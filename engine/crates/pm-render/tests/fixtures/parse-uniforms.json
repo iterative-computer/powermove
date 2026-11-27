@@ -1,0 +1,1945 @@
+{
+ "cases": [
+  {
+   "name": "preset/Aurora Field",
+   "code": "// Powermove shader layer — GLSL ES 3.0\n// uv is 0..1 across the layer. Declare uniforms with @param to get inspector controls.\nuniform float uSpeed;   // @param 0.35 0 3\nuniform float uScale;   // @param 3.0 0.5 12\nuniform vec3  uTint;    // @param #FF6B1A\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n  float n = fbm(p * uScale + vec2(t, t * 0.6));\n  n += 0.35 * fbm(p * uScale * 2.4 - t * 0.4);\n  float band = smoothstep(0.28, 0.72, n);\n  vec3 col = mix(vec3(0.03, 0.03, 0.04), uTint, band);\n  col += pow(band, 6.0) * 0.7;\n  float vig = 1.0 - 0.7 * dot(p, p);\n  fragColor = vec4(col * vig, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.35",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uScale",
+     "type": "float",
+     "label": "Scale",
+     "control": "num",
+     "def": "3",
+     "min": "0.5",
+     "max": "12"
+    },
+    {
+     "name": "uTint",
+     "type": "vec3",
+     "label": "Tint",
+     "control": "color",
+     "def": "#FF6B1A",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "preset/Signal Grid",
+   "code": "uniform float uSpeed;  // @param 1.0 0 4\nuniform float uCells;  // @param 18.0 2 80\nuniform vec3  uInk;    // @param #4C8DFF\nvoid main(){\n  vec2 g = uv * uCells;\n  vec2 id = floor(g), f = fract(g) - .5;\n  float d = sdBox(f, vec2(.34));\n  float pulse = smoothstep(.9, 1.0, sin(iTime*uSpeed*2.0 + hash(id)*6.283 + id.x*.2));\n  float m = smoothstep(.02, .0, d) * (.12 + pulse);\n  vec3 col = vec3(.02) + uInk * m;\n  col += uInk * smoothstep(.06,.0,abs(d)) * .25;\n  fragColor = vec4(col, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "4"
+    },
+    {
+     "name": "uCells",
+     "type": "float",
+     "label": "Cells",
+     "control": "num",
+     "def": "18",
+     "min": "2",
+     "max": "80"
+    },
+    {
+     "name": "uInk",
+     "type": "vec3",
+     "label": "Ink",
+     "control": "color",
+     "def": "#4C8DFF",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "preset/Liquid Chrome",
+   "code": "uniform float uSpeed; // @param .5 0 3\nuniform float uWarp;  // @param 2.5 0 8\nvoid main(){\n  vec2 p = (uv-.5)*2.0; p.x *= iResolution.x/iResolution.y;\n  float t = iTime*uSpeed;\n  for(int i=0;i<4;i++){ p += vec2(sin(p.y*3.0+t), cos(p.x*3.0-t))*.18*uWarp*.25; }\n  float v = fbm(p*1.6+t*.2);\n  vec3 col = palette(v, vec3(.5), vec3(.5), vec3(1.,1.,1.), vec3(0.,.33,.67));\n  col = mix(col, vec3(luma(vec3(col))), .35);\n  fragColor = vec4(col,1.0);\n}",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.5",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uWarp",
+     "type": "float",
+     "label": "Warp",
+     "control": "num",
+     "def": "2.5",
+     "min": "0",
+     "max": "8"
+    }
+   ]
+  },
+  {
+   "name": "preset/Ember Gradient",
+   "code": "uniform vec3 uA; // @param #FF6B1A\nuniform vec3 uB; // @param #120A06\nuniform float uAngle; // @param 0.35 0 6.28\nvoid main(){\n  vec2 p = uv - .5; p = rot(uAngle) * p;\n  float g = smoothstep(-.5,.5,p.y);\n  float n = (noise(uv*vec2(600.,600.))-.5)*.012;\n  fragColor = vec4(mix(uB,uA,g)+n, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uA",
+     "type": "vec3",
+     "label": "A",
+     "control": "color",
+     "def": "#FF6B1A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uB",
+     "type": "vec3",
+     "label": "B",
+     "control": "color",
+     "def": "#120A06",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uAngle",
+     "type": "float",
+     "label": "Angle",
+     "control": "num",
+     "def": "0.35",
+     "min": "0",
+     "max": "6.28"
+    }
+   ]
+  },
+  {
+   "name": "preset/Scanline Bars",
+   "code": "uniform float uCount; // @param 40 4 200\nuniform float uSpeed; // @param .6 0 4\nuniform vec3 uCol;    // @param #E8E2CF\nvoid main(){\n  float y = fract(uv.y*uCount - iTime*uSpeed);\n  float m = smoothstep(.5,.48,abs(y-.5));\n  float fade = smoothstep(0.,.4,iProgress)*smoothstep(1.,.7,iProgress);\n  fragColor = vec4(uCol*m*fade, m*fade);\n}",
+   "defs": [
+    {
+     "name": "uCount",
+     "type": "float",
+     "label": "Count",
+     "control": "num",
+     "def": "40",
+     "min": "4",
+     "max": "200"
+    },
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.6",
+     "min": "0",
+     "max": "4"
+    },
+    {
+     "name": "uCol",
+     "type": "vec3",
+     "label": "Col",
+     "control": "color",
+     "def": "#E8E2CF",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/aurora-ribbons",
+   "code": "// Aurora ribbons drifting across a dark night sky.\nuniform float uSpeed;  // @param 0.15 0 1\nuniform float uCount;  // @param 4 1 8\nuniform vec3  uGlow;   // @param #3DFFB0\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = vec2((uv.x - 0.5) * aspect, uv.y);\n  float t = iTime * uSpeed;\n\n  // Dark sky gradient\n  vec3 col = mix(vec3(0.012, 0.02, 0.05), vec3(0.002, 0.004, 0.015), uv.y);\n\n  // Twinkling stars\n  vec2 cell = floor(vec2(uv.x * aspect, uv.y) * 220.0);\n  float s = hash(cell);\n  float star = step(0.996, s) * (0.55 + 0.45 * sin(iTime * 1.7 + s * 90.0));\n  col += vec3(0.8, 0.85, 1.0) * star * 0.5 * smoothstep(0.05, 0.5, uv.y);\n\n  // Aurora ribbons\n  vec3 topTint = mix(uGlow, vec3(0.55, 0.2, 0.9), 0.6);\n  vec3 aur = vec3(0.0);\n  for (int i = 0; i < 8; i++) {\n    float fi = float(i);\n    float on = clamp(uCount - fi, 0.0, 1.0); // fractional count fades ribbons in smoothly\n    if (on <= 0.0) break;\n    float seed = hash1(fi + 1.3);\n    float dir = mod(fi, 2.0) < 1.0 ? 1.0 : -1.0;\n    float drift = t * (0.6 + 0.5 * seed) * dir;\n    float x = p.x;\n\n    float base = 0.3 + 0.45 * hash1(fi * 3.7 + 0.2);\n    float y = base\n            + 0.12 * sin(x * (1.2 + seed) + drift * 1.3 + seed * 6.28)\n            + 0.18 * (fbm(vec2(x * 0.8 + drift, fi * 4.1 + t * 0.3)) - 0.5);\n\n    float d = p.y - y;\n    float below = exp(-max(-d, 0.0) * 60.0);            // crisp lower edge\n    float above = exp(-max(d, 0.0) * (5.0 + 4.0 * seed)); // long upward curtain\n    float curtain = below * above;\n\n    float rays = 0.55 + 0.45 * noise(vec2(x * 28.0 + drift * 3.0, fi * 7.0));\n    rays *= 0.7 + 0.3 * noise(vec2(x * 90.0, t + fi));\n    float fadeX = 0.35 + 0.65 * fbm(vec2(x * 1.5 - drift * 0.7, fi * 2.3));\n\n    float a = curtain * rays * fadeX * on;\n    vec3 c = mix(uGlow, topTint, smoothstep(0.0, 0.25, d));\n    aur += c * a * 0.55;\n  }\n\n  // Soft glow tonemap so overlapping ribbons bloom instead of clipping\n  col += 1.0 - exp(-aur * 1.6);\n  fragColor = vec4(col, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.15",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uCount",
+     "type": "float",
+     "label": "Count",
+     "control": "num",
+     "def": "4",
+     "min": "1",
+     "max": "8"
+    },
+    {
+     "name": "uGlow",
+     "type": "vec3",
+     "label": "Glow",
+     "control": "color",
+     "def": "#3DFFB0",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/countdown-ring",
+   "code": "// Countdown ring — empties clockwise from 12 o'clock across the layer's duration.\n// Transparent background. Arc length = 1 - iProgress.\nuniform vec3  uColor;        // @param #FFFFFF\nuniform float uThickness;    // @param 0.06 0.005 0.3\nuniform float uRadius;       // @param 0.38 0.05 0.5\nuniform float uTrackOpacity; // @param 0.15 0 1\nuniform bool  uRoundCaps;    // @param true\n\nconst float TAU = 6.28318530718;\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float aa = 1.0 / iResolution.y;\n  float r = uRadius;\n  float hw = uThickness * 0.5;\n  float len = length(p);\n\n  // Full ring SDF (track)\n  float dRing = abs(len - r) - hw;\n  float track = 1.0 - smoothstep(-aa, aa, dRing);\n\n  // Angle from top, clockwise, 0..1\n  float f = fract(atan(p.x, p.y) / TAU + 1.0);\n  float remain = clamp(1.0 - iProgress, 0.0, 1.0);\n\n  float arc;\n  if (uRoundCaps) {\n    float dArc;\n    if (f <= remain) {\n      dArc = dRing;\n    } else {\n      vec2 e0 = vec2(0.0, r);\n      float ea = remain * TAU;\n      vec2 e1 = vec2(sin(ea), cos(ea)) * r;\n      dArc = min(length(p - e0), length(p - e1)) - hw;\n    }\n    arc = 1.0 - smoothstep(-aa, aa, dArc);\n  } else {\n    float s = (f <= remain) ? min(f, remain - f) * TAU * len : -1.0;\n    arc = track * clamp(s / aa + 0.5, 0.0, 1.0);\n  }\n  arc *= step(1e-4, remain);\n\n  float a = max(arc, track * uTrackOpacity);\n  fragColor = vec4(uColor, a);\n}\n",
+   "defs": [
+    {
+     "name": "uColor",
+     "type": "vec3",
+     "label": "Color",
+     "control": "color",
+     "def": "#FFFFFF",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uThickness",
+     "type": "float",
+     "label": "Thickness",
+     "control": "num",
+     "def": "0.06",
+     "min": "0.005",
+     "max": "0.3"
+    },
+    {
+     "name": "uRadius",
+     "type": "float",
+     "label": "Radius",
+     "control": "num",
+     "def": "0.38",
+     "min": "0.05",
+     "max": "0.5"
+    },
+    {
+     "name": "uTrackOpacity",
+     "type": "float",
+     "label": "Track Opacity",
+     "control": "num",
+     "def": "0.15",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uRoundCaps",
+     "type": "bool",
+     "label": "Round Caps",
+     "control": "toggle",
+     "def": true,
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/cursor-glow",
+   "code": "// Cursor glow over a subtle gradient — Shadertoy style.\n// iMouse is read in pixels (Shadertoy convention); values in 0..1 are treated as uv.\n// With no mouse input (0,0), the glow drifts on a slow Lissajous path so renders stay alive.\nuniform float uRadius;     // @param 0.22 0.02 1.0\nuniform float uIntensity;  // @param 1.0 0 3\nuniform float uFalloff;    // @param 2.2 0.5 6\nuniform float uDrift;      // @param 0.25 0 2\nuniform vec3  uGlow;       // @param #FF8A3D\nuniform vec3  uTop;        // @param #141826\nuniform vec3  uBottom;     // @param #07080D\nuniform bool  uFollowMouse; // @param true\n\nvoid main() {\n  float aspect = iResolution.x / max(iResolution.y, 1.0);\n  vec2 asp = vec2(aspect, 1.0);\n\n  // Subtle diagonal gradient with soft noise breathing and dithering against banding.\n  float g = clamp(uv.y * 0.85 + uv.x * 0.15, 0.0, 1.0);\n  vec3 col = mix(uBottom, uTop, smoothstep(0.0, 1.0, g));\n  col += 0.015 * (fbm(uv * 3.0 * asp + iTime * 0.05) - 0.5);\n\n  // Cursor position in uv space.\n  vec2 m = iMouse;\n  bool hasMouse = uFollowMouse && (m.x > 0.0 || m.y > 0.0);\n  if (hasMouse && (m.x > 1.0 || m.y > 1.0)) m /= max(iResolution, vec2(1.0));\n  float t = iTime * uDrift;\n  vec2 drift = vec2(0.5 + 0.28 * sin(t * 1.3), 0.5 + 0.22 * sin(t * 1.9 + 1.2));\n  vec2 c = hasMouse ? m : drift;\n\n  // Glow: soft core + wide halo, aspect-correct.\n  float d = length((uv - c) * asp);\n  float r = max(uRadius, 1e-3);\n  float halo = 1.0 / (1.0 + pow(d / r, uFalloff) * 4.0);\n  float core = exp(-pow(d / (r * 0.18), 2.0));\n  float pulse = 0.94 + 0.06 * sin(iTime * 2.0);\n\n  vec3 glow = uGlow * halo * 0.85 + mix(uGlow, vec3(1.0), 0.6) * core * 0.6;\n  col += glow * uIntensity * pulse;\n\n  // Gentle vignette + tonemap + dither.\n  vec2 q = (uv - 0.5) * asp;\n  col *= 1.0 - 0.35 * dot(q, q);\n  col = col / (1.0 + col * 0.35);\n  col += (hash(uv * iResolution + fract(iTime)) - 0.5) / 255.0;\n\n  fragColor = vec4(col, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uRadius",
+     "type": "float",
+     "label": "Radius",
+     "control": "num",
+     "def": "0.22",
+     "min": "0.02",
+     "max": "1"
+    },
+    {
+     "name": "uIntensity",
+     "type": "float",
+     "label": "Intensity",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uFalloff",
+     "type": "float",
+     "label": "Falloff",
+     "control": "num",
+     "def": "2.2",
+     "min": "0.5",
+     "max": "6"
+    },
+    {
+     "name": "uDrift",
+     "type": "float",
+     "label": "Drift",
+     "control": "num",
+     "def": "0.25",
+     "min": "0",
+     "max": "2"
+    },
+    {
+     "name": "uGlow",
+     "type": "vec3",
+     "label": "Glow",
+     "control": "color",
+     "def": "#FF8A3D",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uTop",
+     "type": "vec3",
+     "label": "Top",
+     "control": "color",
+     "def": "#141826",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uBottom",
+     "type": "vec3",
+     "label": "Bottom",
+     "control": "color",
+     "def": "#07080D",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uFollowMouse",
+     "type": "bool",
+     "label": "Follow Mouse",
+     "control": "toggle",
+     "def": true,
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/dissolve-discard",
+   "code": "// Noise dissolve — warm gradient burns away with a glowing edge over the layer's progress.\nuniform vec3  uColorTop;   // @param #FFB347\nuniform vec3  uColorBot;   // @param #E2412A\nuniform vec3  uEdgeColor;  // @param #FFC45A\nuniform vec3  uCharColor;  // @param #2A0E05\nuniform float uScale;      // @param 4.0 0.5 16\nuniform float uEdge;       // @param 0.08 0.005 0.3\nuniform float uGlow;       // @param 2.5 0 8\nuniform float uDrift;      // @param 0.08 0 1\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n\n  // Dissolve noise, remapped to roughly 0..1\n  float n = fbm(p * uScale + vec2(iTime * uDrift, -iTime * uDrift * 0.7));\n  n = 0.75 * n + 0.25 * fbm(p * uScale * 3.1 + 7.3);\n  n = clamp((n - 0.2) / 0.6, 0.0, 1.0);\n\n  // Threshold sweeps so progress 0 = intact, progress 1 = fully gone\n  float e = max(uEdge, 1e-3);\n  float thr = mix(-e - 0.01, 1.01, clamp(iProgress, 0.0, 1.0));\n  if (n < thr) discard;\n\n  // Edge factor: 1 at the burn front, 0 once uEdge away from it\n  float edge = 1.0 - smoothstep(0.0, e, n - thr);\n\n  // Warm gradient with a gentle sheen\n  float g = clamp(uv.y + 0.08 * sin(uv.x * 6.2831 + iTime * 0.5), 0.0, 1.0);\n  vec3 col = mix(uColorBot, uColorTop, g);\n\n  // Char band then glowing rim\n  col = mix(col, uCharColor, smoothstep(0.0, 0.6, edge));\n  col += uEdgeColor * uGlow * pow(edge, 3.0);\n\n  fragColor = vec4(col, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uColorTop",
+     "type": "vec3",
+     "label": "Color Top",
+     "control": "color",
+     "def": "#FFB347",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uColorBot",
+     "type": "vec3",
+     "label": "Color Bot",
+     "control": "color",
+     "def": "#E2412A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uEdgeColor",
+     "type": "vec3",
+     "label": "Edge Color",
+     "control": "color",
+     "def": "#FFC45A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uCharColor",
+     "type": "vec3",
+     "label": "Char Color",
+     "control": "color",
+     "def": "#2A0E05",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uScale",
+     "type": "float",
+     "label": "Scale",
+     "control": "num",
+     "def": "4",
+     "min": "0.5",
+     "max": "16"
+    },
+    {
+     "name": "uEdge",
+     "type": "float",
+     "label": "Edge",
+     "control": "num",
+     "def": "0.08",
+     "min": "0.005",
+     "max": "0.3"
+    },
+    {
+     "name": "uGlow",
+     "type": "float",
+     "label": "Glow",
+     "control": "num",
+     "def": "2.5",
+     "min": "0",
+     "max": "8"
+    },
+    {
+     "name": "uDrift",
+     "type": "float",
+     "label": "Drift",
+     "control": "num",
+     "def": "0.08",
+     "min": "0",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "generated/early-out-vignette",
+   "code": "// Transparent vignette overlay — clear centre, darkening toward the edges.\nuniform float uStrength; // @param 0.75 0 1\nuniform float uRadius;   // @param 0.45 0 1.5\nuniform float uSoftness; // @param 0.5 0.01 1.5\nuniform vec3  uColor;    // @param #000000\n\nvoid main() {\n  // Aspect-corrected distance from centre (short axis spans -0.5..0.5)\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float d = length(p);\n\n  // Fully transparent inside the radius: bail out early\n  if (d <= uRadius) {\n    fragColor = vec4(0.0);\n    return;\n  }\n\n  float t = smoothstep(uRadius, uRadius + uSoftness, d);\n  float a = clamp(t * uStrength, 0.0, 1.0);\n  // Premultiplied colour (default black is also correct for straight alpha)\n  fragColor = vec4(uColor * a, a);\n}\n",
+   "defs": [
+    {
+     "name": "uStrength",
+     "type": "float",
+     "label": "Strength",
+     "control": "num",
+     "def": "0.75",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uRadius",
+     "type": "float",
+     "label": "Radius",
+     "control": "num",
+     "def": "0.45",
+     "min": "0",
+     "max": "1.5"
+    },
+    {
+     "name": "uSoftness",
+     "type": "float",
+     "label": "Softness",
+     "control": "num",
+     "def": "0.5",
+     "min": "0.01",
+     "max": "1.5"
+    },
+    {
+     "name": "uColor",
+     "type": "vec3",
+     "label": "Color",
+     "control": "color",
+     "def": "#000000",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/env-cubemap-sky",
+   "code": "// Sky gradient with samplerCube environment reflections mixed in at 20%.\n// uEnvMap is not an @param: nothing is bound yet, so it samples black.\nuniform vec3  uZenith;    // @param #1E4FA8\nuniform vec3  uHorizon;   // @param #9CC8F0\nuniform vec3  uGround;    // @param #3A3F4A\nuniform vec3  uSunColor;  // @param #FFE2B0\nuniform float uSunHeight; // @param 0.25 -0.2 1\nuniform float uSunX;      // @param 0.3 -1 1\nuniform float uSunSize;   // @param 0.04 0.005 0.2\nuniform float uHorizonY;  // @param 0.45 0 1\nuniform float uEnvMix;    // @param 0.2 0 1\nuniform float uFov;       // @param 1.2 0.3 2.5\nuniform samplerCube uEnvMap;\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = vec2((uv.x - 0.5) * aspect, uv.y - uHorizonY);\n\n  // View ray for this pixel (camera looks toward -Z, Y up).\n  vec3 dir = normalize(vec3(p.x * uFov, p.y * uFov, -1.0));\n\n  // Sky gradient: horizon -> zenith above, horizon -> ground below.\n  float h = dir.y;\n  vec3 sky = mix(uHorizon, uZenith, pow(clamp(h, 0.0, 1.0), 0.6));\n  vec3 below = mix(uHorizon, uGround, smoothstep(0.0, 0.35, -h));\n  vec3 col = h >= 0.0 ? sky : below;\n\n  // Horizon haze band.\n  col += uHorizon * 0.15 * exp(-abs(h) * 18.0);\n\n  // Sun disc + glow.\n  vec3 sunDir = normalize(vec3(uSunX, uSunHeight, -1.0));\n  float sd = max(dot(dir, sunDir), 0.0);\n  float disc = smoothstep(1.0 - uSunSize * 0.05, 1.0 - uSunSize * 0.04, sd);\n  col += uSunColor * (disc * 2.0 + pow(sd, 64.0) * 0.6 + pow(sd, 8.0) * 0.15);\n\n  // Environment reflection: mirror rays below the horizon about the ground plane.\n  vec3 rdir = h >= 0.0 ? dir : reflect(dir, vec3(0.0, 1.0, 0.0));\n  vec3 env = textureLod(uEnvMap, rdir, 0.0).rgb;\n  col = mix(col, env, clamp(uEnvMix, 0.0, 1.0));\n\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uZenith",
+     "type": "vec3",
+     "label": "Zenith",
+     "control": "color",
+     "def": "#1E4FA8",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uHorizon",
+     "type": "vec3",
+     "label": "Horizon",
+     "control": "color",
+     "def": "#9CC8F0",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uGround",
+     "type": "vec3",
+     "label": "Ground",
+     "control": "color",
+     "def": "#3A3F4A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uSunColor",
+     "type": "vec3",
+     "label": "Sun Color",
+     "control": "color",
+     "def": "#FFE2B0",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uSunHeight",
+     "type": "float",
+     "label": "Sun Height",
+     "control": "num",
+     "def": "0.25",
+     "min": "-0.2",
+     "max": "1"
+    },
+    {
+     "name": "uSunX",
+     "type": "float",
+     "label": "Sun X",
+     "control": "num",
+     "def": "0.3",
+     "min": "-1",
+     "max": "1"
+    },
+    {
+     "name": "uSunSize",
+     "type": "float",
+     "label": "Sun Size",
+     "control": "num",
+     "def": "0.04",
+     "min": "0.005",
+     "max": "0.2"
+    },
+    {
+     "name": "uHorizonY",
+     "type": "float",
+     "label": "Horizon Y",
+     "control": "num",
+     "def": "0.45",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uEnvMix",
+     "type": "float",
+     "label": "Env Mix",
+     "control": "num",
+     "def": "0.2",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uFov",
+     "type": "float",
+     "label": "Fov",
+     "control": "num",
+     "def": "1.2",
+     "min": "0.3",
+     "max": "2.5"
+    }
+   ]
+  },
+  {
+   "name": "generated/frame-flicker",
+   "code": "// Old film flicker — brightness steps randomly once per frame, dust re-rolls every frame.\nuniform float uFlicker;   // @param 0.25 0 1\nuniform float uDust;      // @param 0.5 0 1\nuniform float uDustSize;  // @param 1.0 0.2 4\nuniform float uScratches; // @param 0.35 0 1\nuniform float uGrain;     // @param 0.08 0 0.5\nuniform float uVignette;  // @param 0.6 0 1.5\nuniform vec3  uTint;      // @param #CDB892\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = (uv - 0.5) * vec2(aspect, 1.0);\n  float f = float(iFrame);\n\n  // Base film image: soft sepia exposure with a slow, faint density variation\n  float dens = 0.75 + 0.25 * fbm(p * 1.8 + 3.7);\n  vec3 col = uTint * dens;\n\n  // Per-frame flicker: one random value per frame, no interpolation\n  float r1 = hash1(f * 0.7313 + 1.17);\n  float r2 = hash1(f * 1.9177 + 4.31);\n  float flick = 1.0 + ((r1 + r2) - 1.0) * uFlicker;\n  col *= flick;\n\n  // Dust specks: new random set every frame\n  float px = 1.0 / iResolution.y;\n  float dust = 0.0;\n  for (int i = 0; i < 32; i++) {\n    float fi = float(i);\n    float seed = f * 17.13 + fi * 3.71;\n    if (hash1(seed + 0.5) > uDust) continue;\n    vec2 c = (vec2(hash1(seed + 1.1), hash1(seed + 2.3)) - 0.5) * vec2(aspect, 1.0);\n    float rad = (1.5 + 5.0 * pow(hash1(seed + 3.7), 3.0)) * px * uDustSize;\n    // slightly irregular shape\n    vec2 d = p - c;\n    d *= vec2(1.0, 0.6 + 0.8 * hash1(seed + 5.9));\n    float irr = 1.0 + 0.4 * (noise(d / max(rad, 1e-5) * 1.5 + seed) - 0.5);\n    float speck = 1.0 - smoothstep(rad * 0.6 * irr, rad * irr, length(d));\n    // mostly dark specks, occasional bright ones (dirt on negative)\n    float sgn = hash1(seed + 7.7) < 0.8 ? -1.0 : 1.0;\n    dust += sgn * speck * (0.5 + 0.5 * hash1(seed + 8.3));\n  }\n  col += dust * 0.7 * vec3(1.0);\n\n  // Vertical scratches that jump per frame\n  for (int i = 0; i < 3; i++) {\n    float seed = f * 5.31 + float(i) * 11.7;\n    if (hash1(seed) > uScratches) continue;\n    float x = hash1(seed + 1.3);\n    float w = (0.6 + 1.2 * hash1(seed + 2.1)) / iResolution.x;\n    float wob = 0.002 * sin(uv.y * 9.0 + seed);\n    float line = 1.0 - smoothstep(0.0, w, abs(uv.x - x - wob));\n    float fade = smoothstep(0.0, 0.3, noise(vec2(uv.y * 6.0, seed)));\n    col += line * fade * 0.35 * (hash1(seed + 4.4) < 0.5 ? -1.0 : 1.0);\n  }\n\n  // Grain, re-rolled each frame\n  float g = hash(floor(uv * iResolution) + vec2(f * 13.7, f * 7.1)) - 0.5;\n  col += g * uGrain;\n\n  // Vignette\n  float vig = 1.0 - uVignette * dot(p, p) * 1.2;\n  col *= clamp(vig, 0.0, 1.0);\n\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uFlicker",
+     "type": "float",
+     "label": "Flicker",
+     "control": "num",
+     "def": "0.25",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uDust",
+     "type": "float",
+     "label": "Dust",
+     "control": "num",
+     "def": "0.5",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uDustSize",
+     "type": "float",
+     "label": "Dust Size",
+     "control": "num",
+     "def": "1",
+     "min": "0.2",
+     "max": "4"
+    },
+    {
+     "name": "uScratches",
+     "type": "float",
+     "label": "Scratches",
+     "control": "num",
+     "def": "0.35",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uGrain",
+     "type": "float",
+     "label": "Grain",
+     "control": "num",
+     "def": "0.08",
+     "min": "0",
+     "max": "0.5"
+    },
+    {
+     "name": "uVignette",
+     "type": "float",
+     "label": "Vignette",
+     "control": "num",
+     "def": "0.6",
+     "min": "0",
+     "max": "1.5"
+    },
+    {
+     "name": "uTint",
+     "type": "vec3",
+     "label": "Tint",
+     "control": "color",
+     "def": "#CDB892",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/glitch-blocks",
+   "code": "// Digital glitch blocks over a gradient.\n// Blocks shift horizontally and re-randomize uRate times per second.\nuniform float uIntensity;  // @param 0.6 0 1\nuniform float uRate;       // @param 8.0 1 30\nuniform float uBlockSize;  // @param 0.08 0.02 0.3\nuniform float uRGBSplit;   // @param 0.5 0 1\nuniform vec3  uColorA;     // @param #1A1F6B\nuniform vec3  uColorB;     // @param #FF4D8D\n\nvec3 grad(vec2 q) {\n  q.x = fract(q.x);\n  float t = clamp(q.x * 0.75 + q.y * 0.25, 0.0, 1.0);\n  vec3 c = mix(uColorA, uColorB, smoothstep(0.0, 1.0, t));\n  c += 0.06 * (1.0 - q.y);\n  return c;\n}\n\n// Returns horizontal shift and an \"active\" mask for one block layer.\nvec2 blockLayer(vec2 q, float size, float stepId, float seed) {\n  float rows = 1.0 / size;\n  float ry = floor(q.y * rows);\n  float rowR = hash(vec2(ry + seed, stepId));\n  float cols = rows * 0.35;\n  float cx = floor(q.x * cols + hash(vec2(ry, stepId + seed + 3.0)) * 4.0);\n  float cellR = hash(vec2(cx + seed * 2.0, ry + stepId * 7.13));\n  float active = step(1.0 - uIntensity * 0.65, rowR) * step(0.4, cellR);\n  float shift = (hash(vec2(ry + seed, stepId + 1.7)) - 0.5) * 0.45;\n  return vec2(shift * active, active);\n}\n\nvoid main() {\n  float stepId = floor(iTime * uRate);\n  vec2 q = uv;\n\n  vec2 a = blockLayer(q, uBlockSize, stepId, 0.0);\n  vec2 b = blockLayer(q, uBlockSize * 2.7, stepId + 13.0, 41.0);\n  float active = max(a.y, b.y);\n  float shift = (a.x + b.x * 0.6) * uIntensity;\n  q.x += shift;\n\n  float split = uRGBSplit * 0.02 * uIntensity * active\n              * (0.5 + hash(vec2(stepId, floor(uv.y / uBlockSize))));\n  vec3 col;\n  col.r = grad(q + vec2(split, 0.0)).r;\n  col.g = grad(q).g;\n  col.b = grad(q - vec2(split, 0.0)).b;\n\n  // Occasional block treatments: invert or posterize.\n  float fx = hash(vec2(floor(uv.y / uBlockSize), stepId + 5.0));\n  if (active > 0.5 && fx > 0.88) col = 1.0 - col;\n  else if (active > 0.5 && fx > 0.72) col = floor(col * 4.0) / 4.0;\n\n  // Thin bright tear lines.\n  float lineR = hash(vec2(floor(uv.y * iResolution.y / 2.0), stepId));\n  col += step(1.0 - 0.015 * uIntensity, lineR) * 0.5;\n\n  // Faint scanlines.\n  col *= 1.0 - 0.06 * uIntensity * step(0.5, fract(uv.y * iResolution.y * 0.5));\n\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uIntensity",
+     "type": "float",
+     "label": "Intensity",
+     "control": "num",
+     "def": "0.6",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uRate",
+     "type": "float",
+     "label": "Rate",
+     "control": "num",
+     "def": "8",
+     "min": "1",
+     "max": "30"
+    },
+    {
+     "name": "uBlockSize",
+     "type": "float",
+     "label": "Block Size",
+     "control": "num",
+     "def": "0.08",
+     "min": "0.02",
+     "max": "0.3"
+    },
+    {
+     "name": "uRGBSplit",
+     "type": "float",
+     "label": "RGBSplit",
+     "control": "num",
+     "def": "0.5",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uColorA",
+     "type": "vec3",
+     "label": "Color A",
+     "control": "color",
+     "def": "#1A1F6B",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uColorB",
+     "type": "vec3",
+     "label": "Color B",
+     "control": "color",
+     "def": "#FF4D8D",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/global-clock-rings",
+   "code": "// Concentric rings pulsing outward.\n// Pulse phase uses iGlobalTime (comp clock) so it stays in sync wherever the layer starts.\n// Fade-in uses iTime (layer-local) so it begins when the layer begins.\nuniform float uSpeed;     // @param 0.5 0 3\nuniform float uDensity;   // @param 8.0 1 30\nuniform float uWidth;     // @param 0.18 0.02 0.5\nuniform float uFadeIn;    // @param 1.0 0 5\nuniform vec3  uRingColor; // @param #FF6B1A\nuniform vec3  uBgColor;   // @param #08080B\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float r = length(p);\n\n  // Comp-synced phase: rings travel outward\n  float phase = r * uDensity - iGlobalTime * uSpeed * uDensity * 0.25;\n  float f = fract(phase);\n  float d = min(f, 1.0 - f);                       // distance to ring center (0..0.5)\n  float aa = fwidth(phase) * 1.5;\n  float ring = 1.0 - smoothstep(uWidth * 0.5 - aa, uWidth * 0.5 + aa, d);\n  float glow = exp(-d * 14.0) * 0.35;\n\n  // Rings soften toward the edge\n  float falloff = 1.0 - smoothstep(0.15, 0.85, r);\n\n  // Layer-local fade-in\n  float fade = uFadeIn > 0.0 ? smoothstep(0.0, 1.0, clamp(iTime / uFadeIn, 0.0, 1.0)) : 1.0;\n\n  float k = (ring + glow) * falloff * fade;\n  vec3 col = mix(uBgColor, uRingColor, clamp(k, 0.0, 1.0));\n  col += uRingColor * pow(ring * falloff, 4.0) * 0.25 * fade;\n  fragColor = vec4(col, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.5",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uDensity",
+     "type": "float",
+     "label": "Density",
+     "control": "num",
+     "def": "8",
+     "min": "1",
+     "max": "30"
+    },
+    {
+     "name": "uWidth",
+     "type": "float",
+     "label": "Width",
+     "control": "num",
+     "def": "0.18",
+     "min": "0.02",
+     "max": "0.5"
+    },
+    {
+     "name": "uFadeIn",
+     "type": "float",
+     "label": "Fade In",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "5"
+    },
+    {
+     "name": "uRingColor",
+     "type": "vec3",
+     "label": "Ring Color",
+     "control": "color",
+     "def": "#FF6B1A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uBgColor",
+     "type": "vec3",
+     "label": "Bg Color",
+     "control": "color",
+     "def": "#08080B",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/hsv-hue-sweep",
+   "code": "// Full-frame rainbow with time-swept hue, saturation control,\n// and a luminance-desaturated bottom third.\nuniform float uSpeed;       // @param 0.15 0 2\nuniform float uBands;       // @param 1.0 0.25 6\nuniform float uSaturation;  // @param 1.0 0 1\nuniform float uBottomDesat; // @param 1.0 0 1\nuniform float uEdgeSoft;    // @param 0.02 0 0.2\n\nvoid main() {\n  // Diagonal rainbow across the full frame, hue sweeps over time\n  float aspect = iResolution.x / iResolution.y;\n  float h = fract((uv.x * aspect + uv.y * 0.35) / aspect * uBands + iTime * uSpeed);\n  vec3 col = hsv2rgb(vec3(h, clamp(uSaturation, 0.0, 1.0), 1.0));\n\n  // Bottom third (uv.y < 1/3): mix toward luminance gray\n  float edge = 1.0 / 3.0;\n  float soft = max(uEdgeSoft, 1e-4);\n  float bottom = 1.0 - smoothstep(edge - soft, edge + soft, uv.y);\n  vec3 gray = vec3(luma(col));\n  col = mix(col, gray, bottom * clamp(uBottomDesat, 0.0, 1.0));\n\n  fragColor = vec4(col, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.15",
+     "min": "0",
+     "max": "2"
+    },
+    {
+     "name": "uBands",
+     "type": "float",
+     "label": "Bands",
+     "control": "num",
+     "def": "1",
+     "min": "0.25",
+     "max": "6"
+    },
+    {
+     "name": "uSaturation",
+     "type": "float",
+     "label": "Saturation",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uBottomDesat",
+     "type": "float",
+     "label": "Bottom Desat",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uEdgeSoft",
+     "type": "float",
+     "label": "Edge Soft",
+     "control": "num",
+     "def": "0.02",
+     "min": "0",
+     "max": "0.2"
+    }
+   ]
+  },
+  {
+   "name": "generated/kaleidoscope",
+   "code": "// Kaleidoscope — mirrored wedge symmetry with slow rotation.\n// Segments snaps to 3, 4, 6 or 8 (5 -> 6, 7 -> 8).\nuniform float uSegments;  // @param 6 3 8\nuniform float uRotSpeed;  // @param 0.08 -1 1\nuniform float uZoom;      // @param 2.5 0.5 8\nuniform float uFlow;      // @param 0.15 0 1\nuniform vec3  uColorA;    // @param #FF6B1A\nuniform vec3  uColorB;    // @param #1AB8FF\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n\n  int s = int(floor(uSegments + 0.5));\n  float n;\n  switch (s) {\n    case 3: n = 3.0; break;\n    case 4: n = 4.0; break;\n    case 5:\n    case 6: n = 6.0; break;\n    case 7:\n    case 8: n = 8.0; break;\n    default: n = 6.0; break;\n  }\n\n  // slow rotation of the whole kaleidoscope\n  p = rot(iTime * uRotSpeed) * p;\n\n  float r = length(p);\n  float a = atan(p.y, p.x);\n  float seg = 6.28318530718 / n;\n  a = mod(a, seg);\n  a = abs(a - seg * 0.5);           // mirror within wedge\n  vec2 q = vec2(cos(a), sin(a)) * r;\n\n  float t = iTime * uFlow;\n  vec2 k = q * uZoom;\n  float v = fbm(k + vec2(t, -0.7 * t));\n  v += 0.5 * fbm(k * 2.3 + v * 1.5 - t * 0.5);\n  v /= 1.5;\n\n  float rings = sin(12.0 * r - iTime * 0.6 + v * 7.0) * 0.5 + 0.5;\n  float facet = smoothstep(0.02, 0.0, abs(a - seg * 0.5) * r) * 0.25; // soft seam glow\n\n  vec3 col = mix(uColorA, uColorB, smoothstep(0.3, 0.7, v));\n  col *= 0.35 + 0.85 * rings;\n  col += pow(rings * v, 3.0) * 0.6 + facet;\n\n  float vig = 1.0 - 0.6 * dot(p, p);\n  fragColor = vec4(clamp(col * vig, 0.0, 1.0), 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uSegments",
+     "type": "float",
+     "label": "Segments",
+     "control": "num",
+     "def": "6",
+     "min": "3",
+     "max": "8"
+    },
+    {
+     "name": "uRotSpeed",
+     "type": "float",
+     "label": "Rot Speed",
+     "control": "num",
+     "def": "0.08",
+     "min": "-1",
+     "max": "1"
+    },
+    {
+     "name": "uZoom",
+     "type": "float",
+     "label": "Zoom",
+     "control": "num",
+     "def": "2.5",
+     "min": "0.5",
+     "max": "8"
+    },
+    {
+     "name": "uFlow",
+     "type": "float",
+     "label": "Flow",
+     "control": "num",
+     "def": "0.15",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uColorA",
+     "type": "vec3",
+     "label": "Color A",
+     "control": "color",
+     "def": "#FF6B1A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uColorB",
+     "type": "vec3",
+     "label": "Color B",
+     "control": "color",
+     "def": "#1AB8FF",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/lava-lamp",
+   "code": "// Lava lamp — warm metaballs rising slowly over a lit background.\nuniform vec3  uBlob;        // @param #FF5A1F\nuniform vec3  uBackground;  // @param #1C0716\nuniform float uSpeed;       // @param 0.3 0 2\nuniform float uSize;        // @param 1.0 0.5 1.8\n\nvoid main() {\n  float asp = iResolution.x / iResolution.y;\n  vec2 p = (uv - 0.5) * vec2(asp, 1.0);\n  float t = iTime * uSpeed;\n\n  // Gentle wobble of the whole wax so blobs don't look rigid.\n  vec2 q = p + 0.03 * vec2(noise(p * 3.0 + t * 0.5) - 0.5, noise(p * 3.0 - t * 0.4 + 7.0) - 0.5);\n\n  float field = 0.0;\n  for (int i = 0; i < 9; i++) {\n    float fi = float(i);\n    float h  = hash1(fi + 1.37);\n    float h2 = hash1(fi * 3.71 + 0.53);\n    float r  = (0.09 + 0.08 * h2) * uSize;\n    // Slow upward travel; spawn/despawn happens off-screen.\n    float cyc = fract(t * (0.05 + 0.045 * h) + h2);\n    float y = mix(-0.5 - r * 2.2, 0.5 + r * 2.2, cyc);\n    float x = (h - 0.5) * asp * 0.75 + 0.07 * sin(t * 0.6 + fi * 2.1 + y * 2.5);\n    vec2 d = q - vec2(x, y);\n    d *= vec2(1.0 + 0.12 * sin(t * 0.9 + fi), 1.0 - 0.1 * sin(t * 0.9 + fi)); // squash/stretch\n    field += r * r / (dot(d, d) + 1e-4);\n  }\n  // Molten pool at the bottom and a thin cap at the top, like a real lamp.\n  float pool = q.y + 0.5 + 0.02 * sin(q.x * 9.0 + t * 1.3);\n  field += 0.010 / max(pool * pool, 1e-4) * 0.5 + 0.004 / max(pow(0.52 - q.y, 2.0), 1e-4) * 0.3;\n\n  float w = max(fwidth(field), 0.01);\n  float m = smoothstep(1.0 - w, 1.0 + w, field);\n\n  // Background: warmer near the bulb at the bottom, glow halo around wax.\n  vec3 bg = uBackground * (1.25 - 0.65 * uv.y);\n  bg += uBlob * 0.28 * smoothstep(0.25, 1.0, field) * (1.0 - m);\n  bg += uBlob * 0.12 * exp(-6.0 * (uv.y)) ;\n\n  // Wax shading: dark rim, hot luminous core, soft specular.\n  float inner = clamp((field - 1.0) / 2.5, 0.0, 1.0);\n  vec3 wax = uBlob * (0.55 + 0.75 * sqrt(inner));\n  wax = mix(wax, vec3(1.0, 0.86, 0.55), 0.3 * inner * inner);\n  wax += 0.08 * smoothstep(0.0, 0.5, inner) * (0.5 - uv.y + 0.5) * uBlob;\n\n  vec3 col = mix(bg, wax, m);\n  float vig = 1.0 - 0.55 * dot(p * vec2(0.8, 1.0), p * vec2(0.8, 1.0));\n  col *= vig;\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uBlob",
+     "type": "vec3",
+     "label": "Blob",
+     "control": "color",
+     "def": "#FF5A1F",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uBackground",
+     "type": "vec3",
+     "label": "Background",
+     "control": "color",
+     "def": "#1C0716",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.3",
+     "min": "0",
+     "max": "2"
+    },
+    {
+     "name": "uSize",
+     "type": "float",
+     "label": "Size",
+     "control": "num",
+     "def": "1",
+     "min": "0.5",
+     "max": "1.8"
+    }
+   ]
+  },
+  {
+   "name": "generated/noise-terrain-contours",
+   "code": "// Topographic map: contour lines over fbm terrain.\n// Lines are anti-aliased in screen space via fwidth(), so they stay\n// uLineWidth pixels thick (default 1px) at any layer resolution.\nuniform float uScale;      // @param 2.5 0.5 10\nuniform float uLevels;     // @param 28 4 100\nuniform float uSpeed;      // @param 0.04 0 1\nuniform float uLineWidth;  // @param 1.0 0.5 3\nuniform float uIndexEvery; // @param 5 0 10\nuniform float uLineAlpha;  // @param 0.55 0 1\nuniform float uTintAmount; // @param 0.35 0 1\nuniform vec3  uPaper;      // @param #EFE6D2\nuniform vec3  uInk;        // @param #6B4A2B\nuniform vec3  uLowTint;    // @param #B9D3A8\nuniform vec3  uHighTint;   // @param #E2C49A\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n\n  // Terrain height: broad landforms + detail\n  float h = 0.65 * fbm(p * uScale + vec2(t, -t * 0.7))\n          + 0.35 * fbm(p * uScale * 0.45 + vec2(-3.7, 1.9) - t * 0.3);\n\n  // Contour field\n  float v  = h * uLevels;\n  float fw = max(fwidth(v), 1e-5);\n  float d  = abs(fract(v + 0.5) - 0.5) / fw;          // distance to nearest contour, in pixels\n  float line = clamp(0.5 * uLineWidth - d + 0.5, 0.0, 1.0); // pixel coverage\n\n  // Index contours (every Nth level) drawn darker, same 1px thickness\n  float alpha = uLineAlpha;\n  if (uIndexEvery >= 1.0) {\n    float idx = mod(floor(v + 0.5), floor(uIndexEvery));\n    if (idx < 0.5) alpha = 1.0;\n  }\n\n  // Hypsometric paper tint\n  float e = smoothstep(0.25, 0.75, h);\n  vec3 tint = mix(uLowTint, uHighTint, e);\n  vec3 col = mix(uPaper, uPaper * tint * 1.08, uTintAmount);\n\n  col = mix(col, uInk, line * alpha);\n  fragColor = vec4(col, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uScale",
+     "type": "float",
+     "label": "Scale",
+     "control": "num",
+     "def": "2.5",
+     "min": "0.5",
+     "max": "10"
+    },
+    {
+     "name": "uLevels",
+     "type": "float",
+     "label": "Levels",
+     "control": "num",
+     "def": "28",
+     "min": "4",
+     "max": "100"
+    },
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.04",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uLineWidth",
+     "type": "float",
+     "label": "Line Width",
+     "control": "num",
+     "def": "1",
+     "min": "0.5",
+     "max": "3"
+    },
+    {
+     "name": "uIndexEvery",
+     "type": "float",
+     "label": "Index Every",
+     "control": "num",
+     "def": "5",
+     "min": "0",
+     "max": "10"
+    },
+    {
+     "name": "uLineAlpha",
+     "type": "float",
+     "label": "Line Alpha",
+     "control": "num",
+     "def": "0.55",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uTintAmount",
+     "type": "float",
+     "label": "Tint Amount",
+     "control": "num",
+     "def": "0.35",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uPaper",
+     "type": "vec3",
+     "label": "Paper",
+     "control": "color",
+     "def": "#EFE6D2",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uInk",
+     "type": "vec3",
+     "label": "Ink",
+     "control": "color",
+     "def": "#6B4A2B",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uLowTint",
+     "type": "vec3",
+     "label": "Low Tint",
+     "control": "color",
+     "def": "#B9D3A8",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uHighTint",
+     "type": "vec3",
+     "label": "High Tint",
+     "control": "color",
+     "def": "#E2C49A",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/palette-tunnel",
+   "code": "// Infinite tunnel — cosine palette, slow rotation\nuniform float uSpeed;    // @param 0.6 0 3\nuniform float uRotate;   // @param 0.08 -1 1\nuniform float uDensity;  // @param 6.0 1 20\nuniform float uSegments; // @param 8.0 2 24\nuniform float uGlow;     // @param 1.0 0 3\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  p = rot(iTime * uRotate) * p;\n\n  float r = max(length(p), 1e-3);\n  float a = atan(p.y, p.x) / 6.28318;           // -0.5..0.5\n  float z = 0.3 / r + iTime * uSpeed;           // depth along the tunnel\n\n  float seg = floor(uSegments + 0.5);           // integer keeps the seam invisible\n  float ringWave = cos(6.28318 * z * uDensity * 0.25);\n  float segWave  = cos(6.28318 * a * seg);\n  float tiles = 0.55 + 0.45 * ringWave * segWave;\n\n  // thin bright seams between tiles\n  float ringLine = smoothstep(0.92, 1.0, abs(ringWave));\n  float segLine  = smoothstep(0.96, 1.0, abs(segWave));\n  float lines = max(ringLine, segLine);\n\n  vec3 col = palette(z * 0.12 + 0.08 * cos(6.28318 * a * 3.0),\n                     vec3(0.5), vec3(0.5), vec3(1.0), vec3(0.0, 0.33, 0.67));\n  col *= tiles;\n  col += lines * 0.35 * col;\n\n  // depth fog toward the vanishing point, plus a soft core glow\n  float fog = smoothstep(0.0, 0.35, r);\n  col *= fog;\n  col += uGlow * 0.025 / r * palette(z * 0.12 + 0.5,\n                     vec3(0.5), vec3(0.5), vec3(1.0), vec3(0.0, 0.33, 0.67));\n\n  col = 1.0 - exp(-col * 1.4);                  // gentle tone map\n  float vig = 1.0 - 0.35 * dot(p, p);\n  fragColor = vec4(col * vig, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.6",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uRotate",
+     "type": "float",
+     "label": "Rotate",
+     "control": "num",
+     "def": "0.08",
+     "min": "-1",
+     "max": "1"
+    },
+    {
+     "name": "uDensity",
+     "type": "float",
+     "label": "Density",
+     "control": "num",
+     "def": "6",
+     "min": "1",
+     "max": "20"
+    },
+    {
+     "name": "uSegments",
+     "type": "float",
+     "label": "Segments",
+     "control": "num",
+     "def": "8",
+     "min": "2",
+     "max": "24"
+    },
+    {
+     "name": "uGlow",
+     "type": "float",
+     "label": "Glow",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "3"
+    }
+   ]
+  },
+  {
+   "name": "generated/pixel-grid-fragcoord",
+   "code": "// Pixel-perfect checkerboard: each square is exactly uSquarePx layer pixels.\n// Every 4th square along each row/column (diagonal cadence) is highlighted.\nuniform int   uSquarePx;   // @param 8 1 256\nuniform vec3  uColorA;     // @param #1A1A1E\nuniform vec3  uColorB;     // @param #E6E6E6\nuniform vec3  uHighlight;  // @param #FF6B1A\n\nvoid main() {\n  int n = max(uSquarePx, 1);\n  // Integer pixel coordinate within the layer (pixel centers -> exact ints).\n  ivec2 px = ivec2(floor(uv * iResolution));\n  // Flip Y so square 0,0 is anchored at the top-left of the layer.\n  px.y = int(iResolution.y) - 1 - px.y;\n  ivec2 cell = px / n;  // px is non-negative, so integer division == floor\n\n  int parity = (cell.x + cell.y) & 1;\n  vec3 col = parity == 0 ? uColorA : uColorB;\n\n  // Every 4th square: walking along any row or column, squares 0,4,8,... highlight.\n  if (((cell.x + cell.y) & 3) == 0) col = uHighlight;\n\n  fragColor = vec4(col, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uSquarePx",
+     "type": "int",
+     "label": "Square Px",
+     "control": "num",
+     "def": "8",
+     "min": "1",
+     "max": "256"
+    },
+    {
+     "name": "uColorA",
+     "type": "vec3",
+     "label": "Color A",
+     "control": "color",
+     "def": "#1A1A1E",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uColorB",
+     "type": "vec3",
+     "label": "Color B",
+     "control": "color",
+     "def": "#E6E6E6",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uHighlight",
+     "type": "vec3",
+     "label": "Highlight",
+     "control": "color",
+     "def": "#FF6B1A",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/progress-wipe-bar",
+   "code": "// Loading bar — fills left to right over the layer's duration.\n// Everything outside the bar is fully transparent.\nuniform float uHeight;     // @param 6 1 40\nuniform float uMargin;     // @param 0 0 200\nuniform float uBottom;     // @param 0 0 200\nuniform vec3  uColor;      // @param #FFFFFF\nuniform vec3  uTrackColor; // @param #FFFFFF\nuniform float uTrackAlpha; // @param 0.2 0 1\nuniform float uOpacity;    // @param 1 0 1\n\nvoid main() {\n  vec2 px = uv * iResolution;              // pixel coords, origin bottom-left\n  float x0 = uMargin;\n  float x1 = iResolution.x - uMargin;\n  float y0 = uBottom;\n  float y1 = uBottom + uHeight;\n\n  // Antialiased coverage of the track rectangle\n  float inX = smoothstep(x0 - 0.5, x0 + 0.5, px.x) * (1.0 - smoothstep(x1 - 0.5, x1 + 0.5, px.x));\n  float inY = smoothstep(y0 - 0.5, y0 + 0.5, px.y) * (1.0 - smoothstep(y1 - 0.5, y1 + 0.5, px.y));\n  float track = inX * inY;\n\n  // Filled portion up to the progress edge\n  float edge = mix(x0, x1, clamp(iProgress, 0.0, 1.0));\n  float fill = track * (1.0 - smoothstep(edge - 0.5, edge + 0.5, px.x));\n\n  float aTrack = track * uTrackAlpha * (1.0 - fill);\n  float a = (fill + aTrack) * uOpacity;\n  vec3 col = (uColor * fill + uTrackColor * aTrack) * uOpacity; // premultiplied\n\n  fragColor = vec4(col, a);\n}",
+   "defs": [
+    {
+     "name": "uHeight",
+     "type": "float",
+     "label": "Height",
+     "control": "num",
+     "def": "6",
+     "min": "1",
+     "max": "40"
+    },
+    {
+     "name": "uMargin",
+     "type": "float",
+     "label": "Margin",
+     "control": "num",
+     "def": "0",
+     "min": "0",
+     "max": "200"
+    },
+    {
+     "name": "uBottom",
+     "type": "float",
+     "label": "Bottom",
+     "control": "num",
+     "def": "0",
+     "min": "0",
+     "max": "200"
+    },
+    {
+     "name": "uColor",
+     "type": "vec3",
+     "label": "Color",
+     "control": "color",
+     "def": "#FFFFFF",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uTrackColor",
+     "type": "vec3",
+     "label": "Track Color",
+     "control": "color",
+     "def": "#FFFFFF",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uTrackAlpha",
+     "type": "float",
+     "label": "Track Alpha",
+     "control": "num",
+     "def": "0.2",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uOpacity",
+     "type": "float",
+     "label": "Opacity",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "generated/raymarched-blob",
+   "code": "// Raymarched metaball blob — slow morph, key + rim lighting\nuniform float uSpeed;     // @param 0.4 0 3\nuniform float uBlend;     // @param 0.45 0.05 1.5\nuniform float uSize;      // @param 0.42 0.15 0.8\nuniform vec3  uBase;      // @param #3A2A8C\nuniform vec3  uKey;       // @param #FFE2C0\nuniform float uKeyGain;   // @param 1.2 0 3\nuniform vec3  uRim;       // @param #3FD8FF\nuniform float uRimGain;   // @param 1.4 0 4\nuniform float uRimPower;  // @param 3.0 0.5 8\nuniform vec3  uBg;        // @param #07070C\n\nstruct Hit {\n  bool  hit;\n  float t;\n  vec3  pos;\n  int   steps;\n};\n\nfloat smin(float a, float b, float k) {\n  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);\n  return mix(b, a, h) - k * h * (1.0 - h);\n}\n\nfloat map(vec3 q) {\n  float t = iTime * uSpeed;\n  float d = 1e5;\n  for (int i = 0; i < 5; i++) {\n    float fi = float(i);\n    vec3 c = vec3(\n      sin(t * (0.70 + 0.13 * fi) + fi * 1.7),\n      cos(t * (0.50 + 0.11 * fi) + fi * 2.3),\n      sin(t * (0.60 + 0.09 * fi) + fi * 0.9)\n    ) * vec3(0.7, 0.5, 0.5);\n    float r = uSize + 0.08 * sin(t * 1.3 + fi * 2.1);\n    d = smin(d, length(q - c) - r, uBlend);\n  }\n  return d;\n}\n\nvec3 calcNormal(vec3 q) {\n  const vec2 e = vec2(1.0, -1.0) * 0.0012;\n  return normalize(e.xyy * map(q + e.xyy) + e.yyx * map(q + e.yyx) +\n                   e.yxy * map(q + e.yxy) + e.xxx * map(q + e.xxx));\n}\n\nHit march(vec3 ro, vec3 rd) {\n  Hit h;\n  h.hit = false;\n  h.t = 0.0;\n  h.pos = ro;\n  h.steps = 0;\n  for (int i = 0; i < 110; i++) {\n    h.pos = ro + rd * h.t;\n    float d = map(h.pos);\n    h.steps = i;\n    if (d < 0.0008 * h.t + 0.0005) { h.hit = true; break; }\n    h.t += d * 0.9;\n    if (h.t > 12.0) break;\n  }\n  return h;\n}\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n\n  vec3 ro = vec3(0.0, 0.0, 3.6);\n  ro.xz *= rot(0.15 * sin(t * 0.3));\n  vec3 fw = normalize(-ro);\n  vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));\n  vec3 up = cross(rt, fw);\n  vec3 rd = normalize(p.x * rt + p.y * up + 1.6 * fw);\n\n  // Background: soft vertical gradient + faint glow\n  vec3 col = uBg * (1.0 + 0.6 * (0.5 - uv.y));\n  col += uRim * 0.05 * exp(-3.0 * dot(p, p));\n\n  Hit h = march(ro, rd);\n  if (h.hit) {\n    vec3 n = calcNormal(h.pos);\n    vec3 v = -rd;\n\n    vec3 keyDir = normalize(vec3(0.6, 0.7, 0.55));\n    vec3 rimDir = normalize(vec3(-0.7, 0.35, -0.6));\n\n    float diff = max(dot(n, keyDir), 0.0);\n    float wrap = max((dot(n, keyDir) + 0.3) / 1.3, 0.0);\n    vec3 hv = normalize(keyDir + v);\n    float spec = pow(max(dot(n, hv), 0.0), 64.0) * diff;\n\n    float fres = pow(1.0 - max(dot(n, v), 0.0), uRimPower);\n    float rimMask = clamp(dot(n, rimDir) + 0.6, 0.0, 1.0);\n    float rim = fres * rimMask;\n\n    float ao = clamp(1.0 - float(h.steps) / 110.0, 0.0, 1.0);\n    ao = mix(0.55, 1.0, ao);\n    float amb = 0.5 + 0.5 * n.y;\n\n    vec3 surf = uBase * (0.12 * amb + 0.9 * wrap * uKey * uKeyGain);\n    surf += uKey * spec * uKeyGain * 0.9;\n    surf *= ao;\n    surf += uRim * rim * uRimGain;\n\n    float fog = exp(-0.04 * h.t * h.t);\n    col = mix(col, surf, fog);\n  }\n\n  float vig = 1.0 - 0.45 * dot(p, p);\n  col *= vig;\n  col = col / (1.0 + col);          // tonemap\n  col = pow(col, vec3(1.0 / 2.2));  // gamma\n  fragColor = vec4(col, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.4",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uBlend",
+     "type": "float",
+     "label": "Blend",
+     "control": "num",
+     "def": "0.45",
+     "min": "0.05",
+     "max": "1.5"
+    },
+    {
+     "name": "uSize",
+     "type": "float",
+     "label": "Size",
+     "control": "num",
+     "def": "0.42",
+     "min": "0.15",
+     "max": "0.8"
+    },
+    {
+     "name": "uBase",
+     "type": "vec3",
+     "label": "Base",
+     "control": "color",
+     "def": "#3A2A8C",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uKey",
+     "type": "vec3",
+     "label": "Key",
+     "control": "color",
+     "def": "#FFE2C0",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uKeyGain",
+     "type": "float",
+     "label": "Key Gain",
+     "control": "num",
+     "def": "1.2",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uRim",
+     "type": "vec3",
+     "label": "Rim",
+     "control": "color",
+     "def": "#3FD8FF",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uRimGain",
+     "type": "float",
+     "label": "Rim Gain",
+     "control": "num",
+     "def": "1.4",
+     "min": "0",
+     "max": "4"
+    },
+    {
+     "name": "uRimPower",
+     "type": "float",
+     "label": "Rim Power",
+     "control": "num",
+     "def": "3",
+     "min": "0.5",
+     "max": "8"
+    },
+    {
+     "name": "uBg",
+     "type": "vec3",
+     "label": "Bg",
+     "control": "color",
+     "def": "#07070C",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/scanline-crt",
+   "code": "// CRT test pattern — SMPTE-style color bars, scanlines, subtle vignette.\n// Helper functions are compiled at mediump; main() restores highp.\nuniform float uBrightness;   // @param 1.0 0 2\nuniform float uScanline;     // @param 0.35 0 1\nuniform float uScanPixels;   // @param 3.0 1 8\nuniform float uVignette;     // @param 0.3 0 1\nuniform float uFlicker;      // @param 0.025 0 0.2\nuniform float uRoll;         // @param 0.06 0 0.3\nuniform float uRollSpeed;    // @param 0.12 0 1\n\nprecision mediump float;\n\n// Top band: seven 75% bars\nvec3 topBar(float x) {\n  float i = clamp(floor(x * 7.0), 0.0, 6.0);\n  if (i < 0.5) return vec3(0.75, 0.75, 0.75);\n  if (i < 1.5) return vec3(0.75, 0.75, 0.0);\n  if (i < 2.5) return vec3(0.0, 0.75, 0.75);\n  if (i < 3.5) return vec3(0.0, 0.75, 0.0);\n  if (i < 4.5) return vec3(0.75, 0.0, 0.75);\n  if (i < 5.5) return vec3(0.75, 0.0, 0.0);\n  return vec3(0.0, 0.0, 0.75);\n}\n\n// Middle strip: reverse castellations\nvec3 midBar(float x) {\n  float i = clamp(floor(x * 7.0), 0.0, 6.0);\n  if (i < 0.5) return vec3(0.0, 0.0, 0.75);\n  if (i < 1.5) return vec3(0.075);\n  if (i < 2.5) return vec3(0.75, 0.0, 0.75);\n  if (i < 3.5) return vec3(0.075);\n  if (i < 4.5) return vec3(0.0, 0.75, 0.75);\n  if (i < 5.5) return vec3(0.075);\n  return vec3(0.75, 0.75, 0.75);\n}\n\n// Bottom: -I, 100% white, +Q, black, PLUGE, black\nvec3 lowBar(float x) {\n  if (x < 5.0 / 28.0)  return vec3(0.0, 0.13, 0.30);\n  if (x < 10.0 / 28.0) return vec3(1.0);\n  if (x < 15.0 / 28.0) return vec3(0.20, 0.0, 0.42);\n  if (x < 5.0 / 7.0)   return vec3(0.075);\n  if (x < 6.0 / 7.0) {\n    float k = floor((x - 5.0 / 7.0) * 21.0);\n    return vec3(k < 0.5 ? 0.035 : (k < 1.5 ? 0.075 : 0.115));\n  }\n  return vec3(0.075);\n}\n\nvec3 testPattern(vec2 q) {\n  // q.y measured from the top of the layer\n  if (q.y < 0.67) return topBar(q.x);\n  if (q.y < 0.75) return midBar(q.x);\n  return lowBar(q.x);\n}\n\n// phase is fract(pixelY / linePitch), computed at highp by the caller\nfloat scanlineMask(float phase, float amount) {\n  float s = 0.5 + 0.5 * cos(6.28318 * phase);\n  return 1.0 - amount * (1.0 - s * s);\n}\n\nfloat vignette(vec2 q, float amount) {\n  vec2 d = q - 0.5;\n  float r = dot(d, d) * 2.0;\n  return 1.0 - amount * smoothstep(0.15, 1.0, r);\n}\n\nprecision highp float;\n\nvoid main() {\n  vec2 q = vec2(uv.x, 1.0 - uv.y);\n  vec3 col = testPattern(q) * uBrightness;\n\n  // Scanlines locked to layer pixels\n  float py = uv.y * iResolution.y;\n  float phase = fract(py / max(uScanPixels, 1.0));\n  col *= scanlineMask(phase, uScanline);\n\n  // Faint rolling refresh band\n  float roll = fract(q.y - iTime * uRollSpeed);\n  col *= 1.0 + uRoll * smoothstep(0.92, 1.0, roll) * (1.0 - smoothstep(0.0, 0.02, 1.0 - roll) * 0.0);\n\n  // Frame-rate flicker\n  col *= 1.0 - uFlicker * hash1(floor(iTime * 30.0));\n\n  col *= vignette(uv, uVignette);\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uBrightness",
+     "type": "float",
+     "label": "Brightness",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "2"
+    },
+    {
+     "name": "uScanline",
+     "type": "float",
+     "label": "Scanline",
+     "control": "num",
+     "def": "0.35",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uScanPixels",
+     "type": "float",
+     "label": "Scan Pixels",
+     "control": "num",
+     "def": "3",
+     "min": "1",
+     "max": "8"
+    },
+    {
+     "name": "uVignette",
+     "type": "float",
+     "label": "Vignette",
+     "control": "num",
+     "def": "0.3",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uFlicker",
+     "type": "float",
+     "label": "Flicker",
+     "control": "num",
+     "def": "0.025",
+     "min": "0",
+     "max": "0.2"
+    },
+    {
+     "name": "uRoll",
+     "type": "float",
+     "label": "Roll",
+     "control": "num",
+     "def": "0.06",
+     "min": "0",
+     "max": "0.3"
+    },
+    {
+     "name": "uRollSpeed",
+     "type": "float",
+     "label": "Roll Speed",
+     "control": "num",
+     "def": "0.12",
+     "min": "0",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "generated/sdf-badge",
+   "code": "// Rounded badge — fill, outline and soft drop shadow on a transparent background.\nuniform float uRadius;        // @param 0.45 0 1\nuniform float uOutline;       // @param 6 0 40\nuniform vec3  uFill;          // @param #FF6B1A\nuniform vec3  uOutlineColor;  // @param #FFFFFF\nuniform float uShadowOpacity; // @param 0.45 0 1\nuniform float uShadowBlur;    // @param 18 0 60\nuniform float uShadowOffset;  // @param 8 0 40\n\nvoid main() {\n  vec2 px = uv * iResolution;\n  vec2 c = iResolution * 0.5;\n\n  // Leave room around the badge so the shadow is not clipped by the layer edge.\n  float margin = min(uShadowBlur * 1.2 + uShadowOffset + 4.0, min(iResolution.x, iResolution.y) * 0.3);\n  vec2 hb = max(c - margin, vec2(1.0));\n  float r = clamp(uRadius, 0.0, 1.0) * min(hb.x, hb.y);\n\n  // Badge shape (pixel-space SDF, 1px anti-aliasing).\n  float d = sdBox(px - c, hb - r) - r;\n  float shape = clamp(0.5 - d, 0.0, 1.0);\n  float inner = clamp(0.5 - (d + uOutline), 0.0, 1.0);\n\n  // Fill with a subtle top-lit gradient, outline ring around it.\n  vec3 fillCol = uFill * (0.9 + 0.15 * uv.y);\n  vec3 col = mix(uOutlineColor, fillCol, inner);\n\n  // Soft drop shadow, offset downward.\n  float ds = sdBox(px - c + vec2(0.0, uShadowOffset), hb - r) - r;\n  float blur = max(uShadowBlur, 0.5);\n  float sa = uShadowOpacity * (1.0 - smoothstep(-blur * 0.5, blur, ds));\n\n  // Composite badge over shadow (straight alpha output).\n  float a = shape + sa * (1.0 - shape);\n  vec3 outCol = a > 0.0 ? (col * shape) / a : vec3(0.0);\n  fragColor = vec4(outCol, a);\n}\n",
+   "defs": [
+    {
+     "name": "uRadius",
+     "type": "float",
+     "label": "Radius",
+     "control": "num",
+     "def": "0.45",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uOutline",
+     "type": "float",
+     "label": "Outline",
+     "control": "num",
+     "def": "6",
+     "min": "0",
+     "max": "40"
+    },
+    {
+     "name": "uFill",
+     "type": "vec3",
+     "label": "Fill",
+     "control": "color",
+     "def": "#FF6B1A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uOutlineColor",
+     "type": "vec3",
+     "label": "Outline Color",
+     "control": "color",
+     "def": "#FFFFFF",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uShadowOpacity",
+     "type": "float",
+     "label": "Shadow Opacity",
+     "control": "num",
+     "def": "0.45",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uShadowBlur",
+     "type": "float",
+     "label": "Shadow Blur",
+     "control": "num",
+     "def": "18",
+     "min": "0",
+     "max": "60"
+    },
+    {
+     "name": "uShadowOffset",
+     "type": "float",
+     "label": "Shadow Offset",
+     "control": "num",
+     "def": "8",
+     "min": "0",
+     "max": "40"
+    }
+   ]
+  },
+  {
+   "name": "generated/starfield-hdr",
+   "code": "// Starfield flying toward the camera.\n// Brightest (\"hot\") stars are overbright (> 1.0) so a downstream glow/bloom can key on them.\nuniform float uSpeed;     // @param 0.12 0 1.5\nuniform float uDensity;   // @param 0.55 0.05 1\nuniform float uHotRatio;  // @param 0.08 0 0.5\nuniform float uHotGain;   // @param 4.0 1 12\nuniform float uStreak;    // @param 1.5 0 6\nuniform vec3  uTint;      // @param #C6D6FF\nuniform vec3  uHotTint;   // @param #FFE6C4\nuniform vec3  uBg;        // @param #020309\n\n#define LAYERS 6\n\nvec3 starLayer(vec2 p, vec2 n, float z, float seed, float depth) {\n  vec2 q = p * z + seed * vec2(13.17, 7.73);\n  vec2 id = floor(q);\n  vec2 gv = fract(q) - 0.5;\n  float stretch = 1.0 + uStreak * depth * depth * length(p);\n  vec3 acc = vec3(0.0);\n  for (int y = -1; y <= 1; y++) {\n    for (int x = -1; x <= 1; x++) {\n      vec2 o = vec2(float(x), float(y));\n      vec2 cid = id + o + seed;\n      if (hash(cid) > uDensity) continue;\n      vec2 off = vec2(hash(cid + 3.1), hash(cid + 7.4)) - 0.5;\n      vec2 d = gv - o - off * 0.8;\n      // elongate along the radial (motion) direction\n      float dr = dot(d, n);\n      float dt = d.x * n.y - d.y * n.x;\n      float r = length(vec2(dr / stretch, dt));\n      float b = pow(hash(cid + 11.3), 3.0);\n      float hot = step(1.0 - uHotRatio, hash(cid + 19.7));\n      float size = mix(0.015, 0.05, b) + 0.03 * hot;\n      float core = 1.0 - smoothstep(0.0, size, r);\n      float glow = 0.0012 / (r * r + 0.0012);\n      float inten = (0.25 + 0.75 * b) * (core + 0.35 * glow);\n      inten *= mix(1.0, uHotGain, hot);\n      vec3 c = mix(uTint, uHotTint, hot) * mix(0.85, 1.15, hash(cid + 5.5));\n      acc += c * inten;\n    }\n  }\n  return acc;\n}\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  vec2 n = p / (length(p) + 1e-4);\n  float t = iTime * uSpeed;\n  vec3 col = uBg;\n  for (int i = 0; i < LAYERS; i++) {\n    float k = float(i) / float(LAYERS) + t;\n    float depth = fract(k);\n    float cycle = floor(k);\n    float seed = floor(hash1(float(i) * 7.31 + cycle * 31.7) * 997.0);\n    // perspective: world z shrinks linearly → screen positions accelerate outward\n    float z = mix(22.0, 0.7, depth);\n    float fade = smoothstep(0.0, 0.3, depth) * (1.0 - smoothstep(0.88, 1.0, depth));\n    col += starLayer(p, n, z, seed, depth) * fade * (0.35 + 0.9 * depth);\n  }\n  // intentionally unclamped: hot stars exceed 1.0 for glow pickup\n  fragColor = vec4(col, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.12",
+     "min": "0",
+     "max": "1.5"
+    },
+    {
+     "name": "uDensity",
+     "type": "float",
+     "label": "Density",
+     "control": "num",
+     "def": "0.55",
+     "min": "0.05",
+     "max": "1"
+    },
+    {
+     "name": "uHotRatio",
+     "type": "float",
+     "label": "Hot Ratio",
+     "control": "num",
+     "def": "0.08",
+     "min": "0",
+     "max": "0.5"
+    },
+    {
+     "name": "uHotGain",
+     "type": "float",
+     "label": "Hot Gain",
+     "control": "num",
+     "def": "4",
+     "min": "1",
+     "max": "12"
+    },
+    {
+     "name": "uStreak",
+     "type": "float",
+     "label": "Streak",
+     "control": "num",
+     "def": "1.5",
+     "min": "0",
+     "max": "6"
+    },
+    {
+     "name": "uTint",
+     "type": "vec3",
+     "label": "Tint",
+     "control": "color",
+     "def": "#C6D6FF",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uHotTint",
+     "type": "vec3",
+     "label": "Hot Tint",
+     "control": "color",
+     "def": "#FFE6C4",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uBg",
+     "type": "vec3",
+     "label": "Bg",
+     "control": "color",
+     "def": "#020309",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/texture-uniform-tile",
+   "code": "// Tile pattern: offset brick tiles with Truchet arcs + bevel, optional uPattern texture per tile.\n// uPattern is a plain sampler2D (no @param). If it is unbound/empty, the procedural base shows alone.\nuniform sampler2D uPattern;\nuniform float uTiles;       // @param 6.0 1 24\nuniform float uSpeed;       // @param 0.15 0 2\nuniform float uPatternMix;  // @param 0.75 0 1\nuniform float uGrout;       // @param 0.05 0 0.3\nuniform float uArcWidth;    // @param 0.09 0.01 0.3\nuniform vec3  uColorA;      // @param #1E3A5F\nuniform vec3  uColorB;      // @param #E8B04A\nuniform vec3  uGroutColor;  // @param #0B0C10\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = uv * vec2(aspect, 1.0) * uTiles;\n  p.x += iTime * uSpeed;\n  p.x += 0.5 * mod(floor(p.y), 2.0);          // brick offset\n  vec2 id = floor(p);\n  vec2 f = fract(p);\n  float h = hash(id);\n  float h2 = hash(id + 17.31);\n\n  // Procedural base: per-tile color + Truchet arcs\n  vec3 tileCol = mix(uColorA, uColorB, smoothstep(0.15, 0.95, h) * 0.55);\n  vec2 q = f - 0.5;\n  if (h2 > 0.5) q.x = -q.x;\n  float d = min(abs(length(q - 0.5) - 0.5), abs(length(q + 0.5) - 0.5));\n  float aa = fwidth(d) + 1e-4;\n  float arc = 1.0 - smoothstep(uArcWidth - aa, uArcWidth + aa, d);\n  float glow = exp(-d * 18.0) * 0.25;\n  vec3 base = mix(tileCol, uColorB, arc) + uColorB * glow;\n\n  // Optional texture, sampled per tile with continuous gradients (no mip seams)\n  vec4 tex = textureGrad(uPattern, f, dFdx(p), dFdy(p));\n  vec4 probe = textureLod(uPattern, vec2(0.5), 0.0) + textureLod(uPattern, vec2(0.2, 0.7), 0.0)\n             + textureLod(uPattern, vec2(0.8, 0.3), 0.0);\n  float hasTex = smoothstep(0.002, 0.02, dot(probe, vec4(1.0)));\n  vec3 texCol = tex.rgb * (0.65 + 0.7 * luma(base)) + base * 0.15;\n  vec3 col = mix(base, texCol, clamp(uPatternMix * hasTex * tex.a, 0.0, 1.0));\n\n  // Bevel + grout\n  vec2 e2 = min(f, 1.0 - f);\n  float e = min(e2.x, e2.y);\n  float ea = fwidth(e) + 1e-4;\n  float tileMask = smoothstep(uGrout - ea, uGrout + ea, e);\n  float bevel = 1.0 - smoothstep(uGrout, uGrout + 0.08, e);\n  float light = (f.y - f.x) * 0.5;              // light from top-left\n  col *= 1.0 + bevel * light * 0.6;\n  col *= 0.9 + 0.1 * h;\n  col = mix(uGroutColor, col, tileMask);\n\n  vec2 c = uv - 0.5;\n  col *= 1.0 - 0.45 * dot(c, c);\n  fragColor = vec4(col, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uTiles",
+     "type": "float",
+     "label": "Tiles",
+     "control": "num",
+     "def": "6",
+     "min": "1",
+     "max": "24"
+    },
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.15",
+     "min": "0",
+     "max": "2"
+    },
+    {
+     "name": "uPatternMix",
+     "type": "float",
+     "label": "Pattern Mix",
+     "control": "num",
+     "def": "0.75",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uGrout",
+     "type": "float",
+     "label": "Grout",
+     "control": "num",
+     "def": "0.05",
+     "min": "0",
+     "max": "0.3"
+    },
+    {
+     "name": "uArcWidth",
+     "type": "float",
+     "label": "Arc Width",
+     "control": "num",
+     "def": "0.09",
+     "min": "0.01",
+     "max": "0.3"
+    },
+    {
+     "name": "uColorA",
+     "type": "vec3",
+     "label": "Color A",
+     "control": "color",
+     "def": "#1E3A5F",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uColorB",
+     "type": "vec3",
+     "label": "Color B",
+     "control": "color",
+     "def": "#E8B04A",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uGroutColor",
+     "type": "vec3",
+     "label": "Grout Color",
+     "control": "color",
+     "def": "#0B0C10",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/toggle-invert-stripes",
+   "code": "// Diagonal stripes — angle set by #define, density slider, invert checkbox.\n#define STRIPE_ANGLE 45.0   // degrees\n\nuniform float uDensity; // @param 12.0 1 80\nuniform bool  uInvert;  // @param false\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float a = radians(STRIPE_ANGLE);\n  float d = dot(p, vec2(cos(a), sin(a))) * uDensity;\n  float f = fract(d);\n  float w = fwidth(d) * 0.75;\n  // anti-aliased 50% duty stripe\n  float s = smoothstep(0.5 - w, 0.5 + w, f) - smoothstep(1.0 - w, 1.0 + w, f) + smoothstep(-w, w, f) - 1.0;\n  s = clamp(s, 0.0, 1.0);\n  if (uInvert) s = 1.0 - s;\n  vec3 col = vec3(s);\n  fragColor = vec4(col, 1.0);\n}",
+   "defs": [
+    {
+     "name": "uDensity",
+     "type": "float",
+     "label": "Density",
+     "control": "num",
+     "def": "12",
+     "min": "1",
+     "max": "80"
+    },
+    {
+     "name": "uInvert",
+     "type": "bool",
+     "label": "Invert",
+     "control": "toggle",
+     "def": false,
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "generated/vec-param-offset",
+   "code": "// Soft spotlight — Powermove shader layer (GLSL ES 3.0)\n// uCenter is in layer uv (0..1). uColor rgba: rgb tint, a = peak intensity.\nuniform vec2  uCenter;   // @param 0.5,0.5 0 1\nuniform vec4  uColor;    // @param 1.0,0.86,0.62,1.0 0 1\nuniform float uFalloff;  // @param 0.35 0.02 1.5\nuniform float uExtra;    // reserved for a future control (unannotated, no Inspector UI yet)\n\nvoid main() {\n  float aspect = iResolution.x / max(iResolution.y, 1.0);\n  vec2 d = (uv - uCenter) * vec2(aspect, 1.0);\n  float r = length(d);\n  float f = max(uFalloff, 1e-3);\n  // Gaussian-like core with a smooth tail that reaches zero.\n  float glow = exp(-(r * r) / (f * f));\n  glow *= 1.0 - smoothstep(f * 1.5, f * 3.0, r);\n  float a = clamp(glow * uColor.a, 0.0, 1.0);\n  // Premultiplied output so the light composites over layers below.\n  fragColor = vec4(uColor.rgb * a, a);\n}",
+   "defs": [
+    {
+     "name": "uCenter",
+     "type": "vec2",
+     "label": "Center",
+     "control": "num",
+     "def": "0.5",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uColor",
+     "type": "vec4",
+     "label": "Color",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "1"
+    },
+    {
+     "name": "uFalloff",
+     "type": "float",
+     "label": "Falloff",
+     "control": "num",
+     "def": "0.35",
+     "min": "0.02",
+     "max": "1.5"
+    },
+    {
+     "name": "uExtra",
+     "type": "float",
+     "label": "Extra",
+     "control": "num",
+     "def": "0",
+     "min": "0",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "generated/voronoi-cells",
+   "code": "// Cracked glass — animated Voronoi cells with dark borders\nuniform float uScale;   // @param 6.0 1.0 20.0\nuniform float uBorder;  // @param 0.04 0.0 0.25\nuniform float uSpeed;   // @param 0.4 0.0 3.0\nuniform vec3  uTint;    // @param #8FC8E8\nuniform vec3  uEdge;    // @param #050608\n\nvec2 hash2(vec2 p) {\n  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));\n  return fract(sin(p) * 43758.5453);\n}\n\nvec2 cellPoint(vec2 c, float t) {\n  vec2 h = hash2(c);\n  return 0.5 + 0.4 * sin(t + 6.2831 * h);\n}\n\n// Returns distance to nearest cell border; outputs cell id and vector to seed.\nfloat voronoi(vec2 x, float t, out vec2 id, out vec2 toSeed) {\n  vec2 n = floor(x);\n  vec2 f = fract(x);\n  vec2 mg = vec2(0.0);\n  vec2 mr = vec2(0.0);\n  float md = 8.0;\n  for (int j = -1; j <= 1; j++) {\n    for (int i = -1; i <= 1; i++) {\n      vec2 g = vec2(float(i), float(j));\n      vec2 r = g + cellPoint(n + g, t) - f;\n      float d = dot(r, r);\n      if (d < md) { md = d; mr = r; mg = g; }\n    }\n  }\n  md = 8.0;\n  for (int j = -2; j <= 2; j++) {\n    for (int i = -2; i <= 2; i++) {\n      vec2 g = mg + vec2(float(i), float(j));\n      vec2 r = g + cellPoint(n + g, t) - f;\n      vec2 dr = r - mr;\n      if (dot(dr, dr) > 1e-5) {\n        md = min(md, dot(0.5 * (mr + r), normalize(dr)));\n      }\n    }\n  }\n  id = n + mg;\n  toSeed = mr;\n  return md;\n}\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n\n  vec2 id, toSeed;\n  float d = voronoi(p * uScale, t, id, toSeed);\n\n  // Per-cell glass shard color with faceted lighting\n  vec2 h = hash2(id);\n  vec3 col = uTint * (0.45 + 0.55 * h.x);\n  vec2 dir = normalize(toSeed + 1e-4);\n  float facet = dot(dir, normalize(vec2(0.6 + 0.4 * h.y, 0.8)));\n  col *= 0.75 + 0.35 * facet;\n  col += 0.08 * fbm(p * uScale * 1.5 + id);\n\n  // Bright rim just inside each crack\n  float aa = max(fwidth(d), 1e-4);\n  float rim = 1.0 - smoothstep(uBorder, uBorder + 0.08, d);\n  col += rim * 0.35 * (0.5 + 0.5 * h.y);\n\n  // Dark crack border\n  float edge = 1.0 - smoothstep(uBorder - aa, uBorder + aa, d);\n  col = mix(col, uEdge, edge);\n\n  float vig = 1.0 - 0.5 * dot(p, p);\n  fragColor = vec4(col * vig, 1.0);\n}\n",
+   "defs": [
+    {
+     "name": "uScale",
+     "type": "float",
+     "label": "Scale",
+     "control": "num",
+     "def": "6",
+     "min": "1",
+     "max": "20"
+    },
+    {
+     "name": "uBorder",
+     "type": "float",
+     "label": "Border",
+     "control": "num",
+     "def": "0.04",
+     "min": "0",
+     "max": "0.25"
+    },
+    {
+     "name": "uSpeed",
+     "type": "float",
+     "label": "Speed",
+     "control": "num",
+     "def": "0.4",
+     "min": "0",
+     "max": "3"
+    },
+    {
+     "name": "uTint",
+     "type": "vec3",
+     "label": "Tint",
+     "control": "color",
+     "def": "#8FC8E8",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uEdge",
+     "type": "vec3",
+     "label": "Edge",
+     "control": "color",
+     "def": "#050608",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "edge/0",
+   "code": "uniform float uA;\n// @param 2 1 4\nuniform float uB;",
+   "defs": [
+    {
+     "name": "uA",
+     "type": "float",
+     "label": "A",
+     "control": "num",
+     "def": "2",
+     "min": "1",
+     "max": "4"
+    },
+    {
+     "name": "uB",
+     "type": "float",
+     "label": "B",
+     "control": "num",
+     "def": "0",
+     "min": "0",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "edge/1",
+   "code": "uniform float uA; // @param\nuniform float uB; // @param 1e3 -1e-2 .5",
+   "defs": [
+    {
+     "name": "uA",
+     "type": "float",
+     "label": "A",
+     "control": "num",
+     "def": "0",
+     "min": "NaN",
+     "max": "NaN"
+    }
+   ]
+  },
+  {
+   "name": "edge/2",
+   "code": "uniform float uA; //   @param   0x10 Infinity -Infinity",
+   "defs": [
+    {
+     "name": "uA",
+     "type": "float",
+     "label": "A",
+     "control": "num",
+     "def": "0",
+     "min": "Infinity",
+     "max": "-Infinity"
+    }
+   ]
+  },
+  {
+   "name": "edge/3",
+   "code": "uniform vec3 uC; // @param #abc\nuniform vec3 uD; // @param abc\nuniform vec3 uE; // @param #",
+   "defs": [
+    {
+     "name": "uC",
+     "type": "vec3",
+     "label": "C",
+     "control": "color",
+     "def": "#abc",
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uD",
+     "type": "vec3",
+     "label": "D",
+     "control": "num",
+     "def": "0",
+     "min": "0",
+     "max": "NaN"
+    },
+    {
+     "name": "uE",
+     "type": "vec3",
+     "label": "E",
+     "control": "color",
+     "def": "#",
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "edge/4",
+   "code": "uniform bool uT; // @param TRUE\nuniform bool uU; // @param true false\nuniform bool uV;",
+   "defs": [
+    {
+     "name": "uT",
+     "type": "bool",
+     "label": "T",
+     "control": "toggle",
+     "def": false,
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uU",
+     "type": "bool",
+     "label": "U",
+     "control": "toggle",
+     "def": true,
+     "min": null,
+     "max": null
+    },
+    {
+     "name": "uV",
+     "type": "bool",
+     "label": "V",
+     "control": "toggle",
+     "def": false,
+     "min": null,
+     "max": null
+    }
+   ]
+  },
+  {
+   "name": "edge/5",
+   "code": "uniform  int\tuN ;// @param -3\r\nuniform vec4 uW; // @param 1 2 3 4",
+   "defs": [
+    {
+     "name": "uN",
+     "type": "int",
+     "label": "N",
+     "control": "num",
+     "def": "-3",
+     "min": "-6",
+     "max": "6"
+    },
+    {
+     "name": "uW",
+     "type": "vec4",
+     "label": "W",
+     "control": "num",
+     "def": "1",
+     "min": "2",
+     "max": "3"
+    }
+   ]
+  },
+  {
+   "name": "edge/6",
+   "code": "xuniform float uX; // @param 7\nuniform float iTime; // @param 1\nuniform float uniformValue; // @param 2",
+   "defs": [
+    {
+     "name": "uX",
+     "type": "float",
+     "label": "X",
+     "control": "num",
+     "def": "7",
+     "min": "0",
+     "max": "14"
+    },
+    {
+     "name": "uniformValue",
+     "type": "float",
+     "label": "niform Value",
+     "control": "num",
+     "def": "2",
+     "min": "0",
+     "max": "4"
+    }
+   ]
+  },
+  {
+   "name": "edge/7",
+   "code": "uniform float uMyLongName_2; // @param 5.5.5 3e 1e+",
+   "defs": [
+    {
+     "name": "uMyLongName_2",
+     "type": "float",
+     "label": "My Long Name_2",
+     "control": "num",
+     "def": "5.5",
+     "min": "3",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "edge/8",
+   "code": "uniform float uSpace; // @param 1 2 3",
+   "defs": [
+    {
+     "name": "uSpace",
+     "type": "float",
+     "label": "Space",
+     "control": "num",
+     "def": "1",
+     "min": "2",
+     "max": "3"
+    }
+   ]
+  },
+  {
+   "name": "edge/9",
+   "code": "uniform float uBom;﻿// @param 4",
+   "defs": [
+    {
+     "name": "uBom",
+     "type": "float",
+     "label": "Bom",
+     "control": "num",
+     "def": "4",
+     "min": "0",
+     "max": "8"
+    }
+   ]
+  },
+  {
+   "name": "edge/10",
+   "code": "uniform float uNel;// @param 4",
+   "defs": [
+    {
+     "name": "uNel",
+     "type": "float",
+     "label": "Nel",
+     "control": "num",
+     "def": "0",
+     "min": "0",
+     "max": "1"
+    }
+   ]
+  },
+  {
+   "name": "edge/11",
+   "code": "uniform mat2 uM; // @param 1\nuniform float uAfter; // @param 9",
+   "defs": [
+    {
+     "name": "uAfter",
+     "type": "float",
+     "label": "After",
+     "control": "num",
+     "def": "9",
+     "min": "0",
+     "max": "18"
+    }
+   ]
+  },
+  {
+   "name": "edge/12",
+   "code": "uniform float uDup; // @param 1\nuniform float uDup; // @param 2",
+   "defs": [
+    {
+     "name": "uDup",
+     "type": "float",
+     "label": "Dup",
+     "control": "num",
+     "def": "1",
+     "min": "0",
+     "max": "2"
+    },
+    {
+     "name": "uDup",
+     "type": "float",
+     "label": "Dup",
+     "control": "num",
+     "def": "2",
+     "min": "0",
+     "max": "4"
+    }
+   ]
+  },
+  {
+   "name": "edge/13",
+   "code": "uniform float uNegDef; // @param -0.5\nuniform float uNan; // @param nope 2",
+   "defs": [
+    {
+     "name": "uNegDef",
+     "type": "float",
+     "label": "Neg Def",
+     "control": "num",
+     "def": "-0.5",
+     "min": "-1",
+     "max": "1"
+    },
+    {
+     "name": "uNan",
+     "type": "float",
+     "label": "Nan",
+     "control": "num",
+     "def": "0",
+     "min": "2",
+     "max": "NaN"
+    }
+   ]
+  }
+ ]
+}

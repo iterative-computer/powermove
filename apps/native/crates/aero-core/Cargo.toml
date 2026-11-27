@@ -1,0 +1,18 @@
+[package]
+name = "pm-aero-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Aero's agent core: the vendored libfx core (apps/native/vendor/fx) behind its C ABI, with a safe wrapper."
+links = "fx_core"
+build = "build.rs"
+
+[features]
+# Fail the build instead of compiling the stub when the core can't be built (trial builds).
+require-core = []
+
+[dependencies]
+libc = "0.2"
+sha2 = "0.10"
+serde_json = "1"

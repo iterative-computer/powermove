@@ -1,9 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Pool } from 'pg';
+import { databaseUrl, workerUrl } from './lib/local-env';
 
 const cloud = resolve(import.meta.dir, '..');
-const databaseUrl = 'postgres://powermove:powermove@localhost:54329/powermove';
 const pool = new Pool({ connectionString: databaseUrl, max: 2 });
 
 async function seedUser(email: string, name: string, handle: string): Promise<string> {
@@ -44,12 +44,12 @@ console.log(`POWERMOVE_REGISTRY_TOKEN=${judeToken}`);
 console.log(`MARA_REGISTRY_TOKEN=${maraToken}`);
 
 if (process.argv.includes('--publish')) {
-  const health = await fetch('http://localhost:8787/health').catch(() => null);
-  if (!health?.ok) throw new Error('Worker is not reachable at http://localhost:8787. Run `bun run dev:local` before `bun run local:seed --publish`.');
-  const desktop = resolve(cloud, '../desktop');
+  const health = await fetch(`${workerUrl}/health`).catch(() => null);
+  if (!health?.ok) throw new Error(`Worker is not reachable at ${workerUrl}. Run \`bun run dev:local\` before \`bun run local:seed --publish\`.`);
+  const { v1Desktop: desktop } = await import('./lib/v1-ref');
   const publisher = Bun.spawn(['bun', 'scripts/publish-builtins.mjs'], {
     cwd: desktop,
-    env: { ...process.env, POWERMOVE_REGISTRY_URL: 'http://localhost:8787', POWERMOVE_REGISTRY_TOKEN: judeToken },
+    env: { ...process.env, POWERMOVE_REGISTRY_URL: workerUrl, POWERMOVE_REGISTRY_TOKEN: judeToken },
     stdout: 'inherit', stderr: 'inherit',
   });
   if (await publisher.exited !== 0) throw new Error('Built-ins publisher failed.');

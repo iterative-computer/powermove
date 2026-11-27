@@ -1,0 +1,3264 @@
+//! Native model coordination. Snapshots contain presentation facts and leased
+//! identifiers, never a writable JS project or a second persistence authority.
+use crate::LockShared;
+use crate::{
+    data::{Backend, model, wire},
+    properties::Properties,
+};
+use pm_kernel::*;
+use pm_panel_media::{Catalog, readiness::ObservedRuntime, v4::ProjectBridge};
+use pm_panel_timeline::{PropertyFacts, Row, RowId, TimelineClient};
+use pm_surface::host_api::Query;
+use serde_json::{Value, json};
+
+/// Settings publications whose row targets are remembered for stale presses.
+pub(crate) const SETTINGS_TARGETS_KEPT: usize = 16;
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
+
+type TimelineJob = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    TimelineClient,
+                    Result<Vec<pm_panel_timeline::HostEffect>, String>,
+                ),
+            > + Send,
+    >,
+>;
+pub(crate) struct Models {
+    pub properties: Properties,
+    pub timeline: Option<TimelineClient>,
+    pub(crate) timeline_view:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
+    pub(crate) timeline_outline:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
+    /// Where the timeline client comes from, until a panel first asks for it:
+    /// indexing every channel of a large project costs seconds, and only the
+    /// Timeline panel reads it.
+    timeline_source: Option<(KernelHandle, String, Caller)>,
+    pub viewer: pm_panel_viewerchrome::v4::Session,
+    composition_tabs: Vec<String>,
+    tabs_document: Option<u64>,
+    tab_switch: Option<String>,
+    viewer_projection: Option<(
+        pm_panel_viewerchrome::Stamp,
+        pm_panel_viewerchrome::Viewport,
+        f64,
+        Value,
+    )>,
+    pub project: ProjectBridge,
+    project_catalog: Option<(u64, Catalog)>,
+    transition_registry:
+        Option<std::sync::Arc<BTreeMap<String, Vec<pm_kernel::state::Registration>>>>,
+    pub facts: Value,
+    pub fields: BTreeMap<String, String>,
+    pub platform: Vec<(String, Value)>,
+    /// The export the viewer last measured a 3D estimate for (size, length,
+    /// revision), so the sheet asks once per change.
+    pub export_estimate_key: Option<String>,
+    /// The estimate state last seen and how often it was asked again: the
+    /// viewer drops a queued measurement when its picture is redrawn (a
+    /// full-resolution refine after a scrub), so the sheet asks again, at
+    /// most a few times per change.
+    pub export_estimate_seen: (String, u8),
+    /// Loaded for the Agent panel only; its load settles interrupted runs.
+    pub agent: Option<crate::agent_host::SharedAgent>,
+    pub agent_link: std::sync::Arc<crate::agent_host::AgentLink>,
+    pub stamp: String,
+    pub settings_sequence: u64,
+    /// The last [`SETTINGS_TARGETS_KEPT`] Settings publications' row actions
+    /// and targets (the account or provider a row acts on), so a press from
+    /// an older one is judged against what that person saw.
+    pub settings_targets: std::collections::VecDeque<(u64, Value)>,
+    pub export: Value,
+    pub export_extensions: Value,
+    pub project_reply: Option<Value>,
+    pub media_runtime: ObservedRuntime,
+    /// Moves with every new observation, so the Project panel asks for rows
+    /// again when readiness lands without a document revision.
+    pub media_sequence: u64,
+    /// The status line asked the Project panel to list only missing files;
+    /// applied on the panel's next request.
+    pub show_missing: bool,
+    pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// What the encoder checks were last asked for (`export_projection`).
+    pub export_probe_stamp: String,
+    /// The checks' worker reports here: the stamp last asked for, and the
+    /// last finished check with its stamp.
+    pub export_probe: std::sync::Arc<std::sync::Mutex<Probe>>,
+    /// The open composition as a value, for the sheet's 3D quality, by
+    /// document, revision and composition: converting a real project's
+    /// composition took 0.2 to 0.3 s, twice on every plan.
+    pub export_comp: Option<(String, std::sync::Arc<Value>)>,
+    /// The Export sheet is open (PM-376): only then does its subscription
+    /// plan the export and check the encoders, which opened audio decoders
+    /// and held the panels' thread half a second on every edit and undo.
+    pub export_open: bool,
+    timeline_job: Option<TimelineJob>,
+    pub(crate) timeline_effect_pending: usize,
+    pub(crate) timeline_effect_result: Option<Result<(), String>>,
+    timeline_editor: Option<TimelineEditor>,
+}
+/// Keep small outlines mounted so their wheel steps need no JS publication.
+fn retained_outline(rows: &[Row], track_headers: Option<usize>) -> Option<usize> {
+    const BUDGET: usize = 512;
+    let mut count = track_headers.unwrap_or(0);
+    let mut cost = count;
+    for row in rows {
+        if track_headers.is_some() && !matches!(row.id, RowId::Property { .. } | RowId::Path { .. }) {
+            continue;
+        }
+        count += 1;
+        // Property rows carry multiple values, editors and key controls.
+        cost += if matches!(row.id, RowId::Property { .. }) { 4 } else { 1 };
+        if cost > BUDGET {
+            return None;
+        }
+    }
+    (cost <= BUDGET).then_some(count.max(1))
+}
+
+impl Models {
+    fn refresh_project(&mut self, published: &Published) -> Result<(), String> {
+        if self.project_catalog.as_ref().is_none_or(|(metadata, catalog)| {
+            catalog.stamp.document != published.snapshot.doc_id
+                || catalog.stamp.revision != published.revision()
+                || *metadata != published.metadata_revision
+        }) {
+            self.project_catalog = Some((
+                published.metadata_revision,
+                Catalog::published(published).map_err(|e| format!("{e:?}"))?,
+            ));
+        }
+        self.project.refresh(
+            &self.project_catalog.as_ref().expect("project catalog").1,
+            &self.media_runtime,
+        );
+        Ok(())
+    }
+
+    /// The timeline client, made on first use ([`Models::timeline_source`]).
+    pub(crate) fn ensure_timeline(&mut self) -> Result<(), String> {
+        if self.timeline.is_none()
+            && let Some((kernel, project, caller)) = self.timeline_source.take()
+        {
+            self.timeline =
+                Some(TimelineClient::new(kernel, &project, caller).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+    pub fn new(
+        kernel: KernelHandle,
+        project: &str,
+        caller: Caller,
+        application: bool,
+        loads_agent: bool,
+    ) -> Result<Self, String> {
+        let timeline_source = (!application).then(|| (kernel.clone(), project.to_owned(), caller));
+        let agent = if loads_agent {
+            let mut store = KernelStore::new(kernel, application);
+            let panel = pm_panel_agentpanel::model::Panel::load(
+                &mut store,
+                project,
+                &new_id("thread"),
+                crate::agent_host::now_ms(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::agent_host::AgentState::new(panel),
+            )))
+        } else {
+            None
+        };
+        Ok(Self {
+            properties: Properties::default(),
+            timeline: None,
+            timeline_view: Default::default(),
+            timeline_outline: Default::default(),
+            timeline_source,
+            viewer: Default::default(),
+            composition_tabs: vec![],
+            tabs_document: None,
+            tab_switch: None,
+            viewer_projection: None,
+            project: ProjectBridge::default(),
+            project_catalog: None,
+            transition_registry: None,
+            facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
+            fields: BTreeMap::new(),
+            platform: vec![],
+            export_estimate_key: None,
+            export_estimate_seen: (String::new(), 0),
+            agent,
+            agent_link: Default::default(),
+            stamp: String::new(),
+            settings_sequence: 1,
+            settings_targets: Default::default(),
+            export: Value::Null,
+            export_extensions: Value::Null,
+            timeline_job: None,
+            timeline_effect_pending: 0,
+            timeline_effect_result: None,
+            timeline_editor: None,
+            project_reply: None,
+            media_runtime: Default::default(),
+            media_sequence: 0,
+            show_missing: false,
+            originals: Default::default(),
+            export_probe_stamp: String::new(),
+            export_probe: Default::default(),
+            export_comp: None,
+            export_open: false,
+        })
+    }
+}
+pub use pm_kernel::agent_storage::APPLICATION_STORE as APPLICATION_AGENT_STORE;
+pub(crate) struct KernelStore {
+    kernel: KernelHandle,
+    application: bool,
+}
+impl KernelStore {
+    pub fn new(kernel: KernelHandle, application: bool) -> Self {
+        Self {
+            kernel,
+            application,
+        }
+    }
+}
+impl pm_agents::persistence::Store for KernelStore {
+    fn lazy_history_attachments(&self) -> bool {
+        true
+    }
+
+    fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        match self
+            .kernel
+            .profile(ProfileCall::AgentGet {
+                application: self.application,
+                key: key.into(),
+            })
+            .wait()
+        {
+            Some(Ok(ProfileReply::AgentValue(value))) => Ok(value),
+            Some(Err(error)) => Err(std::io::Error::other(error)),
+            _ => Err(std::io::Error::other("Agent storage is unavailable")),
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        match self
+            .kernel
+            .profile(ProfileCall::AgentSet {
+                application: self.application,
+                key: key.into(),
+                expected: None,
+                value: value.clone(),
+            })
+            .wait()
+        {
+            Some(Ok(ProfileReply::Changed)) => Ok(()),
+            Some(Err(error)) => Err(std::io::Error::other(error)),
+            _ => Err(std::io::Error::other("Agent storage is unavailable")),
+        }
+    }
+}
+
+impl Backend {
+    pub(crate) fn time(&self) -> f64 {
+        self.native.facts["time"].as_f64().unwrap_or(0.)
+    }
+    pub(crate) fn fields(&mut self, names: &Value) -> Result<Value, String> {
+        let mut fields = serde_json::Map::new();
+        for name in names.as_array().ok_or("field names")? {
+            let name = name.as_str().ok_or("field name")?;
+            let id = format!(
+                "builtin:{}:{}:{}",
+                self.panel_id, self.identity.generation, name
+            );
+            self.native.fields.insert(id.clone(), name.into());
+            fields.insert(name.into(), json!(id));
+        }
+        Ok(Value::Object(fields))
+    }
+    pub(crate) fn inspector_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let time = self.time();
+        let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        self.native.properties.failures = self.native.facts["layerFailures"].clone();
+        self.native
+            .properties
+            .focus_part(&self.native.facts["focusPart"]);
+        let state = self.kernel.state();
+        if self
+            .native
+            .transition_registry
+            .as_ref()
+            .is_none_or(|previous| !std::sync::Arc::ptr_eq(previous, &state.registries))
+        {
+            self.native.properties.transitions = registered_transitions(&state);
+            self.native.transition_registry = Some(state.registries.clone());
+        }
+        if self.native.properties.originals != self.native.originals {
+            self.native.properties.originals = self.native.originals.clone();
+        }
+        let started = std::time::Instant::now();
+        let model = self.model.as_mut().ok_or("No open project")?;
+        model.begin_readout();
+        let snapshot = self.native.properties.snapshot(model, time, playing);
+        // The Studio light readout can evaluate its target on a different layer.
+        self.properties_reads_time = model.reads_time()
+            || model.primary()
+                .and_then(|id| model.layer_node(id).ok())
+                .and_then(pm_eval::address::layer3d_role)
+                == Some(pm_eval::address::Layer3dRole::Light);
+        crate::trace(json!({"properties": "sections", "ms": crate::ms(started.elapsed())}));
+        snapshot
+    }
+    pub(crate) fn timeline_frame(&mut self, request: &Value) -> Result<Value, String> {
+        self.sync()?;
+        let time = self.time();
+        let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        let p = self.published().ok_or("closed")?;
+        let outline = self.native.timeline_outline.shared().clone();
+        let first = request["first"].as_u64().ok_or("first row")? as usize;
+        let visible = request["visible"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= 512)
+            .ok_or("visible rows")? as usize;
+        let editing = match &self.native.timeline_editor {
+            Some(TimelineEditor::Property(l, p)) => Some((l.clone(), p.clone())),
+            _ => None,
+        };
+        // A hosted outline decorates the same immutable model as the canvas.
+        let timeline =
+            if let Some(outline) = outline.as_deref().filter(|m| m.follows_publication(&p)) {
+                outline
+            } else {
+                self.native.ensure_timeline()?;
+                let client = self
+                    .native
+                    .timeline
+                    .as_mut()
+                    .ok_or("timeline action in flight")?;
+                client.model.sync(&p);
+                if client.model.editing_property != editing {
+                    client.model.editing_property = editing;
+                    client.model.rebuild_rows();
+                }
+                &client.model
+            };
+        // Retain modest outlines across scrolls. Only the native host mounts rows;
+        // wheel input must never wait for another JS publication. Property
+        // rows carry more controls and readouts than ordinary layer rows.
+        let track_headers = (timeline.mode == pm_panel_timeline::TimelineMode::Tracks).then(|| {
+            let layout = timeline.track_layout();
+            layout.video + layout.audio + layout.captions
+        });
+        let retained = retained_outline(timeline.rows(), track_headers);
+        let (first, visible) = retained.map_or((first, visible), |rows| (0, rows));
+        let mut frame = pm_panel_timeline::v4::project_window(timeline, first, visible)
+            .map_err(|e| e.to_string())?;
+        frame["composition"] = json!(timeline.index.comp_id);
+        let fps = timeline.index.fps;
+        let numbers = layer_numbers(&p);
+        let mut display = vec![];
+        let editor_field = format!(
+            "builtin:{}:{}:edit",
+            self.panel_id, self.identity.generation
+        );
+        for row in frame["window"]["rows"].as_array().ok_or("timeline rows")? {
+            let mut row = row.clone();
+            row["focused"] = json!(false);
+            row["hovered"] = json!(false);
+            if row["kind"] == "track" || row["kind"] == "heading" {
+                row["accessibilityLabel"] = row["label"].clone();
+                display.push(row);
+                continue;
+            }
+            let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
+            if row["kind"] == "layer" {
+                if !numbers {
+                    row["index"] = Value::Null;
+                }
+                let l = timeline.index.layer(&layer).ok_or("layer")?;
+                row["accessibilityLabel"] = json!(format!(
+                    "{}, {}",
+                    l.name.to_string_lossy(),
+                    super::data::kind_label(&l.kind)
+                ));
+                row["canOpen"] = json!(timeline.layer_disclosable(&layer));
+                row["transformable"] = json!(l.kind != "audio");
+                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_else(|| "None".into()),"set":l.parent.is_some()});
+                if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
+                    row["nameEditor"] = json!({
+                        "value": l.name.to_string_lossy(),
+                        "binding": editor_field.clone(),
+                    });
+                }
+                row["media"] = json!(if matches!(l.kind.as_str(), "video" | "audio" | "image") {
+                    "loading"
+                } else {
+                    "ready"
+                });
+            } else {
+                let path = row["path"].as_str().ok_or("property path")?.to_owned();
+                let label = row["label"].as_str().ok_or("property label")?.to_owned();
+                let channels = timeline.track_channels(&layer, &path);
+                let mut values = Vec::new();
+                let mut numeric = Vec::new();
+                let mut animated = false;
+                let mut at_key = !channels.is_empty();
+                for channel in &channels {
+                    let binding = pm_panel_inspector::Binding::Property(
+                        pm_panel_inspector::PropertyId::new(&layer, &channel.path),
+                    );
+                    let state = self
+                        .model
+                        .as_mut()
+                        .ok_or("No open project")?
+                        .binding_state(&binding, time)
+                        .map_err(|e| format!("{e:?}"))?;
+                    let value = wire(&state.value);
+                    let model = self.model.as_ref().ok_or("No open project")?;
+                    let number = if value.is_number() {
+                        let id = format!(
+                            "timeline:{}:{:?}:{layer}:{}",
+                            model.document_id(),
+                            model.selected_layers(),
+                            channel.path
+                        );
+                        let lease = self.native.properties.lease(model, &id, binding.clone())?;
+                        let spec = model
+                            .fields_for_layer(&layer)
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|f| f.binding == binding)
+                            .and_then(|f| match f.kind {
+                                pm_panel_inspector::FieldType::Number(spec) => Some(spec),
+                                _ => None,
+                            });
+                        let mut number = json!({"binding":lease,"value":value,"step":1.,"speed":0.5,"precision":3});
+                        if let Some(spec) = spec {
+                            number["step"] = json!(spec.step);
+                            number["speed"] = json!(spec.speed);
+                            if let Some(min) = spec.min {
+                                number["min"] = json!(min);
+                            }
+                            if let Some(max) = spec.max {
+                                number["max"] = json!(max);
+                            }
+                        }
+                        match channel.path.as_str() {
+                            "opacity" => {
+                                number["min"] = json!(0.);
+                                number["max"] = json!(100.);
+                                number["unit"] = json!("%");
+                            }
+                            "position.x" | "position.y" | "position.z" | "anchor.x"
+                            | "anchor.y" | "anchor.z" => number["unit"] = json!("px"),
+                            "scale.x" | "scale.y" | "scale.z" => number["unit"] = json!("%"),
+                            "rotation" | "rotation.x" | "rotation.y" | "rotation.z" => {
+                                number["unit"] = json!("°")
+                            }
+                            _ => {}
+                        }
+                        number
+                    } else {
+                        Value::Null
+                    };
+                    numeric.push(number);
+                    values.push(match value.as_f64() {
+                        Some(n) => readout(n),
+                        None => value.to_string(),
+                    });
+                    animated |= state.animated;
+                    at_key &= state.key_at_playhead;
+                }
+                row["readout"] = json!(values.join(", "));
+                row["axes"] = json!(
+                    channels
+                        .iter()
+                        .zip(values.iter())
+                        .zip(numeric.iter())
+                        .map(|((channel, value), numeric)| {
+                            let mut axis =
+                                json!({"path":channel.path,"readout":value,"numeric":numeric});
+                            if self.native.timeline_editor
+                                == Some(TimelineEditor::Property(
+                                    layer.clone(),
+                                    channel.path.clone(),
+                                ))
+                            {
+                                axis["editor"] =
+                                    json!({"value":value,"binding":editor_field.clone()});
+                            }
+                            axis
+                        })
+                        .collect::<Vec<_>>()
+                );
+                row["animated"] = json!(animated);
+                row["keyAtPlayhead"] = json!(at_key);
+                row["previous"] = json!(
+                    timeline
+                        .adjacent_key(-1, time, Some((&layer, &path)))
+                        .is_some()
+                );
+                row["next"] = json!(
+                    timeline
+                        .adjacent_key(1, time, Some((&layer, &path)))
+                        .is_some()
+                );
+                row["accessibilityLabel"] = json!(format!(
+                    "{label}, {}",
+                    row["readout"].as_str().unwrap_or("")
+                ));
+            }
+            display.push(row);
+        }
+        frame["window"]["rows"] = json!(display);
+        frame["window"]["retained"] = json!(retained.is_some());
+        let (timecode, spoken) = timecode(time, fps);
+        frame["playing"] = json!(playing);
+        frame["timecode"] = json!(timecode);
+        frame["spokenTime"] = json!(spoken);
+        if self.native.timeline_editor == Some(TimelineEditor::Time) {
+            frame["timeEditor"] = json!({"value":frame["timecode"],"binding":editor_field});
+        }
+        frame["frameRate"] = json!(format!("{fps} fps"));
+
+        let root = p.snapshot.root().ok_or("closed")?;
+        let active = timeline
+            .index
+            .comp_id
+            .as_deref()
+            .unwrap_or("root")
+            .to_owned();
+        if self.native.tabs_document != Some(p.snapshot.doc_id) {
+            self.native.composition_tabs.clear();
+            self.native.tab_switch = None;
+            self.native.tabs_document = Some(p.snapshot.doc_id);
+        }
+        self.native
+            .composition_tabs
+            .retain(|id| id == "root" || root.get("comps").and_then(|c| c.get(id)).is_some());
+        if self.native.tab_switch.as_deref() == Some(active.as_str()) {
+            self.native.tab_switch = None;
+        }
+        if self.native.tab_switch.is_none() && !self.native.composition_tabs.contains(&active) {
+            self.native.composition_tabs.push(active.clone());
+        }
+        let group_chain = timeline.focused_group_chain();
+        let has_group_focus = !group_chain.is_empty();
+        let comp_closable = self.native.composition_tabs.len() > 1;
+        let mut tabs = Vec::with_capacity(self.native.composition_tabs.len() + group_chain.len());
+        for id in &self.native.composition_tabs {
+            let comp = if id == "root" {
+                Some(root)
+            } else {
+                root.get("comps").and_then(|c| c.get(id))
+            };
+            let name = comp
+                .and_then(|c| c.get("name"))
+                .and_then(|node| match node.kind() {
+                    pm_model::NodeKind::String(text) => text.as_str(),
+                    _ => None,
+                })
+                .unwrap_or("Composition");
+            tabs.push(json!({
+                "id": id,
+                "name": name,
+                "active": !has_group_focus && id == &active,
+                "showClose": comp_closable
+            }));
+            if id == &active {
+                for (index, group) in group_chain.iter().enumerate() {
+                    let gname = group.name.to_string_lossy();
+                    tabs.push(json!({
+                        "id": format!("group:{}", group.id),
+                        "name": if gname.is_empty() { "Group".to_owned() } else { gname },
+                        "active": index + 1 == group_chain.len(),
+                        "showClose": true,
+                        "kind": "group"
+                    }));
+                }
+            }
+        }
+        frame["tabs"] = json!(tabs);
+        frame["renderSummary"] = json!("");
+        frame["feedback"] = json!({});
+        Ok(frame)
+    }
+    /// The viewer slot (the host's `stage` fact, in points) around the
+    /// composition. A pane shorter than two insets fits edge to edge.
+    fn viewer_viewport(
+        &self,
+        vm: &pm_panel_viewerchrome::ViewModel,
+    ) -> Result<pm_panel_viewerchrome::Viewport, String> {
+        let side = |i: usize, default: f64| {
+            self.native.facts["stage"][i]
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .unwrap_or(default)
+                .max(1.)
+        };
+        let stage = pm_panel_viewerchrome::Size {
+            width: side(0, 640.),
+            height: side(1, 360.),
+        };
+        let inset = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
+            .metrics
+            .inset as f64;
+        let room = stage.width.min(stage.height);
+        let inset = if inset * 2. < room { inset } else { 0. };
+        vm.viewport(stage, inset).map_err(|e| e.to_string())
+    }
+    pub(crate) fn viewer_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let p = self.published().ok_or("closed")?;
+        let mut vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
+            .map_err(|e| e.to_string())?;
+        // Auto's playing resolution is the engine's measurement, not a setting.
+        if let Some(scale) = self.native.facts["effectiveQuality"]
+            .as_f64()
+            .filter(|q| (0.25..=1.).contains(q))
+        {
+            vm.chrome.effective_quality = scale;
+        }
+        let effective = vm.chrome.effective_quality;
+        let viewport = self.viewer_viewport(&vm)?;
+        let model = if let Some((stamp, previous_viewport, previous_effective, projection)) =
+            &self.native.viewer_projection
+            && *stamp == vm.stamp
+            && *previous_viewport == viewport
+            && *previous_effective == effective
+        {
+            projection.clone()
+        } else {
+            let projection = wire(
+                &self
+                    .native
+                    .viewer
+                    .publish(&vm, viewport)
+                    .map_err(|e| e.to_string())?,
+            );
+            self.native.viewer_projection =
+                Some((vm.stamp.clone(), viewport, effective, projection.clone()));
+            projection
+        };
+        let mut model = model;
+        // Refine progress for the status capsule (3d-studio.md §3).
+        if model["studio"].is_object() {
+            // Flying (Shift+`): the viewer shows its keys.
+            model["studio"]["fly"] = json!(
+                p.ui_state
+                    .viewer
+                    .get("studioFly")
+                    .and_then(pm_model::Value::as_str)
+                    == Some("on")
+            );
+            model["studio"]["denoiser"] = self.native.facts["studioDenoiser"].clone();
+            let refine = &self.native.facts["studioRefineProgress"];
+            if refine.is_object() {
+                model["studio"]["refine"] = refine.clone();
+            } else if model["studio"]["tier"] == "refine" && self.native.facts["playing"] != true {
+                // Quality before its first progress report: the picture is
+                // on its way (a heavy scene can take a while), not missing.
+                model["studio"]["pending"] = json!(true);
+            }
+        }
+        // The bar's transport: the same time, run and loop the timeline's
+        // header shows (one state); while playing the time is a native layer.
+        let time = self.time().clamp(0., vm.transport.duration);
+        let (now, spoken) = timecode(time, vm.transport.fps);
+        // With a timeline in the workspace, its header owns play and the
+        // timecode; the viewer shows neither (one set of controls on screen).
+        let transport = if self.native.facts["timelineShown"] == true {
+            Value::Null
+        } else {
+            json!({
+            "time": time,
+            "timecode": now,
+            "spokenTime": spoken,
+            "duration": timecode(vm.transport.duration, vm.transport.fps).0,
+            "playing": self.native.facts["playing"].as_bool().unwrap_or(false),
+            "looping": self.native.facts["looping"].as_bool().unwrap_or(false),
+            })
+        };
+        // The channel view's command (`viewer.showRGB`, `viewer.showRed`…).
+        let channels = self.native.facts["channels"]
+            .as_str()
+            .unwrap_or("viewer.showRGB")
+            .to_owned();
+        Ok(
+            json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle","transport":transport,"channels":channels}}),
+        )
+    }
+    pub(crate) fn project_view(&mut self, request: Option<Value>) -> Result<Value, String> {
+        let p = self.published().ok_or("closed")?;
+        self.native.refresh_project(&p)?;
+        let catalog = &self.native.project_catalog.as_ref().expect("project catalog").1;
+        if let Some(request) = request {
+            let reply = self
+                .native
+                .project
+                .request(
+                    catalog,
+                    &self.native.media_runtime,
+                    serde_json::from_value(request).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+            if reply
+                .outcome
+                .as_ref()
+                .is_some_and(|o| o.edit.is_some() || !o.effects.is_empty())
+            {
+                return Err("Project edit requires native coordinator".into());
+            }
+            serde_json::to_value(reply).map_err(|e| e.to_string())
+        } else {
+            serde_json::to_value(
+                self.native
+                    .project
+                    .view(catalog, &self.native.media_runtime)
+                    .map_err(|e| format!("{e:?}"))?,
+            )
+            .map_err(|e| e.to_string())
+        }
+    }
+    fn project_command(&mut self, args: &Value) -> Result<NativeCommand, String> {
+        let p = self.published().ok_or("closed")?;
+        self.native.refresh_project(&p)?;
+        let catalog = &self.native.project_catalog.as_ref().expect("project catalog").1;
+        if std::mem::take(&mut self.native.show_missing) {
+            // Project-wide: from the top folder, every missing file, flat.
+            let filter = pm_panel_media::Filter {
+                missing_only: true,
+                ..Default::default()
+            };
+            self.native
+                .project
+                .apply_host_filter(catalog, &self.native.media_runtime, filter)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        let mut reply = self
+            .native
+            .project
+            .request(
+                catalog,
+                &self.native.media_runtime,
+                serde_json::from_value(args.clone()).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        if let Some(outcome) = reply.outcome.as_mut() {
+            for effect in outcome.effects.drain(..) {
+                self.native.platform.push((
+                    "project.effect".into(),
+                    serde_json::to_value(pm_panel_media::HostRequest {
+                        owner: catalog.stamp.clone(),
+                        effect,
+                    })
+                    .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(edit) = outcome.edit.take() {
+                let prepared = catalog
+                    .prepare(edit.clone())
+                    .map_err(|e| format!("{e:?}"))?;
+                let mut saved = serde_json::to_value(reply).map_err(|e| e.to_string())?;
+                saved["delete_message"] = json!(prepared.delete_message);
+                self.native.project_reply = Some(saved);
+                return Ok(NativeCommand::Kernel(project_edit_request(
+                    edit,
+                    &prepared,
+                    self.caller,
+                )));
+            }
+        }
+        Ok(NativeCommand::Value(
+            serde_json::to_value(reply).map_err(|e| e.to_string())?,
+        ))
+    }
+    pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
+        let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
+        let mut state = agent.shared();
+        let active = state.panel.active_id().to_owned();
+        let provider = state
+            .panel
+            .session(&active)
+            .map_err(|e| format!("{e:?}"))?
+            .settings
+            .provider;
+        state
+            .panel
+            .set_catalog(&active, self.native.agent_link.catalog(provider))
+            .map_err(|e| format!("{e:?}"))?;
+        let panel = &state.panel;
+        let active = active.as_str();
+        let window =
+            pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
+        let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
+        let mut snapshot = window
+            .snapshot(
+                panel,
+                count.saturating_sub(64)..count,
+                crate::agent_host::now_ms(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        // The images, videos and sounds each reply names, for its cards.
+        let home = reply_home();
+        for item in snapshot["rows"]["items"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            let value = &mut item["value"];
+            let media: Vec<Value> = reply_media(value, &home)
+                .iter()
+                .map(
+                    |m| json!({"kind":m.kind_name(),"path":m.path,"name":m.name,"remote":m.remote}),
+                )
+                .collect();
+            if !media.is_empty() {
+                value["media"] = json!(media);
+            }
+        }
+        // A step's media or layer, by its name in this project (v1 settles
+        // "Sampling interview.mov…"): the row says what it worked on.
+        if let Some(published) = self.published()
+            && let Some(root) = published.snapshot.root()
+        {
+            let name = |node: Option<&pm_model::Node>| {
+                node.and_then(|n| n.get("name"))
+                    .map(|n| n.to_value())
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .filter(|s| !s.is_empty())
+            };
+            for item in snapshot["rows"]["items"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+            {
+                let subject = &item["value"]["subject"];
+                let found = subject["assetId"]
+                    .as_str()
+                    .and_then(|id| name(root.get("assets").and_then(|a| a.get(id))))
+                    .or_else(|| {
+                        subject["layerId"].as_str().and_then(|id| {
+                            let at = pm_kernel::model::find_layer(root, id)?;
+                            name(pm_kernel::model::layer_at(root, &at))
+                        })
+                    });
+                if let Some(found) = found {
+                    item["value"]["subjectName"] = json!(found);
+                }
+            }
+        }
+        let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
+        let (connection, reason) = self.native.agent_link.connection(provider);
+        let signed_out = connection == "unavailable" && self.native.agent_link.signed_out(provider);
+        let finding_models = self
+            .native
+            .agent_link
+            .accounts()
+            .is_some_and(|a| a.finding_models(provider));
+        // The account Codex runs on, as the chooser heads its models (an API
+        // key or the ChatGPT sign-in).
+        let accounts: BTreeMap<&str, &str> = self
+            .native
+            .agent_link
+            .accounts()
+            .filter(|a| a.status(pm_agents::Provider::Chatgpt).api_key)
+            .map(|_| (pm_agents::Provider::Chatgpt.name(), "OpenAI API key"))
+            .into_iter()
+            .collect();
+        let model_groups: BTreeMap<_, Vec<_>> = [
+            pm_agents::Provider::Chatgpt,
+            pm_agents::Provider::Claude,
+            pm_agents::Provider::Compatible,
+            pm_agents::Provider::Aero,
+        ]
+        .into_iter()
+        .map(|provider| {
+            let models = self.native.agent_link.model_choices(provider);
+            (
+                provider.name(),
+                models.into_iter().map(|m| (m.id, m.label, m.default)).collect(),
+            )
+        })
+        .collect();
+        let connected_model_name = model_groups
+            .get(pm_agents::Provider::Compatible.name())
+            .and_then(|models| models.iter().find(|(_, _, is_default)| *is_default))
+            .map(|(id, _, _)| pm_agents::account::codex_model_label(id));
+        // Aero's usage monitor (credits, plan, reset day); on Free, that Aero
+        // needs a plan; out of credits, the reset day and the bigger plan.
+        let (usage, billing) = self.native.agent_link.aero_usage();
+        let out = billing.as_ref().filter(|b| b.remaining == 0);
+        let aero = json!({"usage": usage.into_iter().map(|(l, v)| json!([l, v])).collect::<Vec<_>>(),
+            "needsPlan": self.native.agent_link.aero_needs_plan(),
+            "outOfCredits": out.map(|b| json!({
+                "resets": b.resets().map(pm_agents::inference::short_day),
+                "upgrade": b.upgrade().map(|p| p.name.clone())}))});
+        let needs_answer = session.needs_answer();
+        // A docked panel fills its dock under the dock's own title; the
+        // popover has a fixed width, its own title and the floating ground.
+        let presentation = if self.native.facts["agentPopover"] == true {
+            "popover"
+        } else {
+            "docked"
+        };
+        Ok(
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"accounts":accounts,"connectedModelName":connected_model_name,"aero":aero,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+        )
+    }
+    pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let project = self.published().map(|p| {
+            let name = p
+                .snapshot
+                .root()
+                .and_then(|r| r.get("name"))
+                .and_then(|n| match n.kind() {
+                    pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            json!({"id":p.project,"name":name})
+        });
+        let state = self.kernel.state();
+        let mods =
+            pm_services::surface_backing::projects::mods(&mod_records(&state)).unwrap_or_default();
+        let extensions = state
+            .extensions
+            .values()
+            .filter(|e| !archived(e))
+            .map(|e| {
+                let can_archive = mods.iter().any(|m| {
+                    m.id == e.id
+                        && m.actions
+                            .contains(&pm_services::surface_backing::projects::ModAction::Archive)
+                });
+                let host = e.source.get("hostRecord");
+                let text = |key: &str| {
+                    host.and_then(|h| h.get(key))
+                        .and_then(pm_model::Value::as_str)
+                        .map(str::to_owned)
+                };
+                let includes = host
+                    .and_then(|h| h.get("contributes"))
+                    .and_then(pm_model::Value::as_array)
+                    .map(|kinds| {
+                        kinds
+                            .iter()
+                            .filter_map(pm_model::Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let author = text("author");
+                let source = text("provenance").unwrap_or_else(|| match (e.installed, author.as_deref(), text("trust").as_deref()) {
+                    (false, _, _) => "Built in",
+                    (true, Some("agent"), _) => "AI-created",
+                    (true, _, Some("local")) => "Custom",
+                    _ => "Installed",
+                }.to_owned());
+                // Its folder can't be reached (an unmounted volume): kept, said so.
+                let attention = extension_attention(host);
+                let missing = attention == Some("missing");
+                let about = if missing {
+                    "Unavailable: its folder can't be reached.".to_owned()
+                } else {
+                    text("about").unwrap_or_default()
+                };
+                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":extension_kind(&includes),"source":source,
+                    // A D11 Stop turns it off for this run, not in the saved choice.
+                    "enabled":e.enabled && !e.stopped_this_run(),"about":about,"includes":includes,
+                    "attention":attention,"author":author.filter(|name| name != "agent"),
+                    "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
+            })
+            .collect::<Vec<_>>();
+        // Like kinds together, in the order the page lists them, then by name.
+        // Each row's switch is a local control: its lease only names it.
+        let mut extensions = extensions;
+        for e in &mut extensions {
+            let name = format!("extension.{}", e["id"].as_str().unwrap_or(""));
+            let lease = self.fields(&json!([name]))?;
+            e["binding"] = lease[&name].clone();
+        }
+        extensions.sort_by_cached_key(|e| {
+            let kind = e["type"].as_str().unwrap_or("Other");
+            (
+                EXTENSION_KINDS.iter().position(|k| *k == kind),
+                e["name"].as_str().unwrap_or("").to_lowercase(),
+            )
+        });
+        let accounts = self.account_rows();
+        let speech = crate::speech::status();
+        let mut speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        if let Some(language) = speech_rows
+            .iter_mut()
+            .find(|row| row["id"] == "speech.language")
+        {
+            let fields = self.fields(&json!(["speech.language"]))?;
+            language["binding"] = fields["speech.language"].clone();
+        }
+        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
+            "accountName":self.native.facts["cloud"]["identity"],
+            "accountEmail":self.native.facts["cloud"]["email"],
+            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
+            // Settings › Shortcuts, built by the app from the keymap it uses.
+            "shortcuts":self.native.facts["shortcuts"],
+            // Settings › Project's header (poster, path, the projects open).
+            "header":self.native.facts["settingsHeader"]});
+        let shortcut_rows = self.shortcut_rows()?;
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(speech_rows.iter().cloned());
+        }
+        // This Mac's settings (Settings › Media, General › Playback) show
+        // with or without a project open.
+        if project.is_none() {
+            let media = self.media_rows()?;
+            if let Some(rows) = publication["rows"].as_array_mut() {
+                rows.extend(media);
+            }
+        }
+        if let Some(project) = project {
+            publication["project"] = project;
+            let mut rows = self.settings_rows()?;
+            rows.extend(self.account_rows());
+            rows.extend(speech_rows);
+            publication["rows"] = json!(rows);
+            let p = self.published().ok_or("Project closed")?;
+            let root = p.snapshot.root().ok_or("Project closed")?;
+            let mut notes = pm_model::Map::new();
+            for key in ["memory", "memoryEnabled"] {
+                if let Some(node) = root.get(key) {
+                    notes.insert(key, node.to_value());
+                }
+            }
+            let root = pm_model::Value::Object(notes);
+            let entries = pm_model::memory::list(&root, None, 100).iter().map(|note| {
+                let text = |key| note.get(key).and_then(pm_model::Value::as_js_string)
+                    .map(pm_model::JsString::to_string_lossy).unwrap_or_default();
+                json!({"id":text("id"),"kind":text("kind"),"text":text("text"),"why":text("why"),
+                    "author":text("author"),"updatedAt":note.get("updatedAt").and_then(pm_model::Value::as_f64),
+                    "resolved":note.get("resolved")==Some(&pm_model::Value::Bool(true))})
+            }).collect::<Vec<_>>();
+            publication["memory"] =
+                json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
+        }
+        // Settings › Shortcuts, General › Timeline and Storage show with or
+        // without a project.
+        let timeline_rows = self.timeline_rows();
+        let storage_rows = self.storage_rows();
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(timeline_rows);
+            rows.extend(shortcut_rows);
+            let cache_limit = rows
+                .iter()
+                .position(|row| row["id"] == "media.cacheLimit")
+                .map(|index| rows.remove(index));
+            rows.extend(storage_rows);
+            rows.extend(cache_limit);
+            if let Some(version) = self.native.facts["settingsVersion"].as_str() {
+                rows.push(
+                    json!({"id":"about.version","section":"about","group":"Powermove",
+                    "label":"Version","control":"status","value":version}),
+                );
+                rows.push(
+                    json!({"id":"about.check-updates","section":"about","group":"Powermove",
+                    "label":"Software Updates","control":"action","action":"about.check-updates",
+                    "actionLabel":"Check for Updates…"}),
+                );
+            }
+        }
+        // Targets stay here: recorded for this revision, not published.
+        let mut targets = serde_json::Map::new();
+        for row in publication["rows"].as_array_mut().into_iter().flatten() {
+            let target = row
+                .as_object_mut()
+                .and_then(|row| row.remove("target"))
+                .unwrap_or(Value::Null);
+            if let Some(id) = row["id"].as_str() {
+                targets.insert(
+                    id.to_owned(),
+                    json!({"action":row["action"],"target":target}),
+                );
+            }
+        }
+        let revision = self.native.settings_sequence;
+        let kept = &mut self.native.settings_targets;
+        if kept.back().is_none_or(|(r, _)| *r != revision) {
+            kept.push_back((revision, Value::Object(targets)));
+            if kept.len() > SETTINGS_TARGETS_KEPT {
+                kept.pop_front();
+            }
+        } else if let Some(last) = kept.back_mut() {
+            last.1 = Value::Object(targets);
+        }
+        Ok(publication)
+    }
+    pub(crate) fn extra_query(
+        &mut self,
+        query: &Query,
+        channels: Option<&[String]>,
+    ) -> Result<Option<Value>, String> {
+        if channels == Some(&["settings".to_owned()][..]) {
+            return self.settings_snapshot().map(Some);
+        }
+        if channels == Some(&["agent".to_owned()][..]) {
+            return self.agent_snapshot().map(Some);
+        }
+        if channels == Some(&["viewer.chrome".to_owned()][..]) {
+            return self.viewer_snapshot().map(Some);
+        }
+        if channels == Some(&["export".to_owned()][..]) {
+            return self.export_publication().map(Some);
+        }
+        if self.panel_id == "inspector" && matches!(query, Query::Evaluated) && channels.is_none() {
+            return self.inspector_snapshot().map(Some);
+        }
+        if matches!(query, Query::Time) {
+            return Ok(Some(
+                json!({"time":self.time(),"playing":self.native.facts["playing"]}),
+            ));
+        }
+        if self.panel_id == "assets" && matches!(query, Query::Project) {
+            let p = self.published().ok_or("closed")?;
+            return Ok(Some(
+                json!({"stamp":{"project":p.project,"document":p.snapshot.doc_id,"revision":p.revision()},"media":self.native.media_sequence}),
+            ));
+        }
+        Ok(None)
+    }
+    pub(crate) fn start_timeline(&mut self, intent: Value) -> Result<(), String> {
+        if self.native.timeline_job.is_some() || self.native.timeline_effect_pending != 0 {
+            return Err("Timeline command pending".into());
+        }
+        let p = self.published().ok_or("closed")?;
+        self.native.ensure_timeline()?;
+        let mut client = self.native.timeline.take().ok_or("Timeline closed")?;
+        let time = self.time();
+        self.native.timeline_job = Some(Box::pin(async move {
+            if intent["type"] == "easingLibrary" {
+                let result = crate::timeline_easing::dispatch(&client.kernel, &intent)
+                    .await
+                    .map(|()| Vec::new());
+                return (client, result);
+            }
+            let context = pm_panel_timeline::v4::Context {
+                time,
+                expected_document: p.snapshot.doc_id,
+                expected_revision: p.revision(),
+                millis: intent["millis"].as_u64().unwrap_or_else(|| {
+                    static CLOCK: std::sync::OnceLock<std::time::Instant> =
+                        std::sync::OnceLock::new();
+                    CLOCK
+                        .get_or_init(std::time::Instant::now)
+                        .elapsed()
+                        .as_millis() as u64
+                }),
+                in_field: false,
+                keys_admitted: true,
+                property_facts: &PropertyFacts::default(),
+            };
+            let result = pm_panel_timeline::v4::dispatch(&mut client, &intent, &context)
+                .await
+                .map_err(|e| e.to_string());
+            (client, result)
+        }));
+        Ok(())
+    }
+    pub(crate) fn poll_timeline(&mut self) -> Option<Result<Value, String>> {
+        if self.native.timeline_effect_pending != 0 {
+            return None;
+        }
+        if let Some(result) = self.native.timeline_effect_result.take() {
+            return Some(result.map(|()| Value::Null));
+        }
+        let future = self.native.timeline_job.as_mut()?;
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready((client, result)) = future.as_mut().poll(&mut cx) else {
+            return None;
+        };
+        self.native.timeline = Some(client);
+        self.native.timeline_job = None;
+        let effects = match result {
+            Ok(effects) => effects,
+            Err(error) => return Some(Err(error)),
+        };
+        let mut actions = Vec::new();
+        for effect in effects {
+            use pm_panel_timeline::HostEffect;
+            let action = match effect {
+                HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
+                HostEffect::Status(message) => json!({"kind":"status","message":message}),
+                HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
+                HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
+                // The editor's own timeline fits its view to the curves.
+                HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
+                HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                HostEffect::FocusGroup(id) => json!({"kind":"focusGroup","id":id}),
+                // The empty composition's buttons: the app's own commands.
+                HostEffect::Run(name) => json!({"kind":"command","name":name}),
+                // Import… from the timeline: File › Import…, at the playhead.
+                HostEffect::Import { .. } => json!({"kind":"command","name":"import"}),
+                other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
+            };
+            actions.push(("timeline.effect".into(), action));
+        }
+        if actions.is_empty() {
+            return Some(Ok(Value::Null));
+        }
+        self.native.timeline_effect_pending = actions.len();
+        self.native.timeline_effect_result = Some(Ok(()));
+        self.native.platform.extend(actions);
+        // The HostAck stays pending until every native platform request replies.
+        None
+    }
+}
+/// A timeline row's name, or the header time, open for typing.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TimelineEditor {
+    Name(String),
+    Property(String, String),
+    Time,
+}
+pub(crate) enum NativeCommand {
+    Value(Value),
+    Kernel(Request),
+    State(state::StateTransaction),
+    Timeline(Value),
+}
+impl Backend {
+    /// Name and time editing live here, next to the fields they open. The
+    /// committed value becomes an ordinary kernel edit or seek.
+    fn timeline_intent(&mut self, args: &Value) -> Result<NativeCommand, String> {
+        use pm_panel_timeline::{RowId, v4};
+        let done = |v: Value| Ok(NativeCommand::Value(v));
+        match args["type"].as_str() {
+            Some("tab")
+                if args["close"] == true
+                    && !args["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("group:")) =>
+            {
+                let id = args["id"].as_str().ok_or("composition id")?;
+                if self.native.composition_tabs.len() <= 1 {
+                    return done(Value::Null);
+                }
+                let index = self
+                    .native
+                    .composition_tabs
+                    .iter()
+                    .position(|tab| tab == id)
+                    .ok_or("Unknown composition tab")?;
+                self.native.composition_tabs.remove(index);
+                let p = self.published().ok_or("closed")?;
+                if p.snapshot.open_comp().as_deref().unwrap_or("root") == id {
+                    let next = &self.native.composition_tabs
+                        [index.min(self.native.composition_tabs.len() - 1)];
+                    self.native.tab_switch = Some(next.clone());
+                    self.native.platform.push((
+                        "timeline.effect".into(),
+                        json!({"kind":"openComposition","id":next}),
+                    ));
+                }
+                done(Value::Null)
+            }
+            Some("tabMenu") => {
+                let id = args["id"].as_str().ok_or("composition id")?.to_owned();
+                if id.starts_with("group:") {
+                    return match args["action"].as_str() {
+                        Some("close") => {
+                            Ok(NativeCommand::Timeline(json!({"type":"tab","id":id,"close":true})))
+                        }
+                        _ => Err("Unknown group tab action".into()),
+                    };
+                }
+                if !self.native.composition_tabs.contains(&id) {
+                    return Err("Unknown composition tab".into());
+                }
+                match args["action"].as_str() {
+                    Some("close") => {
+                        return self.timeline_intent(&json!({"type":"tab","id":id,"close":true}));
+                    }
+                    Some("closeOthers") => {
+                        self.native.composition_tabs = vec![id.clone()];
+                        self.native.tab_switch = Some(id.clone());
+                        self.native.platform.push((
+                            "timeline.effect".into(),
+                            json!({"kind":"openComposition","id":id}),
+                        ));
+                    }
+                    Some("settings") => self.native.platform.push((
+                        "timeline.effect".into(),
+                        json!({"kind":"compositionSettings","id":id}),
+                    )),
+                    Some("new") => self.native.platform.push((
+                        "timeline.effect".into(),
+                        json!({"kind":"command","name":"newComposition","args":[]}),
+                    )),
+                    _ => return Err("Unknown composition tab action".into()),
+                }
+                done(Value::Null)
+            }
+            Some("rename") => {
+                let RowId::Layer(id) =
+                    v4::parse_row(args["id"].as_str().ok_or("row")?).map_err(|e| e.to_string())?
+                else {
+                    return Err("Only layers can be renamed".into());
+                };
+                self.native.timeline_editor = Some(TimelineEditor::Name(id));
+                done(Value::Null)
+            }
+            Some("propertyEdit") => {
+                let layer = args["layer"].as_str().ok_or("layer")?.to_owned();
+                let path = args["path"].as_str().ok_or("path")?.to_owned();
+                self.native.ensure_timeline()?;
+                let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
+                let l = client.model.index.layer(&layer).ok_or("layer")?;
+                if !l.effectively_locked && client.model.index.channel(&layer, &path).is_some() {
+                    self.native.timeline_editor = Some(TimelineEditor::Property(layer, path));
+                }
+                done(Value::Null)
+            }
+            Some("timeEdit") => {
+                self.native.timeline_editor = Some(TimelineEditor::Time);
+                done(Value::Null)
+            }
+            Some("editDone") => {
+                let editor = self.native.timeline_editor.take();
+                // Empty closes the field, as Escape does; nothing has a blank name.
+                let value = args["value"].as_str().unwrap_or("");
+                if value.trim().is_empty() {
+                    return done(Value::Null);
+                }
+                match editor {
+                    Some(TimelineEditor::Name(id)) => {
+                        let id = v4::row_id(&RowId::Layer(id));
+                        Ok(NativeCommand::Timeline(
+                            json!({"type":"setName","id":id,"name":value}),
+                        ))
+                    }
+                    Some(TimelineEditor::Property(layer, path)) => {
+                        let value: f64 = value.trim().parse().map_err(|_| "Enter a number")?;
+                        if !value.is_finite() {
+                            return Err("Enter a finite number".into());
+                        }
+                        Ok(NativeCommand::Timeline(
+                            json!({"type":"propertyValue","layer":layer,"path":path,"value":value}),
+                        ))
+                    }
+                    Some(TimelineEditor::Time) => {
+                        self.native.ensure_timeline()?;
+                        let fps = self
+                            .native
+                            .timeline
+                            .as_ref()
+                            .map_or(30., |c| c.model.index.fps);
+                        match v4::parse_timecode(value, fps) {
+                            Some(time) => {
+                                Ok(NativeCommand::Timeline(json!({"type":"seek","time":time})))
+                            }
+                            None => Err("Enter a timecode like 00:00:02:15".into()),
+                        }
+                    }
+                    None => done(Value::Null),
+                }
+            }
+            _ => Ok(NativeCommand::Timeline(args.clone())),
+        }
+    }
+    /// Rows for a native menu the Timeline header opens, and the intent each
+    /// row sends back. Graph options come from the model's own menu.
+    fn timeline_menu(&mut self, args: &Value) -> Result<Value, String> {
+        if args["type"] == "tabContext" {
+            let id = args["id"].as_str().ok_or("composition id")?;
+            if id.starts_with("group:") {
+                let row = |action: &str, label: &str| {
+                    json!({"id":action,"label":label,"intent":{"type":"tabMenu","id":id,"action":action}})
+                };
+                return Ok(json!([row("close", "Close")]));
+            }
+            if !self.native.composition_tabs.iter().any(|tab| tab == id) {
+                return Err("Unknown composition tab".into());
+            }
+            let row = |action: &str, label: &str| json!({"id":action,"label":label,"intent":{"type":"tabMenu","id":id,"action":action}});
+            let mut rows = vec![
+                row("settings", "Composition Settings…"),
+                Value::Null,
+                row("new", "New Composition…"),
+            ];
+            if self.native.composition_tabs.len() > 1 {
+                rows.extend([
+                    Value::Null,
+                    row("close", "Close"),
+                    row("closeOthers", "Close Others"),
+                ]);
+            }
+            return Ok(json!(rows));
+        }
+        use pm_panel_timeline::v4;
+        self.native.ensure_timeline()?;
+        let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
+        if args["type"] == "graphOptions" {
+            // The curves the graph shows decide Fit and Merge, as on the
+            // graph's own menu: v1 lists both always, dimmed when they do not
+            // apply (Merge wants two curves or more).
+            let series = client.model.graph_series().0.len();
+            let context = pm_panel_timeline::Context::Graph { series };
+            let rows: Vec<Value> = client
+                .model
+                .menu(&context)
+                .into_iter()
+                .filter(|item| item.is_action())
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "label": item.label,
+                        "checked": item.checked,
+                        "enabled": item.enabled,
+                        "intent": {"type":"graphMenu","action":item.id},
+                    })
+                })
+                .collect();
+            return Ok(json!(rows));
+        }
+        let row = args["id"].as_str().ok_or("row")?;
+        let pm_panel_timeline::RowId::Layer(id) = v4::parse_row(row).map_err(|e| e.to_string())?
+        else {
+            return Err("Only layers have parents".into());
+        };
+        let current = client.model.index.layer(&id).and_then(|l| l.parent.clone());
+        let mut rows = vec![json!({
+            "id": "none", "label": "None", "checked": current.is_none(),
+            "intent": {"type":"parent","ids":[id],"parent":null},
+        })];
+        rows.extend(
+            client
+                .model
+                .index
+                .layers
+                .iter()
+                .filter(|l| l.id != id)
+                .map(|l| {
+                    json!({
+                        "id": l.id,
+                        "label": l.name.to_string_lossy(),
+                        "checked": current.as_deref() == Some(l.id.as_str()),
+                        "intent": {"type":"parent","ids":[id],"parent":l.id},
+                    })
+                }),
+        );
+        Ok(json!(rows))
+    }
+    /// An export at another frame rate than the sheet opened with: the
+    /// person chose it, and the project keeps it (Export settings, an
+    /// ordinary edit, as v1's export wrote its defaults). An export at the
+    /// rate it opened with writes nothing: the file is the same.
+    fn keep_chosen_export_rate(&mut self, fps: f64) {
+        let Some(p) = self.published() else {
+            return;
+        };
+        let Some(root) = p.snapshot.root() else {
+            return;
+        };
+        let comp_fps = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .and_then(|c| c.get("fps"))
+            .and_then(|n| n.to_value().as_f64())
+            .unwrap_or(30.);
+        let mut defaults = self.export_defaults(root, comp_fps);
+        if defaults["fps"]
+            .as_f64()
+            .is_some_and(|f| (f - fps).abs() < 1e-9)
+        {
+            return;
+        }
+        defaults["fps"] = json!(fps);
+        defaults[pm_kernel::commands::comps::EXPORT_RATE_CHOSEN] = json!(true);
+        let Ok(defaults) = pm_model::json::parse(&defaults.to_string()) else {
+            return;
+        };
+        let request = Request::new(
+            self.caller,
+            Call::Transact {
+                label: Some("Export settings".into()),
+                expected_revision: Some(p.revision()),
+                body: WriteBody::Commands(vec![
+                    pm_kernel::CompCommand::Set {
+                        patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                            export_defaults: Some(defaults),
+                            ..Default::default()
+                        }),
+                    }
+                    .into(),
+                ]),
+            },
+        )
+        .with_document(p.snapshot.doc_id);
+        // The export goes ahead whatever this edit's fate (a newer revision
+        // refuses it: the person changed the project meanwhile).
+        drop(self.kernel.call(&self.identity.project, request));
+    }
+    /// The Export sheet's projection as its subscription publishes it, on
+    /// every document change: planned (summary, audio, captions, 3D
+    /// estimate, encoder checks) only while the sheet is open; closed, the
+    /// toolbar's Export button needs the project and the run alone.
+    pub(crate) fn export_publication(&mut self) -> Result<Value, String> {
+        if matches!(
+            self.native.export["run"]["phase"].as_str(),
+            Some("done" | "cancelled")
+        ) {
+            self.native.export_open = false;
+        }
+        let planned = self.native.export_open;
+        self.export_projection(planned)
+    }
+    /// The Export sheet's whole projection, planned (its commands, and the
+    /// sheet as it opens).
+    pub(crate) fn export_snapshot(&mut self) -> Result<Value, String> {
+        self.export_projection(true)
+    }
+    /// The saved render presets the sheet lists.
+    fn export_presets(&self) -> Value {
+        json!(
+            self.kernel
+                .state()
+                .settings
+                .get("renderPresets")
+                .map(wire)
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p["archived"] != true
+                    && p["id"].is_string()
+                    && p["name"].is_string()
+                    && crate::delivery::options(&p["options"]).is_ok())
+                .collect::<Vec<_>>()
+        )
+    }
+    fn export_projection(&mut self, planned: bool) -> Result<Value, String> {
+        self.sync()?;
+        let p = self.published().ok_or("closed")?;
+        let root = p.snapshot.root().ok_or("closed")?;
+        let comp = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .ok_or("composition")?;
+        let n = |key: &str, default: f64| {
+            comp.get(key)
+                .and_then(|n| match n.kind() {
+                    pm_model::NodeKind::Number(v) => Some(*v),
+                    _ => None,
+                })
+                .unwrap_or(default)
+        };
+        let width = n("w", 1920.) as u32;
+        let height = n("h", 1080.) as u32;
+        let fps = n("fps", 30.);
+        let name = root
+            .get("name")
+            .and_then(|n| match n.kind() {
+                pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if self.native.export.is_null() {
+            let fields = self.fields(&json!([
+                "format",
+                "scale",
+                "width",
+                "height",
+                "fps",
+                "range",
+                "quality",
+                "mblur",
+                "audio",
+                "alpha",
+                "captionsBurn",
+                "captionsSidecar",
+                "profile",
+                "codec",
+                "depth",
+                "dynamicRange",
+                "useProxies",
+                "studioQuality",
+                "studioReducedSize",
+                "colorTag",
+                "timecode",
+                "audioCoding",
+                "dolbyVision",
+                "preset",
+                "presetName",
+                "includeExtensions"
+            ]))?;
+            let fresh =
+                serde_json::to_value(pm_promedia::export_panel::Options::new(width, height, fps))
+                    .map_err(|e| e.to_string())?;
+            // As main's exporter: the project's export defaults open the sheet
+            // (every project has them, normalized); the sheet's other fields keep
+            // the last export's.
+            let base = self
+                .kernel
+                .state()
+                .settings
+                .get("exportOpts")
+                .map(wire)
+                .filter(|v| crate::delivery::options(v).is_ok())
+                .unwrap_or_else(|| fresh.clone());
+            let defaults = self.export_defaults(root, fps);
+            let mut options = base.clone();
+            for key in [
+                "format", "scale", "fps", "range", "quality", "mblur", "audio", "alpha",
+            ] {
+                options[key] = defaults[key].clone();
+            }
+            // main's planner exports the whole composition when "work" has no
+            // work area to use; say so in the sheet.
+            let work = comp
+                .get("work")
+                .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+            if options["range"] == "work" && work.is_none() {
+                options["range"] = json!("all");
+            }
+            // The dynamic range opens on the project's Output (Settings ›
+            // Project › Output): what the project is set to deliver.
+            options["dynamicRange"] = json!(pm_kernel::model::project_output(root).id());
+            // A format this app can't export (v1 `rec`, `web`) keeps the last one.
+            if crate::delivery::options(&options).is_err() {
+                options["format"] = base["format"].clone();
+            }
+            if crate::delivery::options(&options).is_err() {
+                options = fresh;
+            }
+            self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
+        }
+        self.native.export["extensions"] = self.native.export_extensions.clone();
+        let options: pm_promedia::export_panel::Options =
+            crate::delivery::options(&self.native.export["options"])?;
+        // Settings saved before a field existed show its default in the sheet.
+        self.native.export["options"] =
+            serde_json::to_value(&options).map_err(|e| e.to_string())?;
+        if !planned {
+            // Closed: the project's own facts stay current; what a plan says
+            // (audio, captions, summary, 3D) is the last plan's, and an
+            // unchecked encoder says so until the sheet opens and checks.
+            let work_area = comp
+                .get("work")
+                .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+            let last = &self.native.export["project"];
+            let same = last["id"].as_str() == Some(p.project.as_str());
+            let kept = |key: &str, default: Value| {
+                if same { last[key].clone() } else { default }
+            };
+            let project = json!({"id":p.project,"name":name,"width":width,"height":height,
+                "hasAudio":kept("hasAudio", json!(false)),"captionLayers":kept("captionLayers", json!(0)),
+                "hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),
+                "duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),
+                "summary":kept("summary", json!("")),"note":kept("note", json!(""))});
+            let studio = kept("studio", Value::Null);
+            self.native.export["project"] = project;
+            if !studio.is_null() {
+                self.native.export["project"]["studio"] = studio;
+            }
+            for format in crate::delivery::FORMATS {
+                if !self.native.export["capabilities"][*format].is_object() {
+                    self.native.export["capabilities"][*format] =
+                        json!({"available":false,"reason":"Checking…"});
+                }
+            }
+            if !self.native.export["capabilities"]["json"].is_object() {
+                self.native.export["capabilities"]["json"] =
+                    json!({"available":false,"reason":"Checking…"});
+            }
+            self.native.export["presets"] = self.export_presets();
+            return Ok(self.native.export.clone());
+        }
+        let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
+        // The work area's span names what "Work area" exports: a composition's
+        // work area starts as its whole length.
+        let work_area = comp
+            .get("work")
+            .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary,"note":plan.note});
+        // A composition with 3D layers offers a per-export 3D quality; the sheet
+        // names the composition's own preset as the default choice.
+        let comp_key = format!(
+            "{}:{}:{:?}",
+            p.snapshot.doc_id,
+            p.revision(),
+            p.snapshot.open_comp()
+        );
+        if self
+            .native
+            .export_comp
+            .as_ref()
+            .is_none_or(|(key, _)| *key != comp_key)
+        {
+            self.native.export_comp = Some((comp_key, std::sync::Arc::new(wire(&comp.to_value()))));
+        }
+        let comp_value = self.native.export_comp.as_ref().unwrap().1.clone();
+        if let Some((_, label)) = pm_panel_studio3d::properties::export_quality(&comp_value, None) {
+            self.native.export["project"]["studio"] = json!({ "saved": label });
+            // Which filter cleans the frames: a build without Open Image
+            // Denoise uses the engine's own, and the sheet says so.
+            if let Some(d) = self.native.facts["studioDenoiser"].as_str() {
+                self.native.export["project"]["studio"]["denoiser"] = json!(d);
+            }
+        }
+        // The viewer measures this export's 3D cost on its idle worker; the
+        // sheet asks when the size, length or scene changes and shows the
+        // measured range once it's ready (Sol's export-estimate state).
+        let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
+        if let (Some(settings), Some((policy, label))) = (
+            plan.settings.as_ref(),
+            pm_panel_studio3d::properties::export_quality(&comp_value, choice),
+        ) {
+            let (w, h, frames) = (
+                settings.size.width,
+                settings.size.height,
+                plan.frames.max(1),
+            );
+            let render_scale = if options
+                .opaque
+                .get("studioReducedSize")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                0.75
+            } else {
+                1.
+            };
+            let key = format!("{w}x{h}x{frames}@{}:{render_scale}", p.revision());
+            let status = self.native.facts["studioExportEstimate"]["status"]
+                .as_str()
+                .unwrap_or("idle")
+                .to_owned();
+            let (seen, asked) = std::mem::take(&mut self.native.export_estimate_seen);
+            let superseded =
+                matches!(seen.as_str(), "queued" | "measuring") && status == "idle" && asked < 3;
+            let changed = self.native.export_estimate_key.as_deref() != Some(key.as_str());
+            self.native.export_estimate_seen =
+                (status, if changed { 0 } else { asked + superseded as u8 });
+            // An export running (or starting) uses the GPU the estimate would
+            // measure; the sheet shows its progress instead: nothing is asked.
+            let exporting = matches!(
+                self.native.export["run"]["phase"].as_str(),
+                Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
+            );
+            if (changed || superseded) && !exporting {
+                self.native.export_estimate_key = Some(key);
+                self.native.platform.push((
+                    "export.estimate".into(),
+                    json!({"width":w,"height":h,"frames":frames,"renderScale":render_scale}),
+                ));
+            }
+            let preset = policy["preset"].as_str().unwrap_or("production");
+            // Asked just now: say so until the viewer's state catches up,
+            // rather than flash the static guess before the measured range.
+            let asked =
+                ((changed || superseded) && !exporting).then(|| format!("3D {label}, measuring…"));
+            let from_viewer = asked.is_some()
+                || crate::delivery::measured_estimate_scaled(
+                    &self.native.facts["studioExportEstimate"],
+                    preset,
+                    &label,
+                    w,
+                    h,
+                    frames,
+                    render_scale,
+                )
+                .is_some();
+            if let Some(note) = asked.or_else(|| {
+                crate::delivery::measured_estimate_scaled(
+                    &self.native.facts["studioExportEstimate"],
+                    preset,
+                    &label,
+                    w,
+                    h,
+                    frames,
+                    render_scale,
+                )
+            }) {
+                let base = plan.summary.split(" · 3D ").next().unwrap_or("").to_owned();
+                self.native.export["project"]["summary"] = json!(format!("{base} · {note}"));
+            }
+            // The estimate on its own, for the sheet's Render Time row: the
+            // measured range, "measuring…", or the static guess.
+            let summary = self.native.export["project"]["summary"]
+                .as_str()
+                .unwrap_or("");
+            if let Some((_, time)) = summary
+                .split(" · 3D ")
+                .nth(1)
+                .and_then(|tail| tail.split_once(", "))
+            {
+                let measuring = time.ends_with("measuring…");
+                let measured = !measuring && from_viewer;
+                self.native.export["project"]["studio"]["estimate"] = json!(time);
+                self.native.export["project"]["studio"]["state"] = json!(if measuring {
+                    "measuring"
+                } else if measured {
+                    "measured"
+                } else {
+                    "guess"
+                });
+                self.native.export["project"]["studio"]["preset"] = json!(preset);
+            }
+        }
+        self.native.export["presets"] = self.export_presets();
+        #[cfg(target_os = "macos")]
+        {
+            // Each format's check sets its own format, so the chosen one is
+            // not part of what they depend on: switching kind checks nothing.
+            let mut checked = options.clone();
+            checked.format = pm_promedia::export_panel::Format::Mp4;
+            let key = format!(
+                "{}:{}:{}:{:?}",
+                p.snapshot.doc_id,
+                p.revision(),
+                serde_json::to_string(&checked).map_err(|e| e.to_string())?,
+                self.native.originals
+            );
+            // The checks plan the whole project and start each encoder (0.75
+            // to 3.1 s on a real project): on a worker, so the sheet answers
+            // at once and Escape never waits behind them. Until they end, the
+            // formats say what the last check said ("Checking…" the first time).
+            if self.native.export_probe_stamp != key {
+                self.native.export_probe_stamp = key.clone();
+                self.native.export_probe.lock().unwrap().asked = key.clone();
+                let (probe, snapshot, time, originals) = (
+                    self.native.export_probe.clone(),
+                    p.snapshot.clone(),
+                    self.time(),
+                    self.native.originals.clone(),
+                );
+                std::thread::Builder::new()
+                    .name("pm-export-checks".into())
+                    .spawn(move || {
+                        let found =
+                            crate::delivery::capabilities(&snapshot, &checked, time, &originals);
+                        let mut probe = probe.lock().unwrap();
+                        // A newer check was asked meanwhile: it reports instead.
+                        if probe.asked == key {
+                            probe.done = Some((key, found));
+                            probe.unpublished = true;
+                            drop(probe);
+                            crate::wakers::wake_all();
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            let probe = self.native.export_probe.lock().unwrap();
+            if let Some((key, found)) = &probe.done
+                && *key == self.native.export_probe_stamp
+            {
+                self.native.export["capabilities"] = found.clone();
+            }
+            drop(probe);
+            for format in crate::delivery::FORMATS {
+                if !self.native.export["capabilities"][*format].is_object() {
+                    self.native.export["capabilities"][*format] =
+                        json!({"available":false,"reason":"Checking…"});
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        for format in ["prores", "mp4", "webm", "png", "still"] {
+            self.native.export["capabilities"][format] =
+                json!({"available":false,"reason":"Native encoder probes require macOS."});
+        }
+        self.native.export["capabilities"]["json"] =
+            crate::delivery::portable_capability(&p.snapshot, &self.native.originals);
+        Ok(self.native.export.clone())
+    }
+    pub(crate) fn command_reply(&mut self, command: &str) -> Result<Value, String> {
+        match command {
+            "export.begin" | "export.retry" | "export.without" => {
+                self.native.export["run"] = json!({"phase":"choosingDestination"});
+                self.native
+                    .platform
+                    .push((command.into(), self.native.export["options"].clone()));
+                self.native.export["sequence"] =
+                    json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                // The sheet already has a plan for the settings it sent.
+                // Acknowledge startup without planning the same project
+                // again on the path to delivering the platform request.
+                if self.native.export["project"].is_null() {
+                    self.export_snapshot()
+                } else {
+                    Ok(self.native.export.clone())
+                }
+            }
+            c if c.starts_with("export.") => {
+                self.native.export["sequence"] =
+                    json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                self.export_snapshot()
+            }
+            "profile.set" => Ok(json!({"stateRevision":self.kernel.state().revision})),
+            "panel.settings" => self.settings_snapshot(),
+            "panel.easing" => self.easing_state(),
+            "panel.inspector" | "panel.binding" => self.inspector_snapshot(),
+            "viewer.chrome.drive" => self.viewer_snapshot(),
+            "panel.project" => {
+                let mut reply = self
+                    .native
+                    .project_reply
+                    .take()
+                    .ok_or("Missing project acknowledgement")?;
+                reply["view"] = self.project_view(None)?;
+                Ok(reply)
+            }
+            _ => self.projection(),
+        }
+    }
+    /// The Easing panel's view: how many keyframes are selected (what its
+    /// actions change) and the kernel preset curves it offers.
+    pub(crate) fn easing_state(&mut self) -> Result<Value, String> {
+        let Some(p) = self.published() else {
+            return Ok(json!({"open": false, "count": 0, "presets": easing_presets(), "library": crate::timeline_easing::inspect(&self.kernel)}));
+        };
+        let selected = p
+            .snapshot
+            .root()
+            .map(|root| crate::timeline_easing::selected_ease(root, &p.selection))
+            .unwrap_or_default();
+        Ok(json!({
+            "open": true,
+            "curve": selected.curve,
+            "mixed": selected.mixed,
+            "interpolation": selected.interpolation,
+            "mixedInterpolation": selected.mixed_interpolation,
+            "segments": selected.segments,
+            "count": p.selection.keys().len(),
+            "selection": [p.snapshot.doc_id, p.selection.keys(), p.selection.key_layers()],
+            "revision": p.revision().to_string(),
+            "presets": easing_presets(),
+            "library": crate::timeline_easing::inspect(&self.kernel),
+        }))
+    }
+    /// An Easing panel action on the selected keyframes, as one Undo step:
+    /// `{type:"preset", preset, scope?}`, `{type:"curve", curve:[x1,y1,x2,y2], scope?}`,
+    /// `{type:"easyEase", side:"both"|"in"|"out", scope?}` or
+    /// `{type:"interpolation", interpolation:"linear"|"bezier"|"hold"|"auto"|"continuous"}`.
+    pub(crate) fn easing_intent(&mut self, args: &Value) -> Result<Request, String> {
+        use pm_kernel::commands::keyframes::{EaseSide, EaseSpec, Interpolation};
+        self.sync()?;
+        let p = self.published().ok_or("No open project")?;
+        let raw_keys: Vec<String> = p.selection.keys().to_vec();
+        if raw_keys.is_empty() {
+            return Err("Select keyframes to apply easing".into());
+        }
+        // Resolve selected keys on unlocked layers and expand linked scale /
+        // combined position sibling keys so multi-keyframe & multi-layer easing
+        // updates every selected track cleanly without failing on a locked layer
+        // when unlocked keyframes are also selected.
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        let mut model = pm_panel_timeline::TimelineModel::default();
+        model.sync(&p);
+        let expanded = model.expand_graph_keys(&raw_keys);
+        let mut unlocked_keys: Vec<String> = Vec::with_capacity(expanded.len());
+        for id in &expanded {
+            if let Some((layer, _, _)) = index.key(id) {
+                if !layer.effectively_locked {
+                    unlocked_keys.push(id.clone());
+                }
+            } else {
+                unlocked_keys.push(id.clone());
+            }
+        }
+        let key_ids = if unlocked_keys.is_empty() {
+            raw_keys
+        } else {
+            unlocked_keys
+        };
+        let all_sides = args["scope"].as_str() == Some("all");
+        let side = |v: &Value| match v["side"].as_str().unwrap_or("both") {
+            "in" => Ok(EaseSide::In),
+            "out" => Ok(EaseSide::Out),
+            "both" => Ok(EaseSide::Both),
+            _ => Err("Unknown easing side".to_string()),
+        };
+        // Partition consecutive selected pairs vs isolated keys for Easy Ease
+        // so clicking Easy Ease / Ease In / Ease Out on a selected span never
+        // corrupts adjacent unselected segments.
+        let segment_sides = |ids: &[String]| -> (Vec<String>, Vec<String>, Vec<String>) {
+            let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let mut out_only = Vec::new();
+            let mut in_only = Vec::new();
+            let mut isolated = Vec::new();
+            for layer in &index.layers {
+                if layer.effectively_locked {
+                    continue;
+                }
+                for channel in &layer.channels {
+                    let sel: Vec<bool> = channel
+                        .keys
+                        .iter()
+                        .map(|k| id_set.contains(k.id.as_str()))
+                        .collect();
+                    let len = channel.keys.len();
+                    for i in 0..len {
+                        if !sel[i] {
+                            continue;
+                        }
+                        let prev_sel = i > 0 && sel[i - 1];
+                        let next_sel = i + 1 < len && sel[i + 1];
+                        if prev_sel || next_sel {
+                            if next_sel {
+                                out_only.push(channel.keys[i].id.clone());
+                            }
+                            if prev_sel {
+                                in_only.push(channel.keys[i].id.clone());
+                            }
+                        } else {
+                            isolated.push(channel.keys[i].id.clone());
+                        }
+                    }
+                }
+            }
+            (out_only, in_only, isolated)
+        };
+        let commands: Vec<Command> = match args["type"].as_str().unwrap_or("") {
+            "preset" => {
+                let name = args["preset"].as_str().unwrap_or("");
+                if !pm_eval::easing::PRESETS.iter().any(|(n, _)| *n == name) {
+                    return Err(format!("Unknown easing preset {name}"));
+                }
+                if all_sides && key_ids.len() > 1 {
+                    key_ids
+                        .into_iter()
+                        .map(|id| {
+                            KeyframeCommand::SetEasing {
+                                key_ids: vec![id],
+                                curve: EaseSpec::Preset(name.into()),
+                            }
+                            .into()
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        KeyframeCommand::SetEasing {
+                            key_ids,
+                            curve: EaseSpec::Preset(name.into()),
+                        }
+                        .into(),
+                    ]
+                }
+            }
+            "curve" => {
+                let numbers: Vec<f64> = args["curve"]
+                    .as_array()
+                    .filter(|a| a.len() == 4)
+                    .ok_or("A curve is four numbers")?
+                    .iter()
+                    .map(|n| n.as_f64().filter(|n| n.is_finite()))
+                    .collect::<Option<_>>()
+                    .ok_or("A curve is four numbers")?;
+                let curve = [numbers[0], numbers[1], numbers[2], numbers[3]];
+                if all_sides && key_ids.len() > 1 {
+                    key_ids
+                        .into_iter()
+                        .map(|id| {
+                            KeyframeCommand::SetEasing {
+                                key_ids: vec![id],
+                                curve: EaseSpec::Curve(curve),
+                            }
+                            .into()
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        KeyframeCommand::SetEasing {
+                            key_ids,
+                            curve: EaseSpec::Curve(curve),
+                        }
+                        .into(),
+                    ]
+                }
+            }
+            "easyEase" => {
+                let side = side(args)?;
+                if all_sides {
+                    vec![KeyframeCommand::EasyEase { key_ids, side }.into()]
+                } else {
+                    let (out_ids, in_ids, iso_ids) = segment_sides(&key_ids);
+                    let mut cmds = Vec::new();
+                    if side != EaseSide::In && !out_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: out_ids,
+                                side: EaseSide::Out,
+                            }
+                            .into(),
+                        );
+                    }
+                    if side != EaseSide::Out && !in_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: in_ids,
+                                side: EaseSide::In,
+                            }
+                            .into(),
+                        );
+                    }
+                    if !iso_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: iso_ids,
+                                side,
+                            }
+                            .into(),
+                        );
+                    }
+                    if cmds.is_empty() {
+                        cmds.push(KeyframeCommand::EasyEase { key_ids, side }.into());
+                    }
+                    cmds
+                }
+            }
+            "interpolation" => vec![
+                KeyframeCommand::SetInterpolation {
+                    key_ids,
+                    side: side(args)?,
+                    interpolation: match args["interpolation"].as_str().unwrap_or("") {
+                        "linear" => Interpolation::Linear,
+                        "bezier" => Interpolation::Bezier,
+                        "hold" => Interpolation::Hold,
+                        "auto" => Interpolation::Auto,
+                        "continuous" => Interpolation::Continuous,
+                        other => return Err(format!("Unknown interpolation {other}")),
+                    },
+                }
+                .into(),
+            ],
+            other => return Err(format!("Unknown easing action {other}")),
+        };
+        Ok(Request::new(
+            self.caller,
+            Call::Transact {
+                label: Some(if args["type"] == "preset" { format!("Ease: {}", crate::timeline_easing::preset_name(args["preset"].as_str().unwrap_or(""))) } else if let Some(name) = args["name"].as_str().filter(|n| !n.is_empty() && n.chars().count() <= 100) { format!("Ease: {name}") } else { "Adjust easing".into() }),
+                expected_revision: Some(p.revision()),
+                body: WriteBody::Commands(commands),
+            },
+        ))
+    }
+    pub(crate) fn native_command(
+        &mut self,
+        command: &str,
+        args: &Value,
+    ) -> Result<NativeCommand, String> {
+        let started = std::time::Instant::now();
+        let result = self.native_command_timed(command, args);
+        crate::trace(
+            json!({"panel": self.panel_id, "command": command, "ms": crate::ms(started.elapsed())}),
+        );
+        result
+    }
+    fn native_command_timed(
+        &mut self,
+        command: &str,
+        args: &Value,
+    ) -> Result<NativeCommand, String> {
+        self.sync()?;
+        let time = self.time();
+        if matches!(
+            command,
+            "export.destination.choose"
+                | "export.queue.add"
+                | "export.begin"
+                | "export.retry"
+                | "export.without"
+                | "export.plan"
+                | "export.preset.save"
+                | "export.reset"
+                | "export.closeFailure"
+        ) && matches!(
+            self.native.export["run"]["phase"].as_str(),
+            Some("choosingDestination" | "preparing" | "rendering" | "checking" | "finishing" | "cancelling")
+        ) {
+            return Err("Export is in progress".into());
+        }
+        if self.native.export["destinationChoosing"] == true && matches!(command,
+            "export.destination.choose" | "export.begin" | "export.retry" | "export.without"
+                | "export.queue.add" | "export.queue.render" | "export.plan"
+                | "export.preset.save" | "export.reset" | "export.closeFailure") {
+            return Err("Choosing an export destination".into());
+        }
+        let value = match command {
+            "panel.inspector" => {
+                let request = self.native.properties.intent(
+                    self.model.as_mut().ok_or("No open project")?,
+                    self.caller,
+                    args,
+                    time,
+                );
+                for (name, args) in self.native.properties.commands.drain(..) {
+                    self.native
+                        .platform
+                        .push(("command".into(), json!({"name":name,"args":args})));
+                }
+                if let Some(request) = request? {
+                    return Ok(NativeCommand::Kernel(request));
+                }
+                self.inspector_snapshot()?
+            }
+            "panel.binding" => {
+                let handle = args["handle"].as_str().ok_or("binding handle")?;
+                if self.native.fields.contains_key(handle) {
+                    return Err(
+                        "Local controls must dispatch their authored change listener".into(),
+                    );
+                }
+                self.validate_binding_owner(handle)?;
+                // Effect Controls and the Color panel write effect parameters.
+                if matches!(self.panel_id.as_str(), "layer-effects" | "color")
+                    || (self.panel_id == "inspector" && handle.starts_with("effect-parameter:"))
+                {
+                    return self
+                        .parameter_write(handle, &args["value"], time)
+                        .map(NativeCommand::Kernel);
+                }
+                let request = self.native.properties.write(
+                    self.model.as_mut().ok_or("No open project")?,
+                    self.caller,
+                    handle,
+                    model(&args["value"])?,
+                    time,
+                )?;
+                return Ok(NativeCommand::Kernel(request));
+            }
+            "panel.timeline" => {
+                return self.timeline_intent(args);
+            }
+            "panel.easing" => return self.easing_intent(args).map(NativeCommand::Kernel),
+            "panel.timeline.menu" => self.timeline_menu(args)?,
+            "panel.timeline.dispose" => {
+                return Ok(NativeCommand::Timeline(json!({"type":"dispose"})));
+            }
+            "viewer.chrome.drive" => {
+                let p = self.published().ok_or("closed")?;
+                let vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
+                    .map_err(|e| e.to_string())?;
+                let viewport = self.viewer_viewport(&vm)?;
+                let plan = self
+                    .native
+                    .viewer
+                    .drive(&vm, &model(args)?, viewport, self.caller)
+                    .map_err(|e| e.to_string())?;
+                match plan.effect {
+                    pm_panel_viewerchrome::Effect::State(tx) => {
+                        return Ok(NativeCommand::State(tx));
+                    }
+                    pm_panel_viewerchrome::Effect::Document(request) => {
+                        return Ok(NativeCommand::Kernel(request));
+                    }
+                    pm_panel_viewerchrome::Effect::Host(action) => {
+                        use pm_panel_viewerchrome::{HostAction, TransportAction};
+                        let action = match action {
+                            HostAction::Transport(action) => match action {
+                                TransportAction::Seek(time) => json!({"kind":"seek","time":time}),
+                                TransportAction::Step(frames) => {
+                                    json!({"kind":"command","name":"stepFrames","args":[frames]})
+                                }
+                                TransportAction::Toggle => json!({"kind":"command","name":"play"}),
+                                TransportAction::Start => {
+                                    json!({"kind":"command","name":"gotoStart"})
+                                }
+                                TransportAction::End => json!({"kind":"command","name":"gotoEnd"}),
+                                TransportAction::WorkIn => {
+                                    json!({"kind":"command","name":"gotoWorkIn"})
+                                }
+                                TransportAction::WorkOut => {
+                                    json!({"kind":"command","name":"gotoWorkOut"})
+                                }
+                                TransportAction::Pause => json!({"kind":"pause"}),
+                            },
+                            HostAction::OpenComposition(id) => {
+                                json!({"kind":"openComposition","id":id})
+                            }
+                            HostAction::FocusGroup(id) => {
+                                json!({"kind":"focusGroup","id":id})
+                            }
+                            HostAction::Command { id, args } => {
+                                json!({"kind":"command","name":id,"args":args.iter().map(wire).collect::<Vec<_>>()})
+                            }
+                            other => json!({"kind":"unavailable","action":format!("{other:?}")}),
+                        };
+                        self.native.platform.push(("viewer.action".into(), action));
+                        Value::Null
+                    }
+                }
+            }
+            "panel.project" => return self.project_command(args),
+            "panel.settings" => return self.settings_action(args),
+            "panel.agent.read" => self.agent_snapshot()?,
+            "panel.agent.dispatch" => {
+                let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
+                let link = self.native.agent_link.clone();
+                let effect = {
+                    let mut state = agent.shared();
+                    let thread = state.panel.active_id().to_owned();
+                    let session = state.panel.session(&thread).map_err(|e| format!("{e:?}"))?;
+                    let (provider, live) = (session.settings.provider, session.run.is_some());
+                    let sequence = link.admitted_sequence(args, &thread, &session.draft.text());
+                    let action = &args["action"];
+                    if action["type"] == "connect" {
+                        // The provider's own sign-in, as Settings › Accounts
+                        // starts it; its progress comes back as `waiting`.
+                        if let Some(accounts) = link.accounts()
+                            && provider != pm_agents::Provider::Compatible
+                        {
+                            accounts.connect(provider);
+                        }
+                        drop(state);
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "retryConnection" {
+                        if let Some(accounts) = link.accounts() {
+                            accounts.refresh(provider);
+                        }
+                        drop(state);
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "pickRegion" {
+                        // The window shows a crosshair over the editor; what
+                        // is selected belongs to the thread that opened it.
+                        if args["target"]["project"].as_str() != Some(state.panel.project())
+                            || args["target"]["thread"].as_str() != Some(&thread)
+                        {
+                            return Err("The attachment's thread changed.".into());
+                        }
+                        let input = json!({"project":state.panel.project(), "thread":thread});
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.pickRegion".into(), input));
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "attachInput" {
+                        if args["target"]["project"].as_str() != Some(state.panel.project())
+                            || args["target"]["thread"].as_str() != Some(&thread)
+                        {
+                            return Err("The attachment's thread changed.".into());
+                        }
+                        let input = json!({"paths":action["paths"], "project":state.panel.project(), "thread":thread});
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.attachInput".into(), input));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "attach" {
+                        // The window shows its file picker; chosen files come back
+                        // through `Builtins::agent_attach`.
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.attach".into(), Value::Null));
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "openMedia" {
+                        // Only a file or address one of this thread's replies
+                        // (archived conversation or live active-run trace) names.
+                        let path = action["path"].as_str().unwrap_or_default();
+                        let home = reply_home();
+                        let session = state
+                            .panel
+                            .session(&thread)
+                            .map_err(|e| format!("{e:?}"))?;
+                        let media = session
+                            .conversation
+                            .values()
+                            .flat_map(prose_rows)
+                            .chain(session.trace.rows.values())
+                            .flat_map(|row| reply_media(row, &home))
+                            .find(|m| m.path == path)
+                            .ok_or("This file can't be opened from here.")?;
+                        drop(state);
+                        self.native.platform.push((
+                            "agent.media".into(),
+                            json!({"path":media.path,"remote":media.remote,"reveal":action["reveal"] == true}),
+                        ));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "openResultPanel" {
+                        let extension = action["extensionId"]
+                            .as_str()
+                            .ok_or("Missing extension id")?;
+                        let panel = action["panelId"]
+                            .as_str()
+                            .ok_or("Missing contributed panel id")?;
+                        let published = session
+                            .result
+                            .iter()
+                            .chain(
+                                session
+                                    .conversation
+                                    .values()
+                                    .filter_map(|row| row.get("nativeResult")),
+                            )
+                            .flat_map(|result| {
+                                result["extensions"].as_array().into_iter().flatten()
+                            })
+                            .any(|row| {
+                                row["extensionId"] == extension
+                                    && row["panelId"] == panel
+                                    && row["status"] == "ready"
+                            });
+                        if !published {
+                            return Err(
+                                "This panel was not published by a result in this thread.".into()
+                            );
+                        }
+                        let project = state.panel.project().to_owned();
+                        let service = link
+                            .completion
+                            .shared()
+                            .clone()
+                            .ok_or("Completion service is unavailable")?;
+                        drop(state);
+                        service("openPanel", &project, "", action)?;
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "openVisual" {
+                        // A saved reply is checked again before it's shown (main's
+                        // readVisualReply); the window opens its own viewer.
+                        let id = action["id"].as_str().unwrap_or_default();
+                        let reply = state
+                            .panel
+                            .visual_reply(&thread, id)
+                            .ok()
+                            .and_then(|v| pm_agents::visual::read(&v))
+                            .ok_or("This visualization can't be shown.")?;
+                        drop(state);
+                        self.native.platform.push((
+                            "agent.visual".into(),
+                            json!({"id":id,"title":reply.title,"html":reply.html,"height":reply.height}),
+                        ));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    let kept_run = (action["type"] == "keepResult"
+                        && session.run.is_none()
+                        && session.result.is_some())
+                    .then(|| session.last_run().map(str::to_owned))
+                    .flatten();
+                    let admission_provider = if action["type"] == "resumeInterrupted" {
+                        if state.runs.active() >= 8 {
+                            return Err(
+                                "Eight agents are already running. Wait for one to finish.".into(),
+                            );
+                        }
+                        state
+                            .panel
+                            .recovery_provider(&thread)
+                            .map_err(|e| e.to_string())?
+                    } else if action["type"] == "setAccess" && action["access"] == "full" {
+                        let recovery = state
+                            .panel
+                            .interrupted_snapshot(&thread)
+                            .map_err(|e| e.to_string())?;
+                        if recovery["requestAvailable"] == true
+                            && recovery["requiresComputerConsent"] == true
+                        {
+                            state
+                                .panel
+                                .recovery_provider(&thread)
+                                .map_err(|e| e.to_string())?
+                        } else {
+                            provider
+                        }
+                    } else {
+                        provider
+                    };
+                    if let Some(epoch) = action["composerEpoch"].as_u64()
+                        && epoch != session.composer_epoch()
+                        && args["target"]["project"].as_str() == Some(state.panel.project())
+                        && args["target"]["thread"].as_str() == Some(&thread)
+                    {
+                        drop(state);
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
+                    let sending = crate::agent_host::sends(action);
+                    let queue = sending && crate::agent_host::queue_composer_send(&state, &thread)?;
+                    if sending && !queue && !live && state.panel.active_runs() >= 8 {
+                        return Err(
+                            "Eight agents are already running. Wait for one to finish.".into()
+                        );
+                    }
+                    // A new turn gets a fresh run id. A live direction
+                    // reaches the running turn; queued messages reserve no run.
+                    let run = state
+                        .panel
+                        .session(&thread)
+                        .map_err(|e| format!("{e:?}"))?
+                        .run
+                        .as_ref()
+                        .map(|run| run.id.clone())
+                        .unwrap_or_else(|| new_id("run"));
+                    let request = new_id("request");
+                    let new_thread = new_id("thread");
+                    let catalogs = |provider| link.catalog(provider);
+                    let admission_before =
+                        (action["type"] == "resumeInterrupted").then(|| state.panel.clone());
+                    let effect = pm_panel_agentpanel::v4::dispatch_at_with_queue(
+                        &mut state.panel,
+                        sequence,
+                        args,
+                        pm_panel_agentpanel::v4::Context {
+                            run: &run,
+                            request: &request,
+                            new_thread: &new_thread,
+                            now: crate::agent_host::now_ms(),
+                            // Escape closes a popover; docked, it hands the
+                            // keyboard back to the editor.
+                            popover_open: self.native.facts["agentPopover"] == true,
+                            catalogs: &catalogs,
+                        },
+                        queue,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                    if action["type"] == "draft"
+                        && let Some(text) = action["text"].as_str()
+                    {
+                        link.typed(&thread, text);
+                    }
+                    let now = crate::agent_host::now_ms();
+                    // A composer send publishes its row before the provider worker
+                    // sets up the request or writes the archive.
+                    if sending
+                        || effect.is_none()
+                            && matches!(action["type"].as_str(), Some("draft" | "key"))
+                    {
+                        state.panel.defer_save(now);
+                    } else if let Some(before) = admission_before {
+                        state
+                            .panel
+                            .save_recovery_admission(
+                                &mut KernelStore::new(self.kernel.clone(), self.application),
+                                before,
+                                now,
+                            )
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        state
+                            .panel
+                            .save(
+                                &mut KernelStore::new(self.kernel.clone(), self.application),
+                                now,
+                            )
+                            .map_err(|error| format!("{error:?}"))?;
+                    }
+                    if let Some(run) = kept_run {
+                        crate::agent_completion::keep(&link, state.panel.project(), &run);
+                    }
+                    use pm_panel_agentpanel::model::EffectKind;
+                    match effect {
+                        Some(effect)
+                            if matches!(
+                                effect.kind,
+                                EffectKind::Send { .. }
+                                    | EffectKind::Stop
+                                    | EffectKind::Answer { .. }
+                            ) =>
+                        {
+                            state.sends.push_back(effect);
+                            None
+                        }
+                        Some(effect) if matches!(effect.kind, EffectKind::Queued) => None,
+                        effect => effect,
+                    }
+                };
+                if let Some(effect) = effect {
+                    use pm_panel_agentpanel::model::{EffectKind, ShellAction};
+                    let now = crate::agent_host::now_ms();
+                    let mut store = KernelStore::new(self.kernel.clone(), self.application);
+                    let operation = match &effect.kind {
+                        EffectKind::OpenSettings => Some(("agent.settings", Value::Null)),
+                        EffectKind::Subscribe => Some(("agent.subscribe", Value::Null)),
+                        EffectKind::Shell(ShellAction::Open) => Some(("agent.open", Value::Null)),
+                        EffectKind::Shell(ShellAction::Close) => Some(("agent.close", Value::Null)),
+                        // Escape in the docked composer: the editor takes the keyboard back.
+                        EffectKind::Shell(ShellAction::Blur) => Some(("agent.blur", Value::Null)),
+                        // Pinned, the panel docks into the workspace (unpinning is
+                        // its dock's Close, which returns it to the popover).
+                        EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
+                        EffectKind::ChooseFiles => Some(("agent.attach", Value::Null)),
+                        EffectKind::OpenAttachment { attachment, .. } => {
+                            let mut attachment = attachment.clone();
+                            if attachment["payloadStored"] == true
+                                && !["dataUrl", "dataBase64", "content"]
+                                    .iter()
+                                    .any(|key| attachment[*key].is_string())
+                            {
+                                pm_agents::persistence::hydrate_attachment(
+                                    &mut store,
+                                    &mut attachment,
+                                )
+                                .map_err(|error| error.to_string())?;
+                            }
+                            Some(("agent.previewAttachment", attachment))
+                        }
+                        EffectKind::StopTask { .. } => {
+                            crate::agent_host::run_effect(
+                                &agent,
+                                &link,
+                                &self.kernel,
+                                self.application,
+                                &effect,
+                            )?;
+                            None
+                        }
+                        EffectKind::ApplyPlan(_) | EffectKind::UndoResult(_) => {
+                            crate::agent_completion::dispatch_action(
+                                &agent,
+                                &link,
+                                &self.kernel,
+                                self.application,
+                                &effect,
+                            )?;
+                            None
+                        }
+                        // `/new`: a new thread, as the header's New Thread.
+                        EffectKind::NewThread => {
+                            let mut state = agent.shared();
+                            state
+                                .panel
+                                .new_thread(&new_id("thread"), now)
+                                .map_err(|e| format!("{e:?}"))?;
+                            state
+                                .panel
+                                .save(&mut store, now)
+                                .map_err(|e| format!("{e:?}"))?;
+                            None
+                        }
+                        // `/provider <name>`.
+                        EffectKind::SelectProvider(provider) => {
+                            let provider = match provider.as_str() {
+                                "chatgpt" => pm_agents::Provider::Chatgpt,
+                                "claude" => pm_agents::Provider::Claude,
+                                "compatible" => pm_agents::Provider::Compatible,
+                                "aero" => pm_agents::Provider::Aero,
+                                _ => return Err("Unknown provider".into()),
+                            };
+                            let mut state = agent.shared();
+                            let thread = effect.target.thread.clone();
+                            state
+                                .panel
+                                .set_provider(
+                                    &thread,
+                                    provider,
+                                    String::new(),
+                                    link.catalog(provider),
+                                )
+                                .map_err(|e| format!("{e:?}"))?;
+                            state
+                                .panel
+                                .save(&mut store, now)
+                                .map_err(|e| format!("{e:?}"))?;
+                            None
+                        }
+                        // Deleting asks first (PM.confirm in v1): the window's
+                        // alert answers through `Builtins::agent_delete_thread`.
+                        EffectKind::ConfirmArchive => {
+                            let state = agent.shared();
+                            let thread = effect.target.thread.clone();
+                            let summary =
+                                state.panel.summaries().into_iter().find(|t| t.id == thread);
+                            let subtree = state
+                                .panel
+                                .thread_subtree(&thread)
+                                .map_err(|e| format!("{e:?}"))?;
+                            let busy = state
+                                .panel
+                                .summaries()
+                                .iter()
+                                .any(|t| subtree.contains(&t.id) && t.busy);
+                            Some((
+                                "agent.delete",
+                                json!({"thread":thread,
+                                    "title":summary.as_ref().map(|t| t.title.clone()),
+                                    "busy":busy,"subthreads":subtree.len().saturating_sub(1)}),
+                            ))
+                        }
+                        // Full access asks first (language §9); the answer comes
+                        // back through `Builtins::agent_consent`.
+                        EffectKind::ComputerConsent => {
+                            Some(("agent.consent", json!({"effect":effect.id})))
+                        }
+                        // Leaving Full access needs nothing more of the host.
+                        EffectKind::RevokeComputerConsent => None,
+                        _ => {
+                            return Err(
+                                "Agent provider or native action service is unavailable".into()
+                            );
+                        }
+                    };
+                    if let Some((operation, input)) = operation {
+                        self.native.platform.push((operation.into(), input));
+                    }
+                }
+                link.touch();
+                // The panel shows a change only from a publication. A pick in
+                // the window's menu (model, effort, access, thread) reaches the
+                // panel after the window last republished, so the action itself
+                // republishes, queued behind this command. Typing needs none.
+                if !matches!(args["action"]["type"].as_str(), Some("draft" | "focus")) {
+                    link.publish_now();
+                }
+                let snapshot = self.agent_snapshot()?;
+                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
+                snapshot
+            }
+            "profile.get" => {
+                let key = args["key"].as_str().ok_or("profile key")?;
+                if !profile_key(key) {
+                    return Err("Unprivileged profile key".into());
+                }
+                let state = self.kernel.state();
+                let mut result = json!({"stateRevision":state.revision});
+                if let Some(value) = state.settings.get(key) {
+                    result["value"] = wire(value);
+                }
+                result
+            }
+            "profile.set" => {
+                let key = args["key"].as_str().ok_or("profile key")?;
+                if !profile_key(key) {
+                    return Err("Unprivileged profile key".into());
+                }
+                crate::settings::validate_profile(key, &args["value"])?;
+                return Ok(NativeCommand::State(state::StateTransaction {
+                    expected_revision: Some(self.kernel.state().revision),
+                    ops: vec![state::StateOp::Setting {
+                        key: key.into(),
+                        value: Some(model(&args["value"])?),
+                    }],
+                }));
+            }
+            "export.preset.save" => {
+                let state = self.kernel.state();
+                let presets = crate::delivery::save_preset(
+                    state.settings.get("renderPresets").map(wire),
+                    args["name"].as_str().ok_or("Preset name")?,
+                    args["options"].clone(),
+                )?;
+                return Ok(NativeCommand::State(state::StateTransaction {
+                    expected_revision: Some(state.revision),
+                    ops: vec![state::StateOp::Setting {
+                        key: "renderPresets".into(),
+                        value: Some(model(&presets)?),
+                    }],
+                }));
+            }
+            "export.destination.choose" => {
+                crate::delivery::options(&args["options"])?.validate()?;
+                self.native.export["destinationChoosing"] = json!(true);
+                self.native.platform.push((command.into(), args["options"].clone()));
+                self.command_reply(command)?
+            }
+            "export.plan" => {
+                let options: pm_promedia::export_panel::Options =
+                    crate::delivery::options(&args["options"])?;
+                options.validate()?;
+                // The sheet plans as it opens and as its settings change.
+                self.native.export_open = true;
+                self.native.export["options"] = args["options"].clone();
+                self.command_reply(command)?
+            }
+            "export.reset" | "export.closeFailure" => {
+                self.native.export["run"] = json!({"phase":"idle"});
+                self.command_reply(command)?
+            }
+            // The sheet's window shows (reveal) or ends (dismiss) on the host.
+            "export.showInFinder" => {
+                if self.native.export["run"]["phase"] != "done" {
+                    return Err("No completed export to reveal".into());
+                }
+                let path = self.native.export["run"]["path"].clone();
+                self.native.platform.push((command.into(), json!({"path":path})));
+                self.export_snapshot()?
+            }
+            "export.queue.add" | "export.queue.list" | "export.queue.render" | "export.queue.action" | "export.queue.finder" => {
+                if command == "export.queue.add" {
+                    crate::delivery::options(&args["options"])?.validate()?;
+                    self.native.export["run"] = json!({"phase":"choosingDestination"});
+                }
+                self.native.platform.push((command.into(), args.clone()));
+                self.export_snapshot()?
+            }
+            "export.reveal" | "export.dismiss" => {
+                self.native.export_open = command == "export.reveal";
+                self.native.platform.push((command.into(), args.clone()));
+                self.export_snapshot()?
+            }
+            "export.begin" | "export.retry" | "export.without" => {
+                self.native.export_probe_stamp.clear();
+                let options = if command != "export.begin" {
+                    self.native.export["options"].clone()
+                } else {
+                    args["options"].clone()
+                };
+                let typed: pm_promedia::export_panel::Options = crate::delivery::options(&options)?;
+                typed.validate()?;
+                self.native.export["options"] = options.clone();
+                self.keep_chosen_export_rate(typed.fps);
+                let mut options = options;
+                if let Some(fields) = options.as_object_mut() {
+                    fields.remove("includeExtensions");
+                }
+                return Ok(NativeCommand::State(state::StateTransaction {
+                    expected_revision: Some(self.kernel.state().revision),
+                    ops: vec![state::StateOp::Setting {
+                        key: "exportOpts".into(),
+                        value: Some(model(&options)?),
+                    }],
+                }));
+            }
+            "export.cancel" => {
+                self.native.export["run"] = json!({"phase":"cancelling"});
+                self.native
+                    .platform
+                    .push(("export.cancel".into(), Value::Null));
+                self.command_reply(command)?
+            }
+            "effect.reveal" => {
+                self.native
+                    .platform
+                    .push(("activatePanel".into(), json!("layer-effects")));
+                Value::Null
+            }
+            _ => return Err(format!("Unregistered built-in command {command}")),
+        };
+        Ok(NativeCommand::Value(value))
+    }
+}
+/// A move of media alone is a plain kernel edit; other Project edits restore
+/// the reviewed whole-project result under its document guard.
+/// The preset curves the Easing panel offers: v1's `PM.Ease.PRESETS` (the
+/// kernel's own list), each with its cubic Bézier numbers.
+fn easing_presets() -> Value {
+    pm_eval::easing::PRESETS
+        .iter()
+        .map(|(name, curve)| json!({"id": name, "curve": curve}))
+        .collect()
+}
+pub(crate) fn project_edit_request(
+    edit: pm_panel_media::Edit,
+    prepared: &pm_panel_media::PreparedEdit,
+    caller: Caller,
+) -> Request {
+    match edit {
+        pm_panel_media::Edit::Move {
+            assets,
+            folders,
+            target,
+        } if folders.is_empty() => Request::new(
+            caller,
+            pm_kernel::Call::Transact {
+                label: Some(prepared.label.clone()),
+                expected_revision: Some(prepared.stamp.revision),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Media(
+                    pm_kernel::MediaCommand::SetAssetFolder {
+                        asset_ids: assets,
+                        folder: target,
+                    },
+                )]),
+            },
+        )
+        .with_document(prepared.stamp.document),
+        _ => prepared.request(caller),
+    }
+}
+fn profile_key(key: &str) -> bool {
+    matches!(
+        key,
+        "themeMode"
+            | "previewMemoryMiB"
+            | "autoDownloadCloudMedia"
+            | "restoreWindows"
+            | "openProjectsIn"
+            | "shareUsageData"
+    )
+}
+
+/// A property's timeline readout, the same reading as its Properties field
+/// (two places, trailing zeros trimmed): 960 and 1372.84, never 960.00.
+fn readout(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.into()
+    }
+}
+
+/// `workspace.chrome.timeline.showLayerNumbers` (v1–3 and v4
+/// `timeline.chrome`): only an explicit false hides the timeline's layer
+/// numbers. v1's shipped workspaces all write true; v1.2.0 showed them when
+/// the field was missing.
+pub(crate) fn layer_numbers(p: &Published) -> bool {
+    p.workspace
+        .get("chrome")
+        .and_then(|c| c.get("timeline"))
+        .and_then(|t| t.get("showLayerNumbers"))
+        .is_none_or(|v| *v != pm_model::Value::Bool(false))
+}
+
+/// The home folder `~/` paths in replies resolve against.
+fn reply_home() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(Into::into).unwrap_or_default()
+}
+/// The media an agent's prose names: an assistant message, or a text step of
+/// a run's trace (one row each in the panel); none for anything else.
+fn reply_media(
+    row: &Value,
+    home: &std::path::Path,
+) -> Vec<pm_services::surfaces::agent_reply::ReplyMedia> {
+    let prose = (row["role"] == "assistant" && row["error"] != true) || row["kind"] == "text";
+    if !prose {
+        return Vec::new();
+    }
+    pm_services::surfaces::agent_reply::reply_media(row["text"].as_str().unwrap_or_default(), home)
+}
+/// Every row of a stored message that can carry agent prose.
+fn prose_rows(message: &Value) -> Vec<&Value> {
+    match message["steps"].as_array() {
+        Some(steps) if message["role"] == "trace" => steps.iter().collect(),
+        _ => vec![message],
+    }
+}
+
+/// The Mods records (S105) of the extensions the kernel knows: built-ins and
+/// what this Mac installed or made, with their health as the host saw it.
+pub(crate) fn mod_records(
+    state: &pm_kernel::state::StateSnapshot,
+) -> pm_services::surface_backing::Records {
+    let entries = state
+        .extensions
+        .values()
+        .filter(|e| !archived(e))
+        .map(|e| {
+            let host = e
+                .source
+                .get("hostRecord")
+                .map(|h| serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(h)))
+                .and_then(Result::ok)
+                .unwrap_or(Value::Null);
+            let stopped = host["stopped"] == true;
+            json!({"id":e.id,"scope":if e.installed { "user" } else { "builtin" },
+                "enabled":e.enabled && !stopped,"health":host["health"],"manifest":{}})
+        })
+        .collect();
+    pm_services::surface_backing::Records {
+        revision: state.revision,
+        entries,
+    }
+}
+/// The kinds Settings › Extensions sorts by, in the order it lists them
+/// (v1.3.2 `EXTENSION_GROUPS`).
+pub(crate) const EXTENSION_KINDS: [&str; 7] = [
+    "Effects",
+    "Panels",
+    "Appearance",
+    "Layer Types",
+    "Media",
+    "Editor Tools",
+    "Other",
+];
+/// What an extension is, from what it contributes, as v1 placed it: its
+/// content before a companion panel, command or property control (an effect
+/// with a panel is an effect), and Other when it names nothing known.
+pub(crate) fn extension_kind(contributes: &[String]) -> &'static str {
+    let has = |kinds: &[&str]| contributes.iter().any(|c| kinds.contains(&c.as_str()));
+    if has(&["effects", "transitions"]) {
+        "Effects"
+    } else if has(&["themes"]) {
+        "Appearance"
+    } else if has(&["layers"]) {
+        "Layer Types"
+    } else if has(&["media"]) {
+        "Media"
+    } else if has(&["panels"]) {
+        "Panels"
+    } else if has(&[
+        "commands",
+        "inspector",
+        "keybindings",
+        "palette",
+        "menus",
+        "status",
+        "hooks",
+    ]) {
+        "Editor Tools"
+    } else {
+        "Other"
+    }
+}
+/// The health the extension host already publishes. Off is a separate choice.
+pub(crate) fn extension_attention(host: Option<&pm_model::Value>) -> Option<&'static str> {
+    let host = host?;
+    if host.get("unavailable").and_then(pm_model::Value::as_bool) == Some(true) {
+        return Some("missing");
+    }
+    match host.get("health")?.get("state")?.as_str()? {
+        "runtime-error" | "activation-error" | "build-error" | "manifest-error" => Some("error"),
+        _ => None,
+    }
+}
+
+/// Deleted from Settings: the folder is in the archive, its values are kept.
+fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+    entry
+        .source
+        .get("hostRecord")
+        .and_then(|r| r.get("archived"))
+        .and_then(pm_model::Value::as_bool)
+        == Some(true)
+}
+
+/// A time as the transport shows it (`00:00:02:15`: hours, minutes, seconds,
+/// frames at the composition's rate), and as it is spoken.
+pub(crate) fn timecode(time: f64, fps: f64) -> (String, String) {
+    let frames = (time * fps).round().max(0.) as u64;
+    let nominal = fps.round().max(1.) as u64;
+    let sec = frames / nominal;
+    (
+        format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        ),
+        format!("{sec} seconds, {} frames", frames % nominal),
+    )
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use pm_agents::persistence::Store;
+    #[test]
+    fn readouts_read_like_the_properties_field() {
+        assert_eq!(readout(960.), "960");
+        assert_eq!(readout(1372.8427), "1372.84");
+        assert_eq!(readout(0.5), "0.5");
+        assert_eq!(readout(-0.001), "0");
+    }
+    #[test]
+    fn application_agent_archive_is_disjoint_and_preserves_unknown_fields() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let mut application = KernelStore {
+            kernel: actor.handle(),
+            application: true,
+        };
+        let mut project = KernelStore {
+            kernel: actor.handle(),
+            application: false,
+        };
+        let key = "agentThreads.builtin-application";
+        project.set(key, &json!({"realProject":"keep"})).unwrap();
+        application
+            .set("future", &json!({"authored":"日本🙂"}))
+            .unwrap();
+        application
+            .set(key, &json!({"application":"separate"}))
+            .unwrap();
+        assert_eq!(
+            project.get(key).unwrap(),
+            Some(json!({"realProject":"keep"}))
+        );
+        assert_eq!(
+            application.get(key).unwrap(),
+            Some(json!({"application":"separate"}))
+        );
+        assert_eq!(
+            application.get("future").unwrap(),
+            Some(json!({"authored":"日本🙂"}))
+        );
+        project
+            .set(APPLICATION_AGENT_STORE, &json!(["unknown future shape"]))
+            .unwrap();
+        assert!(application.set(key, &json!({})).is_err());
+        assert_eq!(
+            project.get(APPLICATION_AGENT_STORE).unwrap(),
+            Some(json!(["unknown future shape"]))
+        );
+    }
+}
+
+/// The Export sheet's encoder checks, between the panel and their worker.
+#[derive(Default)]
+pub struct Probe {
+    /// The stamp the panel last asked to check.
+    pub asked: String,
+    /// The last check that finished while it was still the one asked for.
+    pub done: Option<(String, serde_json::Value)>,
+    /// That check is not on the sheet yet: the host publishes the sheet
+    /// again (`Builtins::publish_finished_checks`).
+    pub unpublished: bool,
+}
+
+/// The transitions the registry offers, in its order, for Properties.
+pub(crate) fn registered_transitions(
+    state: &pm_kernel::state::StateSnapshot,
+) -> Vec<crate::properties::RegisteredTransition> {
+    state
+        .registries
+        .get("transitions")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let definition = pm_kernel::commands::effects::registered_transition(state, &entry.id)?;
+            let text = |v: &pm_model::Value, key: &str| {
+                v.get(key)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let labels = entry
+                .definition
+                .get("params")
+                .and_then(pm_model::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| Some((text(p, "k")?, text(p, "label")?)))
+                .collect();
+            Some(crate::properties::RegisteredTransition {
+                id: entry.id.clone(),
+                label: text(&entry.definition, "label").unwrap_or_else(|| entry.id.clone()),
+                definition,
+                labels,
+            })
+        })
+        .collect()
+}
+
+/// A speed edit uses the lanes the native timeline actually shows, including
+/// automatically packed lanes. Reify them in the same undoable write.
+pub(crate) fn pin_speed_request(
+    view: Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>,
+    published: &Published,
+    request: &mut Request,
+) -> Result<(), String> {
+    let from_start = matches!(
+        &request.call,
+        Call::Gesture(GestureCall::Step { replace: true, .. })
+    );
+    let commands = match &mut request.call {
+        Call::Transact {
+            body: WriteBody::Commands(commands),
+            ..
+        }
+        | Call::Gesture(GestureCall::Step {
+            body: WriteBody::Commands(commands),
+            ..
+        })
+        | Call::Edit(EditCall::Dispatch {
+            body: WriteBody::Commands(commands),
+        })
+        | Call::Edit(EditCall::Apply {
+            body: WriteBody::Commands(commands),
+            ..
+        })
+        | Call::History(HistoryCall::Do {
+            body: WriteBody::Commands(commands),
+            ..
+        }) => commands,
+        _ => return Ok(()),
+    };
+    if commands
+        .iter()
+        .any(|c| matches!(c, Command::Timing(TimingCommand::PinTracks { .. })))
+    {
+        return Ok(());
+    }
+    fn resized(command: &Command, published: &Published, from_start: bool) -> Option<String> {
+        use pm_kernel::commands::properties::{KeyMode, constant_video_speed};
+        let id = match command {
+            Command::Property(PropertyCommand::Set(c))
+                if c.channel.strip_prefix("properties.").unwrap_or(&c.channel) == "c.speed"
+                    && !matches!(c.mode, KeyMode::Keyframe) =>
+            {
+                &c.layer_id
+            }
+            Command::Content(ContentCommand::Set {
+                layer_id, patch, ..
+            }) if patch.contains_key("speed") => layer_id,
+            _ => return None,
+        };
+        let root = published.snapshot.root()?;
+        let loc = pm_kernel::model::find_layer(root, id)?;
+        let mut layer = pm_kernel::model::layer_at(root, &loc)?.to_value();
+        let before = constant_video_speed(&layer)?;
+        let duration = layer.get("dur")?.as_f64()?;
+        let d = layer.as_object_mut()?.get_mut("d")?.as_object_mut()?;
+        match command {
+            Command::Property(PropertyCommand::Set(c)) => {
+                d.insert("speed", c.value.clone());
+            }
+            Command::Content(ContentCommand::Set { patch, .. }) => {
+                for (key, value) in patch.iter() {
+                    d.insert(key.clone(), value.clone());
+                }
+            }
+            _ => return None,
+        }
+        let after = constant_video_speed(&layer)?;
+        let fps = pm_kernel::model::comp_node(root, loc.comp_id.as_deref())
+            .and_then(|comp| comp.get("fps"))
+            .and_then(|value| value.to_value().as_f64())
+            .filter(|fps| fps.is_finite() && *fps > 0.)
+            .unwrap_or(30.);
+        (from_start || ((duration * before / after).max(1. / fps) - duration).abs() > 1e-8)
+            .then(|| id.clone())
+    }
+    let targets: Vec<_> = commands
+        .iter()
+        .filter_map(|c| resized(c, published, from_start))
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut model = view.as_deref().cloned().unwrap_or_default();
+    model.sync(published);
+    if model.mode != pm_panel_timeline::TimelineMode::Tracks {
+        return Ok(());
+    }
+    let lanes = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal);
+    let by_id: std::collections::HashMap<_, _> = lanes.iter().cloned().collect();
+    let mut visible = false;
+    for id in targets {
+        let (Some(target), Some(lane)) = (model.index.layer(&id), by_id.get(&id)) else {
+            continue;
+        };
+        visible = true;
+        for other in &model.index.layers {
+            if other.effectively_locked
+                && other.group == target.group
+                && pm_panel_timeline::tracks::area(&other.kind)
+                    == pm_panel_timeline::tracks::area(&target.kind)
+                && by_id.get(&other.id) == Some(lane)
+                && other.from >= target.from + target.duration - 1e-8
+            {
+                return Err("Unlock the following clip before changing speed.".into());
+            }
+        }
+    }
+    if visible {
+        commands.insert(0, TimingCommand::PinTracks { lanes }.into());
+    }
+    Ok(())
+}

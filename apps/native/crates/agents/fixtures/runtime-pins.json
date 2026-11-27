@@ -1,0 +1,23 @@
+{
+  "baseline": "v1.2.0:bun.lock; Codex updated to the reviewed npm release",
+  "codex": "0.169.0",
+  "claude": "2.1.280",
+  "pins": [
+    {
+      "package": "@anthropic-ai/claude-code-darwin-arm64",
+      "integrity": "sha512-ctkNgja8Yi2kngVFPO2667k6zbtJwjQ+dOTeEp1XmzHcoDFdaee4h4WVgZllsewm/Io+pPPPSFQVdGHOtdE/1A=="
+    },
+    {
+      "package": "@anthropic-ai/claude-code-darwin-x64",
+      "integrity": "sha512-991qNyZVC/ra6THRMLDJ1mB1a+/C/bpKEA1w5ttNJA0mTvVm012kAbS3Pf7zrvRBFe7fU1KeHkGlTTq49519qA=="
+    },
+    {
+      "package": "@openai/codex-darwin-arm64",
+      "integrity": "sha512-5WsWFBbVP78D+6FvNo1MMVxLPZdmcoQlqVJFrF4qx/TmvneLnMQKtLyXkUo54XOTDfoYKpNouTJ/F7gTVA8FnQ=="
+    },
+    {
+      "package": "@openai/codex-darwin-x64",
+      "integrity": "sha512-K1FKSsSLl9v3z5TeagBQXyQRDBIGB5Jncy5dxsRxwT3aaTqN3AI8VrCfoxBxKMOOU9O2QX1vg7WkBwNVth/s9A=="
+    }
+  ]
+}

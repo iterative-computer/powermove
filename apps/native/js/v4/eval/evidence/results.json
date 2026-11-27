@@ -1,0 +1,553 @@
+{
+  "scope": "independent public-API extensions; headless behavior/wire subset; not visual or macOS acceptance",
+  "mode": "extensions",
+  "results": [
+    {
+      "id": "builtin-01",
+      "lines": 25,
+      "docLookups": 2,
+      "references": ["v4-api.md / powermove/ui", "public types:Row,NumField"],
+      "friction": ["A1", "A2"],
+      "commits": 1,
+      "ops": 20,
+      "renderWithWireMs": [7.1109860000000005],
+      "ms": 8.85998,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-02",
+      "lines": 14,
+      "docLookups": 2,
+      "references": ["v4-api.md / protocol/IDs", "public types:JSX"],
+      "friction": ["A1"],
+      "commits": 2,
+      "ops": 17,
+      "renderWithWireMs": [2.4506839999999954, 2.2417489999999987],
+      "ms": 5.8434719999999984,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-03",
+      "lines": 16,
+      "docLookups": 1,
+      "references": ["v4-api.md / primitives/resources"],
+      "friction": ["A3"],
+      "commits": 1,
+      "ops": 12,
+      "renderWithWireMs": [2.0457040000000006],
+      "ms": 2.76558,
+      "wire": true,
+      "diagnostics": [
+        {
+          "code": "unknownProp",
+          "id": 2,
+          "prop": "resource"
+        },
+        {
+          "code": "unknownProp",
+          "id": 3,
+          "prop": "resource"
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-04",
+      "lines": 16,
+      "docLookups": 2,
+      "references": ["v4-api.md / primitives/resources", "public types:JSX"],
+      "friction": ["A3"],
+      "commits": 1,
+      "ops": 11,
+      "renderWithWireMs": [2.6792409999999975],
+      "ms": 3.457892000000001,
+      "wire": true,
+      "diagnostics": [
+        {
+          "code": "unknownProp",
+          "id": 2,
+          "prop": "points"
+        },
+        {
+          "code": "unknownProp",
+          "id": 3,
+          "prop": "resource"
+        },
+        {
+          "code": "unknownProp",
+          "id": 3,
+          "prop": "time"
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-05",
+      "lines": 15,
+      "docLookups": 2,
+      "references": [
+        "public types:Disclosure",
+        "public types:dispatch/EventPlan"
+      ],
+      "friction": ["A2"],
+      "commits": 2,
+      "ops": 20,
+      "renderWithWireMs": [2.9475460000000027],
+      "ms": 7.427266000000003,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-06",
+      "lines": 17,
+      "docLookups": 2,
+      "references": [
+        "v4-api.md / controlled text",
+        "public types:SurfaceEvent"
+      ],
+      "friction": ["A4"],
+      "commits": 1,
+      "ops": 5,
+      "renderWithWireMs": [2.218104000000004],
+      "ms": 14.230412000000001,
+      "wire": true,
+      "diagnostics": [],
+      "status": "fail",
+      "error": "AssertionError [ERR_ASSERTION]: complete accepted snapshot including props and text\n+ actual - expected\n... Skipped lines\n\n  [\n    {\n      children: [\n        1\n      ],\n...\n        id: 'caption',\n+       value: 'A日本🙂B'\n-       value: 'A🙂B'\n      },\n      text: '',\n      type: 'textarea'\n    }\n  ]\n"
+    },
+    {
+      "id": "builtin-07",
+      "lines": 26,
+      "docLookups": 1,
+      "references": ["public types:ToggleField,SelectField,Section"],
+      "friction": ["A1", "A2"],
+      "commits": 1,
+      "ops": 24,
+      "renderWithWireMs": [2.69444],
+      "ms": 3.53426300000001,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-08",
+      "lines": 14,
+      "docLookups": 2,
+      "references": [
+        "public types:TextField,NumField,Section",
+        "v4-api.md / unknown props"
+      ],
+      "friction": ["A1", "A3"],
+      "commits": 1,
+      "ops": 27,
+      "renderWithWireMs": [2.7278679999999866],
+      "ms": 3.5621010000000126,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-09",
+      "lines": 22,
+      "docLookups": 2,
+      "references": ["public types:Menu", "v4-api.md / declared defaults"],
+      "friction": ["A2"],
+      "commits": 1,
+      "ops": 29,
+      "renderWithWireMs": [2.8471899999999977],
+      "ms": 4.121124000000009,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "builtin-10",
+      "lines": 18,
+      "docLookups": 1,
+      "references": ["public types:ToolbarItem,Glass"],
+      "friction": ["A2"],
+      "commits": 1,
+      "ops": 11,
+      "renderWithWireMs": [2.2652590000000004],
+      "ms": 2.900503999999998,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "wild-01",
+      "lines": 18,
+      "docLookups": 1,
+      "references": ["v4-api.md / styles"],
+      "friction": [],
+      "commits": 1,
+      "ops": 22,
+      "renderWithWireMs": [2.1232889999999998],
+      "ms": 2.8941230000000076,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "wild-02",
+      "lines": 35,
+      "docLookups": 2,
+      "references": ["v4-api.md / primitives/anchored", "public types:JSX"],
+      "friction": ["A3"],
+      "commits": 2,
+      "ops": 16,
+      "renderWithWireMs": [1.8365380000000044, 2.340617000000009],
+      "ms": 5.071384999999992,
+      "wire": true,
+      "diagnostics": [
+        {
+          "code": "unknownProp",
+          "id": 2,
+          "prop": "points"
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "id": "wild-03",
+      "lines": 11,
+      "docLookups": 1,
+      "references": ["v4-api.md / primitives/resources"],
+      "friction": ["A3"],
+      "commits": 1,
+      "ops": 10,
+      "renderWithWireMs": [2.1350790000000046],
+      "ms": 2.885458,
+      "wire": true,
+      "diagnostics": [
+        {
+          "code": "unknownProp",
+          "id": 2,
+          "prop": "resource"
+        },
+        {
+          "code": "unknownProp",
+          "id": 3,
+          "prop": "resource"
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "id": "wild-04",
+      "lines": 12,
+      "docLookups": 2,
+      "references": ["v4-api.md / exact text", "public types:JSX"],
+      "friction": ["A3"],
+      "commits": 1,
+      "ops": 10,
+      "renderWithWireMs": [1.8935519999999997],
+      "ms": 2.4572730000000007,
+      "wire": true,
+      "diagnostics": [
+        {
+          "code": "unknownProp",
+          "id": 2,
+          "prop": "source"
+        },
+        {
+          "code": "unknownProp",
+          "id": 3,
+          "prop": "source"
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "id": "wild-05",
+      "lines": 24,
+      "docLookups": 2,
+      "references": ["v4-api.md / virtual-list", "public types:JSX"],
+      "friction": ["A3"],
+      "commits": 2,
+      "ops": 115,
+      "renderWithWireMs": [2.6265909999999906, 3.635709999999989],
+      "ms": 8.021781000000018,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "wild-06",
+      "lines": 25,
+      "docLookups": 2,
+      "references": ["public types:Menu", "v4-api.md / anchored"],
+      "friction": ["A2", "A3"],
+      "commits": 2,
+      "ops": 26,
+      "renderWithWireMs": [2.922699999999992],
+      "ms": 6.551206000000008,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "wild-07",
+      "lines": 15,
+      "docLookups": 2,
+      "references": ["v4-api.md / focus scopes", "public types:JSX"],
+      "friction": ["A3"],
+      "commits": 1,
+      "ops": 21,
+      "renderWithWireMs": [2.1893429999999796],
+      "ms": 3.053791999999987,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "wild-08",
+      "lines": 31,
+      "docLookups": 1,
+      "references": ["public types:RampField,PointField,FillField"],
+      "friction": ["A1", "A2"],
+      "commits": 1,
+      "ops": 21,
+      "renderWithWireMs": [2.5990290000000016],
+      "ms": 3.354625999999996,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "wild-09",
+      "lines": 6,
+      "docLookups": 1,
+      "references": ["v4-api.md / webview opt-in"],
+      "friction": ["A3"],
+      "commits": 1,
+      "ops": 4,
+      "renderWithWireMs": [1.8347650000000044],
+      "ms": 4.197349000000003,
+      "wire": true,
+      "diagnostics": [
+        {
+          "code": "unknownProp",
+          "id": 1,
+          "prop": "source"
+        }
+      ],
+      "status": "pass"
+    },
+    {
+      "id": "wild-10",
+      "lines": 35,
+      "docLookups": 2,
+      "references": ["v4-api.md / selectors", "public types:StyleRule"],
+      "friction": ["A7"],
+      "commits": 2,
+      "ops": 9,
+      "renderWithWireMs": [1.9238739999999837],
+      "ms": 5.694272999999981,
+      "wire": true,
+      "diagnostics": [],
+      "status": "fail",
+      "error": "AssertionError [ERR_ASSERTION]: complete accepted snapshot including props and text\n+ actual - expected\n\n  [\n    {\n      children: [\n        1\n      ],\n      id: 0,\n+     props: {\n+       styleRules: [\n+         {\n+           selector: {\n+             kind: 'all',\n+             value: [\n+               {\n+                 kind: 'id',\n+                 value: 'styled'\n+               },\n+               {\n+                 kind: 'class',\n+                 value: 'item'\n+               },\n+               {\n+                 kind: 'role',\n+                 value: 'option'\n+               },\n+               {\n+                 kind: 'attr',\n+                 value: {\n+                   name: 'kind',\n+                   value: 'metric'\n+                 }\n+               },\n+               {\n+                 kind: 'state',\n+                 value: {\n+                   name: 'selected',\n+                   value: false\n+                 }\n+               }\n+             ]\n+           },\n+           style: {\n+             gap: {\n+               token: 'metrics.gap'\n+             }\n+           }\n+         }\n+       ]\n+     },\n-     props: {},\n      text: '',\n      type: 'root'\n    },\n    {\n      children: [],\n"
+    },
+    {
+      "id": "held-out-01",
+      "lines": 17,
+      "docLookups": 1,
+      "references": ["v4-api.md / protocol/IDs"],
+      "friction": [],
+      "commits": 2,
+      "ops": 22,
+      "renderWithWireMs": [1.9947139999999877, 2.2886369999999943],
+      "ms": 5.282334999999989,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-02",
+      "lines": 37,
+      "docLookups": 2,
+      "references": [
+        "v4-api.md / stale events",
+        "public types:dispatch/EventPlan"
+      ],
+      "friction": ["A4"],
+      "commits": 2,
+      "ops": 14,
+      "renderWithWireMs": [2.027195999999975, 2.368414999999999],
+      "ms": 5.163860999999997,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-03",
+      "lines": 25,
+      "docLookups": 2,
+      "references": [
+        "v4-api.md / declared defaults",
+        "public types:ListenerFlags"
+      ],
+      "friction": ["A2", "A4"],
+      "commits": 2,
+      "ops": 10,
+      "renderWithWireMs": [1.927503999999999, 2.0314419999999984],
+      "ms": 4.875963999999982,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-04",
+      "lines": 18,
+      "docLookups": 1,
+      "references": ["v4-api.md / null/JSON semantics"],
+      "friction": [],
+      "commits": 2,
+      "ops": 10,
+      "renderWithWireMs": [1.9170070000000123, 2.1785720000000026],
+      "ms": 4.66955200000001,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-05",
+      "lines": 25,
+      "docLookups": 1,
+      "references": ["public types:Fragment"],
+      "friction": [],
+      "commits": 1,
+      "ops": 6,
+      "renderWithWireMs": [1.8908389999999997],
+      "ms": 2.479935999999981,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-06",
+      "lines": 24,
+      "docLookups": 1,
+      "references": ["public types:hooks"],
+      "friction": [],
+      "commits": 3,
+      "ops": 18,
+      "renderWithWireMs": [2.3282110000000102, 2.540064000000001],
+      "ms": 8.152749,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-07",
+      "lines": 37,
+      "docLookups": 2,
+      "references": [
+        "v4-api.md / Refresh compiler responsibilities",
+        "public types:refresh"
+      ],
+      "friction": ["A5"],
+      "commits": 3,
+      "ops": 8,
+      "renderWithWireMs": [1.954734000000002],
+      "ms": 7.8308529999999905,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-08",
+      "lines": 29,
+      "docLookups": 1,
+      "references": ["public types:Row,TextField,createContext"],
+      "friction": ["A2"],
+      "commits": 1,
+      "ops": 18,
+      "renderWithWireMs": [2.29972699999999],
+      "ms": 3.193589000000003,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-09",
+      "lines": 10,
+      "docLookups": 1,
+      "references": ["v4-api.md / finite JSON protocol"],
+      "friction": [],
+      "commits": 1,
+      "ops": 4,
+      "renderWithWireMs": [1.9246760000000052],
+      "ms": 2.516145000000023,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "held-out-10",
+      "lines": 13,
+      "docLookups": 2,
+      "references": [
+        "v4-api.md / atomic rejection/fencing",
+        "public types:Commit"
+      ],
+      "friction": ["A6"],
+      "commits": 2,
+      "ops": 5,
+      "renderWithWireMs": [2.1123350000000016, 1.8763810000000092],
+      "ms": 8.542646000000019,
+      "wire": true,
+      "diagnostics": [],
+      "status": "pass"
+    },
+    {
+      "id": "owner-01",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-02",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-03",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-04",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-05",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-06",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-07",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-08",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-09",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-10",
+      "status": "pending-owner"
+    }
+  ],
+  "passed": 28,
+  "failed": 2,
+  "pending": 10
+}

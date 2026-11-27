@@ -1,0 +1,42 @@
+{
+ "name": "agent-pixel-dissolve",
+ "kind": "transition",
+ "covers": [
+  "transition-uniforms"
+ ],
+ "prompt": "Transition: a pixelated dissolve where blocks of the outgoing layer flip to the incoming one in random order, with a block size slider.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "0306d3c97a20b4a8ac2a84dd5551d551b63a094e6e59c6a18f0b3f13cec77479",
+  "seconds": 39.416,
+  "generated": "2026-10-17T07:36:23.481Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.pixel-dissolve",
+  "label": "Pixel Dissolve",
+  "params": [
+   {
+    "k": "blockSize",
+    "label": "Block Size (px)",
+    "def": 40,
+    "min": 2,
+    "max": 400,
+    "step": 1
+   },
+   {
+    "k": "seed",
+    "label": "Seed",
+    "def": 0,
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "advanced": true
+   }
+  ],
+  "frag": "\n    vec2 cell = floor(v_px / max(u_blockSize, 1.0));\n    float h = hash(cell + vec2(u_seed * 17.31, u_seed * 7.13));\n    float sel = u_prog >= 1.0 ? 1.0 : (u_prog <= 0.0 ? 0.0 : step(h, u_prog));\n    vec4 a = texture(u_from, v_st);\n    vec4 b = texture(u_to, v_st);\n    o = mix(a, b, sel);"
+ },
+ "summary": "I wrote the Pixel Dissolve transition (`gen.pixel-dissolve`) but haven't compiled or rendered it, because no live Powermove tools were attached to this run. It splits the frame into square blocks, and each block gives up a random value between 0 and 1. A block switches from `u_from` to `u_to` as soon as `u_prog` passes that value, so blocks flip in random order and the change is exact at 0 and 1. There's a Block Size slider (2–400 px, default 40) and an advanced Seed slider; both can be keyframed. One unconfirmed assumption: the docs don't name the coordinates a transition shader receives, so I used the ones effects get — `v_st` for texture sampling and `v_px` for the block grid. If those differ for transitions, compiling it will show it."
+}

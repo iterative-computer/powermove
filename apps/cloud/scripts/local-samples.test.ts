@@ -11,13 +11,18 @@ import { withData } from '../test/db';
 import { makeEnv } from '../test/env';
 import { publisher } from '../test/publish-fixture';
 import { publishLocalSamples, sampleDirs, sampleListings } from './local-samples';
+import { v1Desktop, v1Missing } from './lib/v1-ref';
+
+/** Compiling needs a v1 checkout with its dependencies installed; without one this test is skipped, saying why. */
+const v1 = v1Missing({ deps: true, paths: ['src/main/extensions/compiler.ts'] });
+if (v1) console.warn(`skipping the v1 sandbox compile test: ${v1}`);
 
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const expected = ['glass-tint', 'ease-lab', 'colour-match', 'wipe-set'];
 
-test('all sample trees compile for the desktop sandbox and declare scanned capabilities', async () => {
+test.skipIf(v1 !== null)('all sample trees compile for the desktop sandbox and declare scanned capabilities', async () => {
   // Keep desktop's Electron-only TypeScript dependencies outside cloud's tsconfig.
-  const { compileExtension } = await import('../../desktop/src/main/extensions/' + 'compiler') as {
+  const { compileExtension } = await import(join(v1Desktop, 'src/main/extensions/compiler')) as {
     compileExtension(options: { dir: string; entry: string; outDir: string }): Promise<{ ok: true; bundlePath: string } | { ok: false; error: string }>;
   };
   const temporary = await mkdtemp(join(tmpdir(), 'powermove-samples-'));

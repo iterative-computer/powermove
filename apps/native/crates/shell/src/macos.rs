@@ -1,0 +1,738 @@
+//! macOS application host. Portable shell contracts live in lib.rs.
+use crate::{integration, native, session, theme, view};
+use gpui::{prelude::*, *};
+use pm_design::{Scheme, Tokens};
+use std::{path::PathBuf, rc::Rc};
+pub fn run() -> anyhow::Result<()> {
+    let device = metal::Device::system_default()
+        .ok_or_else(|| anyhow::anyhow!("Metal device unavailable"))?;
+    run_with_device(device)
+}
+struct SharedMetalDevice(metal::Device);
+impl Global for SharedMetalDevice {}
+pub fn run_with_device(device: metal::Device) -> anyhow::Result<()> {
+    launch(device, false, None, None, None, None)
+}
+/// Initializes native chrome with activation prohibited and every window hidden.
+pub fn smoke() -> anyhow::Result<()> {
+    launch(
+        metal::Device::system_default().ok_or_else(|| anyhow::anyhow!("Metal unavailable"))?,
+        true,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+/// Launch using the engine device and app-owned panel/command implementation.
+pub fn run_integrated(device: metal::Device, factory: integration::Factory) -> anyhow::Result<()> {
+    launch(device, false, Some(factory), None, None, None)
+}
+/// Opens the editor windows. Whoever holds the gate calls it exactly once.
+pub type Finish = Rc<dyn Fn(&mut App)>;
+pub type Gate = Box<dyn FnOnce(Finish, &mut App)>;
+/// Files and `powermove://` links LaunchServices hands the app (Finder, the
+/// Dock icon, `open`), as absolute URL strings, in arrival order.
+pub type OpenUrls = Rc<dyn Fn(Vec<String>, &mut App)>;
+/// As `run_integrated`, with no editor window until `gate` calls its `Finish`.
+pub fn run_gated(
+    device: metal::Device,
+    factory: integration::Factory,
+    gate: Gate,
+    open_urls: OpenUrls,
+    drop_directory: PathBuf,
+) -> anyhow::Result<()> {
+    launch(
+        device,
+        false,
+        Some(factory),
+        Some(gate),
+        Some(open_urls),
+        Some(drop_directory),
+    )
+}
+fn launch(
+    device: metal::Device,
+    smoke: bool,
+    factory: Option<integration::Factory>,
+    gate: Option<Gate>,
+    open_urls: Option<OpenUrls>,
+    drop_directory: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    native::install_identity();
+    let theme_error = theme::load_from_env();
+    if let Some(e) = &theme_error {
+        eprintln!("{e}");
+    }
+    let platform = gpui_macos::MacPlatform::new_with_metal_device(false, device.clone());
+    let platform = match drop_directory {
+        Some(path) => platform.with_drop_directory(path),
+        None => platform,
+    };
+    let app = Application::with_platform(Rc::new(platform));
+    let app = if smoke {
+        app.with_activation_policy(MacActivationPolicy::Prohibited)
+    } else {
+        app
+    };
+    // A cold start delivers its documents before `run`'s callback: listen
+    // first, hand them over once the app exists.
+    let (urls_tx, urls_rx) = async_channel::unbounded::<Vec<String>>();
+    app.on_open_urls(move |urls| {
+        let _ = urls_tx.try_send(urls);
+    });
+    let ready = Rc::new(std::cell::Cell::new(false));
+    if !smoke {
+        let ready = ready.clone();
+        app.on_reopen(move |cx| {
+            if ready.get() {
+                reopen_editor(cx);
+            }
+        });
+    }
+    app.with_accessibility_forced().run(move |cx| {
+        cx.set_global(SharedMetalDevice(device));
+        if let Some(open_urls) = open_urls {
+            cx.spawn(async move |cx| {
+                while let Ok(urls) = urls_rx.recv().await {
+                    cx.update(|cx| open_urls(urls, cx));
+                }
+            })
+            .detach();
+        }
+        if let Some(factory) = factory {
+            cx.set_global(integration::AppIntegration(factory));
+        }
+        native::install_menus();
+        native::install_accent();
+        // Dev/test appearance override: menus and sheets follow it too.
+        if std::env::var_os("PM_NATIVE_APPEARANCE").is_some() {
+            native::app_appearance(&tokens());
+        }
+        if smoke {
+            open_editor_window(cx, false, None, None);
+        } else if let Some(gate) = gate {
+            gate(
+                Rc::new(move |cx| {
+                    restore_session(cx);
+                    ready.set(true);
+                }),
+                cx,
+            );
+        } else {
+            restore_session(cx);
+            ready.set(true);
+        }
+        if smoke {
+            cx.quit();
+        } else if objc2_foundation::NSBundle::mainBundle()
+            .bundleIdentifier()
+            .is_none()
+        {
+            // A bare binary (`cargo run`) isn't activated by LaunchServices.
+            // A bundled app never asks: LaunchServices brings a normal launch
+            // forward itself, and a background one (`open -g`, a login item,
+            // an agent) must stay behind the person's app; an activation
+            // request at launch could take the launcher's grant and come
+            // to the front anyway.
+            cx.activate(false);
+        }
+    });
+    Ok(())
+}
+/// Development builds: an app that runs `run` and shows nothing (never
+/// activated, no Dock icon): captures of real windows placed off every
+/// display (`gpui_macos::allow_offscreen_windows`).
+#[cfg(debug_assertions)]
+pub fn capture_app(device: metal::Device, run: impl FnOnce(&mut App) + 'static) {
+    let platform = gpui_macos::MacPlatform::new_with_metal_device(false, device.clone());
+    Application::with_platform(Rc::new(platform))
+        .with_activation_policy(MacActivationPolicy::Prohibited)
+        .run(move |cx| {
+            cx.set_global(SharedMetalDevice(device));
+            run(cx);
+        });
+}
+/// Whether the left mouse button is down now, as the hardware (HID system)
+/// state has it: whatever events reached this app, or the session's view of
+/// the button after a release that went astray.
+/// Development builds: a review's `press:` holds the button until its
+/// `release:` (the real button is up while a background review drags).
+pub(crate) static REVIEW_HELD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub fn left_button_held() -> bool {
+    if cfg!(debug_assertions) && REVIEW_HELD.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    }
+    // Held only while both the hardware (kCGEventSourceStateHIDSystemState)
+    // and the session (kCGEventSourceStateCombinedSessionState, which also
+    // sees posted events) say so: a release over an extension's own window
+    // (a native panel body) never reaches the editor view, and a drag must
+    // still end there with its drop (PM-289).
+    unsafe { CGEventSourceButtonState(1, 0) && CGEventSourceButtonState(0, 0) }
+}
+pub fn tokens() -> Tokens {
+    let scheme = if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("light") {
+        Scheme::Light
+    } else if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("dark") {
+        Scheme::Dark
+    } else {
+        use objc2_app_kit::*;
+        let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+        let name = app.effectiveAppearance().name().to_string();
+        if name.contains("Dark") {
+            Scheme::Dark
+        } else {
+            Scheme::Light
+        }
+    };
+    theme::tokens(scheme, native::settings())
+}
+/// Reopens the saved windows and tabs, every one (as v1 did), with the one
+/// that was in front in front again. With no session, one new window.
+fn restore_session(cx: &mut App) {
+    let mut front = None;
+    let path = view::session_path().filter(|p| p.exists());
+    let plan = path
+        .as_ref()
+        .and_then(|p| match session::Session::load(p) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("Window session could not be restored: {e}");
+                None
+            }
+        })
+        .map(|s| {
+            let plan = s.launch_plan(crate::tabs_mode(), keeps_windows());
+            front = s.key
+                .filter(|k| plan.iter().any(|w| w.id == *k))
+                .or_else(|| plan.first().map(|w| w.id));
+            plan
+        })
+        .unwrap_or_default();
+    // The file holds what this launch reopens and nothing older: entries an
+    // earlier build left behind go (PM-392). Queued before any window
+    // writes its own state.
+    if let Some(path) = &path
+        && !plan.is_empty()
+    {
+        session::write(
+            path,
+            session::Change::Replace(session::Session {
+                version: 1,
+                windows: plan.clone(),
+                key: front,
+                complete: true,
+            }),
+        );
+    }
+    if plan.is_empty() {
+        open_editor_window(cx, true, None, None);
+        return;
+    }
+    // The front window's project opens first; the others' after its first
+    // frame (`native::front_restoring`).
+    if plan.len() > 1 {
+        native::set_front_restoring(front);
+        native::set_restore_arranging(true);
+    }
+    // The window (or tab group) that was in front opens last, so it lies
+    // over the others from the start.
+    for state in session::front_first(plan, front) {
+        let id = state.id;
+        let leader = state.tab_group;
+        open_editor_window(cx, true, Some(state), None);
+        if let Some(leader) = leader {
+            native::join_restored_tab(leader, id);
+        }
+    }
+    // Pick the saved tab as part of opening the initial windows, before
+    // returning to the run loop where a person can pick a different one.
+    if let Some(id) = front {
+        native::bring_session_window(id);
+    }
+    native::set_restore_arranging(false);
+}
+/// Every window and tab comes back on relaunch with its project, as v1
+/// restored its open tabs (owner, 2026-11-15), whatever the system's “Close
+/// windows when quitting an application”. `PM_NATIVE_RESTORE=one` brings
+/// back the front window alone (tests, reviews).
+fn keeps_windows() -> bool {
+    std::env::var("PM_NATIVE_RESTORE").as_deref() != Ok("one")
+}
+/// AppKit calls this when the Dock icon is clicked with no visible windows.
+fn reopen_editor(cx: &mut App) {
+    let existing = cx
+        .windows()
+        .into_iter()
+        .find_map(|handle| handle.downcast::<view::Editor>());
+    if let Some(existing) = existing {
+        let _ = existing.update(cx, |editor, window, _| {
+            // AppKit restores minimized windows as part of its default reopen.
+            if let Some(host) = &editor.host {
+                let host = host.borrow();
+                if !host.window.isMiniaturized() && !host.window.isVisible() {
+                    window.activate();
+                }
+            }
+        });
+    } else {
+        open_editor(cx);
+    }
+}
+/// A new editor window, cascaded from the key one (File ▸ New Window).
+pub fn open_editor(cx: &mut App) {
+    open_editor_window(cx, true, None, None);
+}
+/// A new editor window as a native tab of `leader`'s (Tabs mode), else a
+/// window of its own.
+pub fn open_editor_tab(cx: &mut App, leader: u64) {
+    let leader = (crate::tabs_mode() && leader != 0).then_some(leader);
+    open_editor_window(cx, true, None, leader);
+}
+fn next_window_id() -> u64 {
+    thread_local! { static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+    let saved = view::session_path()
+        .filter(|p| p.exists())
+        .and_then(|p| session::Session::load(&p).ok())
+        .map_or(1, |s| s.next_id());
+    NEXT.with(|n| {
+        let id = n.get().max(saved);
+        n.set(id + 1);
+        id
+    })
+}
+fn open_editor_window(
+    cx: &mut App,
+    visible: bool,
+    restore: Option<session::WindowState>,
+    tab_leader: Option<u64>,
+) {
+    // The key editor window, for cascading a brand-new window. Read from AppKit:
+    // this can run inside that editor's own update.
+    let cascade = native::editor_frame();
+    let t = tokens();
+    let m = t.metrics;
+    let focus = visible && restore.is_none();
+    let result = cx.open_window(
+        WindowOptions::new()
+            .show(visible)
+            .focus(focus)
+            .macos_window_background(MacosWindowBackground::Transparent)
+            // Content runs under the glass toolbar (full-size content view), so
+            // the window tint and blur continue behind it.
+            .titlebar(Some(TitlebarOptions {
+                title: Some("Untitled".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }))
+            .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                point(px(m.toolbar), px(m.toolbar)),
+                size(px(m.window_width), px(m.window_height)),
+            )))),
+        move |window, cx| {
+            window.set_window_title("Untitled");
+            let device = cx.global::<SharedMetalDevice>().0.clone();
+            let (host, rx) = native::Host::install(window, &device, t.clone());
+            if !visible {
+                host.borrow().smoke_validate();
+            }
+            let window_id = if visible {
+                restore.as_ref().map_or_else(next_window_id, |s| s.id)
+            } else {
+                0
+            };
+            if let Some(s) = restore.as_ref().filter(|_| visible) {
+                host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_front = native::front_restoring() == Some(s.id);
+                host.borrow_mut().restored_pages = s.pages.clone();
+                host.borrow_mut().restored_name = s.name.clone();
+                // Its tab says which project it is from the first frame.
+                if let Some(name) = &s.name {
+                    window.set_window_title(name);
+                }
+            }
+            if visible {
+                let h = host.borrow();
+                h.set_window_id(window_id);
+                match &restore {
+                    Some(s) => h.apply_frame(s.frame, s.fullscreen),
+                    None if tab_leader.is_none() => {
+                        if let Some(from) = cascade {
+                            h.cascade_from(from);
+                        }
+                    }
+                    None => {}
+                }
+                if let Some(s) = &restore {
+                    native::restore_tab_index(&h.window, s.tab_index);
+                }
+                if let Some(leader) = tab_leader {
+                    h.join_tabs(leader);
+                }
+            }
+            // A restored frame lands before GPUI hears of resizes: take the
+            // content size now, or the first frames lay out at the default
+            // size (Home showed a band of empty window at launch).
+            window.bounds_changed(cx);
+            let integration = cx
+                .try_global::<integration::AppIntegration>()
+                .map(|g| g.0.clone())
+                .map(|factory| factory(host.clone(), window, cx));
+            let integrated = integration.is_some();
+            let editor = cx.new(|cx| {
+                let mut editor = view::Editor::new(t, Some(host), cx);
+                if let Some(i) = &integration {
+                    i.observe(cx);
+                }
+                editor.integration = integration;
+                if let Some(state) = &restore {
+                    editor.restore(state);
+                } else {
+                    editor.window_id = window_id;
+                }
+                editor
+            });
+            editor.update(cx, |v, cx| {
+                cx.observe_window_appearance(window, |v, w, cx| v.follow_appearance(w, cx))
+                    .detach();
+                cx.observe_window_bounds(window, |v, _, cx| v.schedule_session(cx))
+                    .detach();
+                cx.observe_window_activation(window, |v, w, cx| {
+                    v.schedule_session(cx);
+                    // The original app cancels a drag when the window loses
+                    // focus (⌘-Tab mid-drag); a missed release still drops.
+                    if !w.is_window_active() {
+                        v.cancel_gesture(cx);
+                    }
+                })
+                .detach();
+                v.persist_session();
+            });
+            // Integrated apps own document close/save decisions. GPUI keeps
+            // only one should-close callback: replacing theirs here bypasses
+            // durability and can leave kernel sessions without a window.
+            if !integrated {
+                let closing = editor.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    let _ = closing.update(cx, |v, _| v.forget_session());
+                    true
+                });
+            }
+            let weak = editor.downgrade();
+            let handle = window.window_handle();
+            cx.spawn(async move |cx| {
+                while let Ok(cmd) = rx.recv().await {
+                    let r = handle.update(cx, |_, window, cx| {
+                        weak.update(cx, |v, cx| v.command(cmd, window, cx))
+                    });
+                    if r.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            if visible {
+                review_open(editor.downgrade(), window.window_handle(), cx);
+            }
+            editor
+        },
+    );
+    if let Err(e) = result {
+        eprintln!("Could not open editor: {e}");
+    }
+}
+/// Development builds only: `--open a,b` (`PM_NATIVE_REVIEW_OPEN`) runs those
+/// commands in the first editor window once it has settled, so design review
+/// captures reach Settings, sheets and the palette without the menu bar or focus.
+#[cfg(debug_assertions)]
+pub(crate) fn review_splitter(
+    action: &str,
+    x: f32,
+    y: f32,
+    offset: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    thread_local! { static ORIGIN: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) }; }
+    ORIGIN.with(|origin| {
+        if action == "press" {
+            origin.set(Some((x, y)));
+        }
+        if let Some((x, y)) = origin.get() {
+            review_pointer(&format!("{action}:{x}:{}", y + offset), window, cx);
+        }
+        if action == "release" {
+            origin.set(None);
+        }
+    });
+}
+/// Development builds: `pointer:x:y`, `click:x:y`, `dblclick:x:y` and
+/// `drag:x:y:x:y` (window points) as GPUI input, so a review can hover,
+/// click and drag without the real pointer; `press:x:y`, `move:x:y` and
+/// `release:x:y` split a drag so a capture can see it under way. False for
+/// any other name.
+pub(crate) fn review_pointer(name: &str, window: &mut Window, cx: &mut App) -> bool {
+    let mut parts = name.split(':');
+    let kind = parts.next().unwrap_or_default();
+    if !matches!(
+        kind,
+        "pointer" | "click" | "dblclick" | "drag" | "press" | "move" | "release"
+    ) {
+        return false;
+    }
+    let at: Vec<f32> = parts.filter_map(|v| v.parse().ok()).collect();
+    if at.len() != if kind == "drag" { 4 } else { 2 } {
+        return false;
+    }
+    let position = gpui::point(gpui::px(at[0]), gpui::px(at[1]));
+    let modifiers = gpui::Modifiers::default();
+    let moved = |position, held: bool| {
+        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position,
+            pressed_button: held.then_some(gpui::MouseButton::Left),
+            modifiers,
+        })
+    };
+    let down = |position, click_count| {
+        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        })
+    };
+    let up = |position, click_count| {
+        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            modifiers,
+            click_count,
+        })
+    };
+    match kind {
+        "press" => {
+            REVIEW_HELD.store(true, std::sync::atomic::Ordering::Relaxed);
+            window.dispatch_event(moved(position, false), cx);
+            window.dispatch_event(down(position, 1), cx);
+            return true;
+        }
+        "move" => {
+            window.dispatch_event(moved(position, true), cx);
+            return true;
+        }
+        "release" => {
+            REVIEW_HELD.store(false, std::sync::atomic::Ordering::Relaxed);
+            window.dispatch_event(moved(position, true), cx);
+            window.dispatch_event(up(position, 1), cx);
+            return true;
+        }
+        _ => {}
+    }
+    window.dispatch_event(moved(position, false), cx);
+    match kind {
+        "drag" => {
+            let to = gpui::point(gpui::px(at[2]), gpui::px(at[3]));
+            window.dispatch_event(down(position, 1), cx);
+            for step in 1..=8 {
+                let along = position + (to - position) * (step as f32 / 8.);
+                window.dispatch_event(moved(along, true), cx);
+            }
+            window.dispatch_event(up(to, 1), cx);
+        }
+        "click" | "dblclick" => {
+            for click_count in 1..=if kind == "click" { 1 } else { 2 } {
+                window.dispatch_event(down(position, click_count), cx);
+                window.dispatch_event(up(position, click_count), cx);
+            }
+        }
+        _ => {}
+    }
+    true
+}
+fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &mut App) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let Some(names) = std::env::var("PM_NATIVE_REVIEW_OPEN")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+    else {
+        return;
+    };
+    ONCE.call_once(|| {
+        cx.spawn(async move |cx| {
+            // Wait for the project and built-ins to load, then space the commands out.
+            let mut wait = 8;
+            for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(wait))
+                    .await;
+                wait = 3;
+                // Synthetic pointer input goes into the window as GPUI
+                // events (`review_pointer`).
+                if handle
+                    .update(cx, |_, window, cx| review_pointer(name, window, cx))
+                    .unwrap_or(false)
+                {
+                    wait = 1;
+                    continue;
+                }
+                let cmd = native::Command {
+                    name: name.into(),
+                    args: Vec::new(),
+                    token: None,
+                };
+                let _ = handle.update(cx, |_, window, cx| {
+                    editor.update(cx, |v, cx| v.command(cmd, window, cx))
+                });
+                if name.starts_with("reviewSplitter:") {
+                    wait = 1;
+                }
+            }
+        })
+        .detach();
+    });
+}
+struct Settings {
+    motion: crate::motion::Motion<u64>,
+    tokens: Tokens,
+    selected: usize,
+    focus: FocusHandle,
+}
+const SECTIONS: [&str; 5] = [
+    "Project",
+    "General",
+    "Accounts",
+    "Transcription",
+    "Extensions",
+];
+impl Settings {
+    fn motion(&mut self) -> &mut crate::motion::Motion<u64> {
+        &mut self.motion
+    }
+}
+impl Render for Settings {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
+        let t = self.tokens.clone();
+        let kit = crate::kit::Kit::new(&t, &self.motion, Self::motion, window, cx);
+        let mut sidebar = kit.utility_sidebar();
+        for (i, section) in SECTIONS.iter().enumerate() {
+            let symbol = [
+                "folder",
+                "gearshape",
+                "person.crop.circle",
+                "waveform",
+                "puzzlepiece.extension",
+            ][i];
+            sidebar = sidebar.child(
+                kit.nav_row(
+                    format!("settings-{i}"),
+                    symbol,
+                    (*section).into(),
+                    None,
+                    i == self.selected,
+                )
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    v.selected = i;
+                    cx.notify();
+                })),
+            );
+        }
+        // This fallback is reachable when the shell has no Controller integration.
+        // The app Controller continues to open its full Settings page.
+        let body = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(kit.empty_state(
+                "gearshape",
+                SECTIONS[self.selected],
+                "Open a project to change its settings.",
+            ));
+        kit.utility_window(
+            "Settings",
+            Some(sidebar.into_any_element()),
+            vec![],
+            body.into_any_element(),
+            vec![],
+        )
+        .track_focus(&self.focus)
+        .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
+            match e.keystroke.key.as_str() {
+                "up" => v.selected = v.selected.saturating_sub(1),
+                "down" => v.selected = (v.selected + 1).min(SECTIONS.len() - 1),
+                "home" => v.selected = 0,
+                "end" => v.selected = SECTIONS.len() - 1,
+                "escape" => w.remove_window(),
+                _ => {}
+            }
+            cx.notify();
+        }))
+    }
+}
+pub(crate) fn open_settings(cx: &mut App) {
+    let existing = cx
+        .windows()
+        .into_iter()
+        .find(|w| w.downcast::<Settings>().is_some());
+    if let Some(w) = existing {
+        let _ = w.update(cx, |_, w, _| w.activate());
+        return;
+    }
+    let t = tokens();
+    let m = t.metrics;
+    let _ = cx.open_window(
+        WindowOptions::new()
+            .titlebar(Some(TitlebarOptions {
+                title: Some("Settings".into()),
+                ..Default::default()
+            }))
+            .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                point(px(m.toolbar), px(m.toolbar)),
+                size(px(m.settings_width), px(m.settings_height)),
+            )))),
+        |w, cx| {
+            let entity = cx.new(|cx| Settings {
+                motion: crate::motion::Motion::default(),
+                tokens: t,
+                selected: 0,
+                focus: cx.focus_handle(),
+            });
+            let f = entity.read(cx).focus.clone();
+            w.focus(&f, cx);
+            entity
+        },
+    );
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_settings() {
+    crate::utility_capture_tests::capture("settings-stub", |_, cx| {
+        cx.new(|cx| Settings {
+            motion: crate::motion::Motion::default(),
+            tokens: tokens(),
+            selected: 0,
+            focus: cx.focus_handle(),
+        })
+    });
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn startup_restore_does_not_reselect_a_window_after_a_timer() {
+    let restore = include_str!("macos.rs")
+        .split_once("fn restore_session(")
+        .unwrap()
+        .1
+        .split_once("fn keeps_windows(")
+        .unwrap()
+        .0;
+    assert!(!restore.contains(".timer("), "startup must not steal a later selection");
+}

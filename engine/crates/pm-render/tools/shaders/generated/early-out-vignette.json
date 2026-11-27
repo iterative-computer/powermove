@@ -1,0 +1,21 @@
+{
+ "name": "early-out-vignette",
+ "kind": "shader",
+ "covers": [
+  "early-return",
+  "param-float",
+  "alpha-output"
+ ],
+ "prompt": "Transparent vignette overlay: fully transparent in the middle (return early there for speed), darkening toward the edges. Strength and radius sliders.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "0317e36fb8199645b63fe303a7a6c3e39bdf2503cd2764660db60673c040080b",
+  "seconds": 8.495,
+  "generated": "2026-10-17T07:32:18.854Z"
+ },
+ "code": "// Transparent vignette overlay — clear centre, darkening toward the edges.\nuniform float uStrength; // @param 0.75 0 1\nuniform float uRadius;   // @param 0.45 0 1.5\nuniform float uSoftness; // @param 0.5 0.01 1.5\nuniform vec3  uColor;    // @param #000000\n\nvoid main() {\n  // Aspect-corrected distance from centre (short axis spans -0.5..0.5)\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float d = length(p);\n\n  // Fully transparent inside the radius: bail out early\n  if (d <= uRadius) {\n    fragColor = vec4(0.0);\n    return;\n  }\n\n  float t = smoothstep(uRadius, uRadius + uSoftness, d);\n  float a = clamp(t * uStrength, 0.0, 1.0);\n  // Premultiplied colour (default black is also correct for straight alpha)\n  fragColor = vec4(uColor * a, a);\n}\n",
+ "definition": null,
+ "summary": "I wrote a vignette shader layer with Strength, Radius, Softness and Color sliders. Inside the radius it outputs transparent pixels and returns early; outside it gets darker toward the edges and keeps a round shape on any aspect ratio. No Powermove tools were attached to this run, so it hasn't been compiled or rendered."
+}

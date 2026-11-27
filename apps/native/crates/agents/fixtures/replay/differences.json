@@ -1,0 +1,406 @@
+{
+  "codex-happy": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-question": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-steer": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-cancel": {
+    "rule": "N3 — interrupt acknowledgement is the cancellation completion boundary; N7 — retain native inspection",
+    "reason": "Cancellation now completes after interrupt settlement, matching the frozen runner. Native Ready/Session inspection events remain explicit pending compatibility/application boundary integration.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-compact": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-async-question": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-tools": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-retry": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-exec": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thread-recorded-1",
+            "after": 1
+          }
+        }
+      }
+    ]
+  },
+  "codex-initialize-error": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "stopped",
+            "value": "Synthetic provider refusal",
+            "after": 2
+          }
+        }
+      }
+    ]
+  },
+  "codex-thread-error": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      }
+    ]
+  },
+  "codex-turn-error": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-missing-thread": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      }
+    ]
+  },
+  "codex-missing-turn": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-turn-failed": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  },
+  "codex-context-exhausted": {
+    "rule": "N7 — inspectable native service lifecycle; N3 — retain the reference unchanged",
+    "reason": "Native service publishes readiness, session identity or stopped status not exposed by this tagged client/parser callback boundary. All recorded wire and public events, including causal stimulus positions, match. These additions are retained and diffed; full observation identity is not claimed.",
+    "differences": [
+      {
+        "path": "/lifecycle/0",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "ready",
+            "value": null,
+            "after": 2
+          }
+        }
+      },
+      {
+        "path": "/lifecycle/1",
+        "expected": "Missing",
+        "actual": {
+          "Present": {
+            "kind": "session",
+            "value": "thr_123",
+            "after": 3
+          }
+        }
+      }
+    ]
+  }
+}

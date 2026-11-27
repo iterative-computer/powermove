@@ -1,0 +1,134 @@
+[package]
+name = "pm-export"
+description = "Encoders, muxers, render queue (section 17)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["engine"]
+# Renderer/media integration needs the macOS engine. The encoding core can be
+# built and tested on Linux with the default features, or with no default features.
+engine = ["dep:pm-gpu", "dep:pm-protocol", "dep:pm-model", "dep:pm-eval", "dep:pm-render", "dep:pm-audio", "dep:pm-media", "dep:wgpu"]
+# Test-only sinks (in-memory and raw-file encoder-input sinks) for other crates' tests.
+test-sinks = []
+
+[dependencies]
+pm-perf = { path = "../pm-perf" }
+pm-color = { path = "../pm-color" }
+pm-time = { path = "../pm-time" }
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+serde_json.workspace = true
+thiserror.workspace = true
+libm.workspace = true
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Job renderer/audio and bundled FFmpeg bindings are macOS integration only.
+pm-gpu = { path = "../pm-gpu", optional = true }
+pm-protocol = { path = "../pm-protocol", optional = true }
+pm-model = { path = "../pm-model", optional = true }
+pm-eval = { path = "../pm-eval", optional = true }
+pm-render = { path = "../pm-render", optional = true }
+pm-audio = { path = "../pm-audio", optional = true }
+pm-media = { path = "../pm-media", optional = true }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"], optional = true }
+# exception: AVFoundation reports misuse by raising Objective-C exceptions; they become errors.
+objc2 = { version = "0.6.5", features = ["exception"] }
+block2 = "0.6.2"
+objc2-foundation = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["objc2-io-surface"] }
+# Enables the IOSurfaceRef CF type objc2-core-video needs.
+objc2-io-surface = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSettings"] }
+objc2-video-toolbox = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "objc2-foundation"] }
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "objc2-core-foundation"] }
+
+[dev-dependencies]
+# Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
+pm-glsl = { path = "../pm-glsl", features = ["test-admission"] }
+pm-reference = { path = "../pm-reference" }
+sha2.workspace = true
+serde_json.workspace = true
+pm-export = { path = ".", default-features = false, features = ["test-sinks"] }
+
+[[test]]
+name = "time_bar"
+required-features = ["engine"]
+
+[[test]]
+name = "bars"
+required-features = ["engine"]
+
+[[test]]
+name = "color_depth_export"
+required-features = ["engine"]
+
+[[test]]
+name = "delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "opus_webm"
+required-features = ["engine"]
+
+[[test]]
+name = "job_export"
+required-features = ["engine"]
+
+[[test]]
+name = "frame_reuse"
+required-features = ["engine"]
+
+[[test]]
+name = "formats"
+required-features = ["engine"]
+
+[[test]]
+name = "measure_delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "bars_delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "videotoolbox"
+required-features = ["engine"]
+
+[[test]]
+name = "chroma_delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "dither_delivery"
+required-features = ["engine"]
+
+[[test]]
+name = "av_length"
+required-features = ["engine"]
+
+[[test]]
+name = "transfer_tags"
+required-features = ["engine"]
+
+[[test]]
+name = "audio_onset"
+required-features = ["engine"]
+
+[[test]]
+name = "prores_delivery"
+required-features = ["engine"]
+
+[[example]]
+name = "throughput"
+required-features = ["engine"]
+
+[[test]]
+name = "temp_ledger"

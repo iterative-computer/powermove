@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "baseline": "v1.2.0",
+  "commit": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "synthetic": true,
+  "sources": [
+    {
+      "file": "apps/desktop/src/main/codex/app-server-runner.ts",
+      "sha256": "71817b0a42c739dbac08d7c43355dd877161317bf280efa4a02a206e6db24940"
+    },
+    {
+      "file": "apps/desktop/src/main/codex/app-server-runner.test.ts",
+      "sha256": "60f0bbb6eb2dccdb76d8be0cbcd9120fc4912e306236abd31fc8f562f55e1148"
+    },
+    {
+      "file": "apps/desktop/src/main/codex/events.ts",
+      "sha256": "a4a4bee34877bffb37046a8d4f2c4ff45d6920ae771e2623860a570bba70b8e0"
+    },
+    {
+      "file": "apps/desktop/src/main/codex/__fixtures__/recorded-transcript.ndjson",
+      "sha256": "e0673945644564cea42d89458ca2aa0dfa9b843da34e2b9af897bd4092eb8315"
+    },
+    {
+      "file": "apps/desktop/src/main/claude/runner.ts",
+      "sha256": "b8d0e8a07511d774d91856b748db34da89d38b095e3cca4fc01dbe2b23abc16b"
+    },
+    {
+      "file": "apps/desktop/src/main/claude/runner.test.ts",
+      "sha256": "7ebc35a09f82a569675d54f90283313dc5df9ffd31b4bf5515752cce400b3453"
+    },
+    {
+      "file": "apps/desktop/src/main/claude/events.ts",
+      "sha256": "46fa07e1e531fc624c766fbfad795cee872ccf897332964213bf54842123d232"
+    },
+    {
+      "file": "apps/desktop/src/main/claude/__fixtures__/fake-claude.sh",
+      "sha256": "049cbc48460d4d1da2d8526ed4ef7ed7aaab7b5eb1440cad2c2d2b6fc56c3ee4"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/mcp-stdio.mjs",
+      "sha256": "5b4a7ccfcd5771c5909a03e583871b2501dfc2d8efefe11bcd54c9300f06e95c"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/mcp-stdio.test.ts",
+      "sha256": "27da7b068512ab075df0cd233770e411de68856a76629dd78fa43db3c541b9a2"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/external-spec.ts",
+      "sha256": "9f7c12dc3860ca6e4e24f92904b9a4e797cfca91b7332b93e48e1b1c79377cd8"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/external-session.ts",
+      "sha256": "34bac7c67a106c872a3b201f1ee29c67bde30c39892e8c57263be52d25722fda"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/spec.ts",
+      "sha256": "1ee3dad799daf6acbb2e3a9b5fb9b7ead44f74e983b7ae39134577dc704baa05"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/trace-format.ts",
+      "sha256": "a44f6657be788d9cccd6d7de6813a77ae542c1ca020159a2e77ef6a9add2aeab"
+    },
+    {
+      "file": "apps/desktop/src/main/codex/connection-status.ts",
+      "sha256": "d1e99bed3a3c1124e1872188de4cacf6169d87c5ca66110dfb2e3f0d6fde576e"
+    },
+    {
+      "file": "apps/desktop/src/shared/ipc.ts",
+      "sha256": "a1dcb5602776f29424bdf5dda7ce14f20fe46a14e76ca243b7c6918d5b1d1d78"
+    },
+    {
+      "file": "apps/desktop/src/shared/media-tools.ts",
+      "sha256": "4065426a201178972083b269b29e5405767037da6f9f3c48890d978e4dcd322a"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/legacy/assistant/mcp-project-tools.ts",
+      "sha256": "ea493c8787ae12a05517a36ea969a4d57b2b33cd90095eba24e4a93439e06d39"
+    }
+  ],
+  "recorder": {
+    "file": "apps/native/crates/agents/scripts/capture-oracle.cjs",
+    "sha256": "e1e966c2e8532c5d6bdeb5b391d13068d3584f8ab4a23720596b52045c76682a"
+  },
+  "capture": {
+    "file": "apps/native/crates/agents/tests/replay/capture.cjs",
+    "sha256": "98c5277c453ac69e9a7c509c26ab19fb56281ef6006aae21bf083b910e5f23f5"
+  },
+  "dependencies": {
+    "typescript": "5.9.3",
+    "zod": "4.6.5"
+  },
+  "cases": [
+    {
+      "name": "codex-happy",
+      "surface": "codex",
+      "file": "providers/codex-happy.json",
+      "sha256": "2bf69a286f21e13097e85be7890cf0d65877f018a2c3e022f1360797da0222ef"
+    },
+    {
+      "name": "codex-question",
+      "surface": "codex",
+      "file": "providers/codex-question.json",
+      "sha256": "32d9a3bc1cd91910c7627d978597c65da43edbd39a6263b153d30aca3fd51d3f"
+    },
+    {
+      "name": "codex-steer",
+      "surface": "codex",
+      "file": "providers/codex-steer.json",
+      "sha256": "5b93f60d4bde83b68ed08f87b4d29a618ad8a14e54a16d57109b21667c245864"
+    },
+    {
+      "name": "codex-cancel",
+      "surface": "codex",
+      "file": "providers/codex-cancel.json",
+      "sha256": "a8cd56ea199e9d2b1afd6135a1e74762a479fd19f1db98a3827875e4a230bb90"
+    },
+    {
+      "name": "codex-compact",
+      "surface": "codex",
+      "file": "providers/codex-compact.json",
+      "sha256": "76685e4b5d0e145cf932683ffe7e6c27c026fa6aafb7776c301f5815fa75fa91"
+    },
+    {
+      "name": "codex-async-question",
+      "surface": "codex",
+      "file": "providers/codex-async-question.json",
+      "sha256": "400ec5fa669aa0087961b6f566826b256ca453a2ddb6f11bd5f04962b0bf4fd0"
+    },
+    {
+      "name": "codex-tools",
+      "surface": "codex",
+      "file": "providers/codex-tools.json",
+      "sha256": "17bd3fcfb0b70ac8adb0afdabdbb23f695f962a2eca37a46362fc9f896ef912b"
+    },
+    {
+      "name": "codex-retry",
+      "surface": "codex",
+      "file": "providers/codex-retry.json",
+      "sha256": "bc175b5b83e61e764fceb0c3dc4ec4b034bced53517bb71f478c927304dd424a"
+    },
+    {
+      "name": "codex-exec",
+      "surface": "exec",
+      "file": "providers/codex-exec.json",
+      "sha256": "3cdb5f573a54d391f7914b50c75698a7d6ff0c4702689db3f178c012f8b37fd0"
+    },
+    {
+      "name": "claude-control",
+      "surface": "claude",
+      "file": "providers/claude-control.json",
+      "sha256": "5d51776742a33af1088b77cb68d1c6f49347b05392c48ee824df737ca6314094"
+    },
+    {
+      "name": "claude-stream",
+      "surface": "claude",
+      "file": "providers/claude-stream.json",
+      "sha256": "34d15c3073d013c8732ba6828e4e050f5015b1244f8808fa0c3a417855a59ec4"
+    },
+    {
+      "name": "codex-initialize-error",
+      "surface": "codex",
+      "file": "providers/codex-initialize-error.json",
+      "sha256": "01fc7e765cee4d06c39e3e5fcbd0067ac98f1b7bdb35c4588c0943a1cdd1944d"
+    },
+    {
+      "name": "codex-thread-error",
+      "surface": "codex",
+      "file": "providers/codex-thread-error.json",
+      "sha256": "3fa8414d613c3633b5022b9f4f7eaef9a95dc23de55384ffb01675645e130ef5"
+    },
+    {
+      "name": "codex-turn-error",
+      "surface": "codex",
+      "file": "providers/codex-turn-error.json",
+      "sha256": "fb486f9b271cb95cd6782e0f7221807202ce8f35c3fd48cc771b0f1a366882f0"
+    },
+    {
+      "name": "codex-missing-thread",
+      "surface": "codex",
+      "file": "providers/codex-missing-thread.json",
+      "sha256": "8f0e39f931f51af216b7243c2b318b32eb1b2541f85253261bcae1a6ff77aa19"
+    },
+    {
+      "name": "codex-missing-turn",
+      "surface": "codex",
+      "file": "providers/codex-missing-turn.json",
+      "sha256": "6d15bd5d0eedbc16ebd980b469b2024fbb67e79cd555d260a1de6bf1611cc3a5"
+    },
+    {
+      "name": "codex-turn-failed",
+      "surface": "codex",
+      "file": "providers/codex-turn-failed.json",
+      "sha256": "562113892e7cff5e13ed1b9fe4180f2c2c30cbe45d9cb2de7fe2d3f5d1b42af1"
+    },
+    {
+      "name": "codex-context-exhausted",
+      "surface": "codex",
+      "file": "providers/codex-context-exhausted.json",
+      "sha256": "6e92cffcb26935508ee86d68a3832e6e5c01dd04d938baa10a07b98de4746511"
+    },
+    {
+      "name": "claude-skipped-withdrawn",
+      "surface": "claude",
+      "file": "providers/claude-skipped-withdrawn.json",
+      "sha256": "fa597e1fb2b635308c3f501a7c43dd794ce165164d9e7f0364adee6f9e73d252"
+    },
+    {
+      "name": "claude-compaction-retry",
+      "surface": "claude",
+      "file": "providers/claude-compaction-retry.json",
+      "sha256": "2bd20b902750ca2ed905e68976612f238f9ae1021a4d4776e3752d3ec8c62a99"
+    },
+    {
+      "name": "claude-error",
+      "surface": "claude",
+      "file": "providers/claude-error.json",
+      "sha256": "8d92064736e563f87f43c571ee7bfda4f677835c53bca9b8aa87933add88dbb3"
+    },
+    {
+      "name": "mcp-stdio",
+      "surface": "mcp",
+      "file": "mcp-stdio.json",
+      "sha256": "052de0558fc52d4314f3ba0153f3fc3eee2519b64068d38225f4aec27aeca04c"
+    },
+    {
+      "name": "mcp-tool-errors",
+      "surface": "mcp",
+      "file": "mcp-tool-errors.json",
+      "sha256": "27a42f1004375d99f9a59a154570b3d442a6e7a79e52c1c23e477c1f394db605"
+    }
+  ]
+}

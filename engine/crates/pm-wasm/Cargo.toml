@@ -1,0 +1,32 @@
+[package]
+name = "pm-wasm"
+description = "The renderer's document mirror and synchronous evaluator, built for wasm32 (sections 6 and 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A plain rlib: native tests, pm-cli and the native side of the bit-identity
+# check link it. The module the renderer and the headless document host load
+# is the cdylib-only pm-wasm-module crate over it, so the release profile's
+# LTO applies to it (docs/engine/release-build.md).
+
+[dependencies]
+pm-model = { path = "../pm-model", features = ["read-tracking"] }
+pm-time = { path = "../pm-time" }
+pm-eval = { path = "../pm-eval" }
+pm-edit = { path = "../pm-edit" }
+pm-expr = { path = "../pm-expr" }
+# 3D model assets (OBJ, glTF) for picks and bounds (`geometry`).
+pm-geom3d = { path = "../pm-geom3d", features = ["import"] }
+# Level 1 text layout over registry answers and subsets from main (no
+# platform registry in WebAssembly).
+pm-text = { path = "../pm-text", default-features = false }
+serde_json.workspace = true
+ryu-js.workspace = true
+
+# In the renderer `Math.pow` and `**` come from the page's own V8, so
+# expression results equal the legacy evaluator's (docs/engine/expressions.md).
+[target.'cfg(target_family = "wasm")'.dependencies]
+pm-expr = { path = "../pm-expr", features = ["js-pow"] }

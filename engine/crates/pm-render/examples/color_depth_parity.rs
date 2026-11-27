@@ -1,0 +1,534 @@
+//! Project-depth quality gate: authored values and high-precision reference
+//! closeness, plus the same-size preview/export contract. Text is judged
+//! against independent f64 coverage of its outlines and paint; capture pixels
+//! remain the witness of today's rendering. Evidence stays in the supplied
+//! external directory.
+#[path = "../tests/support/mod.rs"]
+mod support;
+
+use pm_protocol::{color::Precision, common::Size};
+use pm_render::{MapResolver, RenderRequest, Renderer};
+use serde_json::json;
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
+};
+
+fn export_png(
+    r: &mut Renderer,
+    doc: Arc<pm_model::Document>,
+    comp: &str,
+    sample: &serde_json::Value,
+    destination: PathBuf,
+    working: &[f32],
+    media: &MapResolver,
+) -> usize {
+    use pm_export::render::{
+        ExportJob, MediaPaths, Unrestricted, plan_export_for, run_export_into, sink_for,
+    };
+    use pm_protocol::{
+        color::OutputColor,
+        common::{FrameRate, TICKS_PER_SECOND, TickRange, Ticks},
+        priority::{AlphaOutput, DeliveryOptions, ExportFormat, ExportSettings, QualityTier},
+    };
+    let start = support::ticks(sample["time"].as_f64().unwrap());
+    let job = ExportJob {
+        document: doc,
+        composition: comp.to_owned(),
+        settings: ExportSettings {
+            format: ExportFormat::PngStill { sixteen_bit: false },
+            alpha: if sample["exportReference"].is_string() {
+                AlphaOutput::Straight
+            } else {
+                AlphaOutput::None
+            },
+            quality: QualityTier::Max,
+            size: Size::new(
+                sample["width"].as_u64().unwrap() as u32,
+                sample["height"].as_u64().unwrap() as u32,
+            ),
+            frame_rate: FrameRate::new(30, 1),
+            range: TickRange {
+                start,
+                end: Ticks::new(start.get() + TICKS_PER_SECOND / 30).unwrap(),
+            },
+            audio: false,
+            audio_index_playhead: None,
+            motion_blur: false,
+            color: OutputColor::SrgbImage,
+            precision: Precision::Float32,
+            dither: true,
+            draft_from_proxies: false,
+            delivery: DeliveryOptions::default(),
+        },
+        media: Arc::new(MediaPaths {
+            paths: media.paths.clone(),
+            ..Default::default()
+        }),
+        destination: destination.clone(),
+        overwrite: pm_export::Overwrite::Replace,
+        mode: Some(0o600),
+        seed: 17,
+    };
+    let plan = plan_export_for(&job, r).unwrap();
+    let sink = sink_for(&plan).unwrap();
+    run_export_into(
+        r,
+        &job,
+        plan,
+        sink,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
+    let (info, decoded) = pm_export::png::read(&destination, true).unwrap();
+    assert_eq!(info.bit_depth, 8);
+    let decoded = decoded.unwrap();
+    let actual = decoded.planes[0].u8().unwrap();
+    assert_eq!(actual.len(), working.len());
+    let straight = sample["exportReference"].is_string();
+    // PNG is straight alpha; compare its API conversion with f64 arithmetic
+    // on the exact working frame. Today's early 8-bit unpremultiplication
+    // is not a reference. RGB allows only quantization plus half-code dither;
+    // alpha is never dithered and its quantized code must be exact.
+    actual
+        .chunks_exact(4)
+        .zip(working.chunks_exact(4))
+        .filter(|(actual, pixel)| {
+            let alpha = if straight {
+                f64::from(pixel[3]).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let alpha_code = (alpha * 255.0).round() as u8;
+            if actual[3] != alpha_code {
+                return true;
+            }
+            (0..3).any(|channel| {
+                if !straight && sample["depth"] == 8 {
+                    return actual[channel]
+                        != (pixel[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+                let color = if straight {
+                    if alpha < 1.0 / 4096.0 {
+                        0.0
+                    } else {
+                        f64::from(pixel[channel]) / alpha
+                    }
+                } else {
+                    f64::from(pixel[channel])
+                };
+                (f64::from(actual[channel]) - color.clamp(0.0, 1.0) * 255.0).abs() > 1.00001
+            })
+        })
+        .count()
+}
+
+/// Exact text scene in output pixels, over the independent f64 background. The
+/// scene supplies only geometry and paint operations: scan conversion,
+/// resampling, Gaussian blur and source-over use the independent reference.
+fn text_reference(
+    scene: &pm_text::render::scene::TextScene,
+    opacity: f64,
+    background: &[f32],
+) -> (Vec<f64>, Vec<pm_reference::compare::Class>, Vec<bool>) {
+    let ideal = support::text_reference::render(scene);
+    let pixels = scene.width as usize * scene.height as usize;
+    let mut out = vec![0.0; pixels * 4];
+    let mut reached = vec![false; pixels];
+    for n in 0..pixels {
+        let s = &ideal.rgba[n * 4..][..4];
+        reached[n] = s[3] > 0.0;
+        for k in 0..4 {
+            out[n * 4 + k] =
+                s[k] * opacity + f64::from(background[n * 4 + k]) * (1.0 - s[3] * opacity);
+        }
+    }
+    (out, ideal.classes, reached)
+}
+
+fn main() {
+    let dir = PathBuf::from(
+        std::env::args_os()
+            .nth(1)
+            .expect("external capture directory"),
+    );
+    assert!(
+        !dir.canonicalize()
+            .unwrap()
+            .starts_with(support::repo_root())
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+    let mut r = Renderer::headless().unwrap();
+    assert!(
+        r.set_definitions(&pm_render::all_builtin_definitions())
+            .unwrap()
+            .is_empty()
+    );
+    #[cfg(target_os = "macos")]
+    r.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
+        pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+        None,
+    ))));
+    let mut results = Vec::new();
+    let mut failures = 0;
+    for s in manifest["samples"].as_array().unwrap() {
+        r.trim(0);
+        let id = s["id"].as_str().unwrap();
+        let (w, h) = (
+            s["width"].as_u64().unwrap() as u32,
+            s["height"].as_u64().unwrap() as u32,
+        );
+        let doc = Arc::new(pm_model::Document::new(
+            Some(support::read_json(&dir.join(format!("{id}.json")))),
+            1,
+        ));
+        let comp = pm_eval::node::string(pm_eval::node::member(doc.root(), "compId"))
+            .unwrap()
+            .to_string_lossy();
+        let mut media = MapResolver::default();
+        if let Some(pm_model::NodeKind::Object(assets)) = doc
+            .root()
+            .and_then(|root| root.get("assets"))
+            .map(|n| n.kind())
+        {
+            for (id, record) in assets.iter() {
+                if let Some(path) = pm_eval::node::string(record.get("sourcePath")) {
+                    media
+                        .paths
+                        .insert(id.to_string_lossy(), PathBuf::from(path.to_string_lossy()));
+                }
+            }
+        }
+        let mut req = RenderRequest::sized(Size::new(w, h), Precision::Float32);
+        req.background = !s["transparent"].as_bool().unwrap_or(false);
+        if let Some(samples) = s["mbSamples"].as_u64().filter(|n| *n > 0) {
+            req.motion_blur = pm_render::motion::MotionBlur::Samples(samples.try_into().unwrap());
+        }
+        let frame = r
+            .render(
+                &doc,
+                &comp,
+                support::ticks(s["time"].as_f64().unwrap()),
+                &req,
+                &media,
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{id}: {:?}", frame.failures);
+        assert_eq!(frame.color.format(), r.device_target_format(&doc, &req));
+        if s["depth"] == 8 {
+            assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba8Unorm);
+        }
+        let pixels = r.read_rgba(&frame).unwrap();
+        let bytes = std::fs::read(dir.join(format!("{id}.rgba32f"))).unwrap();
+        let reference: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+            .collect();
+        assert_eq!(reference.len(), pixels.len());
+        let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let native: Vec<u8> = pixels.iter().map(|&v| to_byte(v)).collect();
+        let ref_bytes: Vec<u8> = reference.iter().map(|&v| to_byte(v)).collect();
+        let different = native
+            .chunks_exact(4)
+            .zip(ref_bytes.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        // Text sampling is judged against the f64 reference below; its
+        // export must equal the engine's own preview.
+        let text = s["source"]["layer"].is_string() && s["source"]["scale"].is_number();
+        let export_different =
+            if s["exportReference"].is_string() || (s["depth"] == 8 && s["exportPng"] != false) {
+                let different = export_png(
+                    &mut r,
+                    Arc::clone(&doc),
+                    &comp,
+                    s,
+                    dir.join(format!("{id}.export.png")),
+                    &pixels,
+                    &media,
+                );
+                println!("{id} exported PNG: different={different}");
+                Some(different)
+            } else {
+                None
+            };
+        let max_cv = pixels
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| f64::from((a - b).abs()) * 255.0)
+            .fold(0.0, f64::max);
+        let at = support::ticks(s["time"].as_f64().unwrap());
+        let samples = s["mbSamples"].as_u64().unwrap_or(1).max(1) as u32;
+        let ideal = support::reference::render(
+            &doc,
+            &comp,
+            at,
+            w,
+            h,
+            req.background,
+            samples,
+            r.effects(),
+            &media,
+        );
+        let wide = |v: &[f32]| v.iter().map(|&c| f64::from(c)).collect::<Vec<_>>();
+        let report = pm_reference::compare::compare(
+            &wide(&pixels),
+            &wide(&reference),
+            &ideal.rgba,
+            &ideal.classes(),
+        );
+        let bounds = if s["depth"] == 8 {
+            pm_reference::compare::Bounds::EIGHT_BIT
+        } else {
+            pm_reference::compare::Bounds::HALF_FLOAT
+        };
+        let quality_failures = report.failures(&bounds);
+        let (preview, export) = support::reference::preview_and_export(
+            &mut r,
+            &doc,
+            &comp,
+            at,
+            Size::new(w, h),
+            req.motion_blur,
+            &media,
+        );
+        let equality = pm_reference::compare::identical(&preview, &export);
+        println!("{id} reference:{report}; preview/export {equality:?}");
+        let mut pass = (text || quality_failures.is_empty())
+            && equality.is_ok()
+            && export_different.is_none_or(|n| n == 0);
+        let mut source_result = serde_json::Value::Null;
+        if let Some(source) = s.get("source").filter(|_| text) {
+            let source_w = source["width"].as_u64().unwrap() as usize;
+            let source_h = source["height"].as_u64().unwrap() as usize;
+            let raster = r
+                .text_raster(
+                    &doc,
+                    &comp,
+                    source["layer"].as_str().unwrap(),
+                    s["time"].as_f64().unwrap(),
+                    source["scale"].as_f64().unwrap(),
+                    Precision::Float32,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(raster.canvas, (source_w as u32, source_h as u32));
+            let mut native_source = vec![0; source_w * source_h * 4];
+            let [x0, y0, x1, y1] = raster.plan.crop.map(|v| v as usize);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    for c in 0..4 {
+                        native_source[(y * source_w + x) * 4 + c] =
+                            to_byte(raster.pixels[((y - y0) * (x1 - x0) + x - x0) * 4 + c]);
+                    }
+                }
+            }
+            let reference_source = std::fs::read(dir.join(format!("{id}.source.rgba"))).unwrap();
+            assert_eq!(native_source.len(), reference_source.len());
+            let source_different = native_source
+                .chunks_exact(4)
+                .zip(reference_source.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            let source_max = native_source
+                .iter()
+                .zip(&reference_source)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            support::write_png(
+                &dir.join(format!("{id}.source.native.png")),
+                source_w as u32,
+                source_h as u32,
+                &native_source,
+            );
+            support::write_png(
+                &dir.join(format!("{id}.source.reference.png")),
+                source_w as u32,
+                source_h as u32,
+                &reference_source,
+            );
+            let source_ideal = support::text_reference::render(&raster.plan.scene);
+            let mut source_native = vec![0.0; source_w * source_h * 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    for c in 0..4 {
+                        source_native[(y * source_w + x) * 4 + c] =
+                            f64::from(raster.pixels[((y - y0) * (x1 - x0) + x - x0) * 4 + c]);
+                    }
+                }
+            }
+            let source_today: Vec<f64> = reference_source
+                .iter()
+                .map(|v| f64::from(*v) / 255.0)
+                .collect();
+            let source_report = pm_reference::compare::compare(
+                &source_native,
+                &source_today,
+                &source_ideal.rgba,
+                &source_ideal.classes,
+            );
+            let source_why = source_report.failures(&pm_reference::compare::Bounds {
+                per_pixel_cv: (1.0, 1.0),
+                ..pm_reference::compare::Bounds::EIGHT_BIT
+            });
+            pass &= source_why.is_empty();
+            println!("{id} source vs exact outline:{source_report}");
+            for line in &source_why {
+                println!("{id} source FAIL: {line}");
+            }
+            // The composed text is drawn from the same outline reference
+            // through the authored world transform and float source-over.
+            let background_doc = support::text::background_only(&doc);
+            let background_reference = support::reference::render(
+                &background_doc,
+                &comp,
+                support::ticks(s["time"].as_f64().unwrap()),
+                w,
+                h,
+                req.background,
+                1,
+                r.effects(),
+                &media,
+            );
+            assert!(
+                background_reference.unmodelled.is_empty(),
+                "{id}: {:?}",
+                background_reference.unmodelled
+            );
+            let background: Vec<f32> = background_reference
+                .rgba
+                .iter()
+                .map(|&v| v as f32)
+                .collect();
+            // The frame plan supplies the same shaped device-space outline
+            // scene as the renderer, without any raster or coverage pixels.
+            let (plan, failures) = r
+                .plan(
+                    &doc,
+                    &comp,
+                    support::ticks(s["time"].as_f64().unwrap()),
+                    &req,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            assert!(failures.is_empty());
+            let (scene, opacity) = plan
+                .draws
+                .iter()
+                .find_map(|draw| {
+                    if draw.layer != source["layer"].as_str().unwrap() {
+                        return None;
+                    }
+                    match &draw.content {
+                        pm_render::plan::Content::Texture {
+                            source: pm_render::plan::Source::Text(text),
+                            alpha,
+                            ..
+                        } => Some((text.scene.as_ref(), *alpha)),
+                        _ => None,
+                    }
+                })
+                .expect("text device outline in frame plan");
+            assert_eq!((scene.width, scene.height), (w, h));
+            let (ideal, classes, reached) = text_reference(scene, opacity, &background);
+            let outside = classes
+                .iter()
+                .enumerate()
+                .filter(|(i, c)| {
+                    !reached[*i]
+                        && **c == pm_reference::compare::Class::Interior
+                        && native[i * 4..i * 4 + 4] != ref_bytes[i * 4..i * 4 + 4]
+                })
+                .count();
+            let wide = |v: &[f32]| v.iter().map(|&x| f64::from(x)).collect::<Vec<_>>();
+            let report =
+                pm_reference::compare::compare(&wide(&pixels), &wide(&reference), &ideal, &classes);
+            let bounds = if s["depth"] == 8 {
+                pm_reference::compare::Bounds {
+                    per_pixel_cv: (1.0, 1.0),
+                    ..pm_reference::compare::Bounds::EIGHT_BIT
+                }
+            } else {
+                pm_reference::compare::Bounds::HALF_FLOAT
+            };
+            let mut why = report.failures(&bounds);
+            if outside > 0 {
+                why.push(format!(
+                    "{outside} pixels away from the text differ from today"
+                ));
+            }
+            println!("{id} vs the f64 reference:{report}");
+            for line in &why {
+                println!("{id} FAIL: {line}");
+            }
+            pass &= why.is_empty();
+            let edge = report.class(pm_reference::compare::Class::Edge);
+            let image = report.class(pm_reference::compare::Class::Resampled);
+            source_result = json!({"differentPixels":source_different,"maxCv":source_max,
+                "sourceReference":{"failures":source_why,
+                    "engine":{"max":source_report.class(pm_reference::compare::Class::Edge).engine_vs_reference.max,
+                        "p999":source_report.class(pm_reference::compare::Class::Edge).engine_vs_reference.p999,
+                        "mean":source_report.class(pm_reference::compare::Class::Edge).engine_vs_reference.mean},
+                    "today":{"max":source_report.class(pm_reference::compare::Class::Edge).today_vs_reference.max,
+                        "p999":source_report.class(pm_reference::compare::Class::Edge).today_vs_reference.p999,
+                        "mean":source_report.class(pm_reference::compare::Class::Edge).today_vs_reference.mean}},
+                "reference":{"outsideDifferent":outside,"failures":why,
+                "edge":{"engine":{"max":edge.engine_vs_reference.max,"p999":edge.engine_vs_reference.p999,"mean":edge.engine_vs_reference.mean},
+                    "today":{"max":edge.today_vs_reference.max,"p999":edge.today_vs_reference.p999,"mean":edge.today_vs_reference.mean}},
+                "image":{"engine":{"max":image.engine_vs_reference.max,"p999":image.engine_vs_reference.p999,"mean":image.engine_vs_reference.mean},
+                    "today":{"max":image.today_vs_reference.max,"p999":image.today_vs_reference.p999,"mean":image.today_vs_reference.mean}}}});
+        }
+        support::write_png(&dir.join(format!("{id}.native.png")), w, h, &native);
+        let mut diff: Vec<u8> = native
+            .iter()
+            .zip(&ref_bytes)
+            .map(|(a, b)| a.abs_diff(*b).saturating_mul(32))
+            .collect();
+        for pixel in diff.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        support::write_png(&dir.join(format!("{id}.diff.png")), w, h, &diff);
+        let mut timings = Vec::new();
+        for _ in 0..s["warmFrames"].as_u64().unwrap_or(12) {
+            let started = Instant::now();
+            let frame = r
+                .render(
+                    &doc,
+                    &comp,
+                    support::ticks(s["time"].as_f64().unwrap()),
+                    &req,
+                    &media,
+                )
+                .unwrap();
+            r.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            timings.push(started.elapsed().as_secs_f64() * 1000.0);
+            drop(frame);
+        }
+        timings.sort_by(f64::total_cmp);
+        let p50 = timings.get(timings.len() / 2).copied();
+        println!(
+            "{id}: different={different}, max={max_cv:.6} CV, p50={p50:?} ms, pool={} B",
+            r.target_pool_bytes()
+        );
+        failures += usize::from(!pass);
+        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"modelled":ideal.modelled(),"qualityFailures":quality_failures,"previewEqualsExport":equality.is_ok(),"source":source_result,"p50Ms":p50,"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
+    }
+    std::fs::write(
+        dir.join("parity.json"),
+        serde_json::to_vec_pretty(&json!({"failures":failures,"samples":results})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        failures,
+        0,
+        "Color depth parity failures; images and parity.json are in {}",
+        dir.display()
+    );
+}

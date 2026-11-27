@@ -1,0 +1,764 @@
+//! A translated GLSL program as wgpu pipelines, and the compositor's uniform
+//! binding rules (`legacy/gl/compositor.ts` `setU`, `setI`, `setParam`).
+//!
+//! GL semantics reproduced, as spike S3 measured them against WebGL:
+//!
+//! - `glUniform*` on a uniform of another type is `INVALID_OPERATION` and
+//!   changes nothing: a single float never sets a `vec2`, `uniform1f` never
+//!   sets an `int` (`u_pass` declared `float` stays 0), `bool` takes 1f or 1i.
+//! - Uniforms are program-wide: a name both stages declare (`u_res`) is set
+//!   in both default blocks.
+//! - A sampler uniform samples unit 0 unless `setI` moved it; an empty unit
+//!   samples (0, 0, 0, 1); element 0 of a sampler array follows the array's
+//!   name.
+//! - Named parameters (`u_<key>`) bind when the linked program has them
+//!   active; otherwise the positional alias (`u_p<i>`, `u_c<i>`).
+//!
+//! Legacy GLSL draws in GL row order (see `pm_glsl`'s `adjust_coordinate_space`
+//! and S3.md "Origin"), like every pm-render target.
+
+use std::collections::HashMap;
+
+use pm_glsl::reflect::{Block, Scalar, UniformType};
+use pm_glsl::{FRAGMENT_SET, Failure, FailureStage, Program, SAMPLER_BINDING_OFFSET, VERTEX_SET};
+
+/// Electron's ordinary effect inputs: LINEAR min/mag, CLAMP_TO_EDGE,
+/// nearest mip level. Ordinary targets have only level zero; spatial effects
+/// explicitly prepare a pyramid before using this sampler.
+pub(crate) fn sampler_descriptor() -> wgpu::SamplerDescriptor<'static> {
+    wgpu::SamplerDescriptor {
+        label: Some("pm linear clamp"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod sampler_tests {
+    #[test]
+    fn ordinary_effect_texture_parameters_match_webgl() {
+        let d = super::sampler_descriptor();
+        assert_eq!(d.min_filter, wgpu::FilterMode::Linear);
+        assert_eq!(d.mag_filter, wgpu::FilterMode::Linear);
+        assert_eq!(d.mipmap_filter, wgpu::MipmapFilterMode::Nearest);
+        assert_eq!(d.address_mode_u, wgpu::AddressMode::ClampToEdge);
+        assert_eq!(d.address_mode_v, wgpu::AddressMode::ClampToEdge);
+        assert_eq!(d.anisotropy_clamp, 1);
+        assert_eq!(d.compare, None);
+    }
+}
+
+/// A `glUniform*` call as the compositor issues it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Call {
+    /// `uniform1f`..`uniform4f` (1 to 4 values).
+    F(Vec<f32>),
+    /// `uniform1i`.
+    I(i32),
+    /// `uniformMatrix3fv`, column-major.
+    M3([f32; 9]),
+}
+
+/// Writes one call into a default block with GL's type rules. Returns
+/// whether anything was written.
+pub fn apply(block: &Block, bytes: &mut [u8], name: &str, call: &Call) -> bool {
+    let Some(member) = block.members.iter().find(|m| m.name == name) else {
+        return false;
+    };
+    apply_member(member, bytes, call)
+}
+
+/// [`apply`] to a member found already.
+fn apply_member(member: &pm_glsl::reflect::Member, bytes: &mut [u8], call: &Call) -> bool {
+    let at = member.offset as usize;
+    let mut put = |index: usize, word: [u8; 4]| {
+        if let Some(slot) = bytes.get_mut(at + index * 4..at + index * 4 + 4) {
+            slot.copy_from_slice(&word);
+        }
+    };
+    let b = |v: f32| u32::from(v != 0.0).to_le_bytes();
+    match (call, &member.ty) {
+        (Call::F(v), UniformType::Scalar(Scalar::Float)) if v.len() == 1 => {
+            put(0, v[0].to_le_bytes())
+        }
+        (Call::F(v), UniformType::Scalar(Scalar::Bool)) if v.len() == 1 => put(0, b(v[0])),
+        (Call::I(i), UniformType::Scalar(Scalar::Bool)) => put(0, u32::from(*i != 0).to_le_bytes()),
+        (Call::I(i), UniformType::Scalar(Scalar::Int)) => put(0, i.to_le_bytes()),
+        (Call::F(v), UniformType::Vector(scalar, n)) if v.len() == *n as usize && v.len() > 1 => {
+            match scalar {
+                Scalar::Float => (0..v.len()).for_each(|i| put(i, v[i].to_le_bytes())),
+                Scalar::Bool => (0..v.len()).for_each(|i| put(i, b(v[i]))),
+                _ => return false,
+            }
+        }
+        (
+            Call::M3(m),
+            UniformType::Matrix {
+                columns: 3,
+                rows: 3,
+                stride,
+            },
+        ) => {
+            for column in 0..3 {
+                for row in 0..3 {
+                    let offset = at + column * *stride as usize + row * 4;
+                    if let Some(slot) = bytes.get_mut(offset..offset + 4) {
+                        slot.copy_from_slice(&m[column * 3 + row].to_le_bytes());
+                    }
+                }
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Whether `name` is an active member of `block` (`getUniformLocation`
+/// returns a location).
+pub fn active(block: Option<&Block>, name: &str) -> bool {
+    block.is_some_and(|b| b.members.iter().any(|m| m.name == name && m.active))
+}
+
+/// Replace only the uniform block's simple field reads in generated MSL.
+/// An unexpected writer representation keeps the original pipeline.
+fn specialize_glow_blur(source: &str) -> Option<String> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut source = source.to_owned();
+    for (field, constant) in [
+        (".u_pass", "6"),
+        (".u_highQuality", "0.0f"),
+        (".u_dispersion", "0.0f"),
+    ] {
+        let mut rewritten = String::with_capacity(source.len());
+        let mut from = 0;
+        for (at, _) in source.match_indices(field) {
+            let after = at + field.len();
+            if source[after..].starts_with(ident) {
+                continue;
+            }
+            let head = &source[from..at];
+            let (object, close) = head.strip_suffix(')').map_or((head, false), |s| (s, true));
+            let name = object.rsplit(|c: char| !ident(c)).next()?;
+            if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+                return None;
+            }
+            let start = object.len() - name.len();
+            let prefix = &head[..start];
+            let prefix = if close {
+                prefix.strip_suffix('(')?
+            } else {
+                prefix
+            };
+            rewritten.push_str(prefix);
+            rewritten.push_str(constant);
+            from = after;
+        }
+        if from == 0 {
+            return None;
+        }
+        rewritten.push_str(&source[from..]);
+        source = rewritten;
+    }
+    Some(source)
+}
+
+/// One compiled program, with pipelines per target format.
+pub struct GpuProgram {
+    vertex: crate::glsl::Stage,
+    fragment: crate::glsl::Stage,
+    /// The fragment stage for RGBA16F targets ([`crate::glsl::half_store`]),
+    /// built on first use.
+    fragment_half: Option<crate::glsl::Stage>,
+    layout: wgpu::PipelineLayout,
+    pub fragment_layout: wgpu::BindGroupLayout,
+    pub vertex_layout: wgpu::BindGroupLayout,
+    pub fragment_block: Option<Block>,
+    pub vertex_block: Option<Block>,
+    /// Each block member's index by name (the first of a name, as
+    /// [`apply`] finds it): a pass's calls are written without a search of
+    /// the members per call.
+    pub fragment_index: HashMap<String, usize>,
+    pub vertex_index: HashMap<String, usize>,
+    /// Sampler name and image binding, in binding order.
+    pub samplers: Vec<(String, u32)>,
+    pub(crate) output_cache_safe: bool,
+    pub(crate) inactive_fragment: Vec<usize>,
+    pub(crate) inactive_vertex: Vec<usize>,
+    pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    glow_blur: HashMap<wgpu::TextureFormat, Option<wgpu::RenderPipeline>>,
+}
+
+/// Validation, internal (translation and Metal), and out-of-memory scopes,
+/// so one bad program fails its definition instead of the frame.
+struct Scopes([wgpu::ErrorScopeGuard; 3]);
+
+fn push_scopes(device: &wgpu::Device) -> Scopes {
+    Scopes([
+        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
+        device.push_error_scope(wgpu::ErrorFilter::Internal),
+        device.push_error_scope(wgpu::ErrorFilter::Validation),
+    ])
+}
+
+fn pop_error(scopes: Scopes) -> Option<String> {
+    let [oom, internal, validation] = scopes.0;
+    let mut errors = Vec::new();
+    for guard in [validation, internal, oom] {
+        if let Some(error) = pollster::block_on(guard.pop()) {
+            errors.push(error.to_string());
+        }
+    }
+    (!errors.is_empty()).then(|| errors.join("; "))
+}
+
+/// Each member's index by name, the first of a name kept.
+fn member_index(block: Option<&Block>) -> HashMap<String, usize> {
+    let mut index = HashMap::new();
+    for (i, member) in block.iter().flat_map(|b| b.members.iter()).enumerate() {
+        index.entry(member.name.clone()).or_insert(i);
+    }
+    index
+}
+
+fn layout_entries(
+    block: Option<&Block>,
+    samplers: &[(String, u32)],
+    visibility: wgpu::ShaderStages,
+    filterable: bool,
+) -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut entries = Vec::new();
+    if let Some(block) = block {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: block.binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
+    }
+    for (_, binding) in samplers {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: *binding,
+            visibility,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: binding + SAMPLER_BINDING_OFFSET,
+            visibility,
+            ty: wgpu::BindingType::Sampler(if filterable {
+                wgpu::SamplerBindingType::Filtering
+            } else {
+                wgpu::SamplerBindingType::NonFiltering
+            }),
+            count: None,
+        });
+    }
+    entries.sort_by_key(|e| e.binding);
+    entries
+}
+
+impl GpuProgram {
+    /// Creates the shader modules and layouts. Errors are engine-only
+    /// failures (the program passed WebGL's rules): `FailureStage::Metal`
+    /// is not a pipeline stage of `pm_glsl`, so they are reported as
+    /// `NagaValidate` with wgpu's message.
+    pub fn new(
+        device: &wgpu::Device,
+        program: Program,
+        label: &str,
+    ) -> Result<GpuProgram, Failure> {
+        let fragment_block = program.fragment.reflection.block.clone();
+        let vertex_block = program.vertex.reflection.block.clone();
+        let mut samplers: Vec<(String, u32)> = program
+            .fragment
+            .reflection
+            .samplers
+            .iter()
+            .map(|s| (s.name.clone(), s.binding))
+            .collect();
+        samplers.sort_by_key(|s| s.1);
+        for split in &program.fragment.splits {
+            let known = samplers
+                .iter()
+                .any(|(name, binding)| *name == split.name && *binding == split.image_binding);
+            if !known
+                || split.set != FRAGMENT_SET
+                || split.sampler_binding != split.image_binding + SAMPLER_BINDING_OFFSET
+            {
+                return Err(Failure::new(
+                    FailureStage::Rewrite,
+                    format!("sampler split {split:?} does not match the bind group layout"),
+                ));
+            }
+        }
+        if program.fragment.splits.len() != samplers.len() {
+            return Err(Failure::new(
+                FailureStage::Rewrite,
+                format!(
+                    "{} sampler2D uniforms but {} splits",
+                    samplers.len(),
+                    program.fragment.splits.len()
+                ),
+            ));
+        }
+        // Each stage sees its own group: the fragment's block and samplers
+        // (set 0), the vertex stage's block (set 1). Metal compiles the MSL
+        // with the built-in calls ANGLE makes (`crate::glsl`).
+        let mut fragment_entries = Vec::new();
+        if let Some(b) = &fragment_block {
+            fragment_entries.push(crate::glsl::Entry::Buffer {
+                group: FRAGMENT_SET,
+                binding: b.binding,
+            });
+        }
+        for (_, binding) in &samplers {
+            fragment_entries.push(crate::glsl::Entry::Texture {
+                group: FRAGMENT_SET,
+                binding: *binding,
+            });
+            fragment_entries.push(crate::glsl::Entry::Sampler {
+                group: FRAGMENT_SET,
+                binding: binding + SAMPLER_BINDING_OFFSET,
+            });
+        }
+        let vertex_entries: Vec<_> = vertex_block
+            .iter()
+            .map(|b| crate::glsl::Entry::Buffer {
+                group: VERTEX_SET,
+                binding: b.binding,
+            })
+            .collect();
+        let output_cache_safe = samplers.is_empty()
+            && [
+                (&program.fragment.module, fragment_block.as_ref()),
+                (&program.vertex.module, vertex_block.as_ref()),
+            ]
+            .into_iter()
+            .all(|(module, block)| {
+                use pm_gpu::glsl::naga::AddressSpace;
+                module
+                    .global_variables
+                    .iter()
+                    .all(|(_, global)| match global.space {
+                        AddressSpace::Private => true,
+                        AddressSpace::Uniform => block.is_some_and(|block| {
+                            global.binding.as_ref().is_some_and(|binding| {
+                                binding.group == block.set && binding.binding == block.binding
+                            })
+                        }),
+                        _ => false,
+                    })
+            });
+        let inactive_fragment = program.fragment.reflection.inactive_members;
+        let inactive_vertex = program.vertex.reflection.inactive_members;
+        let scopes = push_scopes(device);
+        let stages = crate::glsl::stage_module(
+            device,
+            "pm legacy vertex",
+            program.vertex.module,
+            pm_gpu::glsl::naga::ShaderStage::Vertex,
+            &vertex_entries,
+        )
+        .and_then(|vertex| {
+            crate::glsl::stage_module(
+                device,
+                label,
+                program.fragment.module,
+                pm_gpu::glsl::naga::ShaderStage::Fragment,
+                &fragment_entries,
+            )
+            .map(|fragment| (vertex, fragment))
+        });
+        let (vertex, fragment) = match stages {
+            Ok(s) => s,
+            Err(e) => {
+                let scoped = pop_error(scopes);
+                return Err(Failure::new(
+                    FailureStage::NagaValidate,
+                    scoped.map_or(e.clone(), |s| format!("{e}; {s}")),
+                ));
+            }
+        };
+        // Every legacy texture is filterable (`rgba16float`, or
+        // `rgba32float` on devices with `FLOAT32_FILTERABLE`; pm-render
+        // refuses 32-bit precision elsewhere).
+        let fragment_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm legacy fragment"),
+            entries: &layout_entries(
+                fragment_block.as_ref(),
+                &samplers,
+                wgpu::ShaderStages::FRAGMENT,
+                true,
+            ),
+        });
+        let vertex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm legacy vertex"),
+            entries: &layout_entries(vertex_block.as_ref(), &[], wgpu::ShaderStages::VERTEX, true),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: &[Some(&fragment_layout), Some(&vertex_layout)],
+            immediate_size: 0,
+        });
+        if let Some(error) = pop_error(scopes) {
+            return Err(Failure::new(FailureStage::NagaValidate, error));
+        }
+        Ok(GpuProgram {
+            vertex,
+            fragment,
+            fragment_half: None,
+            layout,
+            fragment_layout,
+            vertex_layout,
+            fragment_index: member_index(fragment_block.as_ref()),
+            vertex_index: member_index(vertex_block.as_ref()),
+            fragment_block,
+            vertex_block,
+            samplers,
+            output_cache_safe,
+            inactive_fragment,
+            inactive_vertex,
+            pipelines: HashMap::new(),
+            glow_blur: HashMap::new(),
+        })
+    }
+
+    /// The pipeline for a target format, created on first use (this is
+    /// where the Metal compiler runs).
+    pub fn pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Result<&wgpu::RenderPipeline, Failure> {
+        pm_perf::cache(
+            pm_perf::Counter::PipelineCacheHits,
+            pm_perf::Counter::PipelineCacheMisses,
+            self.pipelines.contains_key(&format),
+        );
+        if !self.pipelines.contains_key(&format) {
+            // RGBA16F stores the nearest half of the program's output.
+            if format == wgpu::TextureFormat::Rgba16Float && self.fragment_half.is_none() {
+                let half = self
+                    .fragment
+                    .msl
+                    .as_deref()
+                    .and_then(|msl| crate::glsl::half_store(msl, &self.fragment.entry_point));
+                if let Some(source) = half {
+                    let stage = crate::glsl::msl_stage(
+                        device,
+                        "pm legacy fragment (nearest half)",
+                        source,
+                        &self.fragment.entry_point,
+                    )
+                    .map_err(|e| Failure::new(FailureStage::NagaValidate, e))?;
+                    self.fragment_half = Some(stage);
+                }
+            }
+            let scopes = push_scopes(device);
+            let fragment = match &self.fragment_half {
+                Some(half) if format == wgpu::TextureFormat::Rgba16Float => half,
+                _ => &self.fragment,
+            };
+            let pipeline = self.make_pipeline(device, format, fragment);
+            if let Some(error) = pop_error(scopes) {
+                return Err(Failure::new(FailureStage::NagaValidate, error));
+            }
+            self.pipelines.insert(format, pipeline);
+        }
+        Ok(&self.pipelines[&format])
+    }
+
+    /// The pinned packed glow's final blur for a zero-dispersion,
+    /// standard-quality instance. Only the uniform loads change. The same
+    /// shader samples the same texels and accumulates them in the same order.
+    #[doc(hidden)]
+    pub fn glow_blur_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Option<&wgpu::RenderPipeline> {
+        if !self.glow_blur.contains_key(&format) {
+            let variant = (|| {
+                let stage = if format == wgpu::TextureFormat::Rgba16Float {
+                    self.fragment_half.as_ref().unwrap_or(&self.fragment)
+                } else {
+                    &self.fragment
+                };
+                let source = specialize_glow_blur(stage.msl.as_deref()?)?;
+                let scopes = push_scopes(device);
+                let specialized = crate::glsl::msl_stage(
+                    device,
+                    "pm packed glow blur",
+                    source,
+                    &stage.entry_point,
+                );
+                let pipeline = specialized
+                    .ok()
+                    .map(|s| self.make_pipeline(device, format, &s));
+                if pop_error(scopes).is_some() {
+                    None
+                } else {
+                    pipeline
+                }
+            })();
+            if std::env::var_os("PM_ENGINE_TRACE").is_some() {
+                eprintln!(
+                    "PM_PACKED_GLOW_VARIANT {format:?} ready={}",
+                    variant.is_some()
+                );
+            }
+            self.glow_blur.insert(format, variant);
+        }
+        self.glow_blur.get(&format)?.as_ref()
+    }
+
+    fn make_pipeline(
+        &self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        fragment: &crate::glsl::Stage,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pm legacy glsl"),
+            layout: Some(&self.layout),
+            vertex: wgpu::VertexState {
+                module: &self.vertex.module,
+                entry_point: Some(&self.vertex.entry_point),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            // The vertex output is flipped to keep GL row order, which
+            // reverses the winding: clockwise is GL's counter-clockwise,
+            // so `gl_FrontFacing` matches WebGL (false for the quad).
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fragment.module,
+                entry_point: Some(&fragment.entry_point),
+                compilation_options: Default::default(),
+                // Blending off (`gl.disable(gl.BLEND)` around every
+                // effect and transition draw).
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// The uniform block bytes of one draw, from the compositor's calls in
+    /// issue order (a later call overwrites an earlier one, as in GL).
+    pub fn block_bytes(block: &Block, calls: &[(String, Call)]) -> Vec<u8> {
+        let mut bytes = vec![0u8; block.size.max(16) as usize];
+        for (name, call) in calls {
+            apply(block, &mut bytes, name, call);
+        }
+        bytes
+    }
+
+    /// [`Self::block_bytes`] written into `out` (`block.size.max(16)`
+    /// bytes, any previous contents), finding members through `index`
+    /// ([`Self::fragment_index`], [`Self::vertex_index`]): the same bytes.
+    pub fn write_block(
+        block: &Block,
+        index: &HashMap<String, usize>,
+        calls: &[(String, Call)],
+        out: &mut [u8],
+    ) {
+        out.fill(0);
+        for (name, call) in calls {
+            if let Some(member) = index.get(name.as_str()).and_then(|&i| block.members.get(i)) {
+                apply_member(member, out, call);
+            }
+        }
+    }
+
+    /// Which unit each sampler reads: unit 0 unless a `uniform1i` call
+    /// names it (or, for element 0 of an array, the array).
+    pub fn sampler_units(&self, calls: &[(String, Call)]) -> Vec<u32> {
+        self.samplers
+            .iter()
+            .map(|(name, _)| {
+                let base = name.strip_suffix("[0]");
+                calls
+                    .iter()
+                    .rev()
+                    .find_map(|(n, c)| match c {
+                        Call::I(unit) if n == name || Some(n.as_str()) == base => {
+                            Some((*unit).max(0) as u32)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_glsl::reflect::Member;
+
+    #[test]
+    fn glow_rewrite_requires_simple_uniform_reads() {
+        let fields = "p.u_highQuality + (p).u_dispersion + p.u_passes";
+        for pass in ["p.u_pass", "(p).u_pass"] {
+            assert_eq!(
+                specialize_glow_blur(&format!("{pass} + {fields}")).as_deref(),
+                Some("6 + 0.0f + 0.0f + p.u_passes")
+            );
+        }
+        for pass in ["(*p).u_pass", "a[i].u_pass", "p.u_passes"] {
+            assert_eq!(specialize_glow_blur(&format!("{pass} + {fields}")), None);
+        }
+        assert_eq!(specialize_glow_blur("p.u_pass + p.u_highQuality"), None);
+    }
+
+    fn block() -> Block {
+        let m = |name: &str, offset, ty| Member {
+            name: name.into(),
+            offset,
+            ty,
+            active: true,
+        };
+        Block {
+            set: 0,
+            binding: 0,
+            size: 96,
+            members: vec![
+                m("f", 0, UniformType::Scalar(Scalar::Float)),
+                m("i", 4, UniformType::Scalar(Scalar::Int)),
+                m("b", 8, UniformType::Scalar(Scalar::Bool)),
+                m("v2", 16, UniformType::Vector(Scalar::Float, 2)),
+                m("v3", 32, UniformType::Vector(Scalar::Float, 3)),
+                m(
+                    "m",
+                    48,
+                    UniformType::Matrix {
+                        columns: 3,
+                        rows: 3,
+                        stride: 16,
+                    },
+                ),
+            ],
+        }
+    }
+
+    /// Indexed writes into a reused (dirty) range give exactly the bytes of
+    /// a fresh block: calls in order, later ones overwriting, unknown names
+    /// and wrong types ignored, duplicate member names resolved as `apply`.
+    #[test]
+    fn indexed_writes_equal_block_bytes() {
+        let mut block = block();
+        block.members.push(pm_glsl::reflect::Member {
+            name: "f".into(),
+            offset: 88,
+            ty: UniformType::Scalar(Scalar::Float),
+            active: true,
+        });
+        let index = member_index(Some(&block));
+        let names = ["f", "i", "b", "v2", "v3", "m", "nope", "u_tex"];
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        for _ in 0..200 {
+            let calls: Vec<(String, Call)> = (0..next(12))
+                .map(|_| {
+                    let name = names[next(names.len() as u32) as usize].to_owned();
+                    let v = next(1000) as f32 / 7.0 - 50.0;
+                    let call = match next(5) {
+                        0 => Call::I(next(4) as i32 - 1),
+                        1 => Call::M3([v; 9]),
+                        n => Call::F(vec![v; n as usize - 1]),
+                    };
+                    (name, call)
+                })
+                .collect();
+            let fresh = GpuProgram::block_bytes(&block, &calls);
+            let mut reused = vec![0xA5u8; fresh.len()];
+            GpuProgram::write_block(&block, &index, &calls, &mut reused);
+            assert_eq!(fresh, reused, "{calls:?}");
+        }
+    }
+
+    fn word(bytes: &[u8], at: usize) -> [u8; 4] {
+        bytes[at..at + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn follows_gl_uniform_type_rules() {
+        let block = block();
+        let mut bytes = vec![0u8; 96];
+        assert!(apply(&block, &mut bytes, "f", &Call::F(vec![2.5])));
+        assert!(
+            !apply(&block, &mut bytes, "i", &Call::F(vec![3.0])),
+            "uniform1f on int"
+        );
+        assert!(
+            apply(&block, &mut bytes, "b", &Call::I(1)),
+            "bool takes uniform1i"
+        );
+        assert!(
+            apply(&block, &mut bytes, "b", &Call::F(vec![1.0])),
+            "bool takes uniform1f"
+        );
+        assert!(
+            !apply(&block, &mut bytes, "v2", &Call::F(vec![1.0])),
+            "one float leaves a vec2 at 0"
+        );
+        assert!(!apply(
+            &block,
+            &mut bytes,
+            "v2",
+            &Call::F(vec![1.0, 2.0, 3.0])
+        ));
+        assert!(apply(
+            &block,
+            &mut bytes,
+            "v3",
+            &Call::F(vec![1.0, 2.0, 3.0])
+        ));
+        assert!(apply(
+            &block,
+            &mut bytes,
+            "m",
+            &Call::M3([1., 2., 3., 4., 5., 6., 7., 8., 9.])
+        ));
+        assert!(!apply(&block, &mut bytes, "nope", &Call::F(vec![1.0])));
+        assert_eq!(f32::from_le_bytes(word(&bytes, 0)), 2.5);
+        assert_eq!(word(&bytes, 4), [0; 4]);
+        assert_eq!(u32::from_le_bytes(word(&bytes, 8)), 1);
+        assert_eq!(&bytes[16..24], &[0; 8]);
+        assert_eq!(f32::from_le_bytes(word(&bytes, 40)), 3.0);
+        // Column 1, row 2 of the matrix.
+        assert_eq!(f32::from_le_bytes(word(&bytes, 48 + 16 + 8)), 6.0);
+        assert_eq!(word(&bytes, 48 + 12), [0; 4], "padding stays");
+    }
+}

@@ -1,0 +1,21 @@
+{
+ "name": "pixel-grid-fragcoord",
+ "kind": "shader",
+ "covers": [
+  "gl_FragCoord",
+  "integer-bitwise",
+  "param-int"
+ ],
+ "prompt": "Pixel-perfect checkerboard where each square is N actual pixels wide (an int parameter, default 8), with every 4th square highlighted.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "a7f6904b688d6d97d3d01a3b57b8cc5c890ba4c77f0fa784e4acc9749057ded2",
+  "seconds": 16.003,
+  "generated": "2026-10-17T07:31:38.710Z"
+ },
+ "code": "// Pixel-perfect checkerboard: each square is exactly uSquarePx layer pixels.\n// Every 4th square along each row/column (diagonal cadence) is highlighted.\nuniform int   uSquarePx;   // @param 8 1 256\nuniform vec3  uColorA;     // @param #1A1A1E\nuniform vec3  uColorB;     // @param #E6E6E6\nuniform vec3  uHighlight;  // @param #FF6B1A\n\nvoid main() {\n  int n = max(uSquarePx, 1);\n  // Integer pixel coordinate within the layer (pixel centers -> exact ints).\n  ivec2 px = ivec2(floor(uv * iResolution));\n  // Flip Y so square 0,0 is anchored at the top-left of the layer.\n  px.y = int(iResolution.y) - 1 - px.y;\n  ivec2 cell = px / n;  // px is non-negative, so integer division == floor\n\n  int parity = (cell.x + cell.y) & 1;\n  vec3 col = parity == 0 ? uColorA : uColorB;\n\n  // Every 4th square: walking along any row or column, squares 0,4,8,... highlight.\n  if (((cell.x + cell.y) & 3) == 0) col = uHighlight;\n\n  fragColor = vec4(col, 1.0);\n}",
+ "definition": null,
+ "summary": "I wrote a checkerboard shader where each square is exactly `uSquarePx` pixels wide. That's an int setting (default 8, range 1–256). Every 4th square along each row and column turns `uHighlight`, which forms diagonal stripes. I haven't compiled or rendered it because no Powermove tools were attached. I also couldn't confirm that the Inspector supports int `@param` settings; if it doesn't, the shader falls back to 1-px squares instead of failing."
+}

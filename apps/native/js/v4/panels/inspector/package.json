@@ -1,0 +1,13 @@
+{
+  "name": "powermove-builtin-inspector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.tsx",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "format": "prettier --check '*.ts' '*.tsx' 'test/*.ts' 'test/*.tsx' '*.json' README.md",
+    "build": "bun build index.tsx --target browser --outdir dist"
+  }
+}

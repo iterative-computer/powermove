@@ -1,0 +1,1391 @@
+//! AppKit sheets are asynchronous. No modal run loop or UI-thread file IO.
+use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
+use objc2_app_kit::*;
+use objc2_foundation::{NSData, NSString};
+use std::path::PathBuf;
+
+// `UTType` is looked up by name for open panels; load its framework.
+#[link(name = "UniformTypeIdentifiers", kind = "framework")]
+unsafe extern "C" {}
+
+static TERMINATE: std::sync::OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
+    std::sync::OnceLock::new();
+static TERMINATE_HEARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call first in `main`, before any thread exists: every thread inherits
+/// SIGTERM blocked, and one waits for it, so SIGTERM runs the quit path
+/// ([`terminations`]) instead of killing the process mid-write.
+pub fn route_sigterm() {
+    ignore_user_signals();
+    let tx = TERMINATE
+        .get_or_init(|| async_channel::bounded(1))
+        .0
+        .clone();
+    // SAFETY: plain signal-set calls on a local set, before other threads.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    let _ = std::thread::Builder::new()
+        .name("pm-sigterm".into())
+        .spawn(move || {
+            loop {
+                let mut signal = 0;
+                // SAFETY: waits on the blocked set built above.
+                if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+                    continue;
+                }
+                if !TERMINATE_HEARD.load(std::sync::atomic::Ordering::Acquire) {
+                    // No window yet, so nothing is open to close; ends
+                    // without exit handlers, as the signal's limit does.
+                    crate::quit_limit::stop_jobs_and_exit(0);
+                }
+                // Bounded here, not on the main thread: a quit already under
+                // way and stuck there would otherwise never hear it.
+                crate::quit_limit::signalled();
+                let _ = tx.try_send(());
+            }
+        });
+}
+/// SIGUSR1 and SIGUSR2 terminate a process by default, and other tools send
+/// them to apps they take for Electron (to open its inspector): the editor
+/// would vanish without saving. A no-op handler, not `SIG_IGN`, so a child
+/// process gets the default back at `exec`.
+fn ignore_user_signals() {
+    extern "C" fn ignore(_: libc::c_int) {}
+    for signal in [libc::SIGUSR1, libc::SIGUSR2] {
+        // SAFETY: installs an async-signal-safe handler that does nothing.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+/// SIGTERMs from [`route_sigterm`], for the quit coordinator.
+pub fn terminations() -> async_channel::Receiver<()> {
+    TERMINATE_HEARD.store(true, std::sync::atomic::Ordering::Release);
+    TERMINATE
+        .get_or_init(|| async_channel::bounded(1))
+        .1
+        .clone()
+}
+
+/// Puts a file panel on `window` as a sheet (`child_window::sheet`; a
+/// dropped panel drops `done` and its sender: cancelled).
+fn begin_panel(
+    panel: &objc2_app_kit::NSSavePanel,
+    window: &NSWindow,
+    done: block2::RcBlock<dyn Fn(NSModalResponse)>,
+) {
+    use objc2::Message;
+    let (on, shown) = (window.retain(), panel.retain());
+    gpui_macos::child_window::sheet(
+        window,
+        panel,
+        move || shown.beginSheetModalForWindow_completionHandler(&on, &done),
+        || {},
+    );
+}
+
+/// An open sheet that takes `.cube` files.
+pub fn lut_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+    typed_file(window, "Choose a .cube or .3dl LUT", &["cube", "3dl"])
+}
+
+/// Import CDL…'s open panel: an ASC CDL file.
+pub fn cdl_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+    typed_file(
+        window,
+        "Choose an ASC CDL (.cc, .cdl or .ccc)",
+        &["cc", "cdl", "ccc"],
+    )
+}
+
+/// An open panel for one file of `types`, with `message`.
+fn typed_file(
+    window: &NSWindow,
+    message: &str,
+    types: &[&str],
+) -> async_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setMessage(Some(&NSString::from_str(message)));
+    let types: Vec<_> = types.iter().map(|t| NSString::from_str(t)).collect();
+    #[allow(deprecated)]
+    panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_retained_slice(
+        &types,
+    )));
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let _ = tx.try_send(path);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
+
+/// Ends every sheet still up (each answered as if dismissed), so a quit no
+/// longer waits behind one.
+pub fn end_all_sheets() {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    for window in app.windows().iter() {
+        // Nested sheets (a save panel over the Export sheet) end innermost first.
+        for _ in 0..4 {
+            let Some(host) = window.attachedSheet() else {
+                break;
+            };
+            let host = sheet_host(&host);
+            let parent = unsafe { host.sheetParent() }.unwrap_or_else(|| window.clone());
+            parent.endSheet_returnCode(&host, objc2_app_kit::NSModalResponseAbort);
+        }
+    }
+}
+/// The window a new sheet attaches to: the topmost sheet already shown on
+/// `window` (the Export sheet asking where to save), else `window` itself.
+/// A second sheet begun on a window that already has one is queued by AppKit
+/// until the first closes, so it would never appear.
+fn sheet_host(window: &NSWindow) -> Retained<NSWindow> {
+    let mut host = objc2::Message::retain(window);
+    while let Some(sheet) = host.attachedSheet() {
+        host = sheet;
+    }
+    host
+}
+pub fn paths(window: &NSWindow, save: bool) -> async_channel::Receiver<Option<PathBuf>> {
+    paths_named(window, save, "Project.pmv")
+}
+pub fn paths_named(
+    window: &NSWindow,
+    save: bool,
+    name: &str,
+) -> async_channel::Receiver<Option<PathBuf>> {
+    paths_named_in(window, save, name, None)
+}
+/// [`paths_named`], the panel starting in `start` when given.
+pub fn paths_named_in(
+    window: &NSWindow,
+    save: bool,
+    name: &str,
+    start: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    if save {
+        let panel = NSSavePanel::savePanel(mtm);
+        panel.setNameFieldStringValue(&NSString::from_str(name));
+        start_in(&panel, start);
+        let retained = panel.clone();
+        let done = block2::RcBlock::new(move |result: NSModalResponse| {
+            let path = (result == NSModalResponseOK)
+                .then(|| retained.URL())
+                .flatten()
+                .and_then(|u| u.path())
+                .map(|p| PathBuf::from(p.to_string()));
+            let _ = tx.try_send(path);
+        });
+        begin_panel(&panel, &sheet_host(window), done);
+    } else {
+        let panel = NSOpenPanel::openPanel(mtm);
+        panel.setCanChooseDirectories(false);
+        panel.setAllowsMultipleSelection(false);
+        let retained = panel.clone();
+        let done = block2::RcBlock::new(move |result: NSModalResponse| {
+            let path = (result == NSModalResponseOK)
+                .then(|| retained.URL())
+                .flatten()
+                .and_then(|u| u.path())
+                .map(|p| PathBuf::from(p.to_string()));
+            let _ = tx.try_send(path);
+        });
+        begin_panel(&panel, &sheet_host(window), done);
+    }
+    rx
+}
+
+/// While held, macOS neither App Naps nor throttles the app, so a project that is
+/// opening keeps going when the window is behind others or the screen locks.
+/// Idle system sleep stays allowed.
+pub struct Busy(Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+impl Busy {
+    pub fn begin(reason: &str) -> Self {
+        let options = objc2_foundation::NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
+        Self(
+            objc2_foundation::NSProcessInfo::processInfo()
+                .beginActivityWithOptions_reason(options, &NSString::from_str(reason)),
+        )
+    }
+}
+impl Drop for Busy {
+    fn drop(&mut self) {
+        // SAFETY: the token beginActivity returned, ended once.
+        unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) }
+    }
+}
+
+/// Hands a web link to the default browser.
+pub fn open_url(url: &str) -> bool {
+    // A development or lane build never opens anything in the person's
+    // browser (or another app): it says what it would have opened.
+    if !opens_urls(cfg!(debug_assertions), pm_compat_runner::store_install::lane_launch()) {
+        eprintln!("Powermove (development build) would open: {url}");
+        // The fake URL opener: reviews read what would have opened here.
+        if let Some(log) = std::env::var_os("PM_FAKE_URL_LOG") {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+            {
+                let _ = writeln!(file, "{url}");
+            }
+        }
+        return true;
+    }
+    objc2::rc::autoreleasepool(|_| {
+        objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
+            .is_some_and(|url| objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url))
+    })
+}
+
+/// Only a release build that no lane launched opens URLs.
+pub(crate) fn opens_urls(debug: bool, lane: bool) -> bool {
+    !debug && !lane
+}
+
+/// Import Media: several items at once, filtered to `extensions` when it has any.
+pub fn import_paths(
+    window: &NSWindow,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, folders, multiple, extensions, "Import")
+}
+/// Import Media's panel: media files and folders, several at once (a folder
+/// of numbered frames is offered as an image sequence).
+pub fn import_media_paths(
+    window: &NSWindow,
+    extensions: &[&str],
+) -> async_channel::Receiver<Vec<PathBuf>> {
+    open_panel(window, true, true, true, extensions, "Import")
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static REVIEW_BOARD: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Development builds: Paste reads the pasteboard of this name instead of
+/// the general one, so an on-screen review never reads or overwrites what
+/// the person has copied.
+#[cfg(debug_assertions)]
+pub fn review_pasteboard(name: Option<String>) {
+    REVIEW_BOARD.with(|b| *b.borrow_mut() = name);
+}
+/// The pasteboard Paste reads.
+fn paste_board() -> Retained<NSPasteboard> {
+    #[cfg(debug_assertions)]
+    if let Some(name) = REVIEW_BOARD.with(|b| b.borrow().clone()) {
+        return NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
+    }
+    NSPasteboard::generalPasteboard()
+}
+
+/// `navigator.clipboard`'s text for extensions, on the pasteboard Paste reads
+/// (chosen now, on the main thread); called from the realm's thread.
+pub fn text_clipboard() -> pm_compat_runner::TextClipboard {
+    #[cfg(debug_assertions)]
+    let name = REVIEW_BOARD.with(|b| b.borrow().clone());
+    #[cfg(not(debug_assertions))]
+    let name = None;
+    text_clipboard_on(name)
+}
+fn text_clipboard_on(name: Option<String>) -> pm_compat_runner::TextClipboard {
+    std::sync::Arc::new(move |write: Option<&str>| {
+        let board = match &name {
+            Some(name) => NSPasteboard::pasteboardWithName(&NSString::from_str(name)),
+            None => NSPasteboard::generalPasteboard(),
+        };
+        // SAFETY: AppKit's own pasteboard type constants.
+        let kind = unsafe { NSPasteboardTypeString };
+        match write {
+            Some(text) => {
+                board.clearContents();
+                if !board.setString_forType(&NSString::from_str(text), kind) {
+                    return Err("The text could not be put on the clipboard".into());
+                }
+                Ok(String::new())
+            }
+            None => Ok(board
+                .stringForType(kind)
+                .map(|text| text.to_string())
+                .unwrap_or_default()),
+        }
+    })
+}
+/// What Paste finds for the importer on the pasteboard.
+#[derive(Debug, PartialEq)]
+pub enum PastedMedia {
+    /// Files copied in Finder, or handed over as files by another app.
+    Files(Vec<PathBuf>),
+    /// A copied picture (a screenshot, an image from a browser) in the
+    /// pasteboard's own encoding: PNG, else TIFF.
+    Image { data: Vec<u8>, png: bool },
+}
+/// Main thread, once per paste. Files win over picture data: a file copied
+/// in Finder also carries its icon as a picture.
+pub fn pasteboard_media() -> Option<PastedMedia> {
+    read_media(&paste_board())
+}
+pub(crate) enum AgentPaste {
+    Files(Vec<PathBuf>),
+    Image { board: String, change_count: isize },
+}
+impl AgentPaste {
+    pub(crate) fn into_media(self) -> Result<PastedMedia, String> {
+        match self {
+            Self::Files(paths) => Ok(PastedMedia::Files(paths)),
+            Self::Image {
+                board,
+                change_count,
+            } => objc2::rc::autoreleasepool(|_| {
+                let board = NSPasteboard::pasteboardWithName(&NSString::from_str(&board));
+                let changed =
+                    || "The clipboard changed before the image could be attached.".to_owned();
+                if board.changeCount() != change_count {
+                    return Err(changed());
+                }
+                let (data, png) =
+                    pasteboard_picture(&board).ok_or("The pasted image could not be read.")?;
+                let data = data.to_vec();
+                if board.changeCount() != change_count {
+                    return Err(changed());
+                }
+                Ok(PastedMedia::Image { data, png })
+            }),
+        }
+    }
+}
+
+/// Agent paste accepts copied pictures/files and existing textual file paths.
+pub(crate) fn agent_pasteboard() -> Option<AgentPaste> {
+    let board = paste_board();
+    let files = pasteboard_files(&board);
+    if !files.is_empty() {
+        return Some(AgentPaste::Files(files));
+    }
+    // Read only type metadata here. A clipboard owner can provide its image
+    // lazily, so loading the actual PNG/TIFF must stay on the worker.
+    let change_count = board.changeCount();
+    let image = board.types().is_some_and(|types| {
+        let (png, tiff) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeTIFF) };
+        types.iter().any(|kind| &*kind == png || &*kind == tiff)
+    });
+    if image {
+        return Some(AgentPaste::Image {
+            board: board.name().to_string(),
+            change_count,
+        });
+    }
+    let text = board.stringForType(unsafe { NSPasteboardTypeString })?;
+    crate::media::agent_pasted_path(&text.to_string()).map(|p| AgentPaste::Files(vec![p]))
+}
+fn pasteboard_files(board: &NSPasteboard) -> Vec<PathBuf> {
+    objc2::rc::autoreleasepool(|_| {
+        board
+            .pasteboardItems()
+            .iter()
+            .flat_map(|items| items.iter())
+            .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+            .filter_map(|url| objc2_foundation::NSURL::URLWithString(&url)?.path())
+            .map(|path| PathBuf::from(path.to_string()))
+            .collect()
+    })
+}
+fn pasteboard_picture(board: &NSPasteboard) -> Option<(Retained<NSData>, bool)> {
+    let picture = |kind, png| {
+        board
+            .dataForType(kind)
+            .filter(|data| !data.is_empty())
+            .map(|data| (data, png))
+    };
+    picture(unsafe { NSPasteboardTypePNG }, true)
+        .or_else(|| picture(unsafe { NSPasteboardTypeTIFF }, false))
+}
+fn read_media(board: &NSPasteboard) -> Option<PastedMedia> {
+    let files = pasteboard_files(board);
+    if !files.is_empty() {
+        return Some(PastedMedia::Files(files));
+    }
+    pasteboard_picture(board).map(|(data, png)| PastedMedia::Image {
+        data: data.to_vec(),
+        png,
+    })
+}
+/// A copied TIFF as the PNG the importer keeps. Any thread: the image is
+/// decoded and encoded by its own bitmap object.
+pub fn tiff_to_png(tiff: &[u8]) -> Option<Vec<u8>> {
+    let rep = NSBitmapImageRep::imageRepWithData(&objc2_foundation::NSData::with_bytes(tiff))?;
+    // SAFETY: an empty properties dictionary; the result is copied out.
+    let png = unsafe {
+        rep.representationUsingType_properties(
+            NSBitmapImageFileType::PNG,
+            &objc2_foundation::NSDictionary::new(),
+        )
+    }?;
+    Some(png.to_vec())
+}
+
+/// Whether Paste can handle the system clipboard without reading image bytes.
+/// Live: a menu that offers Paste asks as it opens.
+pub fn has_pasteboard_content() -> bool {
+    content_on(&paste_board())
+}
+fn content_on(board: &NSPasteboard) -> bool {
+    let (files_or_images, html) = advertised(board);
+    files_or_images || html && figma_html(board)
+}
+
+/// The same answer for the menus' state, which is asked on every frame the
+/// window draws. Which types the pasteboard advertises is kept by its change
+/// count (resolving them goes through LaunchServices); the HTML itself is
+/// read every time it decides, since a writer can replace it without the
+/// count moving (PM-698 review).
+pub fn has_pasteboard_content_per_frame() -> bool {
+    content_per_frame_on(paste_board())
+}
+fn content_per_frame_on(board: Retained<NSPasteboard>) -> bool {
+    thread_local! {
+        static KNOWN: std::cell::RefCell<Option<(Retained<NSPasteboard>, isize, (bool, bool))>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let count = board.changeCount();
+    let known = KNOWN.with(|k| {
+        k.borrow()
+            .as_ref()
+            .filter(|(b, c, _)| Retained::as_ptr(b) == Retained::as_ptr(&board) && *c == count)
+            .map(|(_, _, types)| *types)
+    });
+    let (files_or_images, html) = known.unwrap_or_else(|| {
+        let types = advertised(&board);
+        KNOWN.with(|k| *k.borrow_mut() = Some((board.clone(), count, types)));
+        types
+    });
+    files_or_images || html && figma_html(&board)
+}
+
+/// Whether the pasteboard advertises a file, a PNG or a TIFF, and HTML.
+fn advertised(board: &NSPasteboard) -> (bool, bool) {
+    let types = objc2_foundation::NSArray::from_slice(&unsafe {
+        [
+            NSPasteboardTypeFileURL,
+            NSPasteboardTypePNG,
+            NSPasteboardTypeTIFF,
+        ]
+    });
+    let html = objc2_foundation::NSArray::from_slice(&unsafe { [NSPasteboardTypeHTML] });
+    (
+        board.availableTypeFromArray(&types).is_some(),
+        board.availableTypeFromArray(&html).is_some(),
+    )
+}
+
+/// HTML a Figma copy leaves (its marker), read now.
+fn figma_html(board: &NSPasteboard) -> bool {
+    board
+        .stringForType(unsafe { NSPasteboardTypeHTML })
+        .is_some_and(|html| html.to_string().contains("(figma)"))
+}
+
+/// The pasteboard's HTML and PNG, for Figma paste. Main thread: the
+/// pasteboard is read where AppKit expects it, once per paste.
+pub fn pasteboard_figma() -> Option<(String, Option<Vec<u8>>)> {
+    let board = paste_board();
+    let html = board
+        .stringForType(unsafe { NSPasteboardTypeHTML })?
+        .to_string();
+    if !html.contains("(figma)") {
+        return None;
+    }
+    let png = board
+        .dataForType(unsafe { NSPasteboardTypePNG })
+        .map(|data| data.to_vec());
+    Some((html, png))
+}
+
+/// Files for the Agent panel's Add Attachments.
+pub fn attach_paths(window: &NSWindow) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, false, true, &[], "Attach")
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static REVIEW_ANSWER: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Development builds: the next open panel answers `paths` without showing.
+/// The system panel takes no background input, so on-screen reviews of
+/// Import, Locate File… and the rest choose their files here.
+#[cfg(debug_assertions)]
+pub fn answer_next_open_panel(paths: Vec<PathBuf>) {
+    REVIEW_ANSWER.with(|a| *a.borrow_mut() = Some(paths));
+}
+
+/// An open panel sheet whose default button reads `prompt`.
+pub fn choose_paths(
+    window: &NSWindow,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+    prompt: &str,
+) -> async_channel::Receiver<Vec<PathBuf>> {
+    open_panel(window, !folders, folders, multiple, extensions, prompt)
+}
+#[derive(Debug, PartialEq)]
+enum ContentType<'a> {
+    Extension(&'a str),
+    Identifier(&'static str),
+}
+/// The types an open panel lets a person choose: files of `extensions`,
+/// and folders when it takes folders. Restricted to file types alone, the
+/// panel only opens a folder (Import goes into it) instead of choosing it.
+fn content_types<'a>(extensions: &[&'a str], folders: bool) -> Vec<ContentType<'a>> {
+    let mut types: Vec<ContentType<'a>> = extensions
+        .iter()
+        .map(|e| ContentType::Extension(e))
+        .collect();
+    if folders && !types.is_empty() {
+        types.push(ContentType::Identifier("public.folder"));
+    }
+    types
+}
+
+#[cfg(test)]
+mod open_panel_tests {
+    use super::{ContentType, content_types};
+    #[test]
+    fn model_extensions_reach_the_native_open_panel() {
+        let extensions = pm_builtins::media_import::extensions();
+        let types = content_types(&extensions, false);
+        for &extension in pm_scene3d::import::path::EXTENSIONS {
+            assert!(types.contains(&ContentType::Extension(extension)));
+        }
+    }
+    /// Import Media's panel takes media files and folders: a folder stays
+    /// choosable among the media types (else Import opens it), and a panel
+    /// for files alone lists file types only.
+    #[test]
+    fn a_panel_that_takes_folders_lets_a_folder_be_chosen() {
+        assert_eq!(
+            content_types(&["png", "mov"], true),
+            [
+                ContentType::Extension("png"),
+                ContentType::Extension("mov"),
+                ContentType::Identifier("public.folder")
+            ]
+        );
+        assert_eq!(
+            content_types(&["png"], false),
+            [ContentType::Extension("png")]
+        );
+        // No type filter at all: anything (folders included) is choosable.
+        assert!(content_types(&[], true).is_empty());
+    }
+}
+
+fn open_panel(
+    window: &NSWindow,
+    files: bool,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+    prompt: &str,
+) -> async_channel::Receiver<Vec<PathBuf>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSArray;
+    let (tx, rx) = async_channel::bounded(1);
+    #[cfg(debug_assertions)]
+    if let Some(paths) = REVIEW_ANSWER.with(|a| a.borrow_mut().take()) {
+        let _ = tx.try_send(paths);
+        return rx;
+    }
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(files);
+    panel.setCanChooseDirectories(folders);
+    panel.setAllowsMultipleSelection(multiple);
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    panel.setCanCreateDirectories(folders && !files);
+    let types: Vec<Retained<AnyObject>> = content_types(extensions, folders)
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            match kind {
+                ContentType::Extension(extension) => {
+                    let extension = NSString::from_str(extension);
+                    msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*extension]
+                }
+                ContentType::Identifier(identifier) => {
+                    let identifier = NSString::from_str(identifier);
+                    msg_send![objc2::class!(UTType), typeWithIdentifier: &*identifier]
+                }
+            }
+        })
+        .collect();
+    if !types.is_empty() {
+        let types = NSArray::from_retained_slice(&types);
+        unsafe {
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+    }
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let paths = if result == NSModalResponseOK {
+            retained
+                .URLs()
+                .iter()
+                .filter_map(|url| url.path())
+                .map(|path| PathBuf::from(path.to_string()))
+                .collect()
+        } else {
+            vec![]
+        };
+        let _ = tx.try_send(paths);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
+
+/// This process's bundle identifier; none for a bare binary.
+pub fn bundle_id() -> Option<String> {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+}
+
+/// Layer 5: native macOS open panel for v4 extensions (`dialogs.openFolder`,
+/// `dialogs.openFiles`) supporting custom title, message, default directory,
+/// hidden files, multiple selection, and file extension filters.
+#[allow(clippy::too_many_arguments)]
+pub fn ext_open_dialog(
+    window: &NSWindow,
+    files: bool,
+    folders: bool,
+    multiple: bool,
+    show_hidden: bool,
+    extensions: &[String],
+    title: Option<&str>,
+    message: Option<&str>,
+    default_path: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<Vec<PathBuf>>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSArray;
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(files);
+    panel.setCanChooseDirectories(folders);
+    panel.setAllowsMultipleSelection(multiple);
+    panel.setCanCreateDirectories(folders);
+    panel.setShowsHiddenFiles(show_hidden);
+    if let Some(title) = title.filter(|s| !s.is_empty()) {
+        panel.setTitle(Some(&NSString::from_str(title)));
+    }
+    if let Some(message) = message.filter(|s| !s.is_empty()) {
+        panel.setMessage(Some(&NSString::from_str(message)));
+    }
+    start_in(&panel, default_path);
+    let ext_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let types: Vec<Retained<AnyObject>> = content_types(&ext_refs, folders)
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            match kind {
+                ContentType::Extension(extension) => {
+                    let extension = NSString::from_str(extension);
+                    msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*extension]
+                }
+                ContentType::Identifier(identifier) => {
+                    let identifier = NSString::from_str(identifier);
+                    msg_send![objc2::class!(UTType), typeWithIdentifier: &*identifier]
+                }
+            }
+        })
+        .collect();
+    if !types.is_empty() {
+        let types = NSArray::from_retained_slice(&types);
+        unsafe {
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+    }
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let paths = (result == NSModalResponseOK).then(|| {
+            retained
+                .URLs()
+                .iter()
+                .filter_map(|url| url.path())
+                .map(|path| PathBuf::from(path.to_string()))
+                .collect()
+        });
+        let _ = tx.try_send(paths);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
+
+/// Layer 5: native macOS save panel for v4 extensions (`dialogs.saveFile`).
+pub fn ext_save_dialog(
+    window: &NSWindow,
+    title: Option<&str>,
+    message: Option<&str>,
+    default_path: Option<&std::path::Path>,
+    default_name: Option<&str>,
+    extensions: &[String],
+) -> async_channel::Receiver<Option<PathBuf>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSArray;
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setCanCreateDirectories(true);
+    if let Some(title) = title.filter(|s| !s.is_empty()) {
+        panel.setTitle(Some(&NSString::from_str(title)));
+    }
+    if let Some(message) = message.filter(|s| !s.is_empty()) {
+        panel.setMessage(Some(&NSString::from_str(message)));
+    }
+    if let Some(name) = default_name.filter(|s| !s.is_empty()) {
+        panel.setNameFieldStringValue(&NSString::from_str(name));
+    }
+    start_in(&panel, default_path);
+    let types: Vec<Retained<AnyObject>> = extensions
+        .iter()
+        .filter_map(|ext| unsafe {
+            let ext = NSString::from_str(ext);
+            msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*ext]
+        })
+        .collect();
+    if !types.is_empty() {
+        let types = NSArray::from_retained_slice(&types);
+        unsafe {
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+    }
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|url| url.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let _ = tx.try_send(path);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
+/// The `UTType` of a file, read from the file itself.
+fn content_type(path: &std::path::Path) -> Option<Retained<objc2::runtime::AnyObject>> {
+    use objc2_foundation::{NSArray, NSURL, NSURLContentTypeKey};
+    let url = NSURL::from_file_path(path)?;
+    let keys = NSArray::from_slice(&[unsafe { NSURLContentTypeKey }]);
+    let values = url.resourceValuesForKeys_error(&keys).ok()?;
+    values.objectForKey(unsafe { NSURLContentTypeKey })
+}
+/// Whether `kind` is an image, movie or sound and nothing that runs.
+fn media_type(kind: &objc2::runtime::AnyObject) -> bool {
+    use objc2::{msg_send, runtime::Bool};
+    let conforms = |identifier: &str| -> bool {
+        let identifier = NSString::from_str(identifier);
+        let other: Option<Retained<objc2::runtime::AnyObject>> =
+            unsafe { msg_send![objc2::class!(UTType), typeWithIdentifier: &*identifier] };
+        other.is_some_and(|other| {
+            let yes: Bool = unsafe { msg_send![kind, conformsToType: &*other] };
+            yes.as_bool()
+        })
+    };
+    ["public.image", "public.movie", "public.audio"]
+        .iter()
+        .any(|t| conforms(t))
+        && ![
+            "public.executable",
+            "com.apple.application",
+            "com.apple.bundle",
+            "public.directory",
+        ]
+        .iter()
+        .any(|t| conforms(t))
+}
+/// A file an agent's reply names, made safe to show: every link resolved, a
+/// regular file with no execute bit, whose own content type (read from the
+/// resolved file, not the name the reply wrote) is an image, movie or sound.
+/// Disk and Launch Services work: never on the main thread.
+pub fn media_document(path: &std::path::Path) -> Result<PathBuf, &'static str> {
+    objc2::rc::autoreleasepool(|_| {
+        use std::os::unix::fs::PermissionsExt;
+        const MOVED: &str = "That file couldn’t be found. It may have moved.";
+        const REFUSED: &str = "That file isn’t an image, video or sound, so it wasn’t opened.";
+        let resolved = std::fs::canonicalize(path).map_err(|_| MOVED)?;
+        let metadata = std::fs::symlink_metadata(&resolved).map_err(|_| MOVED)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 != 0 {
+            return Err(REFUSED);
+        }
+        match content_type(&resolved) {
+            Some(kind) if media_type(&kind) => Ok(resolved),
+            _ => Err(REFUSED),
+        }
+    })
+}
+/// Opens a checked media file ([`media_document`]) as a document in the
+/// default viewer for its content type, never through a URL Launch Services
+/// could run as an app.
+pub fn open_document(path: &std::path::Path) -> bool {
+    objc2::rc::autoreleasepool(|_| {
+        use objc2::msg_send;
+        use objc2_foundation::{NSArray, NSURL};
+        let (Some(url), Some(kind)) = (NSURL::from_file_path(path), content_type(path)) else {
+            return false;
+        };
+        let workspace = NSWorkspace::sharedWorkspace();
+        let viewer: Option<Retained<NSURL>> =
+            unsafe { msg_send![&*workspace, URLForApplicationToOpenContentType: &*kind] };
+        let Some(viewer) = viewer else {
+            return false;
+        };
+        let configuration = NSWorkspaceOpenConfiguration::configuration();
+        workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+            &NSArray::from_retained_slice(&[url]),
+            &viewer,
+            &configuration,
+            None,
+        );
+        true
+    })
+}
+/// Selects `path` in Finder.
+pub fn reveal(path: &std::path::Path) {
+    objc2::rc::autoreleasepool(|_| {
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::{NSArray, NSURL};
+        if let Some(url) = NSURL::from_file_path(path) {
+            NSWorkspace::sharedWorkspace()
+                .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+        }
+    })
+}
+pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
+    pm_shell::history_titles(undo, redo);
+}
+
+// Preserve GPUI's existing application delegate while intercepting termination
+// before its non-cancellable shutdown callback. All other selectors forward.
+use objc2::{
+    DefinedClass, define_class, msg_send,
+    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
+};
+use std::cell::Cell;
+pub struct QuitState {
+    previous: Retained<ProtocolObject<dyn NSApplicationDelegate>>,
+    sender: async_channel::Sender<()>,
+    allowed: Cell<bool>,
+    /// Quit Apple Events waiting for the quit's outcome (suspension ids).
+    suspended: std::cell::RefCell<Vec<usize>>,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMNativeQuitDelegate"]
+    #[ivars = QuitState]
+    pub struct QuitDelegate;
+    unsafe impl NSObjectProtocol for QuitDelegate {
+        #[unsafe(method(respondsToSelector:))]
+        fn responds_to_selector(&self, selector: Sel) -> bool {
+            // Advertise our Apple Event handler as well as GPUI’s methods;
+            // otherwise Objective-C capability checks hide the quit route.
+            selector == objc2::sel!(applicationShouldTerminate:)
+                || selector == objc2::sel!(handleQuitEvent:withReplyEvent:)
+                || unsafe { msg_send![&*self.ivars().previous, respondsToSelector: selector] }
+        }
+    }
+    unsafe impl NSApplicationDelegate for QuitDelegate {
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _: &NSApplication) -> NSApplicationTerminateReply {
+            if self.ivars().allowed.get() { NSApplicationTerminateReply::TerminateNow }
+            else { let _=self.ivars().sender.try_send(()); NSApplicationTerminateReply::TerminateCancel }
+        }
+    }
+    impl QuitDelegate {
+        /// The Quit Apple Event (Dock, Activity Monitor, `osascript … quit`,
+        /// logout). AppKit drops it while a window shows a sheet, so a hung
+        /// extension's D11 sheet would hold the app open; the event goes to
+        /// the quit coordinator directly instead, which ends that sheet.
+        #[unsafe(method(handleQuitEvent:withReplyEvent:))]
+        fn handle_quit_event(&self, _event: *mut AnyObject, _reply: *mut AnyObject) {
+            if self.ivars().allowed.get() {
+                let mtm = MainThreadMarker::new().unwrap();
+                NSApplication::sharedApplication(mtm).terminate(None);
+                return;
+            }
+            // The sender hears the outcome: quit, or cancelled (-128) when the
+            // person cancels a save prompt (`QuitDelegate::resolve_quit_events`).
+            let id: *mut Suspension =
+                unsafe { msg_send![apple_events(), suspendCurrentAppleEvent] };
+            if !id.is_null() {
+                self.ivars().suspended.borrow_mut().push(id as usize);
+            }
+            let _ = self.ivars().sender.try_send(());
+        }
+        #[unsafe(method(forwardingTargetForSelector:))]
+        fn forward(&self, _: Sel) -> *const AnyObject {
+            &*self.ivars().previous as *const _ as *const AnyObject
+        }
+    }
+);
+pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    let (sender, rx) = async_channel::bounded(1);
+    let previous = app.delegate().expect("GPUI application delegate");
+    let this = QuitDelegate::alloc(mtm).set_ivars(QuitState {
+        previous,
+        sender,
+        allowed: Cell::new(false),
+        suspended: Default::default(),
+    });
+    let guard: Retained<QuitDelegate> = unsafe { objc2::msg_send![super(this), init] };
+    app.setDelegate(Some(ProtocolObject::from_ref(&*guard)));
+    // kCoreEventClass 'aevt', kAEQuitApplication 'quit'.
+    const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
+    const QUIT_APPLICATION: u32 = u32::from_be_bytes(*b"quit");
+    unsafe {
+        let manager = apple_events();
+        let _: () = msg_send![
+            manager,
+            setEventHandler: &*guard,
+            andSelector: objc2::sel!(handleQuitEvent:withReplyEvent:),
+            forEventClass: CORE_EVENT_CLASS,
+            andEventID: QUIT_APPLICATION
+        ];
+    }
+    (guard, rx)
+}
+impl QuitDelegate {
+    /// Quit Powermove or Cmd-Q (`pm_shell::native::set_quit_hook`): to the
+    /// quit coordinator like the Quit Apple Event, with or without a sheet;
+    /// once the quit is allowed, the app terminates.
+    pub fn chosen(&self) {
+        if self.ivars().allowed.get() {
+            let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).terminate(None);
+            return;
+        }
+        let _ = self.ivars().sender.try_send(());
+    }
+    pub fn allow(&self) {
+        self.ivars().allowed.set(true);
+    }
+    /// Answers the Quit Apple Events the quit kept waiting: success, or the
+    /// user-cancelled error (-128) when the quit was cancelled.
+    pub fn resolve_quit_events(&self, cancelled: bool) {
+        const ERROR_NUMBER: u32 = u32::from_be_bytes(*b"errn");
+        const USER_CANCELED: i32 = -128;
+        for id in self.ivars().suspended.borrow_mut().drain(..) {
+            let id = id as *mut Suspension;
+            unsafe {
+                let manager = apple_events();
+                if cancelled {
+                    let reply: *mut AnyObject =
+                        msg_send![manager, replyAppleEventForSuspensionID: id];
+                    let error: *mut AnyObject = msg_send![
+                        objc2::class!(NSAppleEventDescriptor),
+                        descriptorWithInt32: USER_CANCELED
+                    ];
+                    if !reply.is_null() && !error.is_null() {
+                        let _: () =
+                            msg_send![reply, setParamDescriptor: error, forKeyword: ERROR_NUMBER];
+                    }
+                }
+                let _: () = msg_send![manager, resumeWithSuspensionID: id];
+            }
+        }
+    }
+}
+/// `NSAppleEventManagerSuspensionID`. Debug builds check message encodings,
+/// and a plain `void *` made every Quit Apple Event (Dock, logout) abort.
+#[repr(C)]
+pub struct Suspension {
+    _opaque: [u8; 0],
+}
+unsafe impl objc2::RefEncode for Suspension {
+    const ENCODING_REF: objc2::Encoding = objc2::Encoding::Pointer(&objc2::Encoding::Struct(
+        "__NSAppleEventManagerSuspension",
+        &[],
+    ));
+}
+fn apple_events() -> *mut AnyObject {
+    unsafe { msg_send![objc2::class!(NSAppleEventManager), sharedAppleEventManager] }
+}
+
+/// PNG sequences choose a parent directory; publication owns a fresh child
+/// folder, so existing frames are never overwritten.
+/// Development builds only: `--save-dir <dir>` (`PM_NATIVE_REVIEW_SAVE_DIR`)
+/// answers the export destination with `<dir>/<suggested name>` and shows no
+/// panel. The save panel runs out of process, so background review checks
+/// can't drive it; this lets them prove the sheet, render and file end to end.
+fn review_destination(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("PM_NATIVE_REVIEW_SAVE_DIR").filter(|_| cfg!(debug_assertions))?;
+    let name = PathBuf::from(name).file_name()?.to_owned();
+    Some(PathBuf::from(dir).join(name))
+}
+/// Development review launches choose export destinations without a panel.
+pub fn reviewing_saves() -> bool {
+    review_destination("x").is_some()
+}
+thread_local! {
+    /// Where this session last exported to.
+    static LAST_EXPORT_FOLDER: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+pub fn last_export_folder() -> Option<PathBuf> {
+    LAST_EXPORT_FOLDER.with(|last| last.borrow().clone())
+}
+/// Remembers where an export went, for the next one's panel.
+pub fn exported_to(destination: &std::path::Path) {
+    if let Some(folder) = destination.parent() {
+        LAST_EXPORT_FOLDER.with(|l| *l.borrow_mut() = Some(folder.to_path_buf()));
+    }
+}
+fn start_in(panel: &NSSavePanel, folder: Option<&std::path::Path>) {
+    if let Some(folder) = folder {
+        let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&folder.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+    }
+}
+pub fn export_destination_in(
+    window: &NSWindow,
+    folder: bool,
+    name: &str,
+    directory: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<PathBuf>> {
+    if let Some(path) = review_destination(name) {
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(Some(path));
+        return rx;
+    }
+    if !folder {
+        return paths_named_in(window, true, name, directory);
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setCanCreateDirectories(true);
+    start_in(&panel, directory);
+    let retained = panel.clone();
+    // The suggestion is authored by the Export model, never a pathname.
+    let name = PathBuf::from(name).file_name().map(|s| s.to_owned());
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let path = path
+            .zip(name.clone())
+            .map(|(parent, name)| parent.join(name));
+        let _ = tx.try_send(path);
+    });
+    begin_panel(&panel, &sheet_host(window), done);
+    rx
+}
+
+/// The AppKit window behind a GPUI window (a panel's own window, for sheets).
+pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    let view: Retained<objc2_app_kit::NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast())? };
+    view.window()
+}
+
+#[cfg(test)]
+mod signal_tests {
+    #[test]
+    fn a_stray_sigusr1_or_sigusr2_does_not_end_the_app() {
+        super::ignore_user_signals();
+        // SAFETY: raising a signal whose handler was just installed.
+        unsafe {
+            assert_eq!(libc::raise(libc::SIGUSR1), 0);
+            assert_eq!(libc::raise(libc::SIGUSR2), 0);
+        }
+        // Still here. A child gets the default back at exec.
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "kill -USR1 $$; sleep 1"])
+            .status()
+            .unwrap();
+        assert!(!status.success(), "the default action ends the child");
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::{AgentPaste, PastedMedia, read_media, text_clipboard_on, tiff_to_png};
+    /// An extension's `navigator.clipboard` text reaches the pasteboard and
+    /// comes back, from a thread of its own as the realm calls it.
+    #[test]
+    fn an_extensions_clipboard_text_goes_through_the_pasteboard() {
+        let name = "com.powermove.tests.paste.extension-text".to_owned();
+        let clipboard = text_clipboard_on(Some(name.clone()));
+        std::thread::spawn(move || {
+            clipboard(Some("cubic-bezier(0.25, 0.1, 0.25, 1)")).unwrap();
+            assert_eq!(clipboard(None).unwrap(), "cubic-bezier(0.25, 0.1, 0.25, 1)");
+        })
+        .join()
+        .unwrap();
+        let board = board("extension-text");
+        assert_eq!(
+            board
+                .stringForType(unsafe { NSPasteboardTypeString })
+                .map(|s| s.to_string()),
+            None,
+            "board() clears it"
+        );
+        assert_eq!(text_clipboard_on(Some(name))(None).unwrap(), "");
+    }
+    use objc2_app_kit::*;
+    use objc2_foundation::{NSData, NSString, NSURL};
+    /// A pasteboard of the tests' own: the person's clipboard is never touched.
+    fn board(name: &str) -> objc2::rc::Retained<NSPasteboard> {
+        let name = format!("com.powermove.tests.paste.{name}");
+        let board = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
+        board.clearContents();
+        board
+    }
+    /// PM-698 review: a writer that keeps the pasteboard can replace its HTML
+    /// without the change count moving. The menus' per-frame answer keeps only
+    /// which types are there, so Paste follows a Figma copy both ways.
+    #[test]
+    fn paste_follows_html_replaced_without_a_new_change_count() {
+        let html = board("figma-html");
+        let kind = unsafe { NSPasteboardTypeHTML };
+        html.setString_forType(&NSString::from_str("<p>words</p>"), kind);
+        assert!(!super::content_on(&html));
+        assert!(!super::content_per_frame_on(html.clone()));
+        let count = html.changeCount();
+        // The same owner puts Figma's HTML there.
+        html.setString_forType(&NSString::from_str("<!--(figma)meta--><p>frame</p>"), kind);
+        // The case the review found: same owner, same count, other HTML.
+        assert_eq!(html.changeCount(), count);
+        assert!(super::content_on(&html));
+        assert!(
+            super::content_per_frame_on(html.clone()),
+            "count {count} -> {}",
+            html.changeCount()
+        );
+        // And back to plain HTML.
+        html.setString_forType(&NSString::from_str("<p>words again</p>"), kind);
+        assert!(!super::content_per_frame_on(html.clone()));
+        assert!(!super::content_on(&html));
+        // A picture decides without reading the HTML.
+        html.clearContents();
+        let png = crate::mcp_services::png(&[10, 20, 30, 255], 1, 1).unwrap();
+        html.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
+            NSPasteboardTypePNG
+        });
+        assert!(super::content_per_frame_on(html.clone()));
+        html.clearContents();
+        assert!(!super::content_per_frame_on(html.clone()));
+    }
+    #[test]
+    fn paste_reads_copied_files_then_a_copied_picture_and_nothing_from_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("A clip.mov");
+        std::fs::write(&clip, b"x").unwrap();
+        let png = crate::mcp_services::png(&[10, 20, 30, 255], 1, 1).unwrap();
+
+        // Text only (what copying layers leaves): nothing for the importer.
+        let text = board("text");
+        text.setString_forType(&NSString::from_str("Box"), unsafe {
+            NSPasteboardTypeString
+        });
+        assert_eq!(read_media(&text), None);
+
+        // A screenshot or a copied image: its PNG as it is.
+        let shot = board("picture");
+        shot.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
+            NSPasteboardTypePNG
+        });
+        let image = AgentPaste::Image {
+            board: shot.name().to_string(),
+            change_count: shot.changeCount(),
+        };
+        assert_eq!(
+            std::thread::spawn(move || image.into_media()).join().unwrap(),
+            Ok(PastedMedia::Image {
+                data: png.clone(),
+                png: true
+            })
+        );
+        assert_eq!(
+            read_media(&shot),
+            Some(PastedMedia::Image {
+                data: png.clone(),
+                png: true
+            })
+        );
+
+        // An app that copies TIFF only: converted to a PNG of the same size.
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&png)).unwrap();
+        let tiff = rep.TIFFRepresentation().unwrap().to_vec();
+        let tiff_only = board("tiff");
+        tiff_only.setData_forType(Some(&NSData::with_bytes(&tiff)), unsafe {
+            NSPasteboardTypeTIFF
+        });
+        let Some(PastedMedia::Image { data, png: false }) = read_media(&tiff_only) else {
+            panic!("the TIFF is read")
+        };
+        let converted = tiff_to_png(&data).expect("the TIFF converts");
+        assert_eq!(&converted[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(tiff_to_png(b"not a picture"), None);
+
+        // A file copied in Finder carries its icon too: the file wins.
+        let finder = board("files");
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&clip.to_string_lossy()));
+        finder.setString_forType(&url.absoluteString().unwrap(), unsafe {
+            NSPasteboardTypeFileURL
+        });
+        finder.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
+            NSPasteboardTypePNG
+        });
+        assert_eq!(
+            read_media(&finder),
+            Some(PastedMedia::Files(vec![clip.clone()]))
+        );
+        for board in [text, shot, tiff_only, finder] {
+            board.clearContents();
+        }
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::media_document;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    #[test]
+    fn a_reply_path_opens_only_a_real_media_file_never_what_a_link_points_at_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |name: &str, bytes: &[u8], mode: u32| {
+            let path = root.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let png = write("still.png", b"\x89PNG\r\n\x1a\n", 0o644);
+        let script = write("run.sh", b"#!/bin/sh\necho hi\n", 0o755);
+        let text = write("notes.txt", b"hello", 0o644);
+        write("marked.png", b"\x89PNG\r\n\x1a\n", 0o755);
+        let app = root.join("Fake.app/Contents/MacOS");
+        std::fs::create_dir_all(&app).unwrap();
+        write("Fake.app/Contents/MacOS/Fake", b"#!/bin/sh\n", 0o755);
+        std::fs::create_dir_all(root.join("folder.png")).unwrap();
+        for (name, target) in [
+            ("preview.png", png.clone()),
+            ("app.png", root.join("Fake.app")),
+            ("tool.png", script.clone()),
+            ("words.png", text.clone()),
+            ("chain.png", root.join("preview.png")),
+        ] {
+            symlink(&target, root.join(name)).unwrap();
+        }
+        assert_eq!(media_document(&png), Ok(png.clone()));
+        // A link (or a chain of them) opens the file it resolves to.
+        assert_eq!(media_document(&root.join("preview.png")), Ok(png.clone()));
+        assert_eq!(media_document(&root.join("chain.png")), Ok(png.clone()));
+        // The name says .png; what it resolves to decides.
+        for refused in [
+            "app.png",
+            "tool.png",
+            "words.png",
+            "marked.png",
+            "folder.png",
+            "Fake.app",
+        ] {
+            assert_eq!(
+                media_document(&root.join(refused)),
+                Err("That file isn’t an image, video or sound, so it wasn’t opened."),
+                "{refused}"
+            );
+        }
+        assert!(media_document(&root.join("gone.png")).is_err());
+    }
+}
+
+/// Bounces the Dock icon once when Powermove isn't the active app (a long
+/// export finishing in the background); nothing when it is.
+pub fn request_attention() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if !app.isActive() {
+        app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+    }
+}
+
+#[cfg(test)]
+mod export_start_tests {
+    /// An export starts beside the project's file, else where the last one
+    /// went, else in Movies; never in the last import's folder (PM-491).
+    #[test]
+    fn an_export_starts_beside_the_project_then_the_last_export_then_movies() {
+        let root = tempfile::tempdir().unwrap();
+        let (project, last, movies) = (
+            root.path().join("Projects"),
+            root.path().join("Exports"),
+            root.path().join("Movies"),
+        );
+        for d in [&project, &last, &movies] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let file = project.join("Paper.pmv");
+        let start = |file: Option<&std::path::Path>, last: Option<std::path::PathBuf>| {
+            crate::document_paths::export_directory(root.path(), file, None, last.as_deref())
+        };
+        assert_eq!(start(Some(&file), Some(last.clone())), project.clone());
+        assert_eq!(start(None, Some(last.clone())), last.clone());
+        assert_eq!(start(None, None), movies.clone());
+    }
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    /// Only a release build that no lane launched opens a URL; a development
+    /// or lane build says what it would have opened (the owner's browser
+    /// opened on the real cloud from a lane, 2026-11-25).
+    #[test]
+    fn a_lane_or_development_build_never_opens_a_url() {
+        assert!(!super::opens_urls(true, false));
+        assert!(!super::opens_urls(false, true));
+        assert!(!super::opens_urls(true, true));
+        assert!(super::opens_urls(false, false));
+        // This test binary is a development build: nothing opens.
+        assert!(super::open_url("https://example.com/never-opened"));
+    }
+}

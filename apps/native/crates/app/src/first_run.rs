@@ -1,0 +1,2486 @@
+//! First launch: which path this launch takes, the migration worker, consent,
+//! outcomes and onboarding. `Flow` is the whole state machine and owns no thread
+//! or window, so every path is tested on synthetic profiles. `drive` runs it.
+//!
+//! Decisions: the app shares `pm_first_launch::default_paths` with the coordinator;
+//! a clean outcome goes straight to the editor, because the normal path takes no
+//! click. The full-screen migration shows once, on the launch that imports. A
+//! later launch never waits on the original app and shows no window for it
+//! (`pm_first_launch::later` holds the rule); newer work there comes in only
+//! when the person asks, with its progress in this window.
+use crate::extension_transfer::Update;
+use anyhow::Result;
+use pm_first_launch::{
+    Config, DeltaPrepared, Event, KeychainDenied, Launch, LowDisk, Outcome, ProfileRefused, Step,
+    later, onboarding_completed,
+    secrets::MacKeychain,
+    source_access::{self, Activity, Choice as FolderChoice},
+    surfaces::{
+        extensions::{Gate as ExtensionGate, Model as Extensions, Place},
+        migration::{Failure, Gate, Model, Report, bytes},
+    },
+};
+use pm_kernel::locks::{ElectronOwner, electron_owner};
+use pm_services::surface_backing::onboarding::{Choice as Chosen, Onboarding, Step as Onboard};
+use pm_shell::welcome::{
+    Button, Choice, Frame, Progress, Row, Severity, SignInStage, StepRow,
+};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+const APPLICATION_SUPPORT: &str = "Library/Application Support";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plan {
+    /// Absent on an override with no source: isolated dev and test profiles.
+    pub config: Option<Config>,
+    /// Original-app discovery for extensions and Storage, independent of migration.
+    pub original: Option<Config>,
+    pub profile: PathBuf,
+    pub launch: Launch,
+    pub onboard: bool,
+}
+impl Plan {
+    /// Migration keeps its isolated-profile rules. Original-app discovery also
+    /// uses the shipped folder unless a synthetic run opts out explicitly.
+    pub fn resolve(
+        profile: Option<PathBuf>,
+        electron: Option<PathBuf>,
+        home: Option<std::ffi::OsString>,
+    ) -> Option<Self> {
+        let support = home
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(APPLICATION_SUPPORT));
+        let isolated = profile.is_some();
+        let defaults = support.as_deref().map(pm_first_launch::default_paths);
+        let profile = profile.or_else(|| defaults.as_ref().map(|c| c.native_profile.clone()))?;
+        let original = Self::original_source(
+            &profile,
+            electron.clone(),
+            defaults.as_ref(),
+            std::env::var_os("PM_NATIVE_NO_ORIGINAL").as_deref() == Some(std::ffi::OsStr::new("1")),
+        );
+        let config = match (electron, isolated) {
+            (Some(electron_profile), _) => Some(Config {
+                electron_profile,
+                native_profile: profile.clone(),
+            }),
+            (None, false) => defaults,
+            (None, true) => None,
+        };
+        let launch = config
+            .as_ref()
+            .map_or(Launch::Fresh, pm_first_launch::detect);
+        // A development review may walk onboarding on an isolated profile.
+        let review =
+            cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ONBOARDING").is_some();
+        // Until this app's own onboarding finishes (its marker, never the
+        // original app's, which comes across with a copied library): a
+        // copy, or a quit in the middle of the steps, still leads to them.
+        Some(Self {
+            onboard: (!isolated || review) && !onboarding_completed(&profile),
+            config,
+            original,
+            profile,
+            launch,
+        })
+    }
+    fn original_source(
+        profile: &Path,
+        electron: Option<PathBuf>,
+        defaults: Option<&Config>,
+        disabled: bool,
+    ) -> Option<Config> {
+        if disabled {
+            return None;
+        }
+        Some(Config {
+            electron_profile: electron.or_else(|| defaults.map(|c| c.electron_profile.clone()))?,
+            native_profile: profile.to_owned(),
+        })
+    }
+    /// The original app for extension transfer and Storage; never enables migration.
+    pub fn electron(&self) -> Option<PathBuf> {
+        self.original
+            .as_ref()
+            .map(|c| c.electron_profile.clone())
+            .filter(|p| p.is_dir())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Run {
+    Ordinary,
+    WithConsent,
+    SkipConsent,
+    /// After the folder explanation: Continue (macOS then asks) or Skip These Files.
+    Folders(FolderChoice),
+}
+#[derive(Clone, Debug)]
+pub enum Finished {
+    Outcome(Outcome),
+    /// A finished copy and its report, read on the worker.
+    Ready(Outcome, Result<Report, String>),
+    Paused,
+    LowDisk(LowDisk),
+    ProfileRefused(String),
+    Denied(String),
+    Failed(Failure, String),
+}
+#[derive(Debug)]
+pub enum Message {
+    Event(Event),
+    /// A provider's sign-in changed: its line on the agent step, `None`
+    /// for not connected.
+    Account(pm_agents::Provider, Option<String>),
+    /// Who is signed in to Powermove changed (name or email), `None` for
+    /// nobody: the account step shows it.
+    Powermove(Option<String>),
+    /// The account's billing changed: Aero's plan on the agent step.
+    AeroPlan(AeroPlan),
+    /// The account step's code went out, or why it didn't (the registry's
+    /// error code: `network`, `api:rate_limited` …).
+    CodeSent(Result<(), String>),
+    /// The code was checked: the account's email, or the error code
+    /// (`api:unauthorized` wrong, `api:gone` expired, `network`).
+    Verified(Result<String, String>),
+    Finished(Finished),
+    /// The waiting original app has gone; the copy can start.
+    ElectronClosed,
+    /// Bringing in the original app's extensions (N004–N006).
+    Extensions(Update),
+    /// The requested bring-in of recent work ended.
+    Recent(RecentEnd),
+}
+/// How a requested bring-in of recent work ended.
+#[derive(Clone, Debug)]
+pub enum RecentEnd {
+    Done,
+    WaitingForElectron,
+    Failed {
+        reason: String,
+        low_disk: Option<(u64, u64)>,
+        details: String,
+    },
+}
+/// The person asked to bring in recent work (Settings › Storage or Home):
+/// it runs before the library opens, on screen.
+#[derive(Clone, Debug, PartialEq)]
+enum Recent {
+    Running {
+        step: Option<Step>,
+        progress: Option<(usize, usize)>,
+    },
+    /// The original app is open; this waits for it to quit.
+    Waiting,
+    Failed {
+        reason: String,
+        low_disk: Option<(String, String)>,
+        details: String,
+    },
+}
+/// Leaving the gate for the editor. `Enter` happens at most once per attempt.
+#[derive(Debug)]
+enum Entry {
+    Waiting,
+    Entering,
+    Failed { details: String },
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum Effect {
+    Run(Run),
+    Pause,
+    /// Watch the local original app until it quits.
+    Watch,
+    Quit,
+    ShowReport,
+    /// Stop waiting on the unanswered macOS folder prompt; those files stay offline.
+    SkipFolder,
+    /// Open the library and the editor, applying the choices if there are any.
+    Enter(Option<serde_json::Value>),
+    /// Look for original-app extensions the library doesn't have (read-only).
+    ScanExtensions,
+    /// Bring In Extensions: copy and check them on a worker.
+    RunExtensions,
+    /// Not Now: remember it, so later launches don't ask again.
+    DeclineExtensions,
+    /// Sign in to an agent's provider, as Settings › Providers does (the
+    /// provider's own sign-in, in the browser).
+    Connect(pm_agents::Provider),
+    /// Checkout for Aero's plan (this id), in the browser.
+    Subscribe(String),
+    /// The account step: email a code to this address (the sign-in sheet's
+    /// own request, `cloud::send_code`).
+    SendCode(String),
+    /// The account step: check the code, then save the session and read the
+    /// account (`cloud::verify_code`).
+    VerifyCode {
+        email: String,
+        code: String,
+    },
+    /// The action `id` after a while (the signed-in check's pause, Resend's
+    /// countdown).
+    After(Duration, &'static str),
+    /// Bring in the recent work the person asked for, before the library opens.
+    BringIn,
+    /// Open without it: the request is withdrawn.
+    WithdrawRequest,
+}
+impl From<crate::sign_in::Effect> for Effect {
+    fn from(effect: crate::sign_in::Effect) -> Self {
+        use crate::sign_in::Effect as E;
+        match effect {
+            E::SendCode(email) => Effect::SendCode(email),
+            E::VerifyCode { email, code } => Effect::VerifyCode { email, code },
+            E::After(wait, id) => Effect::After(wait, id),
+        }
+    }
+}
+/// The onboarding steps' choices so far.
+#[derive(Debug)]
+pub(crate) struct Choices {
+    pub timeline: String,
+    /// The agent's provider: `aero` is Powermove's own harness.
+    pub agent: String,
+    /// The person chose an agent on its step (else it follows the sign-ins).
+    pub agent_picked: bool,
+    /// The Powermove account's plan: what Aero's row offers on Free.
+    pub aero: AeroPlan,
+    /// Maybe Later on Aero's plan card.
+    pub offer_later: bool,
+    /// The speech models to download once the library is open, one after
+    /// another in the order asked for; none unless the person asks.
+    pub speech: Vec<String>,
+    /// `import` (bring the After Effects workspace) or `fresh`.
+    pub workspace: String,
+}
+/// Aero's plan as the account's billing has it: not read yet (or signed
+/// out), Free with the plan the backend offers (its id, name and price), or
+/// on a plan.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum AeroPlan {
+    #[default]
+    Unknown,
+    Offer {
+        id: String,
+        name: String,
+        /// `$9.99`, and the credits a month (`1,000`).
+        price: String,
+        credits: String,
+    },
+    On(String),
+}
+impl AeroPlan {
+    /// From the account fact's billing (`cloud::fact`).
+    pub(crate) fn from_fact(billing: &serde_json::Value) -> Self {
+        if billing["state"] != "ready" {
+            return Self::Unknown;
+        }
+        if billing["subscribed"] == true {
+            return billing["plan"]["name"]
+                .as_str()
+                .map_or(Self::Unknown, |name| Self::On(name.to_owned()));
+        }
+        let plan = &billing["plans"][0];
+        match (
+            plan["id"].as_str(),
+            plan["name"].as_str(),
+            plan["priceCents"].as_u64(),
+        ) {
+            (Some(id), Some(name), Some(cents)) => Self::Offer {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                price: format!("${}.{:02}", cents / 100, cents % 100),
+                credits: pm_agents::inference::grouped(plan["credits"].as_u64().unwrap_or(0)),
+            },
+            _ => Self::Unknown,
+        }
+    }
+}
+impl Choices {
+    /// The agent the step shows chosen: the person's pick; else Codex or
+    /// Claude Code when a sign-in to it already exists; else Aero.
+    pub(crate) fn agent_for(
+        &self,
+        accounts: &std::collections::BTreeMap<String, String>,
+    ) -> String {
+        if self.agent_picked {
+            return self.agent.clone();
+        }
+        ["chatgpt", "claude"]
+            .into_iter()
+            .find(|p| accounts.contains_key(*p))
+            .unwrap_or("aero")
+            .to_owned()
+    }
+}
+impl Default for Choices {
+    fn default() -> Self {
+        Self {
+            timeline: "layers".into(),
+            agent: "aero".into(),
+            agent_picked: false,
+            aero: AeroPlan::default(),
+            offer_later: false,
+            // Nothing downloads unless the person asks.
+            speech: vec![],
+            workspace: "import".into(),
+        }
+    }
+}
+pub struct Flow {
+    pub model: Model,
+    plan: Plan,
+    onboarding: Option<Onboarding>,
+    choices: Choices,
+    details: Option<String>,
+    low_disk: Option<(String, String)>,
+    report_unread: bool,
+    error: Option<String>,
+    consent_run: bool,
+    entry: Entry,
+    /// Onboarding's choices, kept so a failed attach can be tried again.
+    chosen: Option<serde_json::Value>,
+    /// The original app's extensions on offer, before the library opens.
+    extensions: Option<Extensions>,
+    /// Recent work the person asked to bring in, before the library opens.
+    recent: Option<Recent>,
+    /// The agent step's sign-ins, by provider: what each row says in place
+    /// of its Connect button.
+    accounts: std::collections::BTreeMap<String, String>,
+    /// A development review shows one frame and does nothing else
+    /// (`PM_NATIVE_REVIEW_FRAME`).
+    review: bool,
+    /// Who is signed in to Powermove (name or email), for the account step.
+    powermove: Option<String>,
+    /// The account step's email, then the code sent to it.
+    sign_in: SignInFlow,
+}
+// The account step's sign-in is `sign_in::SignInFlow`, the same as the
+// sign-in sheet's.
+use crate::sign_in::SignInFlow;
+impl Flow {
+    pub fn new(plan: Plan) -> Self {
+        let mut model = Model::default();
+        if let Some(config) = &plan.config {
+            model.electron_owner_local =
+                electron_owner(&config.electron_profile) == ElectronOwner::Local;
+        }
+        Self {
+            model,
+            onboarding: None,
+            choices: Choices::default(),
+            accounts: Default::default(),
+            review: false,
+            // Development builds: the account step as if signed in, for
+            // review (`PM_NATIVE_REVIEW_ACCOUNT=<name or email>`).
+            powermove: std::env::var("PM_NATIVE_REVIEW_ACCOUNT")
+                .ok()
+                .filter(|v| cfg!(debug_assertions) && !v.is_empty()),
+            sign_in: SignInFlow::default(),
+            details: None,
+            low_disk: None,
+            report_unread: false,
+            error: None,
+            consent_run: false,
+            entry: Entry::Waiting,
+            chosen: None,
+            extensions: None,
+            recent: None,
+            plan,
+        }
+    }
+    /// Where the launch starts.
+    pub fn start(&mut self) -> Vec<Effect> {
+        // Development builds: one first-launch frame on its own, for review
+        // (`PM_NATIVE_REVIEW_FRAME=consent|ready|low-disk|original-running|
+        // original-elsewhere|denied|library-failed`); nothing runs.
+        #[cfg(debug_assertions)]
+        if let Ok(name) = std::env::var("PM_NATIVE_REVIEW_FRAME")
+            && self.show_for_review(&name)
+        {
+            return vec![];
+        }
+        if self.plan.launch == Launch::Migrate {
+            return vec![Effect::Run(Run::Ordinary)];
+        }
+        if self.plan.onboard {
+            self.onboarding = Some(Onboarding::new(true));
+            return vec![];
+        }
+        // Asked for from Settings › Storage or Home, the launch before.
+        if self.plan.launch == Launch::Later
+            && let Some(config) = &self.plan.config
+            && later::requested(&config.native_profile)
+        {
+            if config.electron_profile.is_dir() {
+                self.recent = Some(Recent::Running {
+                    step: None,
+                    progress: None,
+                });
+                return vec![Effect::BringIn];
+            }
+            later::cancel_request(&config.native_profile);
+        }
+        // An existing library and an original app with extensions it may not
+        // have yet: look first (nothing shows unless there's something to
+        // offer). After Not Now, only Settings › Storage asks.
+        let declined = |c: &Config| {
+            pm_first_launch::extension_transfer::declined(&c.native_profile).unwrap_or(false)
+        };
+        if crate::extension_transfer::eligible(self.plan.original.as_ref())
+            .is_some_and(|c| !declined(&c))
+        {
+            return vec![Effect::ScanExtensions];
+        }
+        self.enter()
+    }
+    /// Whether this launch has a Welcome window to show.
+    pub fn visible(&self) -> bool {
+        self.review
+            || self.plan.launch == Launch::Migrate
+            || self.onboarding.is_some()
+            || self.extensions.is_some()
+            || self.recent.is_some()
+            || matches!(self.entry, Entry::Failed { .. })
+    }
+    /// Puts the flow on the named frame for review, with plausible synthetic
+    /// numbers. False for a name it doesn't know.
+    #[cfg(debug_assertions)]
+    fn show_for_review(&mut self, name: &str) -> bool {
+        use pm_first_launch::surfaces::migration::Summary;
+        let summary = |projects| Summary {
+            projects,
+            history_refusals: 0,
+            missing_projects: 0,
+            blocked_owners: 0,
+            proxy_only: 0,
+            already_offline: 0,
+            not_reached: 0,
+        };
+        match name {
+            "consent" => self.model.gate = Gate::Consent,
+            "denied" => self.model.gate = Gate::Denied,
+            "ready" => {
+                self.model.gate = Gate::Complete;
+                self.model.summary = Some(summary(4));
+            }
+            "low-disk" => {
+                self.model.gate = Gate::LowDisk;
+                self.low_disk = Some(("2.4 GB".into(), "1.1 GB".into()));
+            }
+            "original-running" => self.model.gate = Gate::WaitingLocal,
+            "original-elsewhere" => self.model.gate = Gate::WaitingUnknown,
+            "library-failed" => {
+                self.entry = Entry::Failed {
+                    details: "The library is in use by another copy of Powermove.".into(),
+                }
+            }
+            _ => return false,
+        }
+        self.review = true;
+        // The window outside the stage: no intro, no steps.
+        self.plan.onboard = false;
+        self.onboarding = None;
+        true
+    }
+    fn after_migration(&mut self) -> Vec<Effect> {
+        // The copy brought the original app's onboarding marker; the steps
+        // the launch planned still follow (`Plan::onboard`).
+        if self.plan.onboard {
+            self.onboarding = Some(Onboarding::new(true));
+            return vec![];
+        }
+        self.enter()
+    }
+    fn enter(&mut self) -> Vec<Effect> {
+        self.entry = Entry::Entering;
+        vec![Effect::Enter(self.chosen.clone())]
+    }
+    /// The library didn't open. The editor stays closed and the person can retry.
+    pub fn enter_failed(&mut self, details: String) -> Vec<Effect> {
+        self.entry = Entry::Failed { details };
+        vec![]
+    }
+    /// The worker's live bytes and any unanswered folder prompt, polled. True if
+    /// the frame changed.
+    pub fn activity(&mut self, bytes: (u64, u64), waiting: Option<String>) -> bool {
+        let bytes = Some(bytes).filter(|(_, total)| *total > 0);
+        let changed = self.model.bytes != bytes || self.model.waiting_folder != waiting;
+        self.model.bytes = bytes;
+        self.model.waiting_folder = waiting;
+        changed
+    }
+    pub fn message(&mut self, message: Message) -> Vec<Effect> {
+        match message {
+            Message::Powermove(identity) => {
+                // A review's pretend account stays as it is.
+                if !(cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ACCOUNT").is_some()) {
+                    self.powermove = identity;
+                }
+                vec![]
+            }
+            Message::AeroPlan(plan) => {
+                self.choices.aero = plan;
+                vec![]
+            }
+            Message::CodeSent(result) => self.code_sent(result),
+            Message::Verified(result) => self.verified(result),
+            Message::Account(provider, line) => {
+                match line {
+                    Some(line) => self.accounts.insert(provider.name().into(), line),
+                    None => self.accounts.remove(provider.name()),
+                };
+                vec![]
+            }
+            Message::Event(event) => {
+                if let Some(Recent::Running { step, progress }) = &mut self.recent {
+                    match event {
+                        Event::Started(started) => {
+                            *step = Some(started);
+                            *progress = None;
+                        }
+                        Event::Progress { done, total, .. } if total > 0 => {
+                            *progress = Some((done, total))
+                        }
+                        _ => {}
+                    }
+                    return vec![];
+                }
+                self.model.event(&event);
+                vec![]
+            }
+            Message::ElectronClosed if self.recent == Some(Recent::Waiting) => {
+                self.recent = Some(Recent::Running {
+                    step: None,
+                    progress: None,
+                });
+                vec![Effect::BringIn]
+            }
+            Message::ElectronClosed => {
+                self.model.electron_owner_local = false;
+                vec![Effect::Run(Run::Ordinary)]
+            }
+            Message::Recent(end) => self.recent_end(end),
+            Message::Finished(finished) => self.finished(finished),
+            Message::Extensions(update) => self.extensions_update(update),
+        }
+    }
+    fn recent_end(&mut self, end: RecentEnd) -> Vec<Effect> {
+        match end {
+            RecentEnd::Done => self.start_after_recent(),
+            RecentEnd::WaitingForElectron => {
+                self.recent = Some(Recent::Waiting);
+                let local = self.plan.config.as_ref().is_some_and(|c| {
+                    electron_owner(&c.electron_profile) == ElectronOwner::Local
+                });
+                if local { vec![Effect::Watch] } else { vec![] }
+            }
+            RecentEnd::Failed {
+                reason,
+                low_disk,
+                details,
+            } => {
+                self.recent = Some(Recent::Failed {
+                    reason,
+                    low_disk: low_disk.map(|(needed, available)| (bytes(needed), bytes(available))),
+                    details,
+                });
+                vec![]
+            }
+        }
+    }
+    /// After the bring-in the library opens. The extensions look waits for the
+    /// next launch: the window already open would show it as a second step.
+    fn start_after_recent(&mut self) -> Vec<Effect> {
+        self.recent = None;
+        self.enter()
+    }
+    fn recent_action(&mut self, id: &str) -> Vec<Effect> {
+        match (&self.recent, id) {
+            (_, "quit") => vec![Effect::Quit],
+            (Some(Recent::Waiting), "open_native") => {
+                let mut effects = vec![Effect::WithdrawRequest];
+                effects.extend(self.start_after_recent());
+                effects
+            }
+            (Some(Recent::Failed { .. }), "open_native") => self.start_after_recent(),
+            _ => vec![],
+        }
+    }
+    fn extensions_update(&mut self, update: Update) -> Vec<Effect> {
+        match update {
+            // Only while startup still waits: never after the library opened.
+            Update::Scanned(scan) if matches!(self.entry, Entry::Waiting) => match scan {
+                Ok(found) if found.scan.should_offer() && self.extensions.is_none() => {
+                    self.extensions = Some(found.model(Place::Startup));
+                    vec![]
+                }
+                Ok(_) => self.enter(),
+                // Unreadable: say nothing and open; Settings can try again.
+                Err(error) => {
+                    eprintln!("Looking for the original app’s extensions stopped: {error}");
+                    self.enter()
+                }
+            },
+            Update::Scanned(_) => vec![],
+            Update::Progress(progress) => {
+                if let Some(model) = self.extensions.as_mut() {
+                    model.progress(progress);
+                }
+                vec![]
+            }
+            Update::Finished(result) => {
+                if let Some(model) = self.extensions.as_mut() {
+                    model.finished(result);
+                }
+                vec![]
+            }
+        }
+    }
+    /// N004–N006. Declining never blocks the library: Not Now opens it.
+    fn extensions_action(&mut self, id: &str) -> Vec<Effect> {
+        let Some(model) = self.extensions.as_mut() else {
+            return vec![];
+        };
+        match (model.gate, id) {
+            (ExtensionGate::Offer, "bring_in") | (ExtensionGate::Failed, "try_again") => {
+                model.start();
+                vec![Effect::RunExtensions]
+            }
+            (ExtensionGate::Offer, "not_now") => {
+                let mut effects = vec![Effect::DeclineExtensions];
+                effects.extend(self.enter());
+                effects
+            }
+            (ExtensionGate::Done | ExtensionGate::Failed, "open_native") => self.enter(),
+            _ => vec![],
+        }
+    }
+    fn finished(&mut self, finished: Finished) -> Vec<Effect> {
+        let consent = std::mem::take(&mut self.consent_run);
+        match finished {
+            Finished::Outcome(outcome) => {
+                self.model.outcome(&outcome);
+                match outcome {
+                    Outcome::WaitingForElectron => {
+                        if let Some(config) = &self.plan.config {
+                            self.model.electron_owner_local =
+                                electron_owner(&config.electron_profile) == ElectronOwner::Local;
+                        }
+                        self.model.outcome(&Outcome::WaitingForElectron);
+                        if self.model.electron_owner_local {
+                            vec![Effect::Watch]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    Outcome::NeedsSecretConsent { .. }
+                    | Outcome::NeedsFolderAccess { .. }
+                    | Outcome::Complete { .. } => vec![],
+                }
+            }
+            Finished::Ready(outcome, report) => {
+                self.model.outcome(&outcome);
+                // An unread report may hide conflicts, so it can't count as clean.
+                let reported = match &report {
+                    Ok(report) => {
+                        self.model.report(report);
+                        report.rows.is_empty()
+                    }
+                    Err(_) => {
+                        self.report_unread = true;
+                        self.model.report_needs_review = true;
+                        false
+                    }
+                };
+                let clean = reported
+                    && self
+                        .model
+                        .summary
+                        .as_ref()
+                        .is_none_or(|s| s.rows().is_empty());
+                if clean {
+                    self.after_migration()
+                } else {
+                    vec![]
+                }
+            }
+            Finished::Paused => {
+                self.model.gate = Gate::Paused;
+                vec![]
+            }
+            Finished::LowDisk(low) => {
+                self.low_disk = Some((bytes(low.needed), bytes(low.available)));
+                self.model.gate = Gate::LowDisk;
+                vec![]
+            }
+            Finished::ProfileRefused(details) => {
+                self.details = Some(details);
+                self.model.gate = Gate::ProfileRefused;
+                vec![]
+            }
+            Finished::Denied(reason) => {
+                self.model.keychain_error = Some(reason);
+                self.model.gate = Gate::Denied;
+                vec![]
+            }
+            Finished::Failed(failure, details) => {
+                self.details = Some(details);
+                self.model.failure = failure;
+                self.model.gate = if consent { Gate::Denied } else { Gate::Failed };
+                vec![]
+            }
+        }
+    }
+    /// The account step's own actions; `None` for the step's ordinary ones
+    /// (Back from the email, Not now).
+    fn sign_in_action(&mut self, id: &str) -> Option<Vec<Effect>> {
+        let signed_in = self.powermove.is_some() && !self.sign_in.switching;
+        let s = &mut self.sign_in;
+        let none = Some(vec![]);
+        // The account step's own: who is signed in already, another
+        // account, and on from the check.
+        match (s.stage, id) {
+            (SignInStage::Email, "continue") if signed_in => return None,
+            (SignInStage::Email, "escape") if s.switching => {
+                s.switching = false;
+                s.error = None;
+                return none;
+            }
+            (SignInStage::Email, "use_other") if signed_in => {
+                s.switching = true;
+                s.email.clear();
+                s.revision += 1;
+                return none;
+            }
+            // Leaving the check for the timeline: back on the step, who is
+            // signed in.
+            (SignInStage::Done, "back") => {
+                s.stage = SignInStage::Email;
+                return None;
+            }
+            (SignInStage::Done, "continue" | "signed_in") => {
+                s.stage = SignInStage::Email;
+                s.switching = false;
+                self.onboarding.as_mut().map(|o| o.advance());
+                return none;
+            }
+            _ => {}
+        }
+        // The email and the code, as everywhere the sign-in shows.
+        if let Some(effects) = s.act(id) {
+            return Some(effects.into_iter().map(Effect::from).collect());
+        }
+        match id {
+            "escape" | "tick" | "signed_in" | "change" | "resend" | "retry" | "use_other" => none,
+            _ => None,
+        }
+    }
+    fn code_sent(&mut self, result: Result<(), String>) -> Vec<Effect> {
+        let effects = self.sign_in.code_sent(result);
+        effects.into_iter().map(Effect::from).collect()
+    }
+    fn verified(&mut self, result: Result<String, String>) -> Vec<Effect> {
+        let effects = self.sign_in.verified(result);
+        if self.sign_in.stage == SignInStage::Done
+            && !(cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ACCOUNT").is_some())
+        {
+            self.powermove = Some(self.sign_in.email.clone());
+        }
+        effects.into_iter().map(Effect::from).collect()
+    }
+    fn onboarding_action(&mut self, id: &str) -> Vec<Effect> {
+        if self.onboarding.as_ref().map(|o| o.step) == Some(Onboard::Account)
+            && let Some(effects) = self.sign_in_action(id)
+        {
+            return effects;
+        }
+        let Some(onboarding) = self.onboarding.as_mut() else {
+            return vec![];
+        };
+        if let Some(choice) = id.strip_prefix("choose:") {
+            match onboarding.step {
+                Onboard::Timeline => self.choices.timeline = choice.into(),
+                Onboard::Agent => {
+                    self.choices.agent = choice.into();
+                    self.choices.agent_picked = true;
+                }
+                // A queued model's row: a press takes the download back
+                // (its Download pill asks for it).
+                Onboard::Transcription => self.choices.speech.retain(|id| id != choice),
+                Onboard::Workspace => self.choices.workspace = choice.into(),
+                _ => {}
+            }
+            return vec![];
+        }
+        // Aero's plan card: Checkout for its plan, or Maybe Later.
+        if onboarding.step == Onboard::Agent {
+            match id {
+                "offer:get" => {
+                    if let AeroPlan::Offer { id, .. } = &self.choices.aero {
+                        self.choices.agent = "aero".into();
+                        self.choices.agent_picked = true;
+                        return vec![Effect::Subscribe(id.clone())];
+                    }
+                    return vec![];
+                }
+                "offer:later" => {
+                    self.choices.offer_later = true;
+                    return vec![];
+                }
+                _ => {}
+            }
+        }
+        // A row's button: Connect on an agent, Download on the model.
+        if let Some(row) = id.strip_prefix("pill:") {
+            match onboarding.step {
+                Onboard::Agent => {
+                    let provider = match row {
+                        "claude" => pm_agents::Provider::Claude,
+                        "chatgpt" => pm_agents::Provider::Chatgpt,
+                        // Aero on Free: Checkout for the plan offered, in the
+                        // browser; it comes back here, on that plan.
+                        _ if let AeroPlan::Offer { id, .. } = &self.choices.aero => {
+                            self.choices.agent = "aero".into();
+                            self.choices.agent_picked = true;
+                            return vec![Effect::Subscribe(id.clone())];
+                        }
+                        // Aero's Connect is the Powermove account's sign-in.
+                        _ => {
+                            let _ = onboarding.back();
+                            return vec![];
+                        }
+                    };
+                    return vec![Effect::Connect(provider)];
+                }
+                // Queued behind any asked for before it.
+                Onboard::Transcription => {
+                    if !self.choices.speech.iter().any(|id| id == row) {
+                        self.choices.speech.push(row.into());
+                    }
+                }
+                _ => {}
+            }
+            return vec![];
+        }
+        match id {
+            "begin" => {
+                onboarding.welcome();
+                let _ = onboarding.advance();
+            }
+            "not_now" if onboarding.step == Onboard::Account => {
+                let _ = onboarding.advance();
+            }
+            // The last step's Continue finishes onboarding (After Effects
+            // workspace import is scrapped for now).
+            "continue"
+                if matches!(
+                    onboarding.step,
+                    Onboard::Transcription | Onboard::Workspace
+                ) =>
+            {
+                if onboarding.step == Onboard::Transcription {
+                    let _ = onboarding.advance();
+                }
+                return self.onboarding_action("fresh");
+            }
+            "continue" => {
+                let _ = onboarding.advance();
+            }
+            "back" => {
+                let _ = onboarding.back();
+                if onboarding.step == Onboard::Welcome {
+                    onboarding.step = Onboard::Animation;
+                }
+            }
+            "import" | "fresh" => {
+                let mut raw = serde_json::json!({
+                    "timelineMode": self.choices.timeline,
+                    "workspaceImport": serde_json::Value::Null,
+                });
+                let agent = self.choices.agent_for(&self.accounts);
+                raw["agent"] = serde_json::json!({
+                    "provider": agent,
+                    "model": match agent.as_str() {
+                        "claude" => "claude-opus",
+                        "compatible" => "compatible",
+                        "aero" => "auto",
+                        _ => "gpt-5",
+                    },
+                });
+                if !self.choices.speech.is_empty() {
+                    raw["speechModels"] = self.choices.speech.clone().into();
+                }
+                match Chosen::parse(raw.clone()).and_then(|choice| onboarding.begin(choice)) {
+                    Ok(_) => {
+                        self.chosen = Some(raw);
+                        return self.enter();
+                    }
+                    Err(_) => {
+                        self.error =
+                            Some("Couldn’t open your workspace. Try again, or start fresh.".into())
+                    }
+                }
+            }
+            "quit" => return vec![Effect::Quit],
+            _ => {}
+        }
+        vec![]
+    }
+    pub fn action(&mut self, id: &str) -> Vec<Effect> {
+        // A reviewed frame only quits: its buttons never copy, ask macOS or
+        // touch the Keychain.
+        if self.review {
+            return if id == "quit" { vec![Effect::Quit] } else { vec![] };
+        }
+        self.error = None;
+        match (&self.entry, id) {
+            (Entry::Waiting, _) => {}
+            (Entry::Entering | Entry::Failed { .. }, "quit") => return vec![Effect::Quit],
+            (Entry::Failed { .. }, "try_again") => return self.enter(),
+            // Already on its way: a second click or a held Return does nothing.
+            _ => return vec![],
+        }
+        if self.onboarding.is_some() {
+            return self.onboarding_action(id);
+        }
+        if self.recent.is_some() {
+            return self.recent_action(id);
+        }
+        if self.extensions.is_some() {
+            return self.extensions_action(id);
+        }
+        match id {
+            "quit" => vec![Effect::Quit],
+            "pause" => {
+                self.model.pause_at_boundary();
+                if self.model.gate == Gate::Pausing {
+                    vec![Effect::Pause]
+                } else {
+                    vec![]
+                }
+            }
+            // Only once the worker has stopped: a second one would lose the lock.
+            "resume" if self.model.gate == Gate::Paused => {
+                self.model.resume();
+                vec![Effect::Run(Run::Ordinary)]
+            }
+            "check_again" | "try_again" => {
+                self.model.gate = Gate::Resuming;
+                vec![Effect::Run(Run::Ordinary)]
+            }
+            "resume_with_secret_consent" => {
+                self.model.keychain_error = None;
+                self.details = None;
+                self.model.gate = Gate::WaitingForMacos;
+                self.consent_run = true;
+                vec![Effect::Run(Run::WithConsent)]
+            }
+            "skip_secret_consent" => {
+                self.model.gate = Gate::Resuming;
+                vec![Effect::Run(Run::SkipConsent)]
+            }
+            "allow_folders" | "skip_folders" if self.model.gate == Gate::FolderAccess => {
+                self.model.gate = Gate::Resuming;
+                vec![Effect::Run(Run::Folders(if id == "allow_folders" {
+                    FolderChoice::Allow
+                } else {
+                    FolderChoice::Skip
+                }))]
+            }
+            "skip_folder" if self.model.waiting_folder.is_some() => vec![Effect::SkipFolder],
+            "show_report" => vec![Effect::ShowReport],
+            "open_native" => self.after_migration(),
+            _ => vec![],
+        }
+    }
+    fn migration_frame(&self) -> Frame {
+        let view = match (&self.low_disk, self.model.gate) {
+            (Some((needed, available)), Gate::LowDisk) => {
+                self.model.low_disk_view(needed, available)
+            }
+            _ => self.model.view(),
+        };
+        let paused = self.model.gate == Gate::Paused;
+        let steps = self
+            .model
+            .rows()
+            .into_iter()
+            .map(|row| StepRow {
+                title: row.title,
+                value: row.value,
+                progress: row.active.map(|fraction| match fraction {
+                    Some(fraction) => Progress::Determinate(fraction),
+                    // A paused step with no total doesn't slide.
+                    None if paused => Progress::Determinate(0.),
+                    None => Progress::Indeterminate,
+                }),
+            })
+            .collect();
+        let unread = self.report_unread.then(|| Row {
+            symbol: "exclamationmark.triangle.fill",
+            severity: Severity::Warning,
+            text: "The Migration Report couldn’t be read, so this list may be incomplete.".into(),
+            detail: None,
+        });
+        let rows = self.model.summary.as_ref().map_or(vec![], |summary| {
+            summary
+                .rows()
+                .into_iter()
+                .map(|(id, text)| {
+                    let (symbol, severity) = match id {
+                        // An empty list entry lost nothing: a note, not a warning.
+                        "history_refusals" => ("exclamationmark.triangle.fill", Severity::Warning),
+                        "blocked_owners" => ("xmark.octagon.fill", Severity::Danger),
+                        _ => ("info.circle", Severity::Note),
+                    };
+                    Row {
+                        symbol,
+                        severity,
+                        text,
+                        detail: None,
+                    }
+                })
+                .chain(unread)
+                .collect()
+        });
+        Frame {
+            surface: view.surface.into(),
+            title: view.title,
+            line: view.line,
+            spinner: matches!(
+                self.model.gate,
+                Gate::WaitingLocal | Gate::WaitingForMacos | Gate::Resuming
+            ) || self.model.waiting_folder.is_some(),
+            status: view.status.filter(|s| !s.is_empty()),
+            steps,
+            rows,
+            details: self
+                .details
+                .clone()
+                .filter(|_| self.model.details_available()),
+            buttons: view
+                .buttons
+                .iter()
+                .map(|b| Button {
+                    id: b.id.into(),
+                    label: b.label.into(),
+                    enabled: b.enabled,
+                    leading: b.id == "quit",
+                })
+                .collect(),
+            default: view.default.map(str::to_owned),
+            // On the stage, the library it fills: Home's recent projects.
+            preview: Some("home".into()),
+            ..Frame::default()
+        }
+    }
+    fn onboarding_frame(&self, onboarding: &Onboarding) -> Frame {
+        let mut frame = step_frame(
+            onboarding.step,
+            &self.choices,
+            &self.accounts,
+            self.powermove.as_deref(),
+            self.error.clone(),
+        );
+        if onboarding.step == Onboard::Account {
+            sign_in_frame(&self.sign_in, self.powermove.as_deref(), &mut frame);
+        }
+        frame
+    }
+}
+/// The account step as its sign-in stands: the email, the code sent to it,
+/// or the check; or who is signed in already.
+fn sign_in_frame(s: &SignInFlow, powermove: Option<&str>, frame: &mut Frame) {
+    {
+        let signed_in = powermove.filter(|_| !s.switching);
+        if s.stage == SignInStage::Email
+            && let Some(identity) = signed_in
+        {
+            frame.title = "Your Powermove account".into();
+            frame.line = format!("Signed in as {identity}.");
+            frame.buttons = vec![
+                Button::new("continue", "Continue"),
+                Button::new("use_other", "Use a different account"),
+            ];
+            frame.default = Some("continue".into());
+            return;
+        }
+        // The onboarding's own words; the sheet's are its own.
+        let (title, line) = match s.stage {
+            SignInStage::Email => ("Create your account".to_owned(), frame.line.clone()),
+            SignInStage::Code => (
+                "Check your email".to_owned(),
+                format!("We sent a 6-digit code to {}.", s.email.trim()),
+            ),
+            SignInStage::Done | SignInStage::Handle | SignInStage::Browser => (
+                "You’re in".to_owned(),
+                format!("Signed in as {}.", s.email),
+            ),
+        };
+        let ready = s.ready();
+        frame.title = title;
+        frame.line = line;
+        frame.note = (s.stage == SignInStage::Email)
+            .then(|| "Already have an account? Use the same email.".into());
+        frame.error = s.error.as_ref().map(|(message, _)| message.clone());
+        frame.busy = s.busy;
+        frame.buttons = vec![
+            Button {
+                // Clickable while it spins: a second press does nothing.
+                enabled: ready || s.busy,
+                ..Button::new("continue", "Continue")
+            },
+            Button::new("not_now", "Not now"),
+        ];
+        frame.default = Some("continue".into());
+        frame.sign_in = Some(s.frame());
+    }
+}
+impl Flow {
+    pub fn frame(&self) -> Frame {
+        match (&self.entry, &self.onboarding) {
+            (Entry::Failed { details }, _) => library_failed_frame(details),
+            (Entry::Waiting, None) if self.recent.is_some() => {
+                recent_frame(self.recent.as_ref().unwrap())
+            }
+            (Entry::Entering, None) => Frame {
+                surface: "N003".into(),
+                title: pm_first_launch::surfaces::migration::LIBRARY_READY.into(),
+                status: Some("Opening Powermove…".into()),
+                spinner: true,
+                preview: Some("home".into()),
+                ..Frame::default()
+            },
+            (_, Some(onboarding)) => self.onboarding_frame(onboarding),
+            (_, None) => match &self.extensions {
+                Some(extensions) => crate::extension_transfer::frame(extensions),
+                None => self.migration_frame(),
+            },
+        }
+    }
+}
+
+/// An onboarding step's frame, with the person's choices so far.
+pub(crate) fn step_frame(
+    step: Onboard,
+    choices: &Choices,
+    accounts: &std::collections::BTreeMap<String, String>,
+    powermove: Option<&str>,
+    error: Option<String>,
+) -> Frame {
+    let row = |id: &str, label: &str, detail: &str| Choice {
+        id: id.into(),
+        label: label.into(),
+        detail: Some(detail.into()),
+        ..Choice::default()
+    };
+    // An agent's row: Connect, or what its sign-in says.
+    let agent = |id: &str, label: &str, detail: &str, mark: &str, account: &str| {
+        let status = accounts.get(account).cloned();
+        Choice {
+            mark: Some(mark.into()),
+            pill: status.is_none().then(|| "Connect".into()),
+            status,
+            ..row(id, label, detail)
+        }
+    };
+    let continuing = |frame: Frame| Frame {
+        buttons: vec![Button::new("continue", "Continue")],
+        default: Some("continue".into()),
+        ..frame
+    };
+    match step {
+        Onboard::Animation | Onboard::Welcome => welcome_frame(),
+        Onboard::Timeline => continuing(Frame {
+            surface: "S108".into(),
+            back: Some("Back to Welcome".into()),
+            title: "Choose your timeline".into(),
+            outline: Some(steps_outline(Some(0))),
+            line: "Work the way you already do. Switch anytime.".into(),
+            choices: vec![
+                row("layers", "Layers", "A row for each element, like After Effects."),
+                row("tracks", "Tracks", "Clips share tracks, like Premiere Pro."),
+            ],
+            // The real timeline, in the mode chosen.
+            preview: Some(format!("timeline-{}", choices.timeline)),
+            chosen: Some(choices.timeline.clone()),
+            ..Frame::default()
+        }),
+        // The Powermove account, before the agents' own sign-ins: create one
+        // or log in (the app's one sign-in, as Home and Settings open it), or
+        // carry on without one (no network, or later from Settings).
+        // The Powermove account, before the agents' own sign-ins: an email,
+        // then the code sent to it, in the window (`sign_in_frame`); or
+        // carry on without one (no network, or later from Settings).
+        Onboard::Account => {
+            let mut frame = Frame {
+                surface: "S109".into(),
+                back: Some("Back to Timeline Choice".into()),
+                outline: Some(steps_outline(Some(1))),
+                line: "Your account remembers the extensions you install on each Mac, and lets you publish your own on the Store.".into(),
+                preview: Some("home".into()),
+                ..Frame::default()
+            };
+            sign_in_frame(&SignInFlow::default(), powermove, &mut frame);
+            frame
+        }
+        Onboard::Agent => continuing(Frame {
+            surface: "S109".into(),
+            back: Some("Back to Account".into()),
+            title: "Choose your agent".into(),
+            outline: Some(steps_outline(Some(2))),
+            line: "It builds what you ask for, in the editor.".into(),
+            choices: vec![
+                // The tag stands in for the detail: one short line under the
+                // name, clear of the row's Connect.
+                // Aero runs on the Powermove account: signed in, its name;
+                // signed out, Connect leads back to the account step.
+                // Signed in on Free: its plan to buy, right here; on a plan,
+                // the plan's name.
+                match (&choices.aero, powermove) {
+                    (AeroPlan::Offer { name, .. }, Some(_)) => Choice {
+                        badge: Some("Recommended".into()),
+                        detail: Some(format!("Runs on {name}, Powermove's inference.")),
+                        pill: None,
+                        status: None,
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                    },
+                    (AeroPlan::On(plan), Some(_)) => Choice {
+                        badge: Some("Recommended".into()),
+                        detail: None,
+                        pill: None,
+                        status: Some(plan.clone()),
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                    },
+                    _ => Choice {
+                        badge: Some("Recommended".into()),
+                        detail: None,
+                        pill: powermove.is_none().then(|| "Connect".into()),
+                        status: powermove.map(str::to_owned),
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                    },
+                },
+                agent(
+                    "claude",
+                    "Claude Code",
+                    "With your Claude account.",
+                    "provider.claude",
+                    "claude",
+                ),
+                agent("chatgpt", "Codex", "With your ChatGPT account.", "provider.chatgpt", "chatgpt"),
+            ],
+            chosen: Some(choices.agent_for(accounts)),
+            // Aero chosen on Free: its plan's card, to buy here.
+            offer: match (&choices.aero, powermove) {
+                (
+                    AeroPlan::Offer {
+                        name,
+                        price,
+                        credits,
+                        ..
+                    },
+                    Some(_),
+                ) if !choices.offer_later && choices.agent_for(accounts) == "aero" => {
+                    Some(pm_shell::welcome::Offer {
+                        name: name.clone(),
+                        price: price.clone(),
+                        period: "per month".into(),
+                        note: "Aero, our agent, with inference included.".into(),
+                        features: vec![(
+                            format!("{credits} credits a month"),
+                            "Inference for Aero, run by Powermove".into(),
+                        )],
+                        action: format!("Get {name}"),
+                    })
+                }
+                _ => None,
+            },
+            preview: Some("agent".into()),
+            ..Frame::default()
+        }),
+        Onboard::Transcription => {
+            // Every model in the catalogue, the recommended ones first
+            // (Parakeet Unified EN, the default, then Cohere Transcribe), then
+            // the catalogue's order; each line as Settings › Speech words it
+            // (size, languages, captions). None is preselected: nothing
+            // downloads unless asked.
+            let mut catalog = pm_transcribe::store::catalog();
+            catalog.sort_by_key(|m| !m.recommended);
+            let rows: Vec<Choice> = catalog
+                .into_iter()
+                .map(|model| {
+                    let queued = choices.speech.contains(&model.id);
+                    let facts = pm_builtins::speech::facts(&serde_json::json!({
+                        "size": model.size(),
+                        "languages": model.languages,
+                        "languageCodes": model.language_codes,
+                        "wordTimestamps": model.word_timestamps,
+                        "timing": model.timing,
+                    }));
+                    Choice {
+                        badge: model.recommended.then(|| "Recommended".into()),
+                        pill: (!queued).then(|| "Download".into()),
+                        // Short, so the model's name keeps its line.
+                        status: queued.then(|| "Queued".into()),
+                        ..row(&model.id, &model.name, &facts)
+                    }
+                })
+                .collect();
+            let note = (!choices.speech.is_empty())
+                .then(|| "Downloads start when Powermove opens, one at a time.".to_owned());
+            continuing(Frame {
+                surface: "S109".into(),
+                back: Some("Back to Agent Choice".into()),
+                title: "Speech to text".into(),
+                outline: Some(steps_outline(Some(3))),
+                line: "Transcribe speech for captions, on this Mac.".into(),
+                choices: rows,
+                note,
+                // The model row shows its download, not a selection.
+                chosen: None,
+                preview: Some("speech".into()),
+                ..Frame::default()
+            })
+        }
+        Onboard::Workspace | Onboard::Starting | Onboard::Complete => Frame {
+            surface: "S110".into(),
+            title: "Opening Powermove".into(),
+            outline: Some(steps_outline(Some(4))),
+            status: Some("Opening Powermove…".into()),
+            spinner: true,
+            ..Frame::default()
+        },
+    }
+}
+
+/// What an agent's row says in place of its Connect button, as Settings ›
+/// Providers says it: `None` while it is not connected.
+fn account_line(status: &pm_agents::account::Status) -> Option<String> {
+    use pm_agents::account::State;
+    match status.state {
+        State::Connected => Some(match status.email.as_ref().or(status.plan.as_ref()) {
+            Some(who) => format!("Connected · {who}"),
+            None => "Connected".into(),
+        }),
+        State::Connecting => Some("Finish in your browser…".into()),
+        State::Checking => Some("Checking…".into()),
+        State::Disconnected | State::Unavailable => None,
+    }
+}
+
+/// The first run's four steps, the one under way (`None`: the Welcome).
+fn steps_outline(current: Option<usize>) -> pm_shell::welcome::Outline {
+    pm_shell::welcome::Outline {
+        steps: ["Timeline", "Account", "Agent", "Speech Model"]
+            .map(str::to_owned)
+            .to_vec(),
+        // Each step's own line, shortened.
+        notes: [
+            "Work the way you already do.",
+            "Your Powermove account.",
+            "It builds what you ask for, in the editor.",
+            "Captions and transcripts, on this Mac.",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        current,
+    }
+}
+
+/// The first run's Welcome: the title card, a line on what comes next and the
+/// steps ahead.
+pub(crate) fn welcome_frame() -> Frame {
+    Frame {
+        surface: "S107".into(),
+        animate: true,
+        title: "Welcome to Powermove".into(),
+        line: "A few quick steps, then your editor.\nYou can change any of them later.".into(),
+        outline: Some(steps_outline(None)),
+        centred: true,
+        preview: Some("welcome".into()),
+        buttons: vec![Button::new("begin", "Begin")],
+        default: Some("begin".into()),
+        ..Frame::default()
+    }
+}
+
+
+fn library_failed_frame(details: &str) -> Frame {
+    Frame {
+        surface: "N001".into(),
+        title: "Your library couldn’t open".into(),
+        line: "Nothing was changed. If Powermove is open in another window or on another account, quit it, then try again.".into(),
+        details: Some(details.to_owned()),
+        preview: Some("home".into()),
+        buttons: vec![
+            Button::new("quit", "Quit Powermove").leading(),
+            Button::new("try_again", "Try Again"),
+        ],
+        default: Some("try_again".into()),
+        ..Frame::default()
+    }
+}
+/// The bring-in the person asked for, in the first launch's language.
+fn recent_frame(recent: &Recent) -> Frame {
+    let quit = Button::new("quit", "Quit Powermove").leading();
+    match recent {
+        Recent::Running { step, progress } => {
+            let doing = match step {
+                None | Some(Step::Checkpoint) => "Reading the original app",
+                Some(Step::Library) => "Bringing in projects",
+                Some(Step::Media | Step::Inventory) => "Bringing in media",
+                Some(Step::Extensions) => "Bringing in extensions",
+                Some(_) => "Bringing in settings",
+            };
+            Frame {
+                surface: "N001".into(),
+                title: "Bringing in recent work".into(),
+                line: "Your original app stays unchanged.".into(),
+                status: Some(match progress {
+                    Some((done, total)) => format!("{doing}… {done} of {total}"),
+                    None => format!("{doing}…"),
+                }),
+                spinner: true,
+                buttons: vec![quit],
+                preview: Some("home".into()),
+                ..Frame::default()
+            }
+        }
+        Recent::Waiting => Frame {
+            surface: "N001".into(),
+            title: "Quit the original app".into(),
+            line: "Powermove brings in your recent work once the original app is closed. The original app stays unchanged.".into(),
+            status: Some("Waiting for the original app to quit…".into()),
+            spinner: true,
+            buttons: vec![quit, Button::new("open_native", "Open Without It")],
+            preview: Some("home".into()),
+                ..Frame::default()
+        },
+        Recent::Failed {
+            reason,
+            low_disk,
+            details,
+        } => Frame {
+            surface: "N001".into(),
+            title: "Recent work couldn’t come in".into(),
+            line: match low_disk {
+                Some((needed, available)) => format!(
+                    "It needs {needed} free on this Mac, and there’s {available}. Nothing in the original app changed. You can try again from Settings › Storage."
+                ),
+                None => format!(
+                    "{reason} Nothing in the original app changed. You can try again from Settings › Storage."
+                ),
+            },
+            details: Some(details.clone()),
+            buttons: vec![quit, Button::new("open_native", "Open Powermove")],
+            default: Some("open_native".into()),
+            preview: Some("home".into()),
+                ..Frame::default()
+        },
+    }
+}
+/// The requested bring-in, before the library opens, on its own thread.
+fn spawn_bring_in(config: Config, tx: async_channel::Sender<Message>) {
+    std::thread::spawn(move || {
+        let events = tx.clone();
+        let result = later::bring_in(&config, |event| {
+            let _ = events.send_blocking(Message::Event(event));
+            Ok(())
+        });
+        let end = match result {
+            Ok(Outcome::WaitingForElectron) => RecentEnd::WaitingForElectron,
+            Ok(_) => RecentEnd::Done,
+            Err(error) => {
+                let failure = later::last_failure(&config.native_profile);
+                RecentEnd::Failed {
+                    reason: failure.as_ref().map_or_else(
+                        || "Something in the original app’s library couldn’t be read.".into(),
+                        |f| f.reason.clone(),
+                    ),
+                    low_disk: failure
+                        .and_then(|f| f.low_disk)
+                        .map(|l| (l.needed, l.available)),
+                    details: format!("{error:#}"),
+                }
+            }
+        };
+        crate::diag::line(serde_json::json!({"recent_work": format!("{end:?}")
+            .chars()
+            .take(300)
+            .collect::<String>()}));
+        let _ = tx.send_blocking(Message::Recent(end));
+    });
+}
+/// Runs the coordinator on a worker, and reads the report there too: it walks the
+/// store and replays journals. Pausing lands on the next durable boundary.
+pub fn spawn_run(
+    config: Config,
+    run: Run,
+    pause: Arc<AtomicBool>,
+    activity: Arc<Activity>,
+    tx: async_channel::Sender<Message>,
+) {
+    spawn_run_with_keychain(config, run, pause, activity, tx, None);
+}
+fn spawn_run_with_keychain(
+    config: Config,
+    run: Run,
+    pause: Arc<AtomicBool>,
+    activity: Arc<Activity>,
+    tx: async_channel::Sender<Message>,
+    keychain: Option<MacKeychain>,
+) {
+    let native = config.native_profile.clone();
+    std::thread::spawn(move || {
+        // Originals in folders macOS protects are opened only after the person
+        // saw the explanation, and never waited on past an unanswered prompt.
+        let _folders = source_access::install(FolderChoice::Ask, activity);
+        let events = tx.clone();
+        let stop = pause.clone();
+        let hook = move |event: Event| -> Result<()> {
+            let _ = events.send_blocking(Message::Event(event));
+            anyhow::ensure!(!stop.load(Ordering::Acquire), PauseRequested);
+            Ok(())
+        };
+        let result = match run {
+            Run::Ordinary => pm_first_launch::run(&config, hook),
+            Run::SkipConsent => pm_first_launch::skip_secret_consent(&config, hook),
+            Run::Folders(choice) => pm_first_launch::run_with_folder_access(&config, choice, hook),
+            // Each attempt owns a fresh backend after the person’s click.
+            Run::WithConsent => pm_first_launch::resume_with_secret_consent(
+                &config,
+                &mut keychain.unwrap_or_else(MacKeychain::after_user_consent),
+                hook,
+            ),
+        };
+        let finished = match classify(result) {
+            Finished::Outcome(outcome @ Outcome::Complete { .. }) => {
+                let report = pm_first_launch::report::load(&native).map_err(|e| format!("{e:#}"));
+                Finished::Ready(outcome, report)
+            }
+            finished => finished,
+        };
+        // `PM_NATIVE_MAIN_TRACE`: how the copy ended, for unattended checks.
+        crate::diag::line(serde_json::json!({"migration": format!("{finished:?}")
+            .chars()
+            .take(300)
+            .collect::<String>()}));
+        let _ = tx.send_blocking(Message::Finished(finished));
+    });
+}
+#[derive(Debug)]
+struct PauseRequested;
+impl std::fmt::Display for PauseRequested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("paused")
+    }
+}
+fn classify(result: Result<Outcome>) -> Finished {
+    let error = match result {
+        Ok(outcome) => return Finished::Outcome(outcome),
+        Err(error) => error,
+    };
+    if error.to_string() == PauseRequested.to_string() {
+        return Finished::Paused;
+    }
+    if let Some(low) = error.downcast_ref::<LowDisk>() {
+        return Finished::LowDisk(*low);
+    }
+    if error.downcast_ref::<KeychainDenied>().is_some()
+        || error
+            .downcast_ref::<pm_first_launch::secrets::KeychainError>()
+            .is_some()
+    {
+        // The underlying backend error carries only a status and safe copy.
+        eprintln!("PM_KEYCHAIN consent failed: {error:#}");
+        return Finished::Denied(
+            error
+                .downcast_ref::<pm_first_launch::secrets::KeychainError>()
+                .map_or(
+                    "macOS couldn’t read the sign-in key. Try again, or continue and sign in here.",
+                    |e| e.message(),
+                )
+                .into(),
+        );
+    }
+    let details = format!("{error:#}");
+    if error.downcast_ref::<ProfileRefused>().is_some() {
+        return Finished::ProfileRefused(details);
+    }
+    let permission = error
+        .chain()
+        .filter_map(|e| e.downcast_ref::<std::io::Error>())
+        .any(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+    let failure = if permission {
+        Failure::Permission
+    } else if error.downcast_ref::<serde_json::Error>().is_some() {
+        Failure::InvalidData
+    } else {
+        Failure::Unknown
+    };
+    Finished::Failed(failure, details)
+}
+/// The local original app quit, or its lock turned unreadable. Polled off main.
+pub fn spawn_watch(profile: PathBuf, tx: async_channel::Sender<Message>) {
+    std::thread::spawn(move || {
+        while electron_owner(&profile) == ElectronOwner::Local {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if tx.is_closed() {
+                return;
+            }
+        }
+        let _ = tx.send_blocking(Message::ElectronClosed);
+    });
+}
+/// Durable onboarding marker. Written last, so a closed window runs it again.
+pub fn write_marker(profile: &Path, choices: &serde_json::Value) -> std::io::Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let mut record = choices.clone();
+    record["version"] = 1.into();
+    let marker = pm_first_launch::ONBOARDING_MARKER;
+    let target = profile.join(marker);
+    let temporary = profile.join(format!("{marker}.{}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(format!("{record}\n").as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, target)
+}
+/// A later launch, before the library attaches: finishes a capture an earlier
+/// attempt already took, and never starts one (`later::resume_pending`). The
+/// caller logs an error and carries on; the failure is recorded, so no launch
+/// tries that capture again on its own.
+pub fn later_store(plan: &Plan, events: impl FnMut(Event) -> Result<()>) -> Result<bool> {
+    let Some(config) = &plan.config else {
+        return Ok(false);
+    };
+    if plan.launch != Launch::Later || !config.electron_profile.is_dir() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        later::resume_pending(config, events)?,
+        DeltaPrepared::MediaPending
+    ))
+}
+
+/// One window, one flow. With nothing to show, a later launch merges and opens.
+pub fn gate(
+    plan: Plan,
+    kernel: pm_kernel::KernelHandle,
+    tools: crate::mcp::Tools,
+    server: Server,
+) -> pm_shell::Gate {
+    Box::new(move |finish, cx| {
+        let (tx, rx) = async_channel::unbounded();
+        let driver = Driver {
+            library: Library {
+                plan: plan.clone(),
+                kernel,
+                tools,
+                server,
+                attached: Default::default(),
+            },
+            finish,
+            pause: Default::default(),
+            activity: Default::default(),
+            running: Default::default(),
+            flow: Rc::new(RefCell::new(Flow::new(plan))),
+            window: Rc::default(),
+            tx,
+            accounts: Rc::default(),
+        };
+        driver.begin(rx, cx);
+    })
+}
+pub type Server = Arc<std::sync::Mutex<Option<pm_mcp::transport::LoopbackServer>>>;
+#[derive(Clone)]
+struct Library {
+    plan: Plan,
+    kernel: pm_kernel::KernelHandle,
+    tools: crate::mcp::Tools,
+    server: Server,
+    /// A retry after a later step failed must not attach a second time.
+    attached: Arc<AtomicBool>,
+}
+struct Opened {
+    /// A pending capture still has media to bring in.
+    media: bool,
+    /// The person chose Bring My Workspace on the last step.
+    bring_workspace: bool,
+    /// The merge before the attach stopped.
+    later_failed: bool,
+}
+const LATER_FAILED: &str = "Recent changes from the original app couldn’t be brought in. Powermove will try again next launch.";
+#[derive(Clone)]
+struct Driver {
+    library: Library,
+    finish: pm_shell::Finish,
+    pause: Arc<AtomicBool>,
+    /// The worker's live bytes and folder prompt, polled while it runs.
+    activity: Arc<Activity>,
+    running: Rc<std::cell::Cell<bool>>,
+    flow: Rc<RefCell<Flow>>,
+    window: Rc<RefCell<Option<GateWindow>>>,
+    tx: async_channel::Sender<Message>,
+    /// The agent step's sign-ins, made when a person first presses Connect
+    /// (nothing reads an account before that).
+    accounts: Rc<RefCell<Option<Arc<pm_agents::account::Accounts>>>>,
+}
+/// Where the first run shows: the stage on the launch that onboards (the
+/// film, then the steps on its card), else the Welcome window.
+#[derive(Clone)]
+enum GateWindow {
+    Welcome(gpui::WindowHandle<pm_shell::welcome_view::WelcomeView>),
+    Stage(crate::first_run_stage::StageWindow),
+}
+impl GateWindow {
+    fn activate(&self, cx: &mut gpui::App) {
+        let _ = match self {
+            Self::Welcome(h) => h.update(cx, |_, window, _| window.activate()),
+            Self::Stage(s) => {
+                s.activate(cx);
+                Ok(())
+            }
+        };
+    }
+}
+/// A sound the film's cue sheet reached (`stage::OnSound`).
+pub fn play_sound(id: &str, _: &mut gpui::App) {
+    if id == "chime" {
+        play_chime();
+    }
+}
+impl Driver {
+    /// Settings › Providers' sign-in for `provider`, from the agent step.
+    fn connect(&self, provider: pm_agents::Provider) {
+        let mut slot = self.accounts.borrow_mut();
+        let accounts = slot.get_or_insert_with(|| {
+            let environment = pm_agents::launch::Environment::current(
+                self.library.plan.profile.clone(),
+                pm_mcp::catalog::names(),
+                pm_mcp::catalog::composition_names(),
+            );
+            let tx = self.tx.clone();
+            let accounts = Arc::new(std::sync::OnceLock::<std::sync::Weak<pm_agents::account::Accounts>>::new());
+            let reader = accounts.clone();
+            let made = pm_agents::account::Accounts::new(
+                environment,
+                Arc::new(pm_agents::account::open_in_browser),
+                Arc::new(move || {
+                    let Some(accounts) = reader.get().and_then(std::sync::Weak::upgrade) else {
+                        return;
+                    };
+                    for provider in [pm_agents::Provider::Chatgpt, pm_agents::Provider::Claude] {
+                        let _ = tx.try_send(Message::Account(provider, account_line(&accounts.status(provider))));
+                    }
+                }),
+            );
+            let _ = accounts.set(Arc::downgrade(&made));
+            made
+        });
+        accounts.connect(provider);
+    }
+    fn begin(self, rx: async_channel::Receiver<Message>, cx: &mut gpui::App) {
+        let effects = self.flow.borrow_mut().start();
+        // The account step shows who is signed in to Powermove: the stored
+        // session, read off the main thread, and every change after it.
+        if self.library.plan.onboard {
+            crate::cloud::init(self.library.plan.profile.clone(), cx);
+            let tx = self.tx.clone();
+            let _ = tx.try_send(Message::Powermove(crate::cloud::identity(cx)));
+            crate::cloud::on_change(cx, move |identity, cx| {
+                let _ = tx.try_send(Message::Powermove(identity));
+                let billing = crate::cloud::fact(cx)["billing"].clone();
+                let _ = tx.try_send(Message::AeroPlan(AeroPlan::from_fact(&billing)));
+            });
+        }
+        self.show(cx);
+        cx.spawn({
+            let driver = self.clone();
+            async move |cx| {
+                while let Ok(message) = rx.recv().await {
+                    cx.update(|cx| {
+                        if let Message::Finished(_) = &message {
+                            driver.running.set(false);
+                        }
+                        if let Message::Finished(Finished::Failed(_, details)) = &message {
+                            crate::error_log::shared(cx)
+                                .borrow_mut()
+                                .push("Library", details);
+                        }
+                        driver.step(|flow| flow.message(message), cx);
+                    });
+                }
+            }
+        })
+        .detach();
+        self.apply(effects, cx);
+    }
+    fn step(&self, change: impl FnOnce(&mut Flow) -> Vec<Effect>, cx: &mut gpui::App) {
+        let effects = change(&mut self.flow.borrow_mut());
+        self.show(cx);
+        self.apply(effects, cx);
+    }
+    /// Puts the flow's frame on screen. The first frame that needs a window opens it.
+    fn show(&self, cx: &mut gpui::App) {
+        let (frame, visible) = {
+            let flow = self.flow.borrow();
+            (flow.frame(), flow.visible())
+        };
+        // The intro's music runs on through a copy it opened on, and stops
+        // at the first step that isn't the Welcome.
+        let copying = {
+            let flow = self.flow.borrow();
+            flow.plan.launch == Launch::Migrate && flow.onboarding.is_none()
+        };
+        if !frame.animate && !copying {
+            stop_chime();
+        }
+        let handle = self.window.borrow().clone();
+        let animating = frame.animate;
+        let began = match handle {
+            Some(GateWindow::Stage(stage)) => {
+                stage.set_frame(frame, cx);
+                false
+            }
+            Some(GateWindow::Welcome(handle)) => handle
+                .update(cx, |view, _, cx| {
+                    let began = animating && !view.frame.animate;
+                    view.set_frame(frame, cx);
+                    began
+                })
+                .unwrap_or(false),
+            None if visible => {
+                let on_action: pm_shell::welcome_view::OnAction = Rc::new({
+                    let driver = self.clone();
+                    move |id, cx| driver.step(|flow| flow.action(id), cx)
+                });
+                // The launch that onboards plays on the stage; its cue
+                // sheet plays the chime. A launch that copies the original
+                // app's library opens on the intro too, its wave drawing the
+                // window the copy runs in; the steps follow the copy.
+                let (staged, intro) = {
+                    let flow = self.flow.borrow();
+                    (
+                        flow.plan.onboard,
+                        frame.animate || flow.plan.launch == Launch::Migrate,
+                    )
+                };
+                let staged = staged
+                    && crate::first_run_stage::open(
+                        frame.clone(),
+                        on_action.clone(),
+                        intro,
+                        true,
+                        Rc::new(play_sound),
+                        cx,
+                    )
+                    .map(|stage| *self.window.borrow_mut() = Some(GateWindow::Stage(stage)))
+                    .inspect_err(|e| eprintln!("The first-run stage could not open: {e:#}"))
+                    .is_ok();
+                let opened = if staged {
+                    Err(anyhow::anyhow!("staged"))
+                } else {
+                    pm_shell::welcome_view::open_welcome(
+                        pm_shell::tokens(),
+                        frame,
+                        on_action.clone(),
+                        cx,
+                    )
+                };
+                match opened {
+                    Err(_) if staged => false,
+                    Ok(handle) => {
+                        *self.window.borrow_mut() = Some(GateWindow::Welcome(handle));
+                        if self.flow.borrow().extensions.is_some() {
+                            crate::extension_transfer::review(on_action.clone(), cx);
+                        }
+                        // A development review walks to a step: the steps it
+                        // names (`--review-onboarding begin,continue`), never
+                        // the last one, which finishes and writes.
+                        #[cfg(debug_assertions)]
+                        if let Ok(steps) = std::env::var("PM_NATIVE_REVIEW_ONBOARDING") {
+                            let ids: Vec<String> = steps
+                                .split(',')
+                                .filter(|s| {
+                                    matches!(*s, "begin" | "continue" | "back")
+                                        || s.starts_with("choose:")
+                                })
+                                .map(str::to_owned)
+                                .collect();
+                            let driver = self.clone();
+                            cx.spawn(async move |cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_secs(1))
+                                    .await;
+                                let _ = cx.update(|cx| {
+                                    for id in ids {
+                                        driver.step(|flow| flow.action(&id), cx);
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
+                        animating
+                    }
+                    Err(error) => {
+                        eprintln!("Could not open Welcome: {error:#}");
+                        false
+                    }
+                }
+            }
+            None => false,
+        };
+        if began {
+            play_chime();
+        }
+    }
+    fn apply(&self, effects: Vec<Effect>, cx: &mut gpui::App) {
+        for effect in effects {
+            match effect {
+                Effect::Connect(provider) => self.connect(provider),
+                Effect::Subscribe(plan) => crate::cloud::subscribe(plan, cx),
+                Effect::SendCode(email) => {
+                    let tx = self.tx.clone();
+                    crate::cloud::send_code(email, cx, move |result, _| {
+                        let _ = tx.try_send(Message::CodeSent(result));
+                    });
+                }
+                Effect::VerifyCode { email, code } => {
+                    let tx = self.tx.clone();
+                    crate::cloud::verify_code(email, code, cx, move |result, _| {
+                        let _ = tx.try_send(Message::Verified(result));
+                    });
+                }
+                Effect::After(wait, id) => {
+                    let driver = self.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = cx.update(|cx| driver.step(|flow| flow.action(id), cx));
+                    })
+                    .detach();
+                }
+                Effect::Run(run) => {
+                    self.pause.store(false, Ordering::Release);
+                    if let Some(config) = self.library.plan.config.clone() {
+                        if run == Run::WithConsent {
+                            let (request, requested) = async_channel::bounded(1);
+                            let (reply, response) = std::sync::mpsc::sync_channel(1);
+                            let window = self.window.borrow().clone();
+                            // The worker asks only after validation and the durable
+                            // AccessStarted checkpoint. This task runs on main.
+                            cx.spawn(async move |cx| {
+                                if requested.recv().await.is_ok() {
+                                    let result = cx.update(|cx| {
+                                        cx.activate(true);
+                                        if let Some(window) = window {
+                                            window.activate(cx);
+                                        }
+                                        MacKeychain::read_on_main_thread()
+                                    });
+                                    let _ = reply.send(result);
+                                }
+                            })
+                            .detach();
+                            let access = MacKeychain::with_legacy_reader(move || {
+                                request.send_blocking(())?;
+                                response.recv()?
+                            });
+                            spawn_run_with_keychain(
+                                config,
+                                run,
+                                self.pause.clone(),
+                                self.activity.clone(),
+                                self.tx.clone(),
+                                Some(access),
+                            );
+                        } else {
+                            spawn_run(
+                                config,
+                                run,
+                                self.pause.clone(),
+                                self.activity.clone(),
+                                self.tx.clone(),
+                            );
+                        }
+                        self.poll(cx);
+                    }
+                }
+                Effect::SkipFolder => self.activity.skip_waiting(),
+                Effect::Pause => self.pause.store(true, Ordering::Release),
+                Effect::Watch => {
+                    if let Some(config) = &self.library.plan.config {
+                        spawn_watch(config.electron_profile.clone(), self.tx.clone());
+                    }
+                }
+                Effect::Quit => cx.quit(),
+                Effect::ShowReport => {
+                    crate::migration_report::open(self.library.plan.profile.clone(), cx)
+                }
+                Effect::Enter(choices) => self.enter(choices, cx),
+                Effect::ScanExtensions => self.extensions(false),
+                Effect::RunExtensions => self.extensions(true),
+                // One small file, written before the library opens.
+                Effect::DeclineExtensions => {
+                    crate::extension_transfer::decline(&self.library.plan.profile)
+                }
+                Effect::BringIn => {
+                    if let Some(config) = self.library.plan.config.clone() {
+                        spawn_bring_in(config, self.tx.clone());
+                    }
+                }
+                Effect::WithdrawRequest => {
+                    later::cancel_request(&self.library.plan.profile)
+                }
+            }
+        }
+    }
+    /// The extension scan or transfer on its own thread, reporting to the flow.
+    fn extensions(&self, run: bool) {
+        let Some(config) = crate::extension_transfer::eligible(self.library.plan.original.as_ref())
+        else {
+            // The original app went away meanwhile: nothing to offer, so open.
+            let update = if run {
+                Update::Finished(Err("The original app’s folder is no longer there.".into()))
+            } else {
+                Update::Scanned(Ok(Default::default()))
+            };
+            let _ = self.tx.try_send(Message::Extensions(update));
+            return;
+        };
+        let (tx, rx) = async_channel::unbounded();
+        if run {
+            crate::extension_transfer::spawn_run(config, tx);
+        } else {
+            crate::extension_transfer::spawn_scan(config, tx);
+        }
+        let forward = self.tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(update) = rx.recv_blocking() {
+                if forward.send_blocking(Message::Extensions(update)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    /// Four times a second while the worker runs: its bytes and any folder prompt.
+    fn poll(&self, cx: &mut gpui::App) {
+        if self.running.replace(true) {
+            return;
+        }
+        let driver = self.clone();
+        cx.spawn(async move |cx| {
+            while driver.running.get() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let (bytes, waiting) = (driver.activity.bytes(), driver.activity.waiting());
+                cx.update(|cx| {
+                    let changed = driver.flow.borrow_mut().activity(bytes, waiting);
+                    if changed {
+                        driver.show(cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    /// Library first, then the MCP server, then windows. Off main until the last.
+    fn enter(&self, choices: Option<serde_json::Value>, cx: &mut gpui::App) {
+        let library = self.library.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { library.open(choices) });
+        let driver = self.clone();
+        cx.spawn(async move |cx| {
+            let result = work.await;
+            cx.update(|cx| match result {
+                Ok(opened) => driver.opened(opened, cx),
+                Err(error) => {
+                    let details = format!("{error:#}");
+                    crate::error_log::shared(cx)
+                        .borrow_mut()
+                        .push("Library", &details);
+                    driver.step(|flow| flow.enter_failed(details), cx);
+                }
+            });
+        })
+        .detach();
+    }
+    fn opened(&self, opened: Opened, cx: &mut gpui::App) {
+        let log = crate::error_log::shared(cx);
+        if opened.later_failed {
+            log.borrow_mut().tell("Library", LATER_FAILED);
+        }
+        // The editor that opens next starts the transfer (`firstRunWorkspace`).
+        note_workspace_request(opened.bring_workspace);
+        (self.finish)(cx);
+        match self.window.borrow_mut().take() {
+            Some(GateWindow::Welcome(handle)) => {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            // The wave carries the card away; the lights come up on the app.
+            Some(GateWindow::Stage(stage)) => stage.hand_off(cx),
+            None => {}
+        }
+        if opened.media {
+            self.library.finish_media(log, cx);
+        }
+        // Newer work in the original app: a quiet line on Home, never a wait.
+        if self.library.plan.launch == Launch::Later
+            && let Some(config) = self.library.plan.config.clone()
+        {
+            crate::recent_work::check(config, cx);
+        }
+    }
+}
+impl Library {
+    fn open(&self, choices: Option<serde_json::Value>) -> Result<Opened> {
+        let later = later_store(&self.plan, |_| Ok(()));
+        if let Err(error) = &later {
+            eprintln!("Bringing in later changes stopped: {error:#}");
+        }
+        if !self.attached.load(Ordering::Acquire) {
+            crate::mcp::attach(&self.kernel, &self.plan.profile)?;
+            if let Err(error) =
+                gpui_macos::clear_incoming_drops(&self.plan.profile.join("media/received"))
+            {
+                eprintln!("Could not clear unfinished media drops: {error}");
+            }
+            self.attached.store(true, Ordering::Release);
+        }
+        if self.server.lock().unwrap().is_none() {
+            let tools = self.tools.clone();
+            let server =
+                pm_mcp::transport::LoopbackServer::start_with(&self.plan.profile, move || {
+                    tools.connect()
+                })?;
+            *self.server.lock().unwrap() = Some(server);
+        }
+        let choices_bring_workspace = choices.as_ref().is_some_and(requests_workspace);
+        if let Some(choices) = choices {
+            std::fs::create_dir_all(&self.plan.profile)?;
+            if let Some(provider) = choices["agent"]["provider"].as_str() {
+                let _pending = self
+                    .kernel
+                    .state_transaction(pm_kernel::state::StateTransaction {
+                        ops: vec![pm_kernel::state::StateOp::Setting {
+                            key: "agentProvider".into(),
+                            value: Some(provider.into()),
+                        }],
+                        ..Default::default()
+                    });
+            }
+            write_marker(&self.plan.profile, &choices)?;
+            // The speech models the person chose download while they work,
+            // one after another.
+            let speech: Vec<String> = choices["speechModels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            if !speech.is_empty() {
+                crate::transcription::install(&self.plan.profile);
+                if let Some(store) = crate::transcription::store() {
+                    store.download_in_turn(speech);
+                }
+            }
+        }
+        Ok(Opened {
+            bring_workspace: choices_bring_workspace,
+            media: *later.as_ref().unwrap_or(&false),
+            later_failed: later.is_err(),
+        })
+    }
+    /// Lands behind the open library, on its own thread.
+    fn finish_media(&self, log: crate::error_log::Shared, cx: &mut gpui::App) {
+        let Some(config) = self.plan.config.clone() else {
+            return;
+        };
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = pm_first_launch::delta_media(&config, |_| Ok(()));
+            if let Err(error) = &result {
+                eprintln!("Bringing in new media stopped: {error:#}");
+            }
+            let _ = tx.send_blocking(result.is_ok());
+        });
+        cx.spawn(async move |cx| {
+            match rx.recv().await {
+                Ok(true) => {
+                    // Protected folders it couldn't open show in Settings › Media.
+                    cx.update(crate::pro_media::MediaPassDone::bump);
+                }
+                Ok(false) => log.borrow_mut().tell("Library", LATER_FAILED),
+                Err(_) => {}
+            }
+        })
+        .detach();
+    }
+}
+/// The choices ask to bring the After Effects workspace (v1's
+/// `workspaceImport`).
+pub fn requests_workspace(choices: &serde_json::Value) -> bool {
+    choices["workspaceImport"] == "after-effects"
+}
+thread_local! {
+    /// Bring My Workspace was chosen and no editor has taken it yet.
+    static WORKSPACE_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The library opened after onboarding; `on`: Bring My Workspace was chosen.
+pub(crate) fn note_workspace_request(on: bool) {
+    WORKSPACE_REQUEST.with(|r| r.set(on));
+}
+/// The first-run request for the workspace transfer, taken once.
+pub fn take_workspace_request() -> bool {
+    WORKSPACE_REQUEST.with(|r| r.replace(false))
+}
+thread_local! {
+    static CHIME: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSound>>> =
+        const { RefCell::new(None) };
+}
+/// The original scene's sound, once, with the animation. Reduce Motion is silent.
+fn play_chime() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSSound, NSWorkspace};
+    use objc2_foundation::NSData;
+    const SOUND: &[u8] = include_bytes!("../assets/onboarding-chime.wav");
+    if MainThreadMarker::new().is_none()
+        || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    {
+        return;
+    }
+    let sound = NSSound::initWithData(NSSound::alloc(), &NSData::with_bytes(SOUND));
+    if let Some(sound) = sound {
+        sound.play();
+        CHIME.with(|slot| *slot.borrow_mut() = Some(sound));
+    }
+}
+fn stop_chime() {
+    CHIME.with(|slot| {
+        if let Some(sound) = slot.borrow_mut().take() {
+            sound.stop();
+        }
+    });
+}
+#[cfg(test)]
+#[path = "first_run_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+mod step_frame_tests {
+    use super::*;
+
+    /// The agent rows (Aero, Claude Code, Codex) offer Connect until a
+    /// sign-in answers; Aero's row follows the Powermove account.
+    #[test]
+    fn agent_rows_connect_and_show_a_sign_in() {
+        let choices = Choices::default();
+        let none = Default::default();
+        let frame = step_frame(Onboard::Agent, &choices, &none, None, None);
+        let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["aero", "claude", "chatgpt"]);
+        assert_eq!(frame.choices[0].label, "Aero");
+        assert_eq!(frame.chosen.as_deref(), Some("aero"));
+        assert!(frame.choices.iter().all(|c| c.pill.as_deref() == Some("Connect") && c.status.is_none()));
+        // A ChatGPT sign-in is Codex's only; the Powermove account is Aero's.
+        let signed = std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected · a@b.c".to_owned())]);
+        let frame = step_frame(Onboard::Agent, &choices, &signed, Some("ana@example.com"), None);
+        for (choice, connected) in frame.choices.iter().zip([true, false, true]) {
+            assert_eq!(choice.pill.is_none(), connected, "{}", choice.id);
+            assert_eq!(choice.status.is_some(), connected, "{}", choice.id);
+        }
+        assert_eq!(frame.choices[0].status.as_deref(), Some("ana@example.com"));
+    }
+
+    fn frame_offer(choices: &Choices) -> Option<pm_shell::welcome::Offer> {
+        step_frame(
+            Onboard::Agent,
+            choices,
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        )
+        .offer
+    }
+    /// Aero leads; it is chosen unless a Codex or Claude Code sign-in
+    /// already exists (then that one), and the person's own pick wins. On
+    /// Free its row offers the plan the backend lists, with its price; on a
+    /// plan it names the plan.
+    #[test]
+    fn aero_leads_offers_its_plan_on_free_and_follows_existing_sign_ins() {
+        let mut choices = Choices::default();
+        let codex =
+            std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected".to_owned())]);
+        let frame = step_frame(
+            Onboard::Agent,
+            &choices,
+            &codex,
+            Some("ana@example.com"),
+            None,
+        );
+        assert_eq!(frame.choices[0].id, "aero");
+        assert_eq!(frame.chosen.as_deref(), Some("chatgpt"));
+        choices.agent_picked = true;
+        assert_eq!(choices.agent_for(&codex), "aero");
+        choices.aero = AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":false,
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}));
+        let frame = step_frame(
+            Onboard::Agent,
+            &choices,
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        );
+        // Aero chosen (no other sign-in): its plan's card, to buy here.
+        choices.agent_picked = false;
+        let offer = frame_offer(&choices);
+        assert_eq!(
+            offer
+                .as_ref()
+                .map(|o| (o.name.as_str(), o.price.as_str(), o.action.as_str())),
+            Some(("Aerolite", "$9.99", "Get Aerolite"))
+        );
+        assert_eq!(offer.unwrap().features[0].0, "1,000 credits a month");
+        assert_eq!(frame.choices[0].pill, None);
+        // Maybe Later, or another agent chosen: no card.
+        choices.offer_later = true;
+        assert_eq!(frame_offer(&choices), None);
+        choices.offer_later = false;
+        let codex =
+            std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected".to_owned())]);
+        assert_eq!(
+            step_frame(
+                Onboard::Agent,
+                &choices,
+                &codex,
+                Some("ana@example.com"),
+                None
+            )
+            .offer,
+            None
+        );
+        // Signed out: Connect, whatever the plans.
+        let frame = step_frame(Onboard::Agent, &choices, &Default::default(), None, None);
+        assert_eq!(frame.choices[0].pill.as_deref(), Some("Connect"));
+        choices.aero = AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":true,
+            "plan":{"id":"aerolite","name":"Aerolite"}}));
+        let frame = step_frame(
+            Onboard::Agent,
+            &choices,
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        );
+        assert_eq!(frame.choices[0].pill, None);
+        assert_eq!(frame.choices[0].status.as_deref(), Some("Aerolite"));
+    }
+
+    /// The speech step lists every model in the catalogue, in its order,
+    /// with the catalogue's Recommended tag and the line Settings › Speech
+    /// shows; nothing downloads unless asked.
+    #[test]
+    fn the_speech_step_lists_every_catalogue_model() {
+        let mut catalog = pm_transcribe::store::catalog();
+        assert!(catalog.len() >= 7, "{}", catalog.len());
+        // The recommended ones lead, in the catalogue's order.
+        catalog.sort_by_key(|m| !m.recommended);
+        let frame = step_frame(
+            Onboard::Transcription,
+            &Choices::default(),
+            &Default::default(),
+            None,
+            None,
+        );
+        let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
+        let want: Vec<_> = catalog.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, want);
+        for (row, model) in frame.choices.iter().zip(&catalog) {
+            assert_eq!(row.label, model.name);
+            assert_eq!(row.badge.is_some(), model.recommended, "{}", model.id);
+            assert_eq!(row.pill.as_deref(), Some("Download"));
+            assert!(row.status.is_none());
+            let detail = row.detail.as_deref().unwrap();
+            assert!(
+                detail.contains(&pm_transcribe::store::format_bytes(model.size())),
+                "{detail}"
+            );
+            assert_eq!(
+                detail.contains("English only"),
+                model.languages == "en",
+                "{detail}"
+            );
+        }
+        // Parakeet Unified EN (the default) first, Cohere Transcribe second,
+        // both tagged; Nemotron not.
+        assert_eq!(
+            ids[..2],
+            ["parakeet-unified-en-0.6b", "cohere-transcribe-03-2026"]
+        );
+        let tagged: Vec<_> = frame
+            .choices
+            .iter()
+            .filter(|c| c.badge.is_some())
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(tagged, ["Parakeet Unified EN", "Cohere Transcribe"]);
+        assert_eq!(frame.note, None);
+    }
+    /// Download queues a model behind any asked for before it; its row then
+    /// says so, the others keep Download, and a press on a queued row takes
+    /// it back.
+    #[test]
+    fn speech_downloads_queue_in_order() {
+        let mut choices = Choices::default();
+        let none = Default::default();
+        let frame = step_frame(Onboard::Transcription, &choices, &none, None, None);
+        let (first, second) = (frame.choices[0].id.clone(), frame.choices[6].id.clone());
+        choices.speech = vec![second.clone(), first.clone()];
+        let frame = step_frame(Onboard::Transcription, &choices, &none, None, None);
+        for row in &frame.choices {
+            let queued = choices.speech.contains(&row.id);
+            assert_eq!(
+                row.status.as_deref(),
+                queued.then_some("Queued"),
+                "{}",
+                row.id
+            );
+            assert_eq!(row.pill.is_some(), !queued, "{}", row.id);
+        }
+        assert_eq!(
+            frame.note.as_deref(),
+            Some("Downloads start when Powermove opens, one at a time.")
+        );
+    }
+
+    /// Every step's title is sentence case without a full stop.
+    #[test]
+    fn step_titles_are_sentence_case() {
+        let choices = Choices::default();
+        let none = Default::default();
+        for step in [Onboard::Welcome, Onboard::Timeline, Onboard::Account, Onboard::Agent, Onboard::Transcription, Onboard::Workspace] {
+            let title = step_frame(step, &choices, &none, None, None).title;
+            assert!(!title.ends_with('.'), "{title}");
+            let words: Vec<_> = title.split(' ').skip(1).collect();
+            assert!(
+                words.iter().all(|w| w.chars().next().is_some_and(char::is_lowercase) || *w == "Powermove"),
+                "{title}"
+            );
+        }
+    }
+}

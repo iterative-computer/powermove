@@ -4,11 +4,11 @@ import { resolve } from 'node:path';
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { composeEnv, databaseUrl } from './lib/local-env';
 
 const cloud = resolve(import.meta.dir, '..');
-const databaseUrl = 'postgres://powermove:powermove@localhost:54329/powermove';
 
-const docker = Bun.spawn(['docker', 'compose', 'up', '-d', '--wait'], { cwd: cloud, stdout: 'inherit', stderr: 'inherit' });
+const docker = Bun.spawn(['docker', 'compose', 'up', '-d', '--wait'], { cwd: cloud, env: composeEnv, stdout: 'inherit', stderr: 'inherit' });
 if (await docker.exited !== 0) throw new Error('docker compose up failed');
 
 const pool = new Pool({ connectionString: databaseUrl, max: 2 });

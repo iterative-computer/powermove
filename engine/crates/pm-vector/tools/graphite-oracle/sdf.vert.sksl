@@ -1,0 +1,39 @@
+// m152 SDFTextRenderStep, with runtime matrices and source instance attributes.
+layout(set=0,binding=0) uniform IntrinsicUniforms { float4 viewport; float4 dstReadBounds; };
+struct CombinedUniformData {
+    half4 paintColor;
+    float4x4 maskToDevice;
+    float4x4 localToDevice;
+    float2 atlasSizeInv;
+    half2 gammaParams;
+};
+layout(set=0,binding=1) readonly buffer CombinedUniforms {
+    CombinedUniformData combinedUniformData[];
+};
+layout(location=0) in ushort2 size;
+layout(location=1) in ushort2 uvPos;
+layout(location=2) in float2 xyPos;
+layout(location=3) in ushort2 indexAndFlags;
+layout(location=4) in float strikeToSourceScale;
+layout(location=5) in float depth;
+layout(location=6) in uint ssboIndex;
+layout(location=0) out flat uint ssboIndices;
+layout(location=1) out noperspective half4 perPrimitiveColor;
+layout(location=2) out float2 unormTexCoords;
+layout(location=3) out float2 textureCoords;
+layout(location=4) out float texIndex;
+uint bufferIndex;
+void main() {
+    float2 stepLocalCoords=float2(0);
+    bufferIndex=ssboIndex;
+    float4x4 maskToDevice=combinedUniformData[bufferIndex].maskToDevice;
+    float4x4 localToDevice=combinedUniformData[bufferIndex].localToDevice;
+    float2 atlasSizeInv=combinedUniformData[bufferIndex].atlasSizeInv;
+    texIndex=half(indexAndFlags.x);
+    float4 devPosition=text_vertex_fn(float2(sk_VertexID >> 1,sk_VertexID & 1),
+        maskToDevice,localToDevice,atlasSizeInv,float2(size),float2(uvPos),xyPos,
+        strikeToSourceScale,depth,textureCoords,unormTexCoords,stepLocalCoords);
+    sk_Position=float4(viewport.zw*devPosition.xy-sign(viewport.zw)*devPosition.ww,devPosition.zw);
+    perPrimitiveColor=combinedUniformData[bufferIndex].paintColor;
+    ssboIndices=bufferIndex;
+}

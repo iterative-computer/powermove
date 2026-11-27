@@ -1,0 +1,833 @@
+use std::fs;
+use std::io::Write;
+#[cfg(all(target_os = "macos", feature = "generation"))]
+use std::sync::atomic::AtomicBool;
+
+use pm_protocol::priority::{ProxyFormat, ProxySize};
+use pm_proxy::{
+    AutomaticInput, DecodeMeasurement, MachineProfile, MediaAvailability, MediaUse, PlaybackMoment,
+    ProxyRecipe, ProxyStore, Representation, RepresentationIntent, ResolutionIntent,
+    choose_representation, disk_guard, source_for,
+};
+
+use tempfile::{NamedTempFile, tempdir};
+
+#[test]
+fn recipe_key_and_store_survive_relink_and_reopen() {
+    let temp = tempdir().unwrap();
+    let store = ProxyStore::open(temp.path()).unwrap();
+    let recipe = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::Automatic,
+        1920,
+        1080,
+        10,
+        false,
+    )
+    .unwrap();
+    let hash = blake3::hash(b"source bytes").to_hex().to_string();
+    let mut movie = NamedTempFile::new_in(temp.path()).unwrap();
+    movie.write_all(b"validated movie bytes").unwrap();
+    let saved = store.commit(&hash, &recipe, movie).unwrap();
+    assert_eq!(
+        store.lookup(&hash, &recipe).unwrap().unwrap().path,
+        saved.path
+    );
+    assert_eq!(
+        store
+            .lookup(&hash.to_uppercase(), &recipe)
+            .unwrap()
+            .unwrap()
+            .path,
+        saved.path
+    );
+    let mut obsolete_recipe = recipe.clone();
+    obsolete_recipe.version = 1;
+    let mut obsolete_media = NamedTempFile::new_in(temp.path()).unwrap();
+    obsolete_media.write_all(b"old encoding algorithm").unwrap();
+    store
+        .commit(&hash, &obsolete_recipe, obsolete_media)
+        .unwrap();
+    let reopened = ProxyStore::open(temp.path()).unwrap();
+    let relinked = reopened
+        .find_for_source(&hash, None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(relinked.blake3, saved.blake3);
+    assert!(
+        reopened
+            .find_for_source(&hash.to_uppercase(), None, None)
+            .unwrap()
+            .is_some()
+    );
+    fs::write(&saved.path, b"corrupt").unwrap();
+    assert!(reopened.lookup(&hash, &recipe).is_err());
+    assert!(
+        reopened
+            .find_for_source(&hash, None, None)
+            .unwrap()
+            .is_none()
+    );
+    reopened.remove(&hash, &recipe).unwrap();
+    assert!(reopened.lookup(&hash, &recipe).unwrap().is_none());
+}
+
+#[test]
+fn disk_guard_reserves_five_gib_or_one_percent_plus_job_output() {
+    let gib = 1u64 << 30;
+    assert!(!disk_guard(5 * gib - 1, 460 * gib));
+    assert!(disk_guard(5 * gib, 460 * gib));
+    assert!(pm_proxy::disk_guard_for_job(
+        193 * gib / 10,
+        460 * gib,
+        3 * gib
+    ));
+    assert!(!pm_proxy::disk_guard_for_job(
+        8 * gib - 1,
+        460 * gib,
+        3 * gib
+    ));
+    assert!(pm_proxy::disk_guard_for_job(8 * gib, 460 * gib, 3 * gib));
+    assert!(!disk_guard(9 * gib, 1000 * gib));
+    assert!(disk_guard(10 * gib, 1000 * gib));
+}
+
+#[test]
+fn deep_source_recipe_uses_4444_without_discarding_depth_fact() {
+    let recipe =
+        ProxyRecipe::new(ProxyFormat::Hevc10, ProxySize::Half, 101, 57, 16, false).unwrap();
+    assert_eq!(recipe.source_depth, 16);
+    assert_eq!(recipe.codec(), "prores_4444");
+    assert_eq!(recipe.width % 2, 0);
+    assert_eq!(recipe.height % 2, 0);
+}
+
+#[test]
+fn policy_respects_boundaries_offline_originals_and_export_safety() {
+    let profile = MachineProfile {
+        gpu_frame_p95_ms: 4.0,
+        gpu_headroom_ms: 12.667,
+        disk_write_mib_s: 500.0,
+        on_battery: false,
+    };
+    let mut input = AutomaticInput {
+        intent: RepresentationIntent::Automatic,
+        resolution: ResolutionIntent::Automatic,
+        moment: PlaybackMoment::Start,
+        availability: MediaAvailability::Online,
+        current: Representation::Original,
+        proxy_ready: true,
+        reduced_half_available: false,
+        reduced_quarter_available: false,
+        decode: DecodeMeasurement {
+            original_p95_ms: 60.0,
+            reduced_half_p95_ms: None,
+            reduced_quarter_p95_ms: None,
+            proxy_p95_ms: Some(4.0),
+        },
+        profile,
+        fps: 30.0,
+        viewer_size: (960, 540),
+        source_size: (3840, 2160),
+    };
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Proxy)
+    );
+    input.reduced_half_available = true;
+    input.decode.reduced_half_p95_ms = Some(5.0);
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::ReducedHalf)
+    );
+    input.reduced_quarter_available = true;
+    input.decode.reduced_quarter_p95_ms = Some(3.0);
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::ReducedQuarter)
+    );
+    // A measured original that fits is the exact source even on a small
+    // canvas; the decoder's reduced picture has different texels.
+    input.decode.original_p95_ms = 5.0;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Original)
+    );
+    input.decode.original_p95_ms = 60.0;
+    input.reduced_half_available = false;
+    input.reduced_quarter_available = false;
+    input.moment = PlaybackMoment::Continuing;
+    input.current = Representation::Original;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Original)
+    );
+    input.moment = PlaybackMoment::Paused;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Original)
+    );
+    input.resolution = ResolutionIntent::Half;
+    input.current = Representation::ReducedQuarter;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Original)
+    );
+    input.intent = RepresentationIntent::Originals;
+    input.availability = MediaAvailability::OriginalOfflineProxyAvailable;
+    assert_eq!(choose_representation(input).representation, None);
+    input.intent = RepresentationIntent::Automatic;
+    assert_eq!(choose_representation(input).representation, None);
+    assert_eq!(
+        choose_representation(input).offline,
+        MediaAvailability::OriginalOfflineProxyAvailable
+    );
+    input.moment = PlaybackMoment::Start;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Proxy)
+    );
+    input.moment = PlaybackMoment::Paused;
+    input.intent = RepresentationIntent::Proxies;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Proxy)
+    );
+    assert!(source_for(MediaUse::Export, Representation::Proxy, false).is_err());
+    assert_eq!(
+        source_for(MediaUse::Analysis, Representation::Proxy, true).unwrap(),
+        Representation::Original
+    );
+    assert_eq!(
+        source_for(MediaUse::DraftExport, Representation::Proxy, false).unwrap(),
+        Representation::Proxy
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("source.mov");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=128x72:rate=24000/1001:duration=0.5",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=400:sample_rate=48000:duration=0.5",
+            "-c:v",
+            "prores_videotoolbox",
+            "-profile:v",
+            "proxy",
+            "-pix_fmt",
+            "p216le",
+            "-c:a",
+            "pcm_s24le",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-timecode",
+            "01:00:00:00",
+            "-metadata",
+            "reel_name=test_reel",
+            "-movflags",
+            "use_metadata_tags",
+            "-shortest",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let source_tags = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    let source_tags: serde_json::Value = serde_json::from_slice(&source_tags.stdout).unwrap();
+    assert_eq!(source_tags["streams"][0]["tags"]["timecode"], "01:00:00:00");
+    assert_eq!(source_tags["format"]["tags"]["reel_name"], "test_reel");
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    // Proxies at half size, and optimized media (ProRes 422 HQ) at full size.
+    let reported = std::sync::Mutex::new(Vec::<f64>::new());
+    let record = |share: f64| reported.lock().unwrap().push(share);
+    for (format, size) in [
+        (ProxyFormat::ProResProxy, ProxySize::Half),
+        (ProxyFormat::ProResLt, ProxySize::Half),
+        (ProxyFormat::Hevc10, ProxySize::Half),
+        (ProxyFormat::ProResHq, ProxySize::Full),
+    ] {
+        let request = || GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format,
+            size,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &record,
+            },
+        };
+        let result = generate_with_disk_probe(request(), &TEST_QUOTA).unwrap();
+        assert!(!result.reused);
+        assert!(result.stored.byte_size > 0);
+        let again = generate_with_disk_probe(request(), &TEST_QUOTA).unwrap();
+        assert!(again.reused);
+        assert_eq!(again.stored.path, result.stored.path);
+        if size == ProxySize::Full {
+            assert_eq!(
+                (result.stored.recipe.width, result.stored.recipe.height),
+                (128, 72),
+                "optimized media keeps the source size"
+            );
+        }
+    }
+    assert!(
+        reported
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|share| (0.0..=1.0).contains(share)),
+        "progress is a share of the clip"
+    );
+    let replaced = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=128x72:r=24000/1001:d=0.5",
+            "-c:v",
+            "prores_videotoolbox",
+            "-profile:v",
+            "proxy",
+            "-pix_fmt",
+            "p216le",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    let stale = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    );
+    assert!(matches!(stale, Err(pm_proxy::ProxyError::InvalidMedia(_))));
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn alpha_source_forces_prores_4444_even_with_hevc_preference() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("alpha.mov");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red@0.5:s=128x72:r=24:d=0.5,format=yuva444p10le",
+            "-c:v",
+            "prores_videotoolbox",
+            "-profile:v",
+            "4444",
+            "-pix_fmt",
+            "ayuv64le",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::Hevc10,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    assert_eq!(output.stored.recipe.codec(), "prores_4444");
+    assert!(output.stored.recipe.source_has_alpha);
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn float64_pcm_source_keeps_its_coding_and_samples() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("float.mov");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=128x72:rate=24:duration=0.5",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=917:sample_rate=48000:duration=0.5",
+            "-c:v",
+            "prores_videotoolbox",
+            "-profile:v",
+            "proxy",
+            "-pix_fmt",
+            "p216le",
+            "-c:a",
+            "pcm_f64le",
+            "-shortest",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    let probed = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "json",
+        ])
+        .arg(&output.stored.path)
+        .output()
+        .unwrap();
+    let probed: serde_json::Value = serde_json::from_slice(&probed.stdout).unwrap();
+    assert!(
+        probed["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["codec_name"] == "pcm_f64le")
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn variable_frame_intervals_keep_exact_pts() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("variable.mov");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=128x72:rate=10:duration=0.7",
+            "-vf",
+            r"setpts=PTS+gte(N\,3)",
+            "-fps_mode",
+            "passthrough",
+            "-c:v",
+            "prores_videotoolbox",
+            "-profile:v",
+            "proxy",
+            "-pix_fmt",
+            "p216le",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    assert!(output.stored.byte_size > 0);
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn odd_source_dimensions_retain_display_aspect() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("odd.mov");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=641x359:rate=12:duration=0.25",
+            "-c:v",
+            "png",
+            "-pix_fmt",
+            "rgb24",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    assert_eq!(output.stored.recipe.width % 2, 0);
+    assert_eq!(output.stored.recipe.height % 2, 0);
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+use pm_proxy::{GenerationControl, GenerationRequest, generate_with_disk_probe};
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+/// These codec tests are not about the disk guard (`disk_pause.rs` and
+/// `disk_guard_reserves_five_gib_or_one_percent_plus_job_output` are): a fixed quota
+/// keeps them independent of the shared build machine's free space.
+fn test_quota(_: &std::path::Path) -> pm_proxy::Result<(u64, u64)> {
+    Ok((40 << 30, 100 << 30))
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+const TEST_QUOTA: fn(&std::path::Path) -> pm_proxy::Result<(u64, u64)> = test_quota;
+
+#[test]
+fn machine_profile_uses_injected_power_and_propagates_probe_failures() {
+    struct Probe(bool);
+    impl pm_proxy::PowerProbe for Probe {
+        fn on_battery(&self) -> pm_proxy::Result<bool> {
+            Ok(self.0)
+        }
+    }
+    struct Failed;
+    impl pm_proxy::PowerProbe for Failed {
+        fn on_battery(&self) -> pm_proxy::Result<bool> {
+            Err(pm_proxy::ProxyError::InvalidMedia("probe failed".into()))
+        }
+    }
+    let dir = tempdir().unwrap();
+    for battery in [true, false] {
+        let profile =
+            pm_proxy::probe_machine_profile_with(dir.path(), 4.0, &Probe(battery)).unwrap();
+        assert_eq!(profile.on_battery, battery);
+        assert!(profile.disk_write_mib_s.is_finite() && profile.disk_write_mib_s > 0.0);
+    }
+    assert!(pm_proxy::probe_machine_profile_with(dir.path(), 4.0, &Failed).is_err());
+    assert!(pm_proxy::probe_machine_profile_with(dir.path(), f64::NAN, &Probe(false)).is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn webm_preview_preserves_alpha_samples() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("alpha.webm");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red@0.5:s=128x72:r=24:d=0.5,format=yuva420p",
+            "-c:v",
+            "libvpx-vp9",
+            "-lossless",
+            "1",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::Hevc10,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    assert_eq!(output.stored.recipe.codec(), "prores_4444");
+    assert!(output.stored.recipe.source_has_alpha);
+    let decoded = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&output.stored.path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "alphaextract,format=gray",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        decoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    assert!(!decoded.stdout.is_empty());
+    assert!(
+        decoded.stdout.iter().all(|&a| (120..=136).contains(&a)),
+        "the half-transparent WebM must not become opaque"
+    );
+}
+
+#[test]
+fn portrait_hd_preview_fits_the_portrait_composition() {
+    let recipe = |w, h| {
+        ProxyRecipe::new(ProxyFormat::ProResProxy, ProxySize::P1080, w, h, 8, false).unwrap()
+    };
+    let portrait = recipe(2160, 3840);
+    assert_eq!((portrait.width, portrait.height), (1080, 1920));
+    let landscape = recipe(3840, 2160);
+    assert_eq!((landscape.width, landscape.height), (1920, 1080));
+    let small = recipe(540, 960);
+    assert_eq!((small.width, small.height), (540, 960));
+}
+
+#[test]
+fn output_estimate_accounts_for_codec_and_long_compressed_clips() {
+    let gib = 1u64 << 30;
+    let opaque = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::P1080,
+        3840,
+        2160,
+        8,
+        false,
+    )
+    .unwrap();
+    let alpha = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::P1080,
+        2160,
+        3840,
+        8,
+        true,
+    )
+    .unwrap();
+    let long_output = pm_proxy::estimated_output_bytes(&opaque, 30 * 3600);
+    assert!(
+        pm_proxy::disk_guard_for_job(100 * gib, 460 * gib, long_output),
+        "an hour of compressed HD proxy footage must not reserve raw RGBA storage"
+    );
+    let alpha_output = pm_proxy::estimated_output_bytes(&alpha, 162);
+    assert!(alpha_output > pm_proxy::estimated_output_bytes(&opaque, 162));
+    assert!(pm_proxy::disk_guard_for_job(
+        193 * gib / 10,
+        460 * gib,
+        alpha_output
+    ));
+    assert!(!pm_proxy::disk_guard_for_job(
+        5 * gib,
+        460 * gib,
+        alpha_output
+    ));
+}

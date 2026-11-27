@@ -1,0 +1,144 @@
+[
+  {
+    "name": "export_project",
+    "description": "Export a portable .pmv copy of the active project with its original media and render-required extensions. Returns the exported path and extension requirements.",
+    "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}}
+  },
+  {
+    "name": "list_commands",
+    "description": "List every command a person can run in this window: the menu bar's, the command palette's and the keyboard's, each with its id, arguments, label, menu, current keys, and whether it can run now (\"enabled\") and is switched on (\"checked\", for toggles such as Loop Playback, Snapping, the viewer's channels and overlays, and the timeline's edit tool). Filter by text in the label, menu or id with \"query\". Run one with run_command.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    }
+  },
+  {
+    "name": "run_command",
+    "description": "Run one command exactly as the menu bar, the command palette or its key runs it in the attached project's window: playback (play, toggleLoop, gotoStart, stepFrames [n], shuttleForward), the work area (workIn, workOut, resetWorkArea), editing on the selection (rippleTrimIn, extendEdit, slipLayers [frames], slideLayer [frames], rippleDelete, liftWorkArea, timeRemapLayers, freezeFrame, reverseLayers, precompose), the timeline (graph, graph.value, timeline.tool:ripple, timeline.toggleSnapping), the viewer's toggles (viewer.grid, viewer.rulers, viewer.showAlpha) and Settings' keys (shortcuts with {op:\"set\", value: keymap}). Use list_commands for ids, arguments and whether a command can run now. Commands that act on the selection use the project's selection (select_layers first) and the playhead (seek_to). It refuses commands that would close windows, quit, or open a file panel or sheet.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 8
+        }
+      }
+    }
+  },
+  {
+    "name": "panel_begin",
+    "description": "Call BEFORE writing any new panel or extension. Read get_panel_layout, choose a sensible dock, beside panel id or tab_in panel id, and tell the user where you placed it. Reserves a visible Light sketch slot immediately. Returns build_id and actual placement (floating is currently a reported right-dock fallback). Keep build_id for panel_build events.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "placement"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "placement": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dock": {
+              "type": "string"
+            },
+            "beside": {
+              "type": "string"
+            },
+            "tab_in": {
+              "type": "string"
+            }
+          }
+        },
+        "size_hint": {
+          "type": "number",
+          "minimum": 120,
+          "maximum": 1200
+        },
+        "planned": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "label"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "panel_build",
+    "description": "Send real authoring progress for a panel_begin build_id: plan a row, commit a control only after its definition/code is committed, ready with the registered panelId after publish_extensions or workspace publication, or cancel/error to fade and close the slot. ready waits for the target first rendered layout before handing off; never report successful completion before publication. For incremental generated panels, publish each control and include its registered panelId on commit so the real control fades through its ink while building continues.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_id",
+        "event"
+      ],
+      "properties": {
+        "build_id": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "commit",
+            "ready",
+            "cancel",
+            "error"
+          ]
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 80
+        }
+      }
+    }
+  }
+]

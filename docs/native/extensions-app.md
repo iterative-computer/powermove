@@ -1,0 +1,307 @@
+# Extensions in the app
+
+Status of the running app's extension support. Measured results live in
+[extcheck-p2.md](extcheck-p2.md); the realm internals in
+[compat-realm.md](compat-realm.md).
+
+## Path
+
+`pm_compat_runner::host::ExtensionHost` is created per project window by
+`Controller::start_extensions`. One owner thread does everything that can wait:
+
+1. **Discover**: immediate children of `extensions-shared` (the shipped app's
+   folder as first launch migrated it, kept current by each launch's delta pass),
+   then the native profile's `extensions`. Later roots win. The shipped app's live
+   folder is never read. A manifest error stays a visible record.
+2. **Compile**: `compile.rs` applies the frozen compiler's source boundary, strips
+   TypeScript with oxc, compiles Svelte in a compiler realm and caches graphs by
+   source digest. There is no bundler: V8 links the graph as real ES modules.
+3. **Activate**: `js/compat/src/loader.ts` plans and activates with the reference
+   loader's order, timeouts and auto-disable. v1 to 3 share one realm; Store
+   installs each get a confined helper; v4 extensions get their own realm.
+4. **Publish**: contributions go to kernel registries, so Effects, Properties,
+   MCP and layer commands see them as they see built-ins, and engine definitions go
+   to every viewer and export through `ResourceSnapshot`.
+5. **Follow**: kernel publications update the realm mirror, Settings toggles and
+   on-disk edits reload, and native undo reaches external closures through the
+   realm mailbox.
+
+The main thread only enqueues and reads published copies (N8).
+
+## Kernel channel
+
+`adapter.rs` serves the realm from `KernelHandle`. Reads carry facts only. A write
+publishes the stored change's operations mapped onto the realized open composition;
+only a composition switch or a whole-root write sends a document. The first
+document is serialized before the realm starts and parsed with `JSON.parse`
+(a pro project can be hundreds of megabytes).
+
+`PM.proj` is a view over the realm's mirror that records which records were
+written; a boundary diffs and settles only those subtrees. Records an extension
+builds and inserts are compared slot by slot, since it may keep writing through
+its own reference. Replacing the whole project falls back to whole-tree diffs. `transport.rs`
+keeps `PM.time` a lock and a copy; the app's clock owner pushes time and receives
+seek, play and pause.
+
+## DOM panels
+
+The realm has one document, so the window has one WebKit page below GPUI. A
+contributed panel's body is transparent in GPUI (`Integration::native_panel`, and
+the shell's window fill leaves it out), the page shows through and takes pointer
+events there, and the realm positions the panel's root at the shell's rectangle.
+The root stays hidden until placed; the extension builds into a body inside it,
+which it may style. The page carries the compat theme edition for the window's
+appearance, so `--tx`, `--bg-field` and the rest resolve as in the shipped app. Recorder canvases reach the page as immutable
+PNG resources, and an `<img>` whose source is realm-local (`blob:`, `data:`) as its own
+bytes. Images decode natively in the realm (`image.rs`: ImageIO, resvg for SVG), so
+`decode()`, `naturalWidth` and `drawImage` of an image or `ImageBitmap` work. Inspector sections share a contributed `extension-properties` panel,
+because the v4 Inspector has no DOM slot.
+
+## Failure
+
+A failed compile, throw or export leaves one record with its reason. Each
+extension activates in its own realm task. A task that runs for eight seconds of
+JavaScript (time blocked in engine or kernel calls doesn't count) gets the D11 sheet
+("isn't responding — Wait / Stop"), named for the extension whose module is innermost
+on the running stack (read by a V8 interrupt inside the task, so any hang is named: a
+raster override, an event, a timer, a command), else the one activating or whose
+command runs. The task keeps running meanwhile. Stop terminates it, turns that
+extension off for this run (every window; Settings shows it off, and turning it on
+runs it again; the next launch runs it; the saved preference never changes) and
+rebuilds the realm. Two restarts nobody can name stop the realm until the project
+reopens. The rebuild is a new writer generation: the old one is sealed
+(`RealmFailed`), and its page is replaced and its open panels reopened. A panel whose
+extension reloads is parked (`panel:park`) and returns to its tab. The host's owner
+thread never waits for room in a busy realm's queue: what doesn't fit waits in order
+on the owner, which keeps handling Stop and Close.
+
+Quit while the sheet is up ends the sheet and stops that window's realm without a
+restart (its open entry is sealed; acknowledged kernel edits stay), then quits as
+usual; a cancelled quit starts the window's extensions again once the cancelling
+update has ended. AppKit drops the Quit Apple Event while a sheet is attached, so
+the app handles `kAEQuitApplication` itself: the event waits for the quit's outcome
+and a cancelled quit answers the sender with user-cancelled (-128).
+
+The trusted realm queues fetches that do not fit its external-memory budget
+(`Limits::queue_fetches`) and always leaves room for one synchronous engine reply,
+so a panel that starts dozens of requests cannot starve the kernel channel.
+A fatal V8 process abort is not contained:
+the trusted realm is in-process, by decision 5.
+
+## Native answers
+
+Menus, sheets and links belong to AppKit, so the realm asks and carries on. A
+request reaches `Controller::extension_request` on the main thread and its answer
+returns through the host's inbox, resolving the realm's promise or running the menu
+item's closure. `ui.confirm`, `ui.menu`, `ui.openExternal`, `panels.open` and
+`panel:context` contributions take this path. A tab menu waits 150 ms for
+contributions, then opens without them.
+
+`assets.import` and `PM.assets.add` go through Import Media (probe, retain, Project
+panel, no layer) and answer with the new asset; bytes the realm made are written to a
+private temporary file first. `assets.pick` is the open panel; a picked file stays on
+disk behind an opaque token (`compat-runner/src/files.rs`) and reads its bytes only when
+asked, so importing it copies nothing into V8. `assets.import` takes 3D models (glb,
+glTF, OBJ) and keeps `layerDefinition` on the asset, as main does. `assets.importUrl`
+is main's media download, run by the app on a worker: public HTTPS only, at most five
+redirects, 512 MiB, the file type taken from its bytes.
+
+`api.storage` is the kernel's `ext.<id>` settings, the keys the shipped app wrote,
+so values survive a restart and are read by a later window.
+
+A panel whose definition disappears leaves the layout and returns if the id is
+registered again, as in the shipped app. The kernel's workspace record is not
+touched: native layout lives in the shell.
+
+## Store
+
+Each Store extension gets a confined helper and its own WebKit document. Panels are
+built in the helper against a remote DOM; only batches reach the page. Settings
+toggles start and stop the helper; a rescan restarts only helpers whose source moved.
+A Store fetch reaches public HTTPS hosts only, across redirects, and drops credentials
+on a cross-origin redirect. The palette's Install Extension from Store appears only
+once a Store key is pinned; until the Store signs releases there is none (see
+[store-host.md](store-host.md)).
+
+## Agent authoring
+
+An agent changes the app through extensions, as on main. `start_session` copies
+every extension folder (later roots win) into a run-private stage and writes the
+API pack (`js/v4/api-pack`) to `api/`. `publish_extensions` checks the declared
+changes against a snapshot of the stage, scans text for credentials, then
+`extension_authoring::check` compiles each one with the native compiler and
+activates it on a synthetic project: v1–3 in a trusted realm, v4 in a panel
+isolate, a fork in place of its built-in. Promotion into the profile's folder
+goes through a journal in `<profile>/agent-change-history/<project>` that a crash
+rolls back at the next start; `rescan_all` reloads every window at once. The
+palette's **Undo Extension Change** restores the newest change set.
+
+Built-in panels mount through `panels/<id>/mount.tsx` and the `BuiltinEnv`
+contract (`src/builtin.ts`). The build writes each built-in's source as an
+extension tree (`scripts/builtin-sources.ts`, shared imports become
+`powermove/*`), which the app writes once to `<profile>/builtin-extensions/`.
+`fork_builtin_extension` copies one with a `.forked-from` base;
+`stage_fork_rebase` merges a newer built-in line by line. A v4 extension whose
+`replaces` names a built-in runs in that panel's realm (`Builtins::replace`) with
+the built-in's routes; removing it restores the built-in. A reloaded v4
+extension gets the previous version's `api.hot.data`. A panel published while a
+window is open is shown in it.
+
+`pm-mcp/src/extensions` holds the transaction, scanner and three-way merge;
+`app/src/extension_authoring_tests.rs` drives the agent flow headless.
+
+## Known limits
+
+- `PM.proj` hands out views: a project record read back is a view (its identity is
+  stable), not the stored object. `structuredClone` accepts views; other natives that
+  refuse proxies would not.
+
+- Raster overrides (a `raster` service wrapper or a replaced `PM.raster`) draw in the
+  viewer and in exports through the engine's compat rasters (`pm_render::compat`):
+  `engine-service/src/compat.rs` holds the viewer's answers. A paused frame waits for
+  its own answers and redraws when they land; a playing frame draws a late layer from
+  its nearest answered frame (or not at all when it has none), and a scrubbed frame
+  from its nearest answer, so the viewer never stops for the realm; such frames are
+  not cached and redraw exact. The viewer asks one batch at a time (newer needs
+  replace waiting ones); while playing it plans the frame the answers will land on
+  (the realm's measured time per need) and asks for as many frames as cost about
+  0.1 s of realm time (`raster_overrides.rs`, `__compat.answerRasters`). An export
+  child asks the parent for each
+  layer through its pipes, with pixels in a private file. `render.raster`'s base is
+  lazy and painted by a second renderer on its own thread (`LayerRasters`), so a
+  pass-through costs one JS call and no paint. A result counts as the layer only
+  while it is that layer's untouched base at the asked frame, scale and crop; any
+  write, canvas read, replacement layer or other frame sends its pixels (with `uv`, so
+  a crop window keeps its place). `null` draws nothing, as main; a throwing or
+  unreadable override fails that frame (the viewer holds it and does not ask again
+  until an edit or new wrappers; an export fails with the extension's message).
+  Answers are per document (kernel `doc_id`) and per wrapper generation (any
+  registration, removal or `PM.raster` change forgets them). A delivery (an export,
+  a render cache fill; `ExportRequest::look` is false) gets a realm of its own
+  (`compat-runner/src/host/export.rs`), started as the job starts: the window's
+  trusted extensions as compiled then, with their storage as it was then, activate in
+  a second isolate whose kernel channel is the job's frozen publication
+  (`KernelAdapter::frozen`: writes stay in that realm, history and edits are refused,
+  nothing is registered). The person keeps editing and the window's realm keeps
+  serving the viewer; the export realm, its hidden page and its cage reservation go
+  when the job ends. The page is kept running for the job (`begin_background_job`);
+  a layout read it does not answer within 10 s, or with no page at all, fails the
+  export rather than draw at a guessed place. An extension that runs in the window
+  but does not start there fails the export by name, as does one that stops
+  responding. `renderFrameTo`/`PM.Export.snapshot` there render the frozen project
+  and ask that realm inline for their overrides. **Delivery policy:** a delivery only
+  reads the outside world. `fetch` other than GET/HEAD is refused, storage writes stay
+  in the realm, and anything that needs the window's UI (sheets, menus, imports,
+  panels) is answered with an error; timers run, so polling extensions keep reading.
+  A one-frame look (an agent's still of the window's current publication) asks the
+  window's realm while it is at that exact revision, and an export realm once the
+  project moved on. A capture
+  (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
+  needs inline while the realm waits (`render.continue`). Cancelling an export or
+  closing its window ends any wait at once; pixel files carry the job id. Override
+  pixels travel premultiplied (the engine's fast upload) and each renderer keeps one
+  texture per raster for every band. Release, 2 s
+  test export with four overrides: 16 s against 4.5 s without extensions (76 s before
+  the upload fixes); about 6 s of that is realm answers (480 asks, ~12 ms each).
+- `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine as
+  main draws it (opaque over black, motion blur unless `{mblur:false}`, a target canvas
+  filled and returned; snapshot at most `maxWidth` wide, no blur, JPEG 0.74). Each new
+  frame is still a one-frame export in the engine process (`mcp_services::frame_renderer`);
+  the last four are cached by revision, and a stopped task or the 30 s host deadline
+  cancels it. `mbSamples` is not honoured: the engine picks its own sample count.
+- Built-in services: `tool` follows the shell's tool (`toolSelect` is `select`; a
+  `tool` bus event on change); `setTool` and its writable `tool`/`toolShape` change at
+  once, as main, and run the shell's tool command (the native Shape tool draws
+  rectangles whatever the shape). `viewer` reports the viewer's zoom, pan and fit plus
+  `worldBounds`; `setZoom` leaves fit at the clamped zoom as main.
+- Viewer stage: the first read of `viewer.stage` or `ov` builds main's
+  `#stage` / `#stage-inner` / `#overlay` in the window's page, and the shell keeps
+  them on the viewer slot and composition frame (`Controller::sync_viewer_stage`).
+  From then on the page shows through the viewer slot as a page region (above the
+  Metal layer, below GPUI's gizmos); GPUI keeps the pointer there, so stage content
+  is display-only. The page is transparent; panel roots paint `--bg-panel`. Each
+  presented viewer frame reaches the realm (`ExtensionHost::frame_presented`,
+  coalesced) as main's `frame:rendered`, then the overlay pass (`ov` cleared, then
+  `overlay`); pan and zoom repaint the overlay and a slot resize is a `layout`.
+  `layerAtPoint` and `render.gl.pick` answer with the layer. `showControls` is View ▸
+  Layer Controls both ways; `preview` reports no source monitor (the native viewer
+  has none).
+- `render.gl.init(canvas)` binds a presenter canvas (D7): each presented frame, and
+  `init`/`resize`, fills it from the engine (`renderFrameTo`) before `frame:rendered`,
+  at the frame's time from the realm's publication at the frame's revision (behind,
+  the realm catches up first; a frame the project moved past is dropped); a `resize`
+  crop takes the whole composition at the crop's scale (≤ 8192 px). A window realm's
+  captures always draw the publication it holds, so the override answers they ask of
+  the waiting realm are at its own revision.
+  `render.gl.context` is `null`: extension code runs in V8, not the page, so WebGL2
+  needs a page-side proxy (open).
+- `timeline` reads the native timeline's view, graph mode, key selection and visible
+  rows (`TimelineSurface::service_facts`, sent when its frame rebuilds); `pps`,
+  `scrollT`, `scrollY` and `graph` write back, `frameView` and `reveal` drive it, and
+  edges follow timeline.ts. `cv` is `null` (v4's `timeline.paint` paints clips).
+  `graph` sets the timeline panel's view as asked (v4 intent `graph`, run by
+  `Builtins::timeline_action`; the panel re-reads after a command from outside it). `inspector.refresh`
+  rebuilds the v1–3 sections panel; `focusText` selects the layer, shows Properties
+  and, once its text row bound to that layer shows (≤ 2 s), focuses the field with the
+  text selected. `copySelectedEffects`/`pasteCopiedEffects`/`clearEffectClipboard`
+  use the app's one effect clipboard (`EffectDesk` over the window's Effect Controls). `shaderHooks.syncShaderUniforms` reconciles
+  `d.uniforms` with the kernel's `@param` parser.
+- `api.scene3d`: `edit` is the Studio command MCP's `edit_3d` runs (one undo step,
+  `data.result` names the layer), `describe` the kernel's evaluated scene;
+  `selection`, `select`, `isGroup`, `convert` and the factories behave as main. The
+  viewer shows the camera view only, so `setView('editor')`, other navigation or
+  gizmo modes, `frame`, `createGizmo`/`createNavigation` and multi-file
+  `prepareImport` throw `Unavailable` (the 3D studio is not in the app).
+- `ui.modal` is a native sheet on the window: AppKit title and buttons (primary last,
+  on Return), the extension's body DOM in a child web view the page moves it into; a
+  button clicks a hidden twin in the realm, so actions run there with main's rules
+  (run then close unless it returns `false`; Escape dismisses unless
+  `dismissible: false`; `onClose` once on any close). The sheet's document is attached
+  to the panel's remote-DOM applier, so its input reaches the realm as the panel's
+  own. Its body is a fixed 280 pt tall and scrolls.
+- `PM.Fonts` (`api.media.fonts`) is main's: `system` is this Mac's CoreText families,
+  `ensure(family, weight)` resolves once that face has settled in the page (loaded,
+  or not available; at most 15 s). Each realm asks the window for the faces its
+  project's text layers use (and `ensure` adds one); the app resolves each as a text
+  layer does (the family, else `system-ui`, else the standard font) and serves the
+  engine's own face bytes to every page under the family's name (`pmcompat://…/font`),
+  loaded as `FontFace`s before later DOM batches apply; then the realm hears `fonts`,
+  so measurements re-run.
+- `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
+  rows follow the native rows in the timeline's and viewer's right-click NSMenus through
+  the same gathering path as tab menus (`Controller::extension_menu`: v4 items off the
+  main thread, then v1–3's within the 150 ms deadline), with v1's contexts: a layer
+  gathers both `layer:context` and its surface's location (`kind: "layer"`).
+- A contributed layer type's parameters (`api.layers.register` `params`) are Properties
+  rows in Content, labelled by its definition, editing the animatable `x.<key>` channels
+  in `d.params` as main's `ExtensionLayerParams` does (numbers with their range, colours,
+  toggles, selects). Its mesh asset and version notes are not shown yet.
+- Layout reads are synchronous (`remote-dom.md`). With the engine's faces the page
+  measures the font the engine draws, but WebKit lays a variable system face out at
+  its automatic optical size while the face the engine draws carries `opsz` 17 (probably the cause), so SF text
+  measures about 4% narrower (a typing caret an extension measures trails by a few letters on a real project);
+  WebKit ignores a FontFace `variationSettings` descriptor, so closing this needs an
+  instanced face or the engine's layer path to size `opsz` as its canvas path does.
+- A v4 extension adds a panel, replaces a whole built-in panel, and registers
+  palette commands with shortcuts (`commands.register`). It cannot yet slot into
+  part of another panel (a viewer overlay or timeline column without a fork), add
+  menus or toolbar items; v1–3 extensions can add menus through the compat realm.
+- Every window's isolates reserve from one account inside the shared 4 GB cage
+  (`Admission::cage`): a slice at start, more on demand, given back when idle.
+- Store panels have no recorder canvases, and `ui.*` from a helper is not attached.
+
+## v4 parity with v1–3 (2026-11-08)
+
+What a v1–3 extension could change and where v4 stands, without forking:
+
+| v1–3 could | v4 now |
+|---|---|
+| Commands, keybindings, panels | `commands.register`, `view()` / `mount(env)` |
+| Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator, and the timeline surface (track, gutter, accent, text, line, surface order); other surface rules aren't applied natively yet. |
+| Context menus (`menus.contribute`) | `menus.contribute` for panel, layer, timeline and viewer; `titlebar:right` accepted and not shown, as on main |
+| Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | `overlays.viewer` (display only) |
+| Timeline chrome (`workspace.chrome.timeline`: rows, gutter, ruler, keys, columns) | `timeline.chrome`; the native timeline follows rows, gutter, ruler, key size, clip radius, surface order and layer numbers. Type badges and toolbar density are stored and draw nothing, as on main |
+| Timeline painting (`TimelineService.cv`) | `timeline.paint` (shapes per clip; TL-PAINT-1 p95 0.11 ms for 1,000 clips) |
+| Titlebar/toolbar items | None on main either: tool strips are panels |
+
+Agent flows (publish → visible → revert) run with `scripts/agent-flows.py`.

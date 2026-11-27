@@ -1,0 +1,22 @@
+{
+ "name": "countdown-ring",
+ "kind": "shader",
+ "covers": [
+  "iProgress",
+  "helper-sdf",
+  "alpha-output",
+  "param-color"
+ ],
+ "prompt": "Circular countdown ring that empties as the layer plays, on a transparent background; ring color and thickness controls.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "8b1e1482348ac409082f526ecbfd0181a47c533b2c3ae622d599b7c465727330",
+  "seconds": 22.444,
+  "generated": "2026-10-17T07:33:09.653Z"
+ },
+ "code": "// Countdown ring — empties clockwise from 12 o'clock across the layer's duration.\n// Transparent background. Arc length = 1 - iProgress.\nuniform vec3  uColor;        // @param #FFFFFF\nuniform float uThickness;    // @param 0.06 0.005 0.3\nuniform float uRadius;       // @param 0.38 0.05 0.5\nuniform float uTrackOpacity; // @param 0.15 0 1\nuniform bool  uRoundCaps;    // @param true\n\nconst float TAU = 6.28318530718;\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float aa = 1.0 / iResolution.y;\n  float r = uRadius;\n  float hw = uThickness * 0.5;\n  float len = length(p);\n\n  // Full ring SDF (track)\n  float dRing = abs(len - r) - hw;\n  float track = 1.0 - smoothstep(-aa, aa, dRing);\n\n  // Angle from top, clockwise, 0..1\n  float f = fract(atan(p.x, p.y) / TAU + 1.0);\n  float remain = clamp(1.0 - iProgress, 0.0, 1.0);\n\n  float arc;\n  if (uRoundCaps) {\n    float dArc;\n    if (f <= remain) {\n      dArc = dRing;\n    } else {\n      vec2 e0 = vec2(0.0, r);\n      float ea = remain * TAU;\n      vec2 e1 = vec2(sin(ea), cos(ea)) * r;\n      dArc = min(length(p - e0), length(p - e1)) - hw;\n    }\n    arc = 1.0 - smoothstep(-aa, aa, dArc);\n  } else {\n    float s = (f <= remain) ? min(f, remain - f) * TAU * len : -1.0;\n    arc = track * clamp(s / aa + 0.5, 0.0, 1.0);\n  }\n  arc *= step(1e-4, remain);\n\n  float a = max(arc, track * uTrackOpacity);\n  fragColor = vec4(uColor, a);\n}\n",
+ "definition": null,
+ "summary": "I wrote a countdown ring shader with a transparent background. It starts at 12 o'clock and empties clockwise as the layer plays, with a faint track behind it. It hasn't been compiled or rendered because no Powermove tools were attached to this run. Inspector controls: uColor, uThickness, uRadius, uTrackOpacity and uRoundCaps; it outputs plain (not premultiplied) alpha."
+}

@@ -1,0 +1,39 @@
+{
+  "overlays": {
+    "start_session": {
+      "note": "Native project sessions return a bounded composition and layer summary by default. Use get_project_state for paged detail, or detail:\"full\" to include the full agent project snapshot in this reply. The tool schemas are in tools/list and the on-disk API pack, not in the reply.",
+      "properties": {
+        "detail": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+      }
+    },
+    "export_video": {
+      "note": "Use background:true (or wait:false) to checkpoint the session's edits, capture the current revision and return a jobId immediately. Read export_status with that jobId for progress and the output path; pass it as taskId to task_cancel to stop the export. Without an opt-in, wait:true is the default, and export_video with only a jobId resumes the legacy wait.",
+      "properties": {
+        "background": { "type": "boolean", "default": false },
+        "wait": { "type": "boolean", "default": true }
+      }
+    },
+    "apply_commands": {
+      "note": "Replies are compact by default: per-command index and ok (or error message), newIds, changedLayerIds and revision. Set verbose:true for legacy command data and full layer results. Set atomic:false to skip invalid commands and apply the successful commands together as one undo step; the default atomic:true rejects the entire batch on any error.",
+      "properties": {
+        "atomic": { "type": "boolean", "default": true },
+        "verbose": { "type": "boolean", "default": false }
+      }
+    },
+    "task_cancel": {
+      "note": "You can also pass an export jobId as taskId to request cancellation. Read export_status to confirm a terminal outcome."
+    }
+  },
+  "tools": [
+    {
+      "name": "export_status",
+      "description": "Read a recent export started for the attached project. Returns running progress when available, cancelling until cancellation is reaped, cancelled or failed with a diagnostic, or done with the output path. Poll sparingly; status does not consume the result.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "jobId": { "type": "string", "minLength": 1 } },
+        "required": ["jobId"]
+      }
+    }
+  ]
+}

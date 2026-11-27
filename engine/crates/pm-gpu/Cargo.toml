@@ -1,0 +1,54 @@
+[package]
+name = "pm-gpu"
+description = "wgpu device, pools, shader compilation, interop, time slicing (section 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pm-color = { path = "../pm-color" }
+# decode_in (feature `decode-in`, on by default) reads pm-media frames.
+pm-media = { path = "../pm-media", optional = true }
+pm-protocol = { path = "../pm-protocol" }
+# Work counters (docs/engine/perfbench.md).
+pm-perf = { path = "../pm-perf" }
+thiserror.workspace = true
+# `std`: error scopes are per thread (without it every thread shares one
+# stack, and a program built on another thread breaks the frame's scopes).
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl", "std"] }
+wgpu-hal = { version = "30", features = ["metal"] }
+objc2 = "0.6"
+objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }
+# The viewer's surfaces (bridge_out) and its device helper.
+objc2-io-surface = "0.3.2"
+objc2-core-foundation = "0.3.2"
+pollster = "0.4"
+# The GLSL ES pipeline (feature `glsl`): glslang to SPIR-V, rewrites, naga IR.
+glslang = { version = "0.8.1", optional = true }
+glslang-sys = { version = "0.8.1", optional = true }
+rspirv = { version = "0.13.0", optional = true }
+naga = { version = "30.0.1", optional = true, features = ["spv-in", "msl-out"] }
+
+[dev-dependencies]
+# The refresh-rate probe's display link (examples/refresh_probe.rs).
+objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
+
+[features]
+default = ["decode-in"]
+# The decode-in half of the interop trait. Hosts that only present (the
+# interactive engine's viewer presenter today) build without it, so they do
+# not link FFmpeg until media reaches the engine.
+decode-in = ["dep:pm-media"]
+# three.js and user GLSL to naga IR (`glsl`).
+glsl = ["dep:glslang", "dep:glslang-sys", "dep:rspirv", "dep:naga", "wgpu/naga-ir"]
+
+[[test]]
+name = "decode_import"
+required-features = ["decode-in"]
+
+[[test]]
+name = "deinterlace"
+required-features = ["decode-in"]

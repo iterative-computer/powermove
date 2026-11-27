@@ -1,0 +1,215 @@
+//! S001 recovery alert, design/surfaces/recovery.md (2026-11-01): the kernel's
+//! RecoveryRequired reply as an NSAlert sheet, and the answer as its decision.
+//! Discard requires a confirmed Recently Deleted archive capability (N4).
+use crate::alert::{Alert, Button};
+use pm_kernel::session::{RecoveryDecision, RecoveryResult, ShellCall, ShellReply};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Recover,
+    OpenAsCopy,
+    Discard,
+    OpenSavedVersion,
+    Acknowledge,
+    /// Leave another file's unsaved work where it is.
+    Leave,
+    /// Escape: the open is called off; nothing is recovered or copied, and
+    /// the next open asks again.
+    Cancel,
+}
+/// Unsaved work left for another file (`from`, no longer where it was) whose
+/// saved content is exactly this file's. Whether this is that file is the
+/// person's to say: Recover opens the work here, Leave Them touches nothing.
+pub fn ask_other_files_work(name: &str, from: &str, truncated: bool) -> Alert<Action> {
+    Alert::new(
+        format!("Recover unsaved changes from “{from}” into “{name}”?"),
+        format!(
+            "Powermove has unsaved changes for “{from}”, a file with exactly the content of this one that is no longer where it was. If this is that file (moved, renamed or restored from a backup), Recover opens those changes here. If it is a different file, leave them: they stay with “{from}”.{}",
+            if truncated {
+                " The last few seconds of edits may be missing."
+            } else {
+                ""
+            }
+        ),
+        vec![
+            Button::new("Recover", Action::Recover).default(),
+            Button::new("Leave Them", Action::Leave).cancel(),
+        ],
+    )
+}
+/// `signal`: the last session ended by a quit signal (logout, shutdown, a
+/// script), which leaves unsaved work for this offer on purpose: no crash.
+pub fn ask_recovery(
+    name: &str,
+    truncated: bool,
+    can_archive_recently_deleted: bool,
+    signal: bool,
+) -> Alert<Action> {
+    let mut buttons = vec![
+        Button::new("Recover", Action::Recover).default(),
+        Button::new("Open as Copy", Action::OpenAsCopy),
+    ];
+    if can_archive_recently_deleted {
+        buttons.push(Button::new("Discard Edits", Action::Discard).destructive());
+    }
+    // Escape cancels the open: it never answers the question.
+    buttons.push(Button::new("Cancel", Action::Cancel).cancel());
+    Alert::new(
+        if signal {
+            format!("Powermove quit before the changes to “{name}” were saved.")
+        } else {
+            format!("Powermove quit unexpectedly while “{name}” had unsaved changes.")
+        },
+        format!(
+            "Recover opens your latest edits. Open as Copy keeps the saved project unchanged and opens the edits beside it.{}",
+            if truncated {
+                " The last few seconds of edits may be missing."
+            } else {
+                ""
+            }
+        ),
+        buttons,
+    )
+}
+/// [`ask_recovery`] when the person chose Reopen after an internal error
+/// stopped the project (`documents::stopped`): the app never quit.
+pub fn after_stop(mut alert: Alert<Action>, name: &str) -> Alert<Action> {
+    alert.message = format!("“{name}” stopped after an internal error with unsaved changes.");
+    alert
+}
+/// "12:35" in local time.
+fn clock(seconds: u64) -> String {
+    // "YYYY-MM-DD HH.MM.SS"
+    let local = pm_kernel::project_io::local_time(seconds);
+    local
+        .get(11..16)
+        .map_or(local.clone(), |hm| hm.replace('.', ":"))
+}
+
+/// What could not be recovered, in words: how many changes, when, and
+/// the names of their last steps.
+fn lost_in_words(lost: &pm_kernel::journal::LostWork) -> Option<String> {
+    if lost.changes == 0 && lost.steps.is_empty() {
+        return None;
+    }
+    let count = match lost.changes {
+        0 => "Changes".to_owned(),
+        1 => "1 change".to_owned(),
+        n => format!("{n} changes"),
+    };
+    let when = match (lost.from.map(clock), lost.until.map(clock)) {
+        (Some(a), Some(b)) if a != b => format!(" made between {a} and {b}"),
+        (_, Some(t)) | (Some(t), None) => format!(" made at {t}"),
+        _ => String::new(),
+    };
+    let steps = if lost.steps.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<String> = lost.steps.iter().map(|s| format!("“{s}”")).collect();
+        format!(" ({})", names.join(", "))
+    };
+    Some(format!("{count}{when}{steps}"))
+}
+
+pub fn unrecoverable(
+    name: &str,
+    saved_file_exists: bool,
+    lost: &pm_kernel::journal::LostWork,
+) -> Alert<Action> {
+    let mut buttons = Vec::new();
+    if saved_file_exists {
+        buttons.push(Button::new("Open Saved Version", Action::OpenSavedVersion).default());
+    }
+    let ok = Button::new("OK", Action::Acknowledge).cancel();
+    buttons.push(if saved_file_exists { ok } else { ok.default() });
+    let informative = match lost_in_words(lost) {
+        Some(what) => format!(
+            "{what} couldn’t be added to the saved project, which is unchanged. They’re kept \
+             with Powermove’s recovery data. Details are in Window ▸ Error Log."
+        ),
+        None => "The saved project is unchanged. Details are in Window ▸ Error Log.".into(),
+    };
+    Alert::new(
+        format!("“{name}” couldn’t be recovered."),
+        informative,
+        buttons,
+    )
+}
+
+/// A RecoveryRequired reply's alert, and the ticket its answer decides.
+#[derive(Clone, Debug)]
+pub struct PreparedRecovery {
+    ticket: String,
+    pub alert: Alert<Action>,
+    archive_recently_deleted: bool,
+}
+impl PreparedRecovery {
+    /// Archive stays false until the kernel/library exposes a confirmed Recently
+    /// Deleted destination; archive_session alone is insufficient (N4).
+    pub fn from_reply(
+        reply: &ShellReply,
+        name: &str,
+        archive_recently_deleted: bool,
+        saved_exists: bool,
+    ) -> Option<Self> {
+        let ShellReply::RecoveryRequired { ticket, recovery } = reply else {
+            return None;
+        };
+        // The developer reason of an unrecoverable journal never enters the copy.
+        let alert = match recovery {
+            RecoveryResult::None => return None,
+            RecoveryResult::Recovered { truncated }
+            | RecoveryResult::OfferCopy { truncated, .. } => {
+                ask_recovery(
+                    name,
+                    *truncated,
+                    archive_recently_deleted,
+                    crate::error_log::last_quit_by_signal(),
+                )
+            }
+            RecoveryResult::Unrecoverable { lost, .. } => unrecoverable(name, saved_exists, lost),
+            RecoveryResult::FromOtherFile {
+                name: from,
+                truncated,
+            } => ask_other_files_work(name, from, *truncated),
+        };
+        Some(Self {
+            ticket: ticket.clone(),
+            alert,
+            archive_recently_deleted,
+        })
+    }
+    /// The call that calls the open off (Cancel, or the question gone
+    /// unanswered): its prepared open and lock go, the journal stays.
+    pub fn forget(&self) -> ShellCall {
+        ShellCall::ForgetRecovery {
+            ticket: self.ticket.clone(),
+        }
+    }
+    /// The call to submit with KernelHandle::shell (never .wait()), for an
+    /// action this alert offered.
+    pub fn decision(&self, action: Action) -> Option<ShellCall> {
+        if !self.alert.buttons.iter().any(|b| b.action == action) {
+            return None;
+        }
+        let decision = match action {
+            Action::Recover => RecoveryDecision::Recover,
+            Action::OpenAsCopy => RecoveryDecision::OpenAsCopy,
+            Action::Discard if self.archive_recently_deleted => RecoveryDecision::Discard,
+            // Never Discard: this one keeps the unreadable journal, set aside.
+            Action::OpenSavedVersion => RecoveryDecision::OpenSavedVersion,
+            // Offered only for another file's work, which the kernel leaves
+            // exactly where it is when it is declined.
+            Action::Leave => RecoveryDecision::Discard,
+            _ => return None,
+        };
+        Some(ShellCall::DecideRecovery {
+            ticket: self.ticket.clone(),
+            decision,
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod tests;

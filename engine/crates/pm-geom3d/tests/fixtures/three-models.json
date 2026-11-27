@@ -1,0 +1,3881 @@
+{
+ "corpus-model.glb": {
+  "sha256": "b12bb6371e634701c013cb98960b5174ec34a28d68cbfd5adb3857dc28c70de5",
+  "vertices": 88,
+  "triangles": 52,
+  "radius": 1.612645337389709,
+  "center": [
+   0.14999999105930328,
+   0.02499999403953551,
+   0
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "Corpus",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Mesh",
+    "name": "Body",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 24,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 24,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "uv": {
+       "count": 24,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 24
+      }
+     },
+     "index": {
+      "count": 36,
+      "sum": 408
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.5,
+       -0.5,
+       -0.5
+      ],
+      [
+       0.5,
+       0.5,
+       0.5
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Checker",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.6000000238418579,
+     "metalness": 0.10000000149011612,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "map": {
+       "channel": 0,
+       "colorSpace": "srgb",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      }
+     }
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Gem",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     1.100000023841858,
+     0.20000000298023224,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 24,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 24,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "color": {
+       "count": 24,
+       "itemSize": 4,
+       "normalized": false,
+       "sum": 63.900001525878906
+      }
+     },
+     "index": null,
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.44999998807907104,
+       -0.44999998807907104,
+       -0.44999998807907104
+      ],
+      [
+       0.44999998807907104,
+       0.44999998807907104,
+       0.44999998807907104
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Gem",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": true,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0.20000000298023224,
+      0.05000000074505806,
+      0
+     ],
+     "roughness": 0.30000001192092896,
+     "metalness": 0,
+     "emissiveIntensity": 2,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "SkinnedMesh",
+    "name": "Column",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 40,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 24
+      },
+      "normal": {
+       "count": 40,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "skinIndex": {
+       "count": 40,
+       "itemSize": 4,
+       "normalized": false,
+       "sum": 40
+      },
+      "skinWeight": {
+       "count": 40,
+       "itemSize": 4,
+       "normalized": false,
+       "sum": 40
+      }
+     },
+     "index": {
+      "count": 96,
+      "sum": 1872
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.15000000596046448,
+       0,
+       -0.15000000596046448
+      ],
+      [
+       0.15000000596046448,
+       1.2000000476837158,
+       0.15000000596046448
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Column",
+     "side": 2,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.8999999761581421,
+      0.30000001192092896,
+      0.5
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.4000000059604645,
+     "metalness": 0.5,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    },
+    "skin": {
+     "bones": [
+      "Root_joint",
+      "Bend_joint"
+     ],
+     "bindMatrix": [
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    }
+   },
+   {
+    "type": "Bone",
+    "name": "Root_joint",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -1.100000023841858,
+     -0.6000000238418579,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Bone",
+    "name": "Bend_joint",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0.6000000238418579,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   }
+  ],
+  "animations": [
+   {
+    "name": "Spin and bend",
+    "duration": 2,
+    "tracks": [
+     {
+      "name": "Body.quaternion",
+      "times": 5,
+      "values": 20,
+      "interpolation": 2301
+     },
+     {
+      "name": "Bend_joint.quaternion",
+      "times": 3,
+      "values": 12,
+      "interpolation": 2301
+     }
+    ]
+   },
+   {
+    "name": "Bob",
+    "duration": 1.5,
+    "tracks": [
+     {
+      "name": "Gem.position",
+      "times": 3,
+      "values": 9,
+      "interpolation": 2301
+     }
+    ]
+   }
+  ]
+ },
+ "corpus-materials.glb": {
+  "sha256": "e94f978cbd8975d4da701bf53e97294cc7ae19a00ca9378690750cb7a9ae19c5",
+  "vertices": 4711,
+  "triangles": 7936,
+  "radius": 2.7975167452734597,
+  "center": [
+   0,
+   0,
+   0
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "Materials",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Mesh",
+    "name": "Unlit",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -1.7999999523162842,
+     1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshBasicMaterial",
+     "name": "Unlit",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      0.41999998688697815,
+      0.10000000149011612
+     ],
+     "aoMapIntensity": 1,
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Clearcoat",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -0.8999999761581421,
+     1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Clearcoat",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.699999988079071,
+      0.05000000074505806,
+      0.05000000074505806
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0.6000000238418579,
+     "metalness": 0.20000000298023224,
+     "emissiveIntensity": 1,
+     "clearcoat": 1,
+     "clearcoatRoughness": 0.07999999821186066,
+     "ior": 1.5,
+     "transmission": 0,
+     "thickness": 0,
+     "attenuationDistance": null,
+     "iridescence": 0,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 1,
+     "anisotropy": 0,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Sheen",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Sheen",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.25,
+      0.05000000074505806,
+      0.30000001192092896
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      1,
+      0.4000000059604645,
+      0.800000011920929
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0.800000011920929,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.5,
+     "transmission": 0,
+     "thickness": 0,
+     "attenuationDistance": null,
+     "iridescence": 0,
+     "sheen": 1,
+     "sheenRoughness": 0.4000000059604645,
+     "specularIntensity": 1,
+     "anisotropy": 0,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Iridescence",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0.8999999761581421,
+     1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Iridescence",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.10000000149011612,
+      0.10000000149011612,
+      0.11999999731779099
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0.15000000596046448,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.5,
+     "transmission": 0,
+     "thickness": 0,
+     "attenuationDistance": null,
+     "iridescence": 1,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 1,
+     "anisotropy": 0,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Transmission,_volume,_IOR",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     1.7999999523162842,
+     1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Transmission, volume, IOR",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.8999999761581421,
+      1,
+      0.949999988079071
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      0.4000000059604645,
+      0.8999999761581421,
+      0.6000000238418579
+     ],
+     "roughness": 0.05000000074505806,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.5,
+     "transmission": 1,
+     "thickness": 0.4000000059604645,
+     "attenuationDistance": 0.800000011920929,
+     "iridescence": 0,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 1,
+     "anisotropy": 0,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Specular,_IOR",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -1.7999999523162842,
+     0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Specular, IOR",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.20000000298023224,
+      0.30000001192092896,
+      0.800000011920929
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      0.5,
+      0.20000000298023224
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0.30000001192092896,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.7999999523162842,
+     "transmission": 0,
+     "thickness": 0,
+     "attenuationDistance": null,
+     "iridescence": 0,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 0.6000000238418579,
+     "anisotropy": 0,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Anisotropy",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -0.8999999761581421,
+     0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Anisotropy",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.8500000238418579,
+      0.8500000238418579,
+      0.8999999761581421
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0.44999998807907104,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.5,
+     "transmission": 0,
+     "thickness": 0,
+     "attenuationDistance": null,
+     "iridescence": 0,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 1,
+     "anisotropy": 0.800000011920929,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Dispersion",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Dispersion",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.600000023841858,
+     "transmission": 1,
+     "thickness": 0.6000000238418579,
+     "attenuationDistance": null,
+     "iridescence": 0,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 1,
+     "anisotropy": 0,
+     "dispersion": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Bump",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0.8999999761581421,
+     0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshPhysicalMaterial",
+     "name": "Bump",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.6000000238418579,
+      0.6000000238418579,
+      0.6499999761581421
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "sheenColor": [
+      0,
+      0,
+      0
+     ],
+     "specularColor": [
+      1,
+      1,
+      1
+     ],
+     "attenuationColor": [
+      1,
+      1,
+      1
+     ],
+     "roughness": 0.5,
+     "metalness": 0.30000001192092896,
+     "emissiveIntensity": 1,
+     "clearcoat": 0,
+     "clearcoatRoughness": 0,
+     "ior": 1.5,
+     "transmission": 0,
+     "thickness": 0,
+     "attenuationDistance": null,
+     "iridescence": 0,
+     "sheen": 0,
+     "sheenRoughness": 1,
+     "specularIntensity": 1,
+     "anisotropy": 0,
+     "dispersion": 0,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "bumpMap": {
+       "channel": 0,
+       "colorSpace": "",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      }
+     }
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Normal_and_occlusion_(second_UV_set)",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     1.7999999523162842,
+     0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      },
+      "uv1": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       -0.3499999940395355
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0.3499999940395355
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Normal and occlusion (second UV set)",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.949999988079071,
+      0.800000011920929,
+      0.5
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.5,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "aoMap": {
+       "channel": 1,
+       "colorSpace": "",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      },
+      "normalMap": {
+       "channel": 0,
+       "colorSpace": "",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      }
+     }
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Texture_transform",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -1.7999999523162842,
+     -0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      },
+      "uv": {
+       "count": 4,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       0
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Texture transform",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.5,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "map": {
+       "channel": 0,
+       "colorSpace": "srgb",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0.25,
+        0
+       ],
+       "repeat": [
+        3,
+        2
+       ],
+       "rotation": 0.4000000059604645
+      }
+     }
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Alpha_mask",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -0.8999999761581421,
+     -0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      },
+      "uv": {
+       "count": 4,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       0
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Alpha mask",
+     "side": 2,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0.5,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.5,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "map": {
+       "channel": 0,
+       "colorSpace": "srgb",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      }
+     }
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Alpha_blend",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     -0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      },
+      "uv": {
+       "count": 4,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       0
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Alpha blend",
+     "side": 0,
+     "transparent": true,
+     "opacity": 0.44999998807907104,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.30000001192092896,
+      0.8999999761581421,
+      0.5
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.4000000059604645,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "WebP_texture",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0.8999999761581421,
+     -0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      },
+      "uv": {
+       "count": 4,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       0
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "WebP texture",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.5,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "map": {
+       "channel": 0,
+       "colorSpace": "srgb",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      }
+     }
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "AVIF_texture",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     1.7999999523162842,
+     -0.44999998807907104,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      },
+      "uv": {
+       "count": 4,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       0
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "AVIF texture",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.5,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {
+      "map": {
+       "channel": 0,
+       "colorSpace": "srgb",
+       "flipY": false,
+       "wrapS": 1000,
+       "wrapT": 1000,
+       "offset": [
+        0,
+        0
+       ],
+       "repeat": [
+        1,
+        1
+       ],
+       "rotation": 0
+      }
+     }
+    }
+   },
+   {
+    "type": "Group",
+    "name": "Points_and_lines",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -1.7999999523162842,
+     -1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Points",
+    "name": "Points_and_lines_1",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 64,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -0.14045953750610352
+      },
+      "color": {
+       "count": 64,
+       "itemSize": 4,
+       "normalized": false,
+       "sum": 153.60000610351562
+      }
+     },
+     "index": null,
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.33019790053367615,
+       -0.34032854437828064,
+       0
+      ],
+      [
+       0.36247456073760986,
+       0.32919394969940186,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "PointsMaterial",
+     "name": "Points and lines",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": true,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "LineLoop",
+    "name": "Points_and_lines_2",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 6,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      }
+     },
+     "index": null,
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.30000001192092896,
+       -0.25980761647224426,
+       0
+      ],
+      [
+       0.30000001192092896,
+       0.25980761647224426,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "LineBasicMaterial",
+     "name": "Points and lines",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Line",
+    "name": "Points_and_lines_3",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 12,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0.6916797161102295
+      }
+     },
+     "index": null,
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.30000001192092896,
+       -0.1499985307455063,
+       0.05000000074505806
+      ],
+      [
+       0.3050000071525574,
+       0.14840373396873474,
+       0.05000000074505806
+      ]
+     ]
+    },
+    "material": {
+     "type": "LineBasicMaterial",
+     "name": "Points and lines",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Flat_(no_normals)",
+    "matrix": [
+     0.0010000000474974513,
+     0,
+     0,
+     0,
+     0,
+     0.0010000000474974513,
+     0,
+     0,
+     0,
+     0,
+     0.0010000000474974513,
+     0,
+     -0.8999999761581421,
+     -1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 12,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -540
+      }
+     },
+     "index": null,
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -350,
+       -200,
+       -380
+      ],
+      [
+       350,
+       400,
+       200
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Flat (no normals)",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      0.949999988079071,
+      0.75,
+      0.20000000298023224
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.6000000238418579,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Morph",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     -1.350000023841858,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -3.553609609603882
+      },
+      "normal": {
+       "count": 425,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": -10.153170585632324
+      },
+      "uv": {
+       "count": 425,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 425
+      }
+     },
+     "index": {
+      "count": 2160,
+      "sum": 457920
+     },
+     "groups": 0,
+     "morphTargets": {
+      "position": 1
+     },
+     "bounds": [
+      [
+       -0.5600000023841858,
+       -0.3499999940395355,
+       -0.5600000023841858
+      ],
+      [
+       0.5600000023841858,
+       0.3499999940395355,
+       0.5600000023841858
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Morph",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      0.4000000059604645,
+      0.800000011920929,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.4000000059604645,
+     "metalness": 0,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Instanced",
+    "matrix": [
+     0.3499999940395355,
+     0,
+     0,
+     0,
+     0,
+     0.3499999940395355,
+     0,
+     0,
+     0,
+     0,
+     0.3499999940395355,
+     0,
+     0.8999999761581421,
+     -1.350000023841858,
+     0,
+     1
+    ],
+    "count": 4,
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 0
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      },
+      "uv": {
+       "count": 4,
+       "itemSize": 2,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       -0.3499999940395355,
+       -0.3499999940395355,
+       0
+      ],
+      [
+       0.3499999940395355,
+       0.3499999940395355,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "Instanced",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      0.8500000238418579,
+      0.30000001192092896
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 0.30000001192092896,
+     "metalness": 0.5,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "SpotLight",
+    "name": "Embedded_spot",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     3,
+     1
+    ],
+    "geometry": null,
+    "material": null,
+    "light": {
+     "type": "SpotLight",
+     "color": [
+      1,
+      0.8500000238418579,
+      0.6000000238418579
+     ],
+     "intensity": 6,
+     "distance": 10,
+     "angle": 0.6,
+     "penumbra": 0.5,
+     "decay": 2
+    }
+   },
+   {
+    "type": "Object3D",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     -1,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "PointLight",
+    "name": "Embedded_point",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     2,
+     1.5,
+     1,
+     1
+    ],
+    "geometry": null,
+    "material": null,
+    "light": {
+     "type": "PointLight",
+     "color": [
+      0.5,
+      0.699999988079071,
+      1
+     ],
+     "intensity": 4,
+     "distance": 0,
+     "decay": 2
+    }
+   }
+  ],
+  "animations": [
+   {
+    "name": "Morph",
+    "duration": 2,
+    "tracks": [
+     {
+      "name": "Morph.morphTargetInfluences",
+      "times": 3,
+      "values": 3,
+      "interpolation": 2301
+     }
+    ]
+   }
+  ]
+ },
+ "strip-fan.gltf": {
+  "sha256": "623dcb40e206bfbcb73b6c8a83993a5d02aa75b91c8d44760da2a1d75570a9d9",
+  "vertices": 9,
+  "triangles": 5,
+  "radius": 2.23606797749979,
+  "center": [
+   3,
+   1,
+   -0.5
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "Edge",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Group",
+    "name": "Matrix_node",
+    "matrix": [
+     4.440892098500626e-16,
+     0,
+     -2,
+     0,
+     0,
+     2,
+     0,
+     0,
+     2,
+     0,
+     4.440892098500626e-16,
+     0,
+     3,
+     -1,
+     0.5,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Mesh",
+    "name": "Strips_and_fans",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 5,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 6
+      }
+     },
+     "index": {
+      "count": 9,
+      "sum": 18
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       2,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Strips_and_fans_1",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   }
+  ],
+  "animations": []
+ },
+ "shared-mesh.gltf": {
+  "sha256": "5ae3f9dba60e18b7f5898629d7af28b4d8347cbdf80a5c259a402a511fde6284",
+  "vertices": 8,
+  "triangles": 4,
+  "radius": 1.1726039271889712,
+  "center": [
+   -1,
+   0.5,
+   -3.6464466517497
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Object3D",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     -4,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Mesh",
+    "name": "Left",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -2,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Right",
+    "matrix": [
+     -0.7071068286895752,
+     0,
+     0.7071067094802856,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0.7071067094802856,
+     0,
+     0.7071068286895752,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   }
+  ],
+  "animations": []
+ },
+ "sparse-quantized.gltf": {
+  "sha256": "e359ba058aad6ac2696e8cd5efb04252c440dcfe58563b93213a7211a822dbfb",
+  "vertices": 5.333333333333333,
+  "triangles": 2,
+  "radius": 1.4142135623730951,
+  "center": [
+   1,
+   1,
+   0
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Mesh",
+    "name": "Quantized",
+    "matrix": [
+     2,
+     0,
+     0,
+     0,
+     0,
+     2,
+     0,
+     0,
+     0,
+     0,
+     2,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 5.333333333333333,
+       "itemSize": 3,
+       "normalized": true,
+       "sum": null
+      },
+      "normal": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": true,
+       "sum": 4
+      }
+     },
+     "index": null,
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       null,
+       null
+      ],
+      [
+       1,
+       null,
+       null
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": false,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   }
+  ],
+  "animations": []
+ },
+ "skinned-u8.gltf": {
+  "sha256": "ec8a1293bbe777a4b1a0f49b7cd26c7ce5f6abca43b3a855c5e2f46dbdbb5256",
+  "vertices": 6,
+  "triangles": 4,
+  "radius": 2.2500227185551855,
+  "center": [
+   0.21705924964621126,
+   2.0570594439653926,
+   0
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "SkinnedMesh",
+    "name": "Skinned",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0.5,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 6,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 15
+      },
+      "skinIndex": {
+       "count": 6,
+       "itemSize": 4,
+       "normalized": false,
+       "sum": 6
+      },
+      "skinWeight": {
+       "count": 6,
+       "itemSize": 4,
+       "normalized": true,
+       "sum": 5.992156982421875
+      }
+     },
+     "index": {
+      "count": 12,
+      "sum": 30
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       4,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    },
+    "skin": {
+     "bones": [
+      "Hip",
+      "Knee"
+     ],
+     "bindMatrix": [
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    }
+   },
+   {
+    "type": "Bone",
+    "name": "Hip",
+    "matrix": [
+     0.9848077893257141,
+     0.17364808917045593,
+     0,
+     0,
+     -0.17364808917045593,
+     0.9848077893257141,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Bone",
+    "name": "Knee",
+    "matrix": [
+     0.866025447845459,
+     0.49999991059303284,
+     0,
+     0,
+     -0.49999991059303284,
+     0.866025447845459,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     2,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   }
+  ],
+  "animations": []
+ },
+ "camera-light.gltf": {
+  "sha256": "6abb779401c234a828fcee9c0b30bb94c6b499596e8d94e61c55b63c20b16041",
+  "vertices": 8,
+  "triangles": 4,
+  "radius": 3.278719262151,
+  "center": [
+   1.5,
+   2.5,
+   2.5
+  ],
+  "objects": [
+   {
+    "type": "Group",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Group",
+    "name": "Rig",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "Mesh",
+    "name": "Panel_instance_0",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   },
+   {
+    "type": "PerspectiveCamera",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "DirectionalLight",
+    "name": "light_0",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "geometry": null,
+    "material": null,
+    "light": {
+     "type": "DirectionalLight",
+     "color": [
+      1,
+      0.8999999761581421,
+      0.800000011920929
+     ],
+     "intensity": 3
+    }
+   },
+   {
+    "type": "Object3D",
+    "name": "",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     -1,
+     1
+    ],
+    "geometry": null,
+    "material": null
+   },
+   {
+    "type": "PointLight",
+    "name": "Lamp_node",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     2,
+     2,
+     2,
+     1
+    ],
+    "geometry": null,
+    "material": null,
+    "light": {
+     "type": "PointLight",
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "intensity": 20,
+     "distance": 9,
+     "decay": 2
+    }
+   },
+   {
+    "type": "Mesh",
+    "name": "Panel_copy",
+    "matrix": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     3,
+     1
+    ],
+    "geometry": {
+     "attributes": {
+      "position": {
+       "count": 4,
+       "itemSize": 3,
+       "normalized": false,
+       "sum": 4
+      }
+     },
+     "index": {
+      "count": 6,
+      "sum": 8
+     },
+     "groups": 0,
+     "morphTargets": {},
+     "bounds": [
+      [
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "material": {
+     "type": "MeshStandardMaterial",
+     "name": "",
+     "side": 0,
+     "transparent": false,
+     "opacity": 1,
+     "alphaTest": 0,
+     "vertexColors": false,
+     "flatShading": true,
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "emissive": [
+      0,
+      0,
+      0
+     ],
+     "roughness": 1,
+     "metalness": 1,
+     "emissiveIntensity": 1,
+     "bumpScale": 1,
+     "aoMapIntensity": 1,
+     "normalScale": [
+      1,
+      -1
+     ],
+     "maps": {}
+    }
+   }
+  ],
+  "animations": []
+ }
+}

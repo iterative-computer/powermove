@@ -1,0 +1,48 @@
+[package]
+name = "pm-builtins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-perf = { path = "../../../../engine/crates/pm-perf" }
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
+pm-runtime-v8 = { path = "../runtime-v8" }
+pm-surface = { path = "../surface" }
+pm-design = { path = "../design" }
+pm-kernel = { path = "../kernel" }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
+pm-panel-inspector = { path = "../panel-inspector" }
+pm-panel-studio3d = { path = "../panel-studio3d" }
+pm-scene3d = { path = "../scene3d" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+serde_json = "1"
+pm-time = { path = "../../../../engine/crates/pm-time" }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
+tempfile = "3"
+base64 = "0.22"
+flate2 = "1"
+zstd = { version = "0.14", default-features = false }
+
+pm-panel-timeline = { path = "../panel-timeline" }
+pm-text = { path = "../../../../engine/crates/pm-text", default-features = false, features = ["system"] }
+pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
+pm-panel-media = { path = "../panel-media" }
+pm-panel-agentpanel = { path = "../panel-agentpanel" }
+pm-agents = { path = "../agents" }
+pm-telemetry = { path = "../telemetry" }
+pm-services = { path = "../services" }
+pm-captions = { path = "../../../../engine/crates/pm-captions" }
+pm-transcribe = { path = "../transcribe" }
+futures-lite = "2"
+pm-promedia = { path = "../promedia" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
+pm-export = { path = "../../../../engine/crates/pm-export" }
+pm-render = { path = "../../../../engine/crates/pm-render" }
+pm-audio = { path = "../../../../engine/crates/pm-audio" }
+pm-media = { path = "../../../../engine/crates/pm-media" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]

@@ -1,0 +1,887 @@
+import { HostClient, json, type Json } from "../../src";
+import {
+  actions,
+  audioCodings,
+  codecs,
+  colorTags,
+  extensions,
+  fieldDefaults,
+  formats,
+  kindOf,
+  profiles,
+  sizeError,
+  type AudioCoding,
+  type Codec,
+  type ColorTag,
+  type Format,
+  type Kind,
+  type Profile,
+} from "./spec";
+
+/** A projection of pm-promedia + engine facts, never a writable project mirror.
+ * The native KernelData adapter must implement this channel; see README API gaps. */
+export type Options = {
+  [key: string]: Json | undefined;
+  format: Format;
+  scale: number | "custom";
+  width: number;
+  height: number;
+  fps: number;
+  range: "work" | "all";
+  quality: "draft" | "high" | "max";
+  mblur: boolean;
+  audio: boolean;
+  alpha: boolean;
+  captionsBurn: boolean;
+  captionsSidecar: "none" | "srt" | "vtt";
+  profile: Profile;
+  codec: Codec;
+  depth: 8 | 16;
+  /** Absent from options saved before HDR delivery: read as SDR. */
+  dynamicRange: "sdr" | "pq" | "hlg";
+  /** Use Proxies (Draft); absent means originals. */
+  useProxies?: boolean;
+  /** This export's 3D quality; absent or `composition` uses the saved preset. */
+  studioQuality?: StudioQuality;
+  /** Render 3D at 75% of the output size and scale up: faster, slightly
+   * softer. Never automatic; absent means full size. */
+  studioReducedSize?: boolean;
+  /** The label of an SDR ProRes or MP4. Absent from options saved before
+   * it existed: read as the QuickTime label. */
+  colorTag: ColorTag;
+  /** Start timecode of a QuickTime export; empty (or absent, in older
+   * options) means the composition's own time. The host checks it against
+   * the frame rate. */
+  timecode: string;
+  /** Sound coding of a QuickTime export. Absent from older options: read as
+   * 24-bit PCM. */
+  audioCoding: AudioCoding;
+  /** HLG HEVC: the Dolby Vision 8.4 metadata macOS adds. Absent means on. */
+  dolbyVision?: boolean;
+  includeExtensions?: boolean;
+};
+export type StudioQuality =
+  | "composition"
+  | "draft"
+  | "preview"
+  | "production"
+  | "final";
+/** Presets saved before profile, codec and depth existed keep today's output. */
+const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
+export type Run =
+  | {
+      phase:
+        | "idle"
+        | "choosingDestination"
+        | "preparing"
+        | "finishing"
+        | "cancelling";
+    }
+  | {
+      phase: "rendering";
+      frame: number;
+      total: number;
+      elapsed: number;
+      eta?: number;
+      extra?: string;
+      preview?: string;
+    }
+  /** Every frame is encoded; the written file is checked against what was
+   * rendered, frame by frame, before it is kept. */
+  | {
+      phase: "checking";
+      frame: number;
+      total: number;
+      elapsed: number;
+      preview?: string;
+    }
+  | { phase: "done"; path: string }
+  /** `offline`: refused because clips are offline; Export Without Them applies. */
+  | { phase: "failed"; message: string; offline?: boolean }
+  | { phase: "cancelled" };
+export type QueueJob = {
+  id: number;
+  name: string;
+  format: string;
+  profile?: string;
+  finishedAt?: number;
+  path: string;
+  status: "Pending" | "Rendering" | "Interrupted" | "Done" | "Failed" | "Cancelled";
+  progress: number;
+  error: string;
+};
+export type ProjectExtension = {
+  id: string;
+  name: string;
+  version: string;
+  storeId?: string;
+  bytes: number;
+  status: "included" | "excluded" | "storeOnly" | "unavailable" | "invalid";
+};
+export interface ExportSnapshot {
+  queue?: QueueJob[];
+  destination?: { path: string; format: Format };
+  destinationChoosing?: boolean;
+  version: 1;
+  /** Monotonic export-observation sequence, independent of document revision. */
+  sequence: number;
+  project: null | {
+    id: string;
+    name: string;
+    width: number;
+    height: number;
+    hasAudio: boolean;
+    captionLayers: number;
+    hasWorkArea: boolean;
+    /** The work area in seconds, and the composition's length: "Work area"
+     * says what it covers (a work area starts as the whole composition). */
+    workArea?: [number, number] | null;
+    duration?: number;
+    /** The project keeps HDR light, so HDR delivery is on offer. */
+    hdr?: boolean;
+    /** The composition has 3D layers; `saved` names its own quality preset. */
+    studio?: {
+      saved: string;
+      /** The resolved preset of this export (draft, preview, production, final, custom). */
+      preset?: string;
+      /** The render time for the Render Time row ("12–60 min", "measuring…"). */
+      estimate?: string;
+      /** Where `estimate` comes from: the viewer's measurement or a static guess. */
+      state?: "measured" | "measuring" | "guess";
+      /** "guided" when this build has no Open Image Denoise (the engine's own filter cleans the frames). */
+      denoiser?: "oidn" | "guided";
+    };
+    /** Host planner uses engine tick/rate/range semantics, including still timecode. */
+    summary: string;
+    note?: string;
+  };
+  options: Options;
+  extensions?: ProjectExtension[] | null;
+  /** Native generation-owned draft bindings, registered before this projection. */
+  bindings: Record<string, string>;
+  presets: { id: string; name: string; options: Options }[];
+  capabilities: Record<
+    Format,
+    { available: boolean; reason?: string; detail?: string }
+  >;
+  run: Run;
+}
+const object = (x: unknown): x is Record<string, unknown> =>
+  !!x && typeof x === "object" && !Array.isArray(x);
+function validOptions(x: unknown): x is Options {
+  if (!object(x) || !formats.some((f) => f.v === x.format)) return false;
+  return (
+    (x.scale === "custom" || [0.5, 1, 2].includes(x.scale as number)) &&
+    [x.width, x.height, x.fps].every(
+      (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
+    ) &&
+    ["work", "all"].includes(x.range as string) &&
+    ["draft", "high", "max"].includes(x.quality as string) &&
+    ["none", "srt", "vtt"].includes(x.captionsSidecar as string) &&
+    [x.mblur, x.audio, x.alpha, x.captionsBurn].every(
+      (v) => typeof v === "boolean",
+    ) &&
+    (x.useProxies === undefined || typeof x.useProxies === "boolean") &&
+    (x.studioReducedSize === undefined ||
+      typeof x.studioReducedSize === "boolean") &&
+    (x.studioQuality === undefined ||
+      ["composition", "draft", "preview", "production", "final"].includes(
+        x.studioQuality as string,
+      )) &&
+    (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
+    (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
+    (x.depth === undefined || x.depth === 8 || x.depth === 16) &&
+    (x.colorTag === undefined || colorTags.some((c) => c.v === x.colorTag)) &&
+    (x.timecode === undefined || typeof x.timecode === "string") &&
+    (x.audioCoding === undefined ||
+      audioCodings.some((c) => c.v === x.audioCoding))
+  );
+}
+export function snapshot(value: unknown): ExportSnapshot {
+  json(value);
+  if (
+    !object(value) ||
+    value.version !== 1 ||
+    !Number.isSafeInteger(value.sequence) ||
+    (value.sequence as number) < 0 ||
+    !validOptions(value.options) ||
+    !object(value.bindings) ||
+    ![
+      "format",
+      "scale",
+      "width",
+      "height",
+      "fps",
+      "range",
+      "quality",
+      "mblur",
+      "audio",
+      "alpha",
+      "captionsBurn",
+      "captionsSidecar",
+      "profile",
+      "codec",
+      "depth",
+      "preset",
+      "presetName",
+    ].every(
+      (k) =>
+        typeof (value.bindings as Record<string, unknown>)[k] === "string" &&
+        (value.bindings as Record<string, string>)[k].length > 0,
+    ) ||
+    !Array.isArray(value.presets) ||
+    !value.presets.every(
+      (p) =>
+        object(p) &&
+        typeof p.id === "string" &&
+        typeof p.name === "string" &&
+        validOptions(p.options),
+    ) ||
+    !object(value.capabilities) ||
+    !formats.every((f) => {
+      const c = (value.capabilities as Record<string, unknown>)[f.v];
+      return (
+        object(c) &&
+        typeof c.available === "boolean" &&
+        (c.available || typeof c.reason === "string")
+      );
+    }) ||
+    !object(value.run)
+  )
+    throw new TypeError("Invalid export projection");
+  if (
+    value.destination !== undefined &&
+    (!object(value.destination) ||
+      typeof value.destination.path !== "string" ||
+      !formats.some(
+        (f) => f.v === (value.destination as Record<string, unknown>).format,
+      ))
+  )
+    throw new TypeError("Invalid export destination");
+  if (
+    value.destinationChoosing !== undefined &&
+    typeof value.destinationChoosing !== "boolean"
+  )
+    throw new TypeError("Invalid destination picker state");
+  const p = value.project;
+  if (
+    p !== null &&
+    (!object(p) ||
+      typeof p.id !== "string" ||
+      typeof p.name !== "string" ||
+      typeof p.summary !== "string" ||
+      typeof p.hasAudio !== "boolean" ||
+      typeof p.hasWorkArea !== "boolean" ||
+      !Number.isSafeInteger(p.captionLayers) ||
+      (p.captionLayers as number) < 0 ||
+      ![p.width, p.height].every(
+        (v) => typeof v === "number" && v > 0 && Number.isFinite(v),
+      ))
+  )
+    throw new TypeError("Invalid export project facts");
+  const r = value.run;
+  if (
+    ![
+      "idle",
+      "choosingDestination",
+      "preparing",
+      "rendering",
+      "checking",
+      "finishing",
+      "cancelling",
+      "done",
+      "failed",
+      "cancelled",
+    ].includes(r.phase as string) ||
+    ((r.phase === "rendering" || r.phase === "checking") &&
+      (!Number.isSafeInteger(r.frame) ||
+        !Number.isSafeInteger(r.total) ||
+        (r.total as number) <= 0 ||
+        (r.frame as number) < 0 ||
+        (r.frame as number) > (r.total as number) ||
+        typeof r.elapsed !== "number" ||
+        r.elapsed < 0 ||
+        (r.eta !== undefined && (typeof r.eta !== "number" || r.eta < 0)))) ||
+    (r.phase === "done" && typeof r.path !== "string") ||
+    (r.phase === "failed" &&
+      (typeof r.message !== "string" ||
+        (r.offline !== undefined && typeof r.offline !== "boolean")))
+  )
+    throw new TypeError("Invalid export run");
+  return structuredClone(value) as unknown as ExportSnapshot;
+}
+export const isProgress = (run: Run) =>
+  [
+    "preparing",
+    "rendering",
+    "checking",
+    "finishing",
+    "cancelling",
+    "failed",
+  ].includes(run.phase);
+export function progress(run: Run): {
+  leading: string;
+  eta?: string;
+  value?: number;
+  ax?: string;
+} {
+  switch (run.phase) {
+    case "rendering": {
+      const pct = Math.round((run.frame / run.total) * 100);
+      const eta =
+        run.frame >= 8 && run.elapsed >= 1 && run.eta !== undefined
+          ? run.eta >= 90
+            ? `About ${Math.round(run.eta / 60)} min left`
+            : `About ${Math.max(1, Math.round(run.eta))} s left`
+          : undefined;
+      return {
+        leading: `Frame ${run.frame} of ${run.total} · ${pct} %${run.extra ? ` · ${run.extra}` : ""}`,
+        eta,
+        value: run.frame / run.total,
+        ax: `${pct} percent, frame ${run.frame} of ${run.total}`,
+      };
+    }
+    case "checking": {
+      const pct = Math.round((run.frame / run.total) * 100);
+      return {
+        leading: `Checking the file · frame ${run.frame} of ${run.total}`,
+        value: run.frame / run.total,
+        ax: `Checking the file, ${pct} percent, frame ${run.frame} of ${run.total}`,
+      };
+    }
+    case "finishing":
+      return { leading: "Finishing…", value: 1 };
+    case "cancelling":
+      return { leading: "Cancelling…" };
+    default:
+      return { leading: "Preparing…" };
+  }
+}
+
+/** Worker-side sheet draft. All persisted state, destinations, jobs and completion
+ * effects go through HostClient to the single native writer/worker. No UI wait. */
+export class ExportModel {
+  private current: ExportSnapshot;
+  private listeners = new Set<() => void>();
+  private stop?: () => Promise<void>;
+  private disposed = false;
+  private busy = false;
+  private draftVersion = 0;
+  private planVersion = 0;
+  private readyPlanVersion = 0;
+  private remembered: Record<Kind, Format> = {
+    video: "mp4",
+    images: "still",
+    project: "json",
+  };
+  options: Options;
+  private sizeDraft?: { width: number; height: number };
+  get size() {
+    return (
+      this.sizeDraft ?? {
+        width: this.options.width,
+        height: this.options.height,
+      }
+    );
+  }
+  presetName = "";
+  chosenPreset = "";
+  open = false;
+  queueOpen = false;
+  error?: string;
+  planningError?: string;
+  presetError = false;
+  presetFault?: unknown;
+  /** Transport/projection failures are inspectable; no unapproved error copy. */
+  fault?: unknown;
+  constructor(
+    readonly host: HostClient,
+    initial: ExportSnapshot,
+  ) {
+    this.current = snapshot(initial);
+    this.options = withDefaults(structuredClone(initial.options));
+    this.remembered[kindOf(this.options.format)] = this.options.format;
+    this.validateSize();
+  }
+  get state() {
+    return structuredClone(this.current);
+  }
+  get kind() {
+    return kindOf(this.options.format);
+  }
+  get destination() {
+    return this.current.destination?.format === this.options.format
+      ? this.current.destination
+      : undefined;
+  }
+  showQueue() {
+    this.queueOpen = true;
+    this.changed();
+  }
+  backToSettings() {
+    this.queueOpen = false;
+    this.changed();
+  }
+  async dismiss() {
+    this.open = false;
+    this.queueOpen = false;
+    this.changed();
+    await this.command("export.dismiss");
+  }
+  async chooseDestination() {
+    if (this.locked || this.error || this.disposed) return;
+    this.busy = true;
+    this.changed();
+    try {
+      this.accept(
+        (
+          await this.command("export.destination.choose", {
+            options: json(this.options),
+          })
+        ).value,
+      );
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  get pending() {
+    return this.busy;
+  }
+  get activeQueueJobs() {
+    return (this.current.queue ?? []).filter(
+      (job) => job.status === "Pending" || job.status === "Rendering" || job.status === "Interrupted",
+    );
+  }
+  get locked() {
+    return (
+      this.busy ||
+      !!this.current.destinationChoosing ||
+      !["idle", "done", "cancelled"].includes(this.current.run.phase)
+    );
+  }
+  get canExport() {
+    return (
+      !!this.current.project &&
+      !this.locked &&
+      !this.error &&
+      !this.planningError &&
+      !this.fault &&
+      this.readyPlanVersion === this.planVersion &&
+      this.current.capabilities[this.options.format].available
+    );
+  }
+  /** Export pressed (or Return) while its plan was still out: it starts the
+   * moment the plan returns, with the settings it shows. A press is never
+   * lost to a plan in flight. */
+  startWanted = false;
+  /** Export could start once the plan in flight returns. */
+  get canPress() {
+    return (
+      !!this.current.project &&
+      !this.locked &&
+      !this.error &&
+      !this.planningError &&
+      !this.fault &&
+      !this.startWanted &&
+      this.current.capabilities[this.options.format].available
+    );
+  }
+  get actionLabel() {
+    return this.startWanted ? "Preparing…" : actions[this.options.format];
+  }
+  subscribe(listener: () => void) {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+  private changed() {
+    for (const listener of this.listeners) listener();
+  }
+  private accept(value: unknown, replaceDraft = false) {
+    if (this.disposed) return;
+    let next: ExportSnapshot;
+    try {
+      next = snapshot(value);
+    } catch (error) {
+      this.fault = error;
+      this.changed();
+      throw error;
+    }
+    if (next.sequence < this.current.sequence) return;
+    if (this.current.project?.id !== next.project?.id) {
+      this.open = false;
+      this.queueOpen = false;
+      this.draftVersion++;
+      replaceDraft = true;
+    }
+    this.current = next;
+    if (replaceDraft) {
+      this.options = withDefaults(structuredClone(next.options));
+      this.sizeDraft = undefined;
+      this.remembered[kindOf(this.options.format)] = this.options.format;
+      this.validateSize();
+    }
+    if (next.run.phase === "cancelled") this.open = false;
+    this.changed();
+  }
+  async connect(subscriptionId: string) {
+    this.stop = await this.host.subscribe(
+      subscriptionId,
+      "project",
+      (v) => this.accept(v, this.readyPlanVersion === this.planVersion),
+      ["export"],
+    );
+    if (this.disposed) await this.stop();
+    else await this.command("export.queue.list");
+  }
+  async command(id: string, args: Json = {}) {
+    if (this.disposed) throw new Error("Export panel retired");
+    try {
+      return await this.host.command(id, args);
+    } catch (error) {
+      this.fault = error;
+      this.changed();
+      throw error;
+    }
+  }
+  async show() {
+    if (!this.current.project || this.disposed) return;
+    if (
+      isProgress(this.current.run) ||
+      this.current.run.phase === "choosingDestination"
+    ) {
+      this.open = true;
+      this.changed();
+      await this.command("export.reveal");
+      return;
+    }
+    if (["done", "cancelled"].includes(this.current.run.phase))
+      this.accept((await this.command("export.reset")).value, true);
+    delete this.options.includeExtensions;
+    this.open = true;
+    // Closed, the sheet is not planned on every edit (PM-376): it plans as it
+    // opens, and Export waits for that plan as for any other.
+    this.readyPlanVersion = -1;
+    this.changed();
+    await this.refreshPlan();
+  }
+  set<K extends keyof Options>(key: K, value: Options[K]) {
+    if (this.locked || this.disposed) return;
+    const next = { ...this.options, [key]: value };
+    if (!validOptions(next)) throw new TypeError("Invalid export option");
+    if (key === "format" && !this.current.capabilities[next.format].available)
+      return;
+    if (key === "audio" && !this.current.project?.hasAudio) return;
+    this.options = next;
+    if (key === "scale") this.sizeDraft = undefined;
+    this.remembered[this.kind] = this.options.format;
+    this.draftVersion++;
+    this.readyPlanVersion = -1;
+    this.validateSize();
+    this.changed();
+  }
+  chooseKind(kind: Kind) {
+    if (this.locked || this.disposed) return;
+    // Changing kind must still expose an unavailable remembered format, with
+    // its reason and a disabled default action; never choose a fallback codec.
+    this.options = { ...this.options, format: this.remembered[kind] };
+    this.draftVersion++;
+    this.readyPlanVersion = -1;
+    this.validateSize();
+    this.changed();
+  }
+  customSize(axis: "width" | "height", value: number) {
+    if (this.locked || this.disposed || !this.current.project) return;
+    if (!Number.isFinite(value)) {
+      this.error = sizeError;
+      this.changed();
+      return;
+    }
+    const p = this.current.project;
+    const other = axis === "width" ? "height" : "width";
+    const pair = {
+      ...this.options,
+      [axis]: value,
+      [other]: Math.round((value * p[other]) / p[axis]),
+    };
+    this.sizeDraft = { width: pair.width, height: pair.height };
+    this.options = { ...this.options, scale: "custom" };
+    // Invalid native text drafts are inspectable UI state, never remembered
+    // render options. Project delivery can always ignore hidden raster fields.
+    if (
+      [pair.width, pair.height].every(
+        (n) => Number.isInteger(n) && n >= 16 && n <= 8192,
+      )
+    )
+      this.options = {
+        ...this.options,
+        width: pair.width,
+        height: pair.height,
+      };
+    this.draftVersion++;
+    this.readyPlanVersion = -1;
+    this.validateSize();
+    this.changed();
+  }
+  private validateSize() {
+    this.error =
+      this.options.format !== "json" &&
+      this.options.scale === "custom" &&
+      ![this.size.width, this.size.height].every(
+        (n) => Number.isInteger(n) && n >= 16 && n <= 8192,
+      )
+        ? sizeError
+        : undefined;
+  }
+  /** Planner is native: exact ticks, endpoint rules and codec constraints stay in Rust.
+   * Older async plan acks cannot overwrite a newer draft/summary. */
+  async refreshPlan() {
+    const version = ++this.planVersion;
+    const draft = this.draftVersion;
+    if (this.error) return;
+    let ack;
+    try {
+      ack = await this.command("export.plan", { options: json(this.options) });
+    } catch (error) {
+      if (
+        !this.disposed &&
+        version === this.planVersion &&
+        draft === this.draftVersion
+      ) {
+        this.planningError =
+          error instanceof Error ? error.message : String(error);
+        this.readyPlanVersion = -1;
+        // The plan failed: a held press does not start; the sheet says why.
+        this.startWanted = false;
+        this.changed();
+      }
+      throw error;
+    }
+    if (
+      this.disposed ||
+      version !== this.planVersion ||
+      draft !== this.draftVersion
+    )
+      return;
+    this.accept(ack.value, true);
+    this.readyPlanVersion = version;
+    this.planningError = undefined;
+    this.fault = undefined;
+    this.changed();
+    if (this.startWanted) {
+      this.startWanted = false;
+      if (this.canExport) await this.start();
+      else this.changed();
+    }
+  }
+  async choosePreset(id: string) {
+    if (this.locked) return;
+    const preset = this.current.presets.find((p) => p.id === id);
+    if (!preset || !this.current.capabilities[preset.options.format].available)
+      return;
+    this.options = withDefaults(structuredClone(preset.options));
+    this.sizeDraft = undefined;
+    this.remembered[this.kind] = this.options.format;
+    this.chosenPreset = id;
+    this.draftVersion++;
+    this.readyPlanVersion = -1;
+    this.validateSize();
+    this.changed();
+    await this.refreshPlan();
+  }
+  namePreset(name: string) {
+    if (!this.locked) {
+      this.presetName = name;
+      this.changed();
+    }
+  }
+  async savePreset() {
+    if (this.locked || !this.presetName.trim() || this.error) return;
+    this.presetError = false;
+    this.busy = true;
+    this.changed();
+    try {
+      // Native actor appends a fresh ID, archives same-name predecessors (N4).
+      const ack = await this.command("export.preset.save", {
+        name: this.presetName.trim(),
+        options: json(this.options),
+      });
+      this.accept(ack.value);
+      this.chosenPreset =
+        [...this.current.presets]
+          .reverse()
+          .find((p) => p.name === this.presetName.trim())?.id ??
+        this.chosenPreset;
+    } catch (error) {
+      this.presetError = true;
+      this.presetFault = error;
+      this.fault = undefined;
+      throw error;
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  async start() {
+    if (!this.canExport) {
+      if (this.canPress && this.readyPlanVersion !== this.planVersion) {
+        this.startWanted = true;
+        this.changed();
+      }
+      return;
+    }
+    this.busy = true;
+    this.current.run = { phase: "choosingDestination" };
+    this.changed();
+    try {
+      const ack = await this.command("export.begin", {
+        options: json(this.options),
+        destination: {
+          kind: this.options.format === "png" ? "folder" : "file",
+          suggestedName: `${this.current.project!.name}.${extensions[this.options.format]}`,
+        },
+      });
+      this.accept(ack.value);
+    } catch (error) {
+      if (this.current.run.phase === "choosingDestination")
+        this.current.run = { phase: "idle" };
+      throw error;
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  async cancel() {
+    this.startWanted = false;
+    if (this.current.run.phase === "idle") {
+      this.open = false;
+      this.changed();
+      await this.command("export.dismiss");
+      return;
+    }
+    if (
+      ["preparing", "rendering", "checking", "finishing"].includes(
+        this.current.run.phase,
+      )
+    ) {
+      this.current.run = { phase: "cancelling" };
+      this.changed();
+      this.accept((await this.command("export.cancel")).value);
+    }
+  }
+  async addToQueue() {
+    if (!this.canExport) return;
+    this.busy = true;
+    this.changed();
+    try {
+      this.accept(
+        (
+          await this.command("export.queue.add", {
+            options: json(this.options),
+          })
+        ).value,
+      );
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  async queueAction(id: number, action: string) {
+    await this.command("export.queue.action", { id, action });
+  }
+  async showInFinder() {
+    if (this.current.run.phase === "done")
+      await this.command("export.showInFinder");
+  }
+  async dismissCompleted() {
+    if (this.current.run.phase !== "done") return;
+    this.open = false;
+    this.changed();
+    await this.command("export.dismiss");
+  }
+  async closeFailure() {
+    if (this.current.run.phase !== "failed" || this.busy) return;
+    this.accept((await this.command("export.closeFailure")).value);
+    this.open = false;
+    this.changed();
+    await this.command("export.dismiss");
+  }
+  async retry() {
+    if (this.current.run.phase !== "failed" || this.busy || this.fault) return;
+    this.busy = true;
+    this.changed();
+    try {
+      this.accept((await this.command("export.retry")).value);
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  /** The person's explicit choice after a refusal naming offline clips: the
+   * same export again, leaving them out. Never automatic. */
+  async exportWithout() {
+    const run = this.current.run;
+    if (run.phase !== "failed" || !run.offline || this.busy || this.fault)
+      return;
+    this.busy = true;
+    this.changed();
+    try {
+      this.accept((await this.command("export.without")).value);
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  async key(key: string, meta = false, shift = false, presetField = false) {
+    if (meta && key.toLowerCase() === "e") {
+      await this.show();
+      return true;
+    }
+    if (!this.open) return false;
+    if (this.queueOpen) {
+      if (key === "Escape") {
+        this.backToSettings();
+        return true;
+      }
+      if (!(meta && key === ".")) return false;
+    }
+    if (presetField && key === "Enter") {
+      await this.savePreset();
+      return true;
+    }
+    if (key === "Escape" && this.current.run.phase === "idle") {
+      await this.cancel();
+      return true;
+    }
+    // A failed export's sheet: Escape is its Close, as Return is its Retry.
+    if (key === "Escape" && this.current.run.phase === "failed") {
+      await this.closeFailure();
+      return true;
+    }
+    // A running export's sheet: Escape is its Cancel, as Command-period is.
+    if (
+      (key === "Escape" || (meta && key === ".")) &&
+      isProgress(this.current.run)
+    ) {
+      await this.cancel();
+      return true;
+    }
+    if (key === "Enter" && !isProgress(this.current.run)) {
+      await this.start();
+      return true;
+    }
+    if (key === "Enter" && this.current.run.phase === "failed") {
+      await this.retry();
+      return true;
+    }
+    void shift; // Both shipped export shortcuts; shell owns registry arbitration.
+    return false;
+  }
+  async dispose() {
+    this.disposed = true;
+    this.listeners.clear();
+    await this.stop?.();
+  }
+}

@@ -1,0 +1,259 @@
+{
+  "scope": "original scaffold; headless protocol subset; not visual or macOS acceptance",
+  "mode": "scaffold",
+  "results": [
+    {
+      "id": "builtin-01",
+      "status": "pass",
+      "commits": 1,
+      "ops": 17,
+      "ms": 5.838247000000001
+    },
+    {
+      "id": "builtin-02",
+      "status": "pass",
+      "commits": 2,
+      "ops": 22,
+      "ms": 6.455570000000002
+    },
+    {
+      "id": "builtin-03",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.5673239999999993
+    },
+    {
+      "id": "builtin-04",
+      "status": "pass",
+      "commits": 1,
+      "ops": 8,
+      "ms": 2.49549
+    },
+    {
+      "id": "builtin-05",
+      "status": "pass",
+      "commits": 2,
+      "ops": 19,
+      "ms": 3.9979280000000017
+    },
+    {
+      "id": "builtin-06",
+      "status": "pass",
+      "commits": 1,
+      "ops": 4,
+      "ms": 2.6345850000000013
+    },
+    {
+      "id": "builtin-07",
+      "status": "pass",
+      "commits": 1,
+      "ops": 22,
+      "ms": 3.121126999999994
+    },
+    {
+      "id": "builtin-08",
+      "status": "pass",
+      "commits": 1,
+      "ops": 18,
+      "ms": 2.3800779999999975
+    },
+    {
+      "id": "builtin-09",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.561088000000005
+    },
+    {
+      "id": "builtin-10",
+      "status": "pass",
+      "commits": 1,
+      "ops": 8,
+      "ms": 2.199435000000001
+    },
+    {
+      "id": "wild-01",
+      "status": "pass",
+      "commits": 1,
+      "ops": 23,
+      "ms": 2.663762999999996
+    },
+    {
+      "id": "wild-02",
+      "status": "pass",
+      "commits": 1,
+      "ops": 13,
+      "ms": 2.5230960000000024
+    },
+    {
+      "id": "wild-03",
+      "status": "pass",
+      "commits": 1,
+      "ops": 8,
+      "ms": 2.1123910000000024
+    },
+    {
+      "id": "wild-04",
+      "status": "pass",
+      "commits": 1,
+      "ops": 13,
+      "ms": 2.4411440000000013
+    },
+    {
+      "id": "wild-05",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.3771350000000027
+    },
+    {
+      "id": "wild-06",
+      "status": "pass",
+      "commits": 2,
+      "ops": 10,
+      "ms": 2.6999369999999985
+    },
+    {
+      "id": "wild-07",
+      "status": "pass",
+      "commits": 1,
+      "ops": 11,
+      "ms": 2.5023690000000016
+    },
+    {
+      "id": "wild-08",
+      "status": "pass",
+      "commits": 1,
+      "ops": 18,
+      "ms": 2.5098229999999973
+    },
+    {
+      "id": "wild-09",
+      "status": "pass",
+      "commits": 1,
+      "ops": 3,
+      "ms": 2.1427599999999956
+    },
+    {
+      "id": "wild-10",
+      "status": "pass",
+      "commits": 1,
+      "ops": 7,
+      "ms": 2.4145329999999916
+    },
+    {
+      "id": "held-out-01",
+      "status": "pass",
+      "commits": 2,
+      "ops": 13,
+      "ms": 2.3988310000000013
+    },
+    {
+      "id": "held-out-02",
+      "status": "pass",
+      "commits": 2,
+      "ops": 14,
+      "ms": 2.6747489999999914
+    },
+    {
+      "id": "held-out-03",
+      "status": "pass",
+      "commits": 2,
+      "ops": 7,
+      "ms": 2.4297790000000106
+    },
+    {
+      "id": "held-out-04",
+      "status": "pass",
+      "commits": 2,
+      "ops": 7,
+      "ms": 2.461316999999994
+    },
+    {
+      "id": "held-out-05",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.268954999999991
+    },
+    {
+      "id": "held-out-06",
+      "status": "pass",
+      "commits": 3,
+      "ops": 10,
+      "ms": 2.933790000000002
+    },
+    {
+      "id": "held-out-07",
+      "status": "pass",
+      "commits": 3,
+      "ops": 7,
+      "ms": 3.2216450000000094
+    },
+    {
+      "id": "held-out-08",
+      "status": "pass",
+      "commits": 1,
+      "ops": 17,
+      "ms": 2.535890000000009
+    },
+    {
+      "id": "held-out-09",
+      "status": "pass",
+      "commits": 1,
+      "ops": 3,
+      "ms": 2.1054110000000037
+    },
+    {
+      "id": "held-out-10",
+      "status": "pass",
+      "commits": 1,
+      "ops": 5,
+      "ms": 2.437414000000004
+    },
+    {
+      "id": "owner-01",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-02",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-03",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-04",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-05",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-06",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-07",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-08",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-09",
+      "status": "pending-owner"
+    },
+    {
+      "id": "owner-10",
+      "status": "pending-owner"
+    }
+  ],
+  "passed": 30,
+  "failed": 0,
+  "pending": 10
+}

@@ -1,0 +1,5 @@
+--- a/apps/desktop/src/shared/engine-protocol/index.ts
++++ b/apps/desktop/src/shared/engine-protocol/index.ts
+@@ -8 +8 @@
+-export const PROTOCOL_BUILD = "protocol-3c6b6749a44fff87";
++export const PROTOCOL_BUILD = "protocol-f1801e99aec59477";

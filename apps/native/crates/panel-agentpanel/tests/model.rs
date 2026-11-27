@@ -1,0 +1,1939 @@
+//! Tagged behaviors: threads.ts:139–239; spatial.ts:828–865,971–1061,
+//! 1702–1738,1762–1975; QuestionCard.svelte:17–45; ToolActivity.svelte:22–62.
+use pm_agents::{Access, ApprovalMode, Provider, persistence::Store};
+use pm_panel_agentpanel::{
+    Error,
+    activity::{Rows, Trace},
+    composer::Attachment,
+    input::Catalog,
+    model::*,
+    view::Follow,
+};
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, io, sync::Arc};
+#[derive(Default)]
+struct Memory {
+    values: BTreeMap<String, Value>,
+    writes: Vec<String>,
+    fail: bool,
+}
+impl Store for Memory {
+    fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
+        Ok(self.values.get(key).cloned())
+    }
+    fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
+        if self.fail {
+            return Err(io::Error::other("synthetic disk failure"));
+        }
+        self.writes.push(key.into());
+        self.values.insert(key.into(), value.clone());
+        Ok(())
+    }
+}
+fn panel() -> Panel {
+    Panel::load(&mut Memory::default(), "p", "t", 0).unwrap()
+}
+fn start(p: &mut Panel) {
+    p.draft_mut("t")
+        .unwrap()
+        .insert_text("make a title", 1, false);
+    p.submit("t", "run1", "request1", 10).unwrap();
+}
+fn event(p: &mut Panel, seq: u64, value: Value) {
+    p.receive("t", "run1", seq, Update::Trace(value), 10 + seq)
+        .unwrap();
+}
+fn question(secret: bool, transport: &str) -> Value {
+    json!({"kind":"question","itemId":"q","requestId":"request1","transport":transport,"blocking":true,"questions":[{"id":"first","question":"Choose","multiSelect":true,"allowOther":true,"secret":secret,"options":[{"label":"A"},{"label":"B"}]}]})
+}
+#[test]
+fn fresh_profile_and_new_chats_start_on_auto() {
+    let mut p = panel();
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
+    assert_eq!(
+        p.session("t").unwrap().settings.approval,
+        ApprovalMode::Auto
+    );
+    for (i, mode) in ["editor", "supervised", "auto", "full"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = p.active_id().to_owned();
+        if let Some(consent) = p.set_access(&id, mode).unwrap() {
+            p.acknowledge(consent.id, true).unwrap();
+        }
+        p.draft_mut(&id).unwrap().insert_text("keep", 1, false);
+        let new = format!("new-{i}");
+        assert_eq!(p.new_thread(&new, 2).unwrap(), new);
+        let settings = &p.session(&new).unwrap().settings;
+        assert_eq!(settings.access, Access::Project, "after {mode}");
+        assert_eq!(settings.approval, ApprovalMode::Auto, "after {mode}");
+    }
+}
+
+#[test]
+fn persisted_thread_without_access_starts_on_auto() {
+    let mut store = Memory::default();
+    store.values.insert(
+        "agentThreads.p".into(),
+        json!({
+            "version": 1, "activeId": "old", "threads": [
+                pm_agents::persistence::new_thread("old", 0)
+            ]
+        }),
+    );
+    let p = Panel::load(&mut store, "p", "unused", 1).unwrap();
+    assert_eq!(p.session("old").unwrap().settings.access, Access::Project);
+    assert_eq!(
+        p.session("old").unwrap().settings.approval,
+        ApprovalMode::Auto
+    );
+}
+
+#[test]
+fn saved_access_choices_survive_reload_and_blank_chat_reuse() {
+    for (mode, access, approval) in [
+        ("editor", Access::Editor, ApprovalMode::Auto),
+        ("supervised", Access::Project, ApprovalMode::Supervised),
+        ("auto", Access::Project, ApprovalMode::Auto),
+    ] {
+        let mut p = panel();
+        p.set_access("t", mode).unwrap();
+        let mut store = Memory::default();
+        p.save(&mut store, 1).unwrap();
+        let mut restored = Panel::load(&mut store, "p", "unused", 2).unwrap();
+        assert_eq!(restored.new_thread("unused", 3).unwrap(), "t");
+        let settings = &restored.session("t").unwrap().settings;
+        assert_eq!(settings.access, access, "{mode}");
+        assert_eq!(settings.approval, approval, "{mode}");
+    }
+}
+
+#[test]
+fn background_thread_preserves_drafts_run_and_streaming_without_switching_focus() {
+    let mut p = panel();
+    start(&mut p);
+    p.new_thread("other", 11).unwrap();
+    p.draft_mut("other")
+        .unwrap()
+        .insert_text("unsent", 12, false);
+    event(
+        &mut p,
+        1,
+        json!({"kind":"answer","text":"background result"}),
+    );
+    assert_eq!(p.active_id(), "other");
+    assert_eq!(p.background_runs(), 1);
+    p.switch("t").unwrap();
+    assert_eq!(
+        p.session("t").unwrap().trace.rows.values().next().unwrap()["text"],
+        "background result"
+    );
+    p.switch("other").unwrap();
+    assert_eq!(p.session("other").unwrap().draft.request_text(), "unsent");
+}
+#[test]
+fn new_thread_reuses_a_blank_thread() {
+    let mut p = panel();
+    assert_eq!(p.new_thread("unused", 1).unwrap(), "t");
+    p.draft_mut("t").unwrap().insert_text("x", 2, false);
+    assert_eq!(p.new_thread("new", 3).unwrap(), "new");
+    assert_eq!(p.new_thread("unused2", 4).unwrap(), "new");
+    assert_eq!(p.summaries().len(), 2);
+}
+#[test]
+fn project_models_do_not_leak_text_or_drafts() {
+    let mut store = Memory::default();
+    let mut a = Panel::load(&mut store, "a", "t", 0).unwrap();
+    let mut b = Panel::load(&mut store, "b", "t", 0).unwrap();
+    a.draft_mut("t").unwrap().insert_text("only a", 1, false);
+    a.save(&mut store, 2).unwrap();
+    b.save(&mut store, 2).unwrap();
+    assert_eq!(
+        store.values["agentThreads.a"]["threads"][0]["composerDraft"],
+        "only a"
+    );
+    assert_eq!(
+        store.values["agentThreads.b"]["threads"][0]["composerDraft"],
+        ""
+    );
+}
+#[test]
+fn persistence_roundtrip_preserves_unknown_fields_and_detached_payloads() {
+    let mut store = Memory::default();
+    store.values.insert("agentThreads.p".into(),json!({"version":1,"activeId":"t","futureArchive":{"v":7},"threads":[{"id":"t","title":"Kept","updatedAt":0,"conversation":[],"composerDraft":"L😀R","attachments":[{"id":"a","name":"A","type":"application/octet-stream","promptOffset":1,"payloadStored":true,"future":9}],"futureThread":{"resume":"opaque"}}]}));
+    store.values.insert(
+        "agentAttachment.a".into(),
+        json!({"dataBase64":"AP8A","content":"\u{0000}�\u{0000}"}),
+    );
+    let mut p = Panel::load(&mut store, "p", "blank", 1).unwrap();
+    assert_eq!(
+        p.session("t").unwrap().draft.request_text(),
+        "L[Attachment: A]😀R"
+    );
+    p.save(&mut store, 2).unwrap();
+    let archive = &store.values["agentThreads.p"];
+    assert_eq!(archive["futureArchive"]["v"], 7);
+    assert_eq!(archive["threads"][0]["futureThread"]["resume"], "opaque");
+    assert_eq!(store.values["agentAttachment.a"]["dataBase64"], "AP8A");
+    let restored = Panel::load(&mut store, "p", "blank", 3).unwrap();
+    assert_eq!(
+        restored.session("t").unwrap().draft.legacy().1[0]["future"],
+        9
+    );
+}
+#[test]
+fn failed_save_remains_visible_and_retry_keeps_work() {
+    let mut p = panel();
+    p.draft_mut("t").unwrap().insert_text("keep me", 1, false);
+    let mut store = Memory {
+        fail: true,
+        ..Default::default()
+    };
+    assert!(p.save(&mut store, 2).is_err());
+    assert!(p.save_error.is_some());
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "keep me");
+    store.fail = false;
+    p.save(&mut store, 3).unwrap();
+    assert!(p.save_error.is_none());
+}
+#[test]
+fn unknown_or_malformed_archive_is_never_silently_reset() {
+    for archive in [
+        json!({"version":2,"opaque":"keep"}),
+        json!({"version":1,"activeId":"x","threads":[{"id":"x","conversation":[],"composerDraft":7}]}),
+    ] {
+        let mut store = Memory::default();
+        store
+            .values
+            .insert("agentThreads.p".into(), archive.clone());
+        assert!(Panel::load(&mut store, "p", "t", 0).is_err());
+        assert!(store.writes.is_empty());
+        assert_eq!(store.values["agentThreads.p"], archive);
+    }
+}
+#[test]
+fn confirmed_remove_archives_complete_record_and_never_deletes_payload() {
+    let mut p = panel();
+    p.draft_mut("t").unwrap().insert_text("archive", 1, false);
+    p.add_attachments(
+        "t",
+        vec![Attachment::from_record(json!({"id":"a","name":"A","dataBase64":"AA=="})).unwrap()],
+        2,
+    )
+    .unwrap();
+    assert!(matches!(
+        p.archive_thread("t", "replacement", false, 3)
+            .unwrap()
+            .unwrap()
+            .kind,
+        EffectKind::ConfirmArchive
+    ));
+    p.archive_thread("t", "replacement", true, 3).unwrap();
+    let mut store = Memory::default();
+    p.save(&mut store, 4).unwrap();
+    assert_eq!(p.active_id(), "replacement");
+    assert_eq!(
+        store.values["agentThreads.p"]["archivedThreads"][0]["composerDraft"],
+        "archive"
+    );
+    assert_eq!(store.values["agentAttachment.a"]["dataBase64"], "AA==");
+}
+#[test]
+fn streaming_rows_stay_stable_and_duplicate_events_do_not_append() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Hello"}));
+    let id = p.session("t").unwrap().trace.rows.at(0).unwrap().id.clone();
+    event(&mut p, 2, json!({"kind":"answer","text":" world"}));
+    assert!(
+        !p.receive(
+            "t",
+            "run1",
+            2,
+            Update::Trace(json!({"kind":"answer","text":"duplicate"})),
+            14
+        )
+        .unwrap()
+    );
+    assert_eq!(p.session("t").unwrap().trace.rows.len(), 1);
+    assert_eq!(
+        p.session("t").unwrap().trace.rows.get(&id).unwrap().value["text"],
+        "Hello world"
+    );
+    assert!(
+        p.receive("t", "run1", 4, Update::Progress("gap".into()), 15)
+            .is_err()
+    );
+}
+#[test]
+fn steering_archives_reasoning_and_completions_update_original_tool() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"thought","text":"why"}));
+    event(
+        &mut p,
+        2,
+        json!({"kind":"tool-start","itemId":"tool","toolName":"read","label":"Reading"}),
+    );
+    p.draft_mut("t").unwrap().insert_text("steer", 20, false);
+    let effect = p.submit("t", "run1", "request1", 21).unwrap();
+    assert!(matches!(effect.kind, EffectKind::Send { steer: true, .. }));
+    assert_eq!(p.session("t").unwrap().run.as_ref().unwrap().started_at, 10);
+    event(
+        &mut p,
+        3,
+        json!({"kind":"tool-end","itemId":"tool","output":"complete","isError":false}),
+    );
+    let trace = p.session("t").unwrap().conversation.at(1).unwrap();
+    assert_eq!(trace.value["steps"][0]["label"], "why");
+    assert_eq!(trace.value["steps"][1]["status"], "done");
+    assert_eq!(
+        p.session("t").unwrap().conversation.at(2).unwrap().value["text"],
+        "steer"
+    );
+}
+#[test]
+fn completion_does_not_duplicate_streamed_reply_and_followup_keeps_prior_turns() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"answer"}));
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "answer".into(),
+            error: false,
+            cancelled: false,
+        },
+        30,
+    )
+    .unwrap();
+    assert_eq!(p.session("t").unwrap().conversation.len(), 2);
+    p.draft_mut("t").unwrap().insert_text("next", 31, false);
+    p.submit("t", "run2", "r2", 32).unwrap();
+    assert_eq!(
+        p.session("t").unwrap().conversation.at(1).unwrap().value["steps"][0]["text"],
+        "answer"
+    );
+    assert_eq!(
+        p.receive("t", "run1", 3, Update::Progress("late".into()), 40),
+        Err(Error::Stale)
+    );
+}
+#[test]
+fn stop_targets_one_thread_and_failure_can_retry() {
+    let mut p = panel();
+    start(&mut p);
+    let effect = p.stop("t").unwrap();
+    assert_eq!(effect.target.run.as_deref(), Some("run1"));
+    assert!(p.stop("t").is_err());
+    p.acknowledge(effect.id, false).unwrap();
+    assert!(p.session("t").unwrap().stop_error.is_some());
+    let retry = p.stop("t").unwrap();
+    p.acknowledge(retry.id, true).unwrap();
+    assert!(p.session("t").unwrap().run.is_some());
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Complete {
+            text: String::new(),
+            error: false,
+            cancelled: true,
+        },
+        30,
+    )
+    .unwrap();
+    assert!(p.session("t").unwrap().run.is_none());
+    assert_eq!(p.raw_archive()["threads"][0]["lastRunStatus"], "cancelled");
+}
+#[test]
+fn approval_answers_are_explicit_masked_and_failed_delivery_closes_question() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, question(true, "reply"));
+    assert!(p.answer("t", "q", false).is_err());
+    p.choose_answer("t", "q", "first", "A").unwrap();
+    p.choose_answer("t", "q", "first", "B").unwrap();
+    p.type_answer("t", "q", "first", "synthetic-private-answer".into())
+        .unwrap();
+    let effect = p.answer("t", "q", false).unwrap();
+    assert!(!format!("{effect:?}").contains("synthetic-private-answer"));
+    assert_eq!(
+        p.session("t").unwrap().question("q").unwrap()["answers"]["first"],
+        "••••••"
+    );
+    let mut store = Memory::default();
+    p.save(&mut store, 20).unwrap();
+    assert!(
+        !serde_json::to_string(&store.values)
+            .unwrap()
+            .contains("synthetic-private-answer")
+    );
+    assert!(p.answer("t", "q", false).is_err());
+    p.acknowledge(effect.id, false).unwrap();
+    assert_eq!(
+        p.session("t").unwrap().question("q").unwrap()["status"],
+        "closed"
+    );
+    assert!(
+        p.session("t")
+            .unwrap()
+            .question("q")
+            .unwrap()
+            .get("answers")
+            .is_none()
+    );
+}
+#[test]
+fn question_skip_only_reply_transport_and_message_answer_preserves_composer() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, question(false, "message"));
+    p.draft_mut("t").unwrap().insert_text("unsent", 20, false);
+    assert!(p.answer("t", "q", true).is_err());
+    p.type_answer("t", "q", "first", "typed".into()).unwrap();
+    let effect = p.answer("t", "q", false).unwrap();
+    assert!(matches!(effect.kind, EffectKind::Send { steer: true, .. }));
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "unsent");
+}
+#[test]
+fn computer_access_needs_matching_consent_and_late_grants_cannot_override_choice() {
+    let mut p = panel();
+    let effect = p.set_access("t", "full").unwrap().unwrap();
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
+    p.set_access("t", "editor").unwrap();
+    assert!(p.acknowledge(effect.id, true).is_err());
+    let effect = p.set_access("t", "full").unwrap().unwrap();
+    p.acknowledge(effect.id, false).unwrap();
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Editor);
+    let effect = p.set_access("t", "full").unwrap().unwrap();
+    p.acknowledge(effect.id, true).unwrap();
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Computer);
+    assert!(matches!(
+        p.set_access("t", "supervised").unwrap().unwrap().kind,
+        EffectKind::RevokeComputerConsent
+    ));
+}
+#[test]
+fn restored_computer_intent_is_not_a_live_authority() {
+    let mut p = panel();
+    let effect = p.set_access("t", "full").unwrap().unwrap();
+    p.acknowledge(effect.id, true).unwrap();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    let mut restored = Panel::load(&mut store, "p", "blank", 2).unwrap();
+    assert_eq!(
+        restored.session("t").unwrap().settings.access,
+        Access::Project
+    );
+    restored
+        .set_catalog(
+            "t",
+            Catalog {
+                models: vec![("m".into(), "Model".into())],
+                efforts: vec!["high".into()],
+                model_efforts: vec![],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    restored.set_model("t", "m".into(), "high".into()).unwrap();
+    restored.save(&mut store, 3).unwrap();
+    assert_eq!(
+        store.values["agentThreads.p"]["threads"][0]["access"],
+        "computer"
+    );
+}
+
+#[test]
+fn provider_cannot_switch_during_run_and_model_uses_catalog_ids() {
+    let mut p = panel();
+    let catalog = Catalog {
+        providers: vec![("claude".into(), "Claude".into())],
+        models: vec![("sonnet".into(), "Sonnet".into())],
+        efforts: vec!["high".into()],
+        model_efforts: vec![],
+        claude: true,
+        resolves: vec![],
+        default_efforts: vec![],
+    };
+    p.set_provider("t", Provider::Claude, "sonnet".into(), catalog.clone())
+        .unwrap();
+    p.set_model("t", "claude-custom".into(), "high".into())
+        .unwrap();
+    assert!(
+        p.set_model("t", "unavailable".into(), "high".into())
+            .is_err()
+    );
+    start(&mut p);
+    assert!(
+        p.set_provider("t", Provider::Claude, "sonnet".into(), catalog)
+            .is_err()
+    );
+}
+#[test]
+fn plan_apply_blocks_switches_but_failure_preserves_preview_and_draft() {
+    let mut p = panel();
+    start(&mut p);
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Plan(json!({"kind":"scene","commands":[]})),
+        11,
+    )
+    .unwrap();
+    assert!(
+        p.apply_plan("t").is_err(),
+        "active runs cannot apply a preview"
+    );
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: String::new(),
+            error: false,
+            cancelled: false,
+        },
+        12,
+    )
+    .unwrap();
+    let effect = p.apply_plan("t").unwrap();
+    assert!(p.new_thread("new", 12).is_err());
+    assert!(p.draft_mut("t").is_err());
+    p.acknowledge(effect.id, false).unwrap();
+    assert_eq!(p.session("t").unwrap().phase, Phase::Preview);
+    assert!(p.session("t").unwrap().plan.is_some());
+    p.dismiss_plan("t").unwrap();
+    assert!(p.session("t").unwrap().plan.is_none());
+}
+#[test]
+fn artifacts_import_exactly_once_and_failed_import_is_retryable() {
+    let mut p = panel();
+    start(&mut p);
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Result(json!({"artifacts":[{"path":"synthetic/result.png","name":"result.png"}]})),
+        11,
+    )
+    .unwrap();
+    let e = p.artifact("t", "synthetic/result.png", true).unwrap();
+    assert!(p.artifact("t", "synthetic/result.png", true).is_err());
+    p.acknowledge(e.id, false).unwrap();
+    let e = p.artifact("t", "synthetic/result.png", true).unwrap();
+    p.acknowledge(e.id, true).unwrap();
+    assert!(p.artifact("t", "synthetic/result.png", true).is_err());
+    assert!(matches!(
+        p.artifact("t", "synthetic/result.png", false).unwrap().kind,
+        EffectKind::RevealArtifact(_)
+    ));
+}
+#[test]
+fn six_attachment_limit_does_not_reject_existing_larger_archives() {
+    let mut p = panel();
+    let files = (0..6)
+        .map(|i| {
+            Attachment::from_record(json!({"id":format!("a{i}"),"name":"A","dataBase64":""}))
+                .unwrap()
+        })
+        .collect();
+    p.add_attachments("t", files, 1).unwrap();
+    assert!(
+        p.add_attachments(
+            "t",
+            vec![
+                Attachment::from_record(json!({"id":"extra","name":"E","dataBase64":""})).unwrap()
+            ],
+            2
+        )
+        .is_err()
+    );
+    let missing =
+        Attachment::from_record(json!({"id":"missing","name":"M","payloadStored":true})).unwrap();
+    let mut p = panel();
+    p.add_attachments("t", vec![missing], 1).unwrap();
+    assert!(matches!(
+        p.submit("t", "r", "q", 2),
+        Err(Error::MissingPayload(_))
+    ));
+    assert_eq!(p.session("t").unwrap().draft.attachments().count(), 1);
+}
+
+#[test]
+fn draft_attachment_add_and_undo_use_ids_without_reloading_existing_bodies() {
+    #[derive(Default)]
+    struct References {
+        memory: Memory,
+        reads: Vec<String>,
+    }
+    impl Store for References {
+        fn lazy_history_attachments(&self) -> bool {
+            true
+        }
+        fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
+            self.reads.push(key.into());
+            self.memory.get(key)
+        }
+        fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
+            self.memory.set(key, value)
+        }
+    }
+    let mut store = References::default();
+    let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
+    for (i, id) in ["first", "second", "third"].into_iter().enumerate() {
+        store.reads.clear();
+        store.memory.writes.clear();
+        panel
+            .attach_records(
+                "t",
+                vec![json!({
+                    "id": id, "name": format!("{id}.png"), "type": "image/png",
+                    "dataUrl": "data:image/png;base64,AA=="
+                })],
+                &mut store,
+                i as u64 + 1,
+            )
+            .unwrap();
+        panel.save(&mut store, i as u64 + 1).unwrap();
+        let key = format!("agentAttachment.{id}");
+        assert_eq!(store.reads, [key.clone()]);
+        assert_eq!(store.memory.writes, [key, "agentThreads.p".into()]);
+    }
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .remove_file("first", 6)
+        .unwrap();
+    panel.save(&mut store, 6).unwrap();
+    assert!(
+        panel.raw_archive()["threads"][0]["nativeDraftAttachmentIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("first"))
+    );
+    assert!(panel.draft_mut("t").unwrap().undo(false));
+    let effect = panel.submit("t", "run", "request", 7).unwrap();
+    let EffectKind::Send { attachments, .. } = effect.kind else {
+        panic!("expected send")
+    };
+    assert_eq!(attachments.len(), 3);
+    assert!(
+        attachments
+            .iter()
+            .all(|a| a["payloadStored"] == true && a.get("dataUrl").is_none())
+    );
+}
+
+#[test]
+fn retry_uses_stable_message_id_and_leaves_transcript_intact() {
+    let mut p = panel();
+    start(&mut p);
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Complete {
+            text: "failed".into(),
+            error: true,
+            cancelled: false,
+        },
+        20,
+    )
+    .unwrap();
+    let e = p.retry("t", Some("message-1"), false).unwrap();
+    assert!(matches!(e.kind,EffectKind::Retry{ref message,..} if message=="message-0"));
+    assert_eq!(p.session("t").unwrap().conversation.len(), 2);
+    assert!(p.retry("t", Some("message-1"), true).is_err());
+}
+#[test]
+fn row_windows_scale_to_sixty_thousand_and_noop_keeps_arc_identity() {
+    let mut rows = Rows::default();
+    for i in 0..60_001 {
+        rows.upsert(format!("r{i}"), json!({"text":i})).unwrap();
+    }
+    let old = rows.get("r30000").unwrap().value.clone();
+    assert!(!rows.upsert("r30000".into(), json!({"text":30000})).unwrap());
+    assert!(Arc::ptr_eq(&old, &rows.get("r30000").unwrap().value));
+    assert_eq!(rows.page(59_990..60_010).len(), 11);
+    assert_eq!(rows.page(usize::MAX..usize::MAX).len(), 0);
+    assert_eq!(rows.get("r60000").unwrap().value["text"], 60000);
+}
+#[test]
+fn full_activity_is_retained_while_thoughts_settle_and_tools_update_by_id() {
+    let mut trace = Trace::default();
+    trace
+        .receive(&json!({"kind":"thought","text":"x".repeat(10_000)}), 1)
+        .unwrap();
+    trace
+        .receive(
+            &json!({"kind":"tool-start","itemId":"tool","label":"read","toolName":"read"}),
+            2,
+        )
+        .unwrap();
+    assert_eq!(trace.rows.at(0).unwrap().value["live"], false);
+    trace
+        .receive(
+            &json!({"kind":"tool-end","itemId":"tool","output":"y".repeat(10_000)}),
+            3,
+        )
+        .unwrap();
+    assert_eq!(
+        trace.rows.get("tool").unwrap().value["output"]
+            .as_str()
+            .unwrap()
+            .len(),
+        10_000
+    );
+    assert_eq!(
+        trace.rows.at(0).unwrap().value["label"]
+            .as_str()
+            .unwrap()
+            .len(),
+        10_000
+    );
+}
+#[test]
+fn subagent_result_updates_in_place_and_stop_is_fenced() {
+    let mut p = panel();
+    start(&mut p);
+    event(
+        &mut p,
+        1,
+        json!({"kind":"task","task":{"taskId":"child","requestId":"request1","title":"Review","status":"waiting","progress":"wait"}}),
+    );
+    let e = p.stop_task("t", "child").unwrap();
+    assert!(matches!(e.kind,EffectKind::StopTask{ref task,..} if task=="child"));
+    assert!(p.stop_task("t", "child").is_err());
+    p.acknowledge(e.id, false).unwrap();
+    event(
+        &mut p,
+        2,
+        json!({"kind":"task","task":{"taskId":"child","requestId":"request1","title":"Review","status":"completed","summary":"{\"summary\":\"Done\",\"notes\":[\"Note\"]}"}}),
+    );
+    assert_eq!(p.session("t").unwrap().trace.rows.len(), 1);
+    assert_eq!(
+        p.session("t")
+            .unwrap()
+            .trace
+            .rows
+            .get("child")
+            .unwrap()
+            .value["output"],
+        "Done\n\nNote"
+    );
+    assert!(p.stop_task("t", "child").is_err());
+}
+#[test]
+fn progress_is_bounded_and_does_not_reset_run_timer() {
+    let mut p = panel();
+    start(&mut p);
+    for i in 1..=25 {
+        p.receive(
+            "t",
+            "run1",
+            i,
+            Update::Progress(format!("step {i}")),
+            i + 10,
+        )
+        .unwrap();
+    }
+    assert_eq!(p.session("t").unwrap().progress.len(), 20);
+    assert_eq!(p.session("t").unwrap().elapsed_ms(100), Some(90));
+}
+#[test]
+fn follow_state_is_independent_of_streamed_updates() {
+    let mut p = panel();
+    start(&mut p);
+    p.follow = Follow {
+        has_text_selection: true,
+        ..Default::default()
+    };
+    event(&mut p, 1, json!({"kind":"answer","text":"text"}));
+    assert!(!p.follow.should_follow(true));
+}
+
+#[test]
+fn archive_of_running_thread_waits_for_settlement_then_keeps_final_output() {
+    let mut p = panel();
+    start(&mut p);
+    let effect = p
+        .archive_thread("t", "replacement", true, 12)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(effect.kind, EffectKind::Stop));
+    assert!(p.session("t").unwrap().archiving);
+    event(
+        &mut p,
+        1,
+        json!({"kind":"answer","text":"last acknowledged output"}),
+    );
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: String::new(),
+            error: false,
+            cancelled: true,
+        },
+        20,
+    )
+    .unwrap();
+    assert_eq!(p.active_id(), "replacement");
+    assert_eq!(
+        p.raw_archive()["archivedThreads"][0]["conversation"][1]["steps"][0]["text"],
+        "last acknowledged output"
+    );
+}
+#[test]
+fn restored_generated_title_clock_and_opaque_preferences_are_not_rewritten() {
+    let mut store = Memory::default();
+    store.values.insert("agentThreads.p".into(),json!({"version":1,"activeId":"t","threads":[{"id":"t","title":"Generated title","updatedAt":9,"conversation":[{"role":"user","text":"the original prompt"}],"composerDraft":"","attachments":[],"access":"computer","scope":"future:opaque","future":true}]}));
+    let mut p = Panel::load(&mut store, "p", "blank", 10).unwrap();
+    p.save(&mut store, 99).unwrap();
+    let thread = &store.values["agentThreads.p"]["threads"][0];
+    assert_eq!(thread["title"], "Generated title");
+    assert_eq!(thread["updatedAt"], 9);
+    assert_eq!(thread["access"], "computer");
+    assert_eq!(thread["scope"], "future:opaque");
+}
+#[test]
+fn held_question_in_restored_transcript_is_closed_without_dropping_record() {
+    let mut store = Memory::default();
+    store.values.insert("agentThreads.p".into(),json!({"version":1,"activeId":"t","threads":[{"id":"t","title":"Title","updatedAt":0,"composerDraft":"","attachments":[],"conversation":[{"role":"trace","steps":[{"kind":"question","id":"q","status":"open","transport":"reply","requestId":"old","questions":[{"id":"x","question":"Continue?"}]}]}]}]}));
+    let p = Panel::load(&mut store, "p", "blank", 1).unwrap();
+    assert_eq!(
+        p.session("t").unwrap().question("q").unwrap()["status"],
+        "closed"
+    );
+    assert_eq!(
+        p.session("t").unwrap().question("q").unwrap()["requestId"],
+        "old"
+    );
+}
+#[test]
+fn empty_recognized_archive_opens_a_blank_without_losing_unknown_fields() {
+    let mut store = Memory::default();
+    store.values.insert(
+        "agentThreads.p".into(),
+        json!({"version":1,"activeId":"old","threads":[],"future":"kept"}),
+    );
+    let p = Panel::load(&mut store, "p", "blank", 1).unwrap();
+    assert_eq!(p.active_id(), "blank");
+    assert_eq!(p.raw_archive()["future"], "kept");
+}
+#[test]
+fn effect_tokens_cannot_collide_between_project_models() {
+    let mut a = panel();
+    let mut b = panel();
+    let a = a.set_access("t", "full").unwrap().unwrap();
+    let old = a.id;
+    let b_effect = b.set_access("t", "full").unwrap().unwrap();
+    assert_ne!(old, b_effect.id);
+    assert_eq!(b.acknowledge(old, true), Err(Error::Stale));
+}
+#[test]
+fn activity_groups_keep_chronology_and_mixed_failures_semantic() {
+    use pm_panel_agentpanel::activity::{GroupIndex, GroupKind, WorkStatus};
+    let mut rows = Rows::default();
+    for (id, value) in [
+        ("a", json!({"kind":"text","text":"before"})),
+        ("b", json!({"kind":"tool","status":"error"})),
+        ("c", json!({"kind":"tool","status":"done"})),
+        (
+            "d",
+            json!({"kind":"thought","label":"reasoning","live":true}),
+        ),
+        ("e", json!({"kind":"tool","status":"running","task":{}})),
+    ] {
+        rows.upsert(id.into(), value).unwrap();
+    }
+    let groups = GroupIndex::build(&rows);
+    assert_eq!(groups.len(), 4);
+    let work = &groups.page(1..2)[0];
+    assert_eq!(work.kind, GroupKind::Tools);
+    assert_eq!(work.rows, 1..3);
+    assert_eq!(work.status, WorkStatus::Partial);
+    assert_eq!(work.success_count, 1);
+    assert_eq!(groups.newest_active.as_deref(), Some("e"));
+}
+
+#[test]
+fn nested_archived_trace_is_windowed_by_step_even_with_replayed_ids() {
+    use pm_panel_agentpanel::activity::TranscriptIndex;
+    let mut messages = Rows::default();
+    messages.upsert("message-0".into(),json!({"role":"trace","steps":(0..60_001).map(|i|json!({"id":"replayed","kind":"tool","output":i})).collect::<Vec<_>>()})).unwrap();
+    let index = TranscriptIndex::build(&messages);
+    assert_eq!(index.len(), 60_001);
+    let page = index.page(59_990..60_010);
+    assert_eq!(page.len(), 11);
+    assert_ne!(page[0].id, page[1].id);
+    assert_eq!(
+        index.resolve(&page[10], &messages).unwrap()["output"],
+        60_000
+    );
+    assert_eq!(index.get(&page[0].id), Some(&page[0]));
+}
+#[test]
+fn generated_title_is_guarded_and_not_overwritten_by_later_save() {
+    let mut p = panel();
+    start(&mut p);
+    assert!(
+        !p.generated_title("t", "other request", "Wrong", 12)
+            .unwrap()
+    );
+    assert!(
+        p.generated_title("t", "make a title", " ## A\n useful title “ ", 13)
+            .unwrap()
+    );
+    let mut store = Memory::default();
+    p.save(&mut store, 14).unwrap();
+    assert_eq!(
+        store.values["agentThreads.p"]["threads"][0]["title"],
+        "A useful title"
+    );
+    assert_eq!(
+        store.values["agentThreads.p"]["threads"][0]["updatedAt"],
+        13
+    );
+}
+#[test]
+fn attachment_actions_return_preview_or_reveal_and_restore_focus_by_id() {
+    let mut p = panel();
+    p.add_attachments("t",vec![Attachment::from_record(json!({"id":"image","name":"Image","type":"image/png","dataUrl":"data:image/png;base64,AA=="})).unwrap(),Attachment::from_record(json!({"id":"file","name":"File","type":"application/octet-stream","dataBase64":"AP8="})).unwrap()],1).unwrap();
+    assert!(
+        matches!(p.open_attachment("t","image").unwrap().kind,EffectKind::OpenAttachment{preview:true,ref restore_focus,..} if restore_focus=="image")
+    );
+    assert!(matches!(
+        p.open_attachment("t", "file").unwrap().kind,
+        EffectKind::OpenAttachment { preview: false, .. }
+    ));
+    let inspect = p.inspect("t").unwrap().to_string();
+    assert!(!inspect.contains("base64"));
+    assert!(!inspect.contains("AP8="));
+    assert!(inspect.contains("payloadAvailable"));
+}
+#[test]
+fn complete_keeps_review_plan_and_result_undo_ack_survives_run_settlement() {
+    let mut p = panel();
+    start(&mut p);
+    p.receive("t", "run1", 1, Update::Plan(json!({"kind":"scene"})), 11)
+        .unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: String::new(),
+            error: false,
+            cancelled: false,
+        },
+        12,
+    )
+    .unwrap();
+    assert_eq!(p.session("t").unwrap().phase, Phase::Preview);
+    let e = p.apply_plan("t").unwrap();
+    p.acknowledge(e.id, false).unwrap();
+    assert_eq!(p.session("t").unwrap().phase, Phase::Preview);
+}
+
+#[test]
+fn result_artifact_references_survive_keep_followup_and_restart() {
+    let mut p = panel();
+    start(&mut p);
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Result(
+            json!({"artifacts":[{"path":"synthetic/only-copy.mov","name":"Output"}],"future":true}),
+        ),
+        11,
+    )
+    .unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "done".into(),
+            error: false,
+            cancelled: false,
+        },
+        12,
+    )
+    .unwrap();
+    let mut store = Memory::default();
+    p.save(&mut store, 13).unwrap();
+    p.keep_result("t").unwrap();
+    p.save(&mut store, 14).unwrap();
+    let restored = Panel::load(&mut store, "p", "blank", 15).unwrap();
+    let record = restored
+        .session("t")
+        .unwrap()
+        .conversation
+        .values()
+        .find(|m| m["nativeResult"].is_object())
+        .unwrap();
+    assert_eq!(
+        record["nativeResult"]["artifacts"][0]["path"],
+        "synthetic/only-copy.mov"
+    );
+    assert_eq!(record["nativeResult"]["future"], true);
+}
+#[test]
+fn media_nonfinal_outcomes_keep_truthful_status_and_full_original_output() {
+    use pm_panel_agentpanel::activity::media_outcome;
+    assert_eq!(
+        media_outcome(
+            "mcp__pm__transcribe_media",
+            &json!("Error: {\"status\":\"model-required\"}")
+        ),
+        Some(json!({"state":"needs-model"}))
+    );
+    assert_eq!(
+        media_outcome(
+            "transcribe_media",
+            &json!("{\"status\":\"transcribing\",\"progress\":0.42}")
+        ),
+        Some(json!({"state":"pending","progress":0.42}))
+    );
+    assert!(
+        media_outcome(
+            "transcribe_media",
+            &json!("{\"text\":\"quoted\",\"status\":\"transcribing\"}")
+        )
+        .is_none()
+    );
+    let mut trace = Trace::default();
+    trace.receive(&json!({"kind":"tool-start","itemId":"x","toolName":"transcribe_media","label":"Transcribing"}),0).unwrap();
+    trace.receive(&json!({"kind":"tool-end","itemId":"x","isError":true,"output":"{\"status\":\"model-required\"}"}),1).unwrap();
+    assert_eq!(trace.rows.get("x").unwrap().value["status"], "done");
+    assert_eq!(trace.rows.get("x").unwrap().value["outcome"], "needs-model");
+}
+#[test]
+fn single_choice_can_be_toggled_off_and_typed_answer_is_combined() {
+    use pm_panel_agentpanel::questions::QuestionDraft;
+    let step = json!({"status":"open","transport":"reply","questions":[{"id":"q","multiSelect":false,"allowOther":true,"options":[{"label":"A"},{"label":"B"}]}]});
+    let mut draft = QuestionDraft::default();
+    draft.choose(&step, "q", "A").unwrap();
+    draft.choose(&step, "q", "B").unwrap();
+    draft.type_answer(&step, "q", " typed ".into()).unwrap();
+    assert_eq!(draft.submit(&step, false).unwrap()["q"], vec!["B", "typed"]);
+    draft.choose(&step, "q", "B").unwrap();
+    assert_eq!(draft.submit(&step, false).unwrap()["q"], vec!["typed"]);
+    assert!(draft.submit(&step, true).unwrap().is_empty());
+}
+
+#[test]
+fn composer_text_answers_blocking_question_using_run_request_fallback() {
+    let mut p = panel();
+    start(&mut p);
+    let mut q = question(false, "reply");
+    q.as_object_mut().unwrap().remove("requestId");
+    event(&mut p, 1, q);
+    p.draft_mut("t")
+        .unwrap()
+        .insert_text("the answer", 20, false);
+    let e = p.submit("t", "run1", "request1", 21).unwrap();
+    assert!(
+        matches!(e.kind,EffectKind::Answer{ref request_id,ref answers,..} if request_id.as_deref()==Some("request1") && answers.0["first"]==vec!["the answer"])
+    );
+    assert_eq!(p.session("t").unwrap().conversation.len(), 1);
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "");
+}
+#[test]
+fn message_question_answer_starts_new_run_when_idle_and_preserves_secret_draft() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, question(true, "message"));
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "done".into(),
+            error: false,
+            cancelled: false,
+        },
+        20,
+    )
+    .unwrap();
+    p.draft_mut("t")
+        .unwrap()
+        .insert_text("unsent composer", 21, false);
+    p.type_answer("t", "q", "first", "private synthetic value".into())
+        .unwrap();
+    let e = p.answer_at("t", "q", false, 22).unwrap();
+    assert!(
+        matches!(e.kind,EffectKind::Send{steer:false,ref text,..} if text.contains("(answered privately)")&&!text.contains("private synthetic value"))
+    );
+    assert_eq!(
+        p.session("t").unwrap().draft.request_text(),
+        "unsent composer"
+    );
+    assert!(p.session("t").unwrap().run.is_some());
+}
+#[test]
+fn nonblocking_held_question_survives_steering_checkpoint_and_closes_at_completion() {
+    let mut p = panel();
+    start(&mut p);
+    let mut q = question(false, "reply");
+    q["blocking"] = json!(false);
+    event(&mut p, 1, q);
+    p.draft_mut("t").unwrap().insert_text("continue", 20, false);
+    p.submit("t", "run1", "request1", 21).unwrap();
+    assert_eq!(
+        p.session("t").unwrap().question("q").unwrap()["status"],
+        "open"
+    );
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "done".into(),
+            error: false,
+            cancelled: false,
+        },
+        30,
+    )
+    .unwrap();
+    assert_eq!(
+        p.session("t").unwrap().question("q").unwrap()["status"],
+        "closed"
+    );
+}
+
+#[test]
+fn background_launch_never_steals_visible_blank_thread_or_inherits_computer_grant() {
+    let mut p = panel();
+    let consent = p.set_access("t", "full").unwrap().unwrap();
+    p.acknowledge(consent.id, true).unwrap();
+    p.launch_background("background", 10).unwrap();
+    assert_eq!(p.active_id(), "t");
+    assert_eq!(
+        p.session("background").unwrap().settings.access,
+        Access::Project
+    );
+    let e = p
+        .send_message(
+            "background",
+            "plan the edit",
+            &[],
+            "background-run",
+            "request",
+            11,
+        )
+        .unwrap();
+    assert_eq!(e.target.thread, "background");
+    assert_eq!(p.active_id(), "t");
+    assert_eq!(p.background_runs(), 1);
+    assert!(p.launch_background("background", 12).is_err());
+}
+#[test]
+fn agent_send_keeps_visible_draft_selection_files_and_undo() {
+    let mut p = panel();
+    p.draft_mut("t").unwrap().insert_text("my draft", 1, false);
+    p.draft_mut("t").unwrap().select(0..2).unwrap();
+    p.send_message("t", "background direction", &[], "run1", "request1", 10)
+        .unwrap();
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "my draft");
+    assert_eq!(p.session("t").unwrap().draft.selection(), 0..2);
+    assert!(p.draft_mut("t").unwrap().undo(false));
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "");
+}
+#[test]
+fn subagent_stop_still_targets_the_archived_row_after_steering_update() {
+    let mut p = panel();
+    start(&mut p);
+    let task = json!({"kind":"task","task":{"taskId":"child","requestId":"request1","title":"Review","status":"running"}});
+    event(&mut p, 1, task.clone());
+    p.draft_mut("t").unwrap().insert_text("steer", 20, false);
+    p.submit("t", "run1", "request1", 21).unwrap();
+    event(&mut p, 2, task);
+    assert!(
+        matches!(p.stop_task("t","child").unwrap().kind,EffectKind::StopTask{ref task,..} if task=="child")
+    );
+}
+
+#[test]
+fn imported_seven_file_draft_remains_readable_despite_new_message_limit() {
+    let mut store = Memory::default();
+    store.values.insert("agentThreads.p".into(),json!({"version":1,"activeId":"t","threads":[{"id":"t","title":"Legacy","updatedAt":1,"conversation":[],"composerDraft":"","attachments":(0..7).map(|i|json!({"id":format!("a{i}"),"name":format!("file{i}"),"dataBase64":""})).collect::<Vec<_>>()}]}));
+    let p = Panel::load(&mut store, "p", "blank", 2).unwrap();
+    assert_eq!(p.session("t").unwrap().draft.attachments().count(), 7);
+}
+#[test]
+fn duplicate_active_run_id_is_refused_without_consuming_another_threads_draft() {
+    let mut p = panel();
+    start(&mut p);
+    p.launch_background("other", 10).unwrap();
+    p.draft_mut("other")
+        .unwrap()
+        .insert_text("retain", 11, false);
+    assert!(p.submit("other", "run1", "other-request", 12).is_err());
+    assert_eq!(p.session("other").unwrap().draft.request_text(), "retain");
+    assert_eq!(p.session("other").unwrap().conversation.len(), 0);
+}
+#[test]
+fn shell_drag_and_pin_effects_leave_live_conversation_and_draft_owned_by_same_thread() {
+    let mut p = panel();
+    start(&mut p);
+    p.draft_mut("t").unwrap().insert_text("unsent", 12, false);
+    for action in [
+        ShellAction::BeginDrag,
+        ShellAction::CancelDrag,
+        ShellAction::CommitDrag {
+            dock: Some("right".into()),
+        },
+        ShellAction::Pin,
+        ShellAction::Close,
+        ShellAction::Open,
+    ] {
+        let e = p.host_action("t", action).unwrap();
+        assert_eq!(e.target.thread, "t");
+        assert_eq!(e.target.run.as_deref(), Some("run1"));
+        assert_eq!(p.session("t").unwrap().draft.request_text(), "unsent");
+        assert_eq!(p.session("t").unwrap().conversation.len(), 1);
+    }
+}
+
+#[test]
+fn new_ui_thread_preserves_provider_model_effort_and_requires_its_own_computer_grant() {
+    let mut p = panel();
+    p.set_provider(
+        "t",
+        Provider::Claude,
+        "sonnet".into(),
+        Catalog {
+            providers: vec![("claude".into(), "Claude".into())],
+            models: vec![("sonnet".into(), "Sonnet".into())],
+            efforts: vec!["high".into()],
+            model_efforts: vec![],
+            claude: true,
+            resolves: vec![],
+            default_efforts: vec![],
+        },
+    )
+    .unwrap();
+    p.set_model("t", "sonnet".into(), "high".into()).unwrap();
+    let consent = p.set_access("t", "full").unwrap().unwrap();
+    p.acknowledge(consent.id, true).unwrap();
+    p.draft_mut("t").unwrap().insert_text("old draft", 1, false);
+    p.new_thread("new", 2).unwrap();
+    let s = p.session("new").unwrap();
+    assert_eq!(s.settings.provider, Provider::Claude);
+    assert_eq!(s.settings.model, "sonnet");
+    assert_eq!(s.settings.effort, "high");
+    assert_eq!(s.settings.access, Access::Project);
+}
+
+#[test]
+fn rejected_answer_after_same_run_settles_closes_its_archived_acknowledgement() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, question(false, "reply"));
+    p.choose_answer("t", "q", "first", "A").unwrap();
+    let effect = p.answer("t", "q", false).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "finished".into(),
+            error: false,
+            cancelled: false,
+        },
+        20,
+    )
+    .unwrap();
+    p.acknowledge(effect.id, false).unwrap();
+    let q = p.session("t").unwrap().question("q").unwrap();
+    assert_eq!(q["status"], "closed");
+    assert!(q.get("answers").is_none());
+}
+
+#[test]
+fn switching_models_keeps_only_an_effort_the_new_model_takes() {
+    let mut p = panel();
+    let catalog = Catalog {
+        providers: vec![("chatgpt".into(), "ChatGPT".into())],
+        models: vec![
+            ("fast".into(), "Fast".into()),
+            ("deep".into(), "Deep".into()),
+        ],
+        efforts: vec!["".into(), "low".into(), "xhigh".into()],
+        model_efforts: vec![
+            ("fast".into(), vec!["low".into()]),
+            ("deep".into(), vec!["low".into(), "xhigh".into()]),
+        ],
+        claude: false,
+        resolves: vec![],
+        default_efforts: vec![],
+    };
+    p.set_provider("t", Provider::Chatgpt, "deep".into(), catalog)
+        .unwrap();
+    p.set_model("t", "deep".into(), "xhigh".into()).unwrap();
+    // The carried effort doesn't exist on Fast: it falls back to Default.
+    p.set_model("t", "fast".into(), "xhigh".into()).unwrap();
+    let settings = &p.session("t").unwrap().settings;
+    assert_eq!(
+        (settings.model.as_str(), settings.effort.as_str()),
+        ("fast", "")
+    );
+    // Asking Fast for an effort it lacks fails.
+    assert!(p.set_model("t", "fast".into(), "xhigh".into()).is_err());
+    p.set_model("t", "fast".into(), "low".into()).unwrap();
+}
+
+#[test]
+fn a_saved_claude_default_is_not_a_picker_row_while_discovery_is_pending() {
+    let mut p = panel();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    let record = &mut store.values.get_mut("agentThreads.p").unwrap()["threads"][0];
+    record["provider"] = json!("claude");
+    record["model"] = json!("default");
+    let mut p = Panel::load(&mut store, "p", "blank", 2).unwrap();
+    let mut catalog = Catalog {
+        providers: vec![
+            ("claude".into(), "Claude".into()),
+            ("compatible".into(), "Connected model".into()),
+        ],
+        claude: true,
+        ..Default::default()
+    };
+    p.set_catalog("t", catalog.clone()).unwrap();
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    let pending = window.snapshot(&p, 0..0, 3).unwrap();
+    assert_eq!(pending["settings"]["model"], "");
+    assert_eq!(pending["catalog"]["models"], json!([]));
+
+    catalog.models = vec![
+        ("opus".into(), "Opus 5.5".into()),
+        ("sonnet".into(), "Sonnet 5.5".into()),
+        ("haiku".into(), "Haiku 5.5".into()),
+    ];
+    catalog.resolves = vec![("".into(), "opus".into())];
+    p.set_catalog("t", catalog).unwrap();
+    let ready = window.snapshot(&p, 0..0, 4).unwrap();
+    assert_eq!(ready["settings"]["model"], "opus");
+    assert_eq!(
+        ready["catalog"]["models"],
+        json!([
+            ["opus", "Opus 5.5"],
+            ["sonnet", "Sonnet 5.5"],
+            ["haiku", "Haiku 5.5"]
+        ])
+    );
+    assert_eq!(p.session("t").unwrap().settings.model, "default");
+}
+
+#[test]
+fn a_thread_saved_with_no_model_or_default_reads_as_the_providers_default_model() {
+    // The pickers list only real models; a saved "" / null / "default" (and
+    // Claude's resolved id) resolve to one, while the saved value is kept so
+    // the provider still picks its own default.
+    let catalog = Catalog {
+        providers: vec![("claude".into(), "Claude".into())],
+        models: vec![
+            ("opus".into(), "Opus".into()),
+            ("sonnet".into(), "Sonnet".into()),
+        ],
+        efforts: vec!["".into(), "low".into(), "max".into()],
+        model_efforts: vec![
+            ("opus".into(), vec!["low".into(), "max".into()]),
+            ("sonnet".into(), vec!["low".into()]),
+        ],
+        claude: true,
+        resolves: vec![
+            ("".into(), "opus".into()),
+            ("claude-opus-5-5".into(), "opus".into()),
+        ],
+        default_efforts: vec![],
+    };
+    assert!(
+        !catalog
+            .models
+            .iter()
+            .any(|(id, label)| id.is_empty() || label.contains("Default"))
+    );
+    let mut p = panel();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    for (saved, shown) in [
+        (Value::Null, "opus"),
+        (json!(""), "opus"),
+        (json!("default"), "opus"),
+        (json!("claude-opus-5-5"), "opus"),
+        (json!("sonnet"), "sonnet"),
+    ] {
+        let mut store = Memory {
+            values: store.values.clone(),
+            ..Default::default()
+        };
+        let record = &mut store.values.get_mut("agentThreads.p").unwrap()["threads"][0];
+        record["provider"] = json!("claude");
+        record["model"] = saved.clone();
+        let mut restored = Panel::load(&mut store, "p", "blank", 2).unwrap();
+        restored.set_catalog("t", catalog.clone()).unwrap();
+        let settings = &restored.session("t").unwrap().settings;
+        assert_eq!(catalog.resolve(&settings.model), shown, "{saved}");
+        // Its efforts are the resolved model's own.
+        assert_eq!(
+            catalog.efforts_for(&settings.model).len(),
+            if shown == "opus" { 3 } else { 2 },
+            "{saved}"
+        );
+        // Effort changes on the resolved model are accepted.
+        restored.set_model("t", shown.into(), "low".into()).unwrap();
+    }
+    // A provider with no listing yet keeps the saved value: nothing to name.
+    assert_eq!(Catalog::default().resolve(""), "");
+    // No default flagged: the first listed model is the one that runs.
+    let unflagged = Catalog {
+        resolves: vec![],
+        default_efforts: vec![],
+        ..catalog.clone()
+    };
+    assert_eq!(unflagged.resolve(""), "opus");
+    assert_eq!(unflagged.resolve("unknown-model"), "unknown-model");
+}
+
+fn effort_catalog() -> Catalog {
+    Catalog {
+        providers: vec![("chatgpt".into(), "ChatGPT".into())],
+        models: vec![
+            ("sol".into(), "Sol".into()),
+            ("astra".into(), "Astra".into()),
+            ("plain".into(), "Plain".into()),
+        ],
+        efforts: vec!["".into(), "low".into(), "medium".into(), "xhigh".into()],
+        model_efforts: vec![
+            (
+                "sol".into(),
+                vec!["low".into(), "medium".into(), "xhigh".into()],
+            ),
+            ("astra".into(), vec!["low".into(), "xhigh".into()]),
+            // A model with no effort levels: no effort picker.
+            ("plain".into(), vec![]),
+        ],
+        claude: false,
+        resolves: vec![("".into(), "sol".into())],
+        // The provider names Sol's default; Astra's is left to the usual one.
+        default_efforts: vec![("sol".into(), "xhigh".into())],
+    }
+}
+#[test]
+fn the_effort_picker_offers_only_the_models_efforts_and_names_its_default() {
+    let catalog = effort_catalog();
+    // Only the model's own efforts; never an empty "Default".
+    assert_eq!(catalog.effort_choices(""), ["low", "medium", "xhigh"]);
+    assert_eq!(catalog.effort_choices("astra"), ["low", "xhigh"]);
+    assert!(catalog.effort_choices("plain").is_empty());
+    // No saved effort (null reads as "", or an older "default") is the
+    // model's default by name: the provider's, else Medium, else its first.
+    for saved in ["", "default"] {
+        assert_eq!(catalog.resolve_effort("", saved), "xhigh");
+        assert_eq!(catalog.resolve_effort("sol", saved), "xhigh");
+        assert_eq!(catalog.resolve_effort("astra", saved), "low");
+    }
+    let usual = Catalog {
+        default_efforts: vec![],
+        ..catalog.clone()
+    };
+    assert_eq!(usual.resolve_effort("sol", ""), "medium");
+    // A saved effort the model takes stays; one it lacks reads as its default.
+    assert_eq!(catalog.resolve_effort("astra", "xhigh"), "xhigh");
+    assert_eq!(catalog.resolve_effort("astra", "medium"), "low");
+    // No levels: nothing to name or send.
+    assert_eq!(catalog.resolve_effort("plain", ""), "");
+}
+#[test]
+fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
+    let mut p = panel();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    for saved in [Value::Null, json!(""), json!("default")] {
+        let mut store = Memory {
+            values: store.values.clone(),
+            ..Default::default()
+        };
+        let record = &mut store.values.get_mut("agentThreads.p").unwrap()["threads"][0];
+        record["reasoningEffort"] = saved.clone();
+        let mut restored = Panel::load(&mut store, "p", "blank", 2).unwrap();
+        restored.set_catalog("t", effort_catalog()).unwrap();
+        let catalog = effort_catalog();
+        let shown = |p: &Panel| {
+            let s = &p.session("t").unwrap().settings;
+            (
+                catalog.resolve(&s.model).to_owned(),
+                catalog.resolve_effort(&s.model, &s.effort),
+            )
+        };
+        assert_eq!(shown(&restored), ("sol".into(), "xhigh".into()), "{saved}");
+        // The picker sends the model with the effort it shows: Astra takes
+        // Extra High, so it is kept.
+        restored
+            .set_model("t", "astra".into(), "xhigh".into())
+            .unwrap();
+        assert_eq!(shown(&restored), ("astra".into(), "xhigh".into()));
+        // Low is picked; Plain has no levels, so nothing carries.
+        restored
+            .set_model("t", "astra".into(), "low".into())
+            .unwrap();
+        restored
+            .set_model("t", "plain".into(), "low".into())
+            .unwrap();
+        assert_eq!(shown(&restored), ("plain".into(), "".into()));
+        // Back to Sol: no effort saved, so Sol's own default.
+        restored.set_model("t", "sol".into(), "".into()).unwrap();
+        assert_eq!(shown(&restored), ("sol".into(), "xhigh".into()));
+        // Medium is Sol's; Astra lacks it and falls back to its default.
+        restored
+            .set_model("t", "sol".into(), "medium".into())
+            .unwrap();
+        restored
+            .set_model("t", "astra".into(), "medium".into())
+            .unwrap();
+        assert_eq!(shown(&restored), ("astra".into(), "low".into()));
+        // Asking the same model for an effort it lacks still fails.
+        assert!(
+            restored
+                .set_model("t", "astra".into(), "medium".into())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn citations_survive_save_reopen_and_send_structured_context() {
+    for provider in ["chatgpt", "claude", "compatible"] {
+        let mut store = Memory::default();
+        store.values.insert("agentThreads.p".into(), json!({"version":1,"activeId":"t","threads":[{"id":"t","provider":provider,"conversation":[],"composerDraft":"","attachments":[]}]}));
+        let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let quotes = vec![
+            json!({"messageId":"history:m","text":"😀 exact", "start":2,"end":10,"comment":"Explain this"}),
+        ];
+        p.draft_mut("t")
+            .unwrap()
+            .set_citations(quotes.clone())
+            .unwrap();
+        p.draft_mut("t").unwrap().set_text("My request", 1).unwrap();
+        p.save(&mut store, 2).unwrap();
+        let mut p = Panel::load(&mut store, "p", "t", 3).unwrap();
+        assert_eq!(p.session("t").unwrap().draft.citations(), quotes);
+        let effect = p.submit("t", "run", "request", 4).unwrap();
+        let EffectKind::Send { text, settings, .. } = effect.kind else {
+            panic!("send");
+        };
+        assert_eq!(settings.provider.name(), provider);
+        assert!(text.contains("<assistant_citations>"));
+        assert!(text.contains("Explain this"));
+        assert!(text.ends_with("My request"));
+        let message = p
+            .session("t")
+            .unwrap()
+            .conversation
+            .values()
+            .last()
+            .unwrap();
+        assert_eq!(message["text"], "My request");
+        assert_eq!(message["citations"], json!(quotes));
+        assert!(p.session("t").unwrap().draft.citations().is_empty());
+    }
+}
+#[test]
+fn invalid_citation_does_not_replace_existing_draft_context() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    let valid = vec![json!({"messageId":"m","text":"😀","start":0,"end":2,"comment":""})];
+    draft.set_citations(valid.clone()).unwrap();
+    assert!(draft.sendable());
+    assert!(
+        draft
+            .set_citations(vec![
+                json!({"messageId":"m","text":"😀","start":0,"end":1,"comment":""})
+            ])
+            .is_err()
+    );
+    assert_eq!(draft.citations(), valid);
+}
+
+#[test]
+fn undoing_composer_typing_keeps_reference_chips() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    draft.insert_text("before", 1, false);
+    let quote = vec![json!({"messageId":"m","text":"quote","start":0,"end":5,"comment":"Explain"})];
+    draft.set_citations(quote.clone()).unwrap();
+    draft.insert_text(" after", 100, false);
+    assert!(draft.undo(false));
+    assert_eq!(draft.request_text(), "before");
+    assert_eq!(draft.citations(), quote);
+}
+
+#[test]
+fn quotes_from_live_replies_keep_a_resolvable_source_after_finishing_and_reopening() {
+    let mut store = Memory::default();
+    let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "Reference".into(),
+            error: false,
+            cancelled: false,
+        },
+        30,
+    )
+    .unwrap();
+    p.save(&mut store, 31).unwrap();
+    let p = Panel::load(&mut store, "p", "t", 32).unwrap();
+    let source = p.session("t").unwrap().draft.citations()[0]["messageId"]
+        .as_str()
+        .unwrap();
+    assert!(source.starts_with("history:"));
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    let snapshot = window
+        .snapshot(&p, 0..window.count(&p).unwrap(), 33)
+        .unwrap();
+    assert!(
+        snapshot["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == source)
+    );
+}
+#[test]
+fn steering_with_a_live_quote_sends_its_archived_source_id() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    let effect = p.submit("t", "run1", "request2", 30).unwrap();
+    let EffectKind::Send { text, steer, .. } = effect.kind else {
+        panic!("send");
+    };
+    assert!(steer);
+    assert!(text.contains("history:message-1/step-0:"));
+    assert!(!text.contains(&format!("live:{source}")));
+}
+
+#[test]
+fn an_archived_rollback_notice_stays_out_of_the_conversation() {
+    let mut store = Memory::default();
+    let mut thread = pm_agents::persistence::new_thread("t", 0);
+    thread["conversation"] = json!([
+        {"role":"user","text":"Change the rectangle"},
+        {"role":"assistant","text":"The rectangle is orange."},
+        {"role":"assistant","text":"This run's changes were rolled back.","rolledBack":true}
+    ]);
+    store.values.insert(
+        "agentThreads.p".into(),
+        json!({"version":1,"activeId":"t","threads":[thread]}),
+    );
+    let p = Panel::load(&mut store, "p", "t", 1).unwrap();
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    assert_eq!(window.count(&p).unwrap(), 2);
+    let snapshot = window.snapshot(&p, 0..2, 2).unwrap();
+    assert_eq!(snapshot["rows"]["items"][1]["value"]["text"], "The rectangle is orange.");
+}
+
+#[test]
+fn toolbar_completion_notices_clear_on_view_and_cancel_does_not_badge() {
+    for (error, cancelled, expected) in [
+        (false, false, (true, false)),
+        (true, false, (false, true)),
+        (false, true, (false, false)),
+    ] {
+        let mut p = panel();
+        start(&mut p);
+        p.receive(
+            "t",
+            "run1",
+            1,
+            Update::Complete {
+                text: "Finished".into(),
+                error,
+                cancelled,
+            },
+            20,
+        )
+        .unwrap();
+        assert_eq!(p.toolbar_notice(), expected);
+        p.mark_toolbar_seen();
+        assert_eq!(p.toolbar_notice(), (false, false));
+    }
+}
+
+#[test]
+fn hidden_background_failures_win_over_unread_success_without_switching_threads() {
+    let mut p = panel();
+    start(&mut p);
+    p.new_thread("other", 11).unwrap();
+    p.draft_mut("other")
+        .unwrap()
+        .insert_text("another task", 12, false);
+    p.submit("other", "run2", "request2", 13).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Complete {
+            text: "Done".into(),
+            error: false,
+            cancelled: false,
+        },
+        20,
+    )
+    .unwrap();
+    assert_eq!(p.toolbar_notice(), (true, false));
+    p.receive(
+        "other",
+        "run2",
+        1,
+        Update::Complete {
+            text: "Failed".into(),
+            error: true,
+            cancelled: false,
+        },
+        21,
+    )
+    .unwrap();
+    assert_eq!(p.active_id(), "other");
+    assert_eq!(p.toolbar_notice(), (false, true));
+    p.mark_toolbar_seen();
+    assert_eq!(p.toolbar_notice(), (false, false));
+}
+
+#[test]
+fn sent_attachment_tiles_still_open_the_archived_payload() {
+    let mut p = panel();
+    p.add_attachments("t", vec![Attachment::from_record(json!({"id":"sent-image","name":"Frame.png","type":"image/png","dataUrl":"data:image/png;base64,AA=="})).unwrap()], 1).unwrap();
+    p.submit("t", "run1", "request1", 2).unwrap();
+    assert_eq!(
+        p.inspect("t").unwrap()["attachments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(
+        matches!(p.open_attachment("t", "sent-image").unwrap().kind, EffectKind::OpenAttachment { attachment, .. } if attachment["dataUrl"] == "data:image/png;base64,AA==")
+    );
+    assert!(matches!(
+        p.open_attachment("t", "not-in-this-thread"),
+        Err(Error::UnknownId(_))
+    ));
+}
+
+#[test]
+fn subthreads_preserve_parent_drafts_target_live_children_and_start_new_turns_when_idle() {
+    let mut p = panel();
+    p.draft_mut("t")
+        .unwrap()
+        .insert_text("parent draft", 1, false);
+    let settings = p.session("t").unwrap().settings.clone();
+    p.start_subthread(
+        "child",
+        "t",
+        "Layout",
+        "Make a layout",
+        settings,
+        "task-run",
+        2,
+    )
+    .unwrap();
+    assert_eq!(p.active_id(), "t");
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "parent draft");
+    let record = p.raw_archive()["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "child")
+        .unwrap();
+    assert_eq!(record["parentId"], "t");
+    assert_eq!(record["kind"], "subagent");
+    assert_eq!(p.thread_subtree("t").unwrap(), ["t", "child"]);
+    p.switch("child").unwrap();
+    p.draft_mut("child")
+        .unwrap()
+        .insert_text("Move it left", 3, false);
+    p.add_attachments(
+        "child",
+        vec![
+            Attachment::from_record(
+                json!({"id":"direction-file","name":"Notes.txt","content":"A note"}),
+            )
+            .unwrap(),
+        ],
+        3,
+    )
+    .unwrap();
+    let effect = p.submit("child", "task-run", "direction", 4).unwrap();
+    assert_eq!(effect.target.thread, "child");
+    assert_eq!(effect.target.run.as_deref(), Some("task-run"));
+    assert!(
+        matches!(effect.kind, EffectKind::Send {steer: true, attachments, ..} if attachments.len() == 1)
+    );
+    assert!(
+        p.observe_subthread("child", "another-run", Update::Progress("stale".into()), 5)
+            .is_err()
+    );
+    p.observe_subthread(
+        "child",
+        "task-run",
+        Update::Complete {
+            text: "Done".into(),
+            error: false,
+            cancelled: false,
+        },
+        6,
+    )
+    .unwrap();
+    assert!(p.session("child").unwrap().run.is_none());
+    p.draft_mut("child")
+        .unwrap()
+        .insert_text("Another round", 7, false);
+    let effect = p.submit("child", "fresh-run", "fresh-request", 8).unwrap();
+    assert_eq!(effect.target.run.as_deref(), Some("fresh-run"));
+    assert!(matches!(effect.kind, EffectKind::Send { steer: false, .. }));
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "parent draft");
+    let mut store = Memory::default();
+    p.save(&mut store, 9).unwrap();
+    let restored = Panel::load(&mut store, "p", "unused", 10).unwrap();
+    assert_eq!(restored.raw_archive()["threads"][0]["parentId"], "t");
+}
+
+fn settle_turn(p: &mut Panel, result: pm_agents::RunResult) {
+    p.provider_event(
+        &mut Memory::default(),
+        "t",
+        &pm_agents::history::Receipt {
+            source: "run1".into(),
+            sequence: 2,
+            event: pm_agents::Event::Completed {
+                run: "run1".into(),
+                result,
+            },
+        },
+        12,
+    )
+    .unwrap();
+}
+
+#[test]
+fn stopped_turn_before_text_has_no_assistant_reply() {
+    let mut p = panel();
+    start(&mut p);
+    settle_turn(&mut p, pm_agents::RunResult::failure("The run was stopped.", true));
+    assert_eq!(p.session("t").unwrap().conversation.len(), 1);
+}
+
+#[test]
+fn stopped_turn_after_text_keeps_only_the_streamed_reply() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"I found the opening shot."}));
+    settle_turn(&mut p, pm_agents::RunResult::failure("The run was stopped.", true));
+    let conversation = &p.session("t").unwrap().conversation;
+    assert_eq!(conversation.len(), 2);
+    let reply = &conversation.last().unwrap().value;
+    assert_eq!(reply["role"], "trace");
+    assert_eq!(reply["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["steps"][0]["text"], "I found the opening shot.");
+}
+
+#[test]
+fn empty_finished_turn_has_no_assistant_reply() {
+    let mut p = panel();
+    start(&mut p);
+    settle_turn(&mut p, pm_agents::RunResult::success(String::new(), Access::Editor));
+    assert_eq!(p.session("t").unwrap().conversation.len(), 1);
+}
+
+#[test]
+fn failed_turn_keeps_the_actionable_error() {
+    let mut p = panel();
+    start(&mut p);
+    settle_turn(&mut p, pm_agents::RunResult::failure("Sign in to continue.", false));
+    let conversation = &p.session("t").unwrap().conversation;
+    assert_eq!(conversation.len(), 2);
+    let error = &conversation.last().unwrap().value;
+    assert_eq!(error["text"], "Sign in to continue.");
+    assert_eq!(error["error"], true);
+}
+
+#[test]
+fn unexpected_runtime_exit_keeps_an_error() {
+    let mut p = panel();
+    start(&mut p);
+    p.provider_event(
+        &mut Memory::default(),
+        "t",
+        &pm_agents::history::Receipt {
+            source: "run1".into(),
+            sequence: 1,
+            event: pm_agents::Event::Stopped("Agent runtime stopped.".into()),
+        },
+        11,
+    )
+    .unwrap();
+    let conversation = &p.session("t").unwrap().conversation;
+    assert_eq!(conversation.len(), 2);
+    let last = conversation.last().unwrap();
+    assert_eq!(last.value["text"], "Agent runtime exited without a result.");
+    assert_eq!(last.value["error"], true);
+    assert_eq!(p.toolbar_notice(), (false, true));
+}
+
+#[test]
+fn stopped_subthread_keeps_its_prompt_without_a_filler_reply() {
+    let mut p = panel();
+    let settings = p.session("t").unwrap().settings.clone();
+    p.start_subthread("child", "t", "Check the cut", "Check the cut", settings, "task-run", 10)
+        .unwrap();
+    p.observe_subthread(
+        "child",
+        "task-run",
+        Update::Complete {
+            text: "The task was stopped.".into(),
+            error: true,
+            cancelled: true,
+        },
+        11,
+    )
+    .unwrap();
+    let child = p.session("child").unwrap();
+    assert!(child.run.is_none());
+    assert_eq!(child.conversation.len(), 1);
+}

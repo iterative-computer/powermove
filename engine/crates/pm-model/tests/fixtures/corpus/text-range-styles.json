@@ -1,0 +1,264 @@
+{
+ "id": "Ptext-range-styles",
+ "name": "Text range styles",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "linear",
+  "angle": 35,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   },
+   {
+    "id": "stop-2",
+    "color": "#1B2A4A",
+    "position": 55
+   },
+   {
+    "id": "stop-3",
+    "color": "#3A2A5A",
+    "position": 100
+   }
+  ]
+ },
+ "compId": "Ptext-range-styles-root",
+ "compName": "Text range styles",
+ "layers": [
+  {
+   "id": "L001",
+   "type": "text",
+   "name": "Styled ranges",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#E8E2CF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 320,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 180,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "text": "Range styles mix weights and colors",
+    "boxWidth": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "boxHeight": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "font": "SF Pro Display",
+    "weight": 400,
+    "size": 40,
+    "tracking": -2,
+    "leading": 1.1,
+    "color": "#F2F2F2",
+    "align": "center",
+    "italic": false,
+    "styles": [
+     {
+      "id": "ts002",
+      "start": 0,
+      "end": 5,
+      "p": {
+       "color": {
+        "v": "#FF6B1A",
+        "kf": [],
+        "expr": null
+       },
+       "weight": {
+        "v": 800,
+        "kf": [],
+        "expr": null
+       },
+       "size": {
+        "v": 52,
+        "kf": [],
+        "expr": null
+       }
+      }
+     },
+     {
+      "id": "ts003",
+      "start": 13,
+      "end": 25,
+      "p": {
+       "color": {
+        "v": "#3FCF8E",
+        "kf": [
+         {
+          "t": 0,
+          "v": "#3FCF8E",
+          "i": "k004",
+          "inInterp": "linear",
+          "outInterp": "linear",
+          "inEase": {
+           "speed": 0,
+           "influence": 33.333333333333336
+          },
+          "outEase": {
+           "speed": 0,
+           "influence": 33.333333333333336
+          },
+          "autoBezier": false,
+          "continuous": false
+         },
+         {
+          "t": 2,
+          "v": "#F2C14E",
+          "i": "k005",
+          "inInterp": "linear",
+          "outInterp": "linear",
+          "inEase": {
+           "speed": 0,
+           "influence": 33.333333333333336
+          },
+          "outEase": {
+           "speed": 0,
+           "influence": 33.333333333333336
+          },
+          "autoBezier": false,
+          "continuous": false
+         }
+        ],
+        "expr": null
+       },
+       "weight": {
+        "v": 700,
+        "kf": [],
+        "expr": null
+       },
+       "size": {
+        "v": 40,
+        "kf": [],
+        "expr": null
+       }
+      }
+     }
+    ]
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

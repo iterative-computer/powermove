@@ -1,0 +1,21 @@
+{
+ "name": "palette-tunnel",
+ "kind": "shader",
+ "covers": [
+  "helper-palette",
+  "helper-rot",
+  "iTime"
+ ],
+ "prompt": "Infinite tunnel effect with a cosine color palette, rotating slowly. Speed slider.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "f5a261948f6a74593c3b8a3a9ddd939ec0b000458893b09be7dac7926e23f643",
+  "seconds": 20.239,
+  "generated": "2026-10-17T07:31:15.063Z"
+ },
+ "code": "// Infinite tunnel — cosine palette, slow rotation\nuniform float uSpeed;    // @param 0.6 0 3\nuniform float uRotate;   // @param 0.08 -1 1\nuniform float uDensity;  // @param 6.0 1 20\nuniform float uSegments; // @param 8.0 2 24\nuniform float uGlow;     // @param 1.0 0 3\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  p = rot(iTime * uRotate) * p;\n\n  float r = max(length(p), 1e-3);\n  float a = atan(p.y, p.x) / 6.28318;           // -0.5..0.5\n  float z = 0.3 / r + iTime * uSpeed;           // depth along the tunnel\n\n  float seg = floor(uSegments + 0.5);           // integer keeps the seam invisible\n  float ringWave = cos(6.28318 * z * uDensity * 0.25);\n  float segWave  = cos(6.28318 * a * seg);\n  float tiles = 0.55 + 0.45 * ringWave * segWave;\n\n  // thin bright seams between tiles\n  float ringLine = smoothstep(0.92, 1.0, abs(ringWave));\n  float segLine  = smoothstep(0.96, 1.0, abs(segWave));\n  float lines = max(ringLine, segLine);\n\n  vec3 col = palette(z * 0.12 + 0.08 * cos(6.28318 * a * 3.0),\n                     vec3(0.5), vec3(0.5), vec3(1.0), vec3(0.0, 0.33, 0.67));\n  col *= tiles;\n  col += lines * 0.35 * col;\n\n  // depth fog toward the vanishing point, plus a soft core glow\n  float fog = smoothstep(0.0, 0.35, r);\n  col *= fog;\n  col += uGlow * 0.025 / r * palette(z * 0.12 + 0.5,\n                     vec3(0.5), vec3(0.5), vec3(1.0), vec3(0.0, 0.33, 0.67));\n\n  col = 1.0 - exp(-col * 1.4);                  // gentle tone map\n  float vig = 1.0 - 0.35 * dot(p, p);\n  fragColor = vec4(col * vig, 1.0);\n}",
+ "definition": null,
+ "summary": "I wrote a shader layer for an endless tunnel coloured with a cosine palette. It rotates slowly, and Speed sets how fast you move forward (default 0.6, range 0–3). Other sliders: Rotate (0.08), Density, Segments and Glow. It hasn't been compiled or rendered because no Powermove tools were attached."
+}

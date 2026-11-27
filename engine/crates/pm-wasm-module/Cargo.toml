@@ -1,0 +1,22 @@
+[package]
+name = "pm-wasm-module"
+description = "The pm-wasm WebAssembly module (pm_wasm.wasm): a cdylib over pm-wasm (sections 6 and 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The module the renderer and the headless document host load, built for
+# wasm32-unknown-unknown by engine/crates/pm-wasm/scripts/build.mjs. It is its
+# own crate because Cargo never passes `-C lto` to a crate whose types are
+# ["cdylib", "rlib"]: this cdylib-only crate gets the release profile's thin
+# LTO, and pm-wasm stays a plain rlib for its native tests, pm-cli and the
+# native side of the bit-identity check (docs/engine/release-build.md).
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+pm-wasm = { path = "../pm-wasm" }

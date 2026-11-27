@@ -18,3 +18,10 @@ deleting the current file does not remove it from history.
 Do not create a release tag, publish an app update, or dispatch the release
 workflow without explicit user authorization. The secret-scan workflow is
 security validation only and does not build or publish software.
+
+## UI Geometry: Concentric Corner Radii
+
+Keep corners concentric on closely nested surfaces using
+`Outer R = Inner R + Padding`. Use `Radii::nested` or the corresponding
+`pm-design` tokens so the inner radius follows
+`Inner R = max(Outer R - Padding, min_radius)`.

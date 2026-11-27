@@ -1,0 +1,124 @@
+{
+  "default": {
+    "preset": "classic",
+    "font": "SF Pro Display",
+    "weight": 600,
+    "italic": false,
+    "size": 54,
+    "tracking": 0,
+    "leading": 1.2,
+    "fill": "#FFFFFF",
+    "stroke": 3,
+    "strokeColor": "#000000",
+    "box": false,
+    "boxColor": "#000000",
+    "boxOpacity": 72,
+    "boxPadding": 14,
+    "boxRadius": 8,
+    "placement": "bottom",
+    "align": "center",
+    "offsetX": 0,
+    "offsetY": 0,
+    "safeMargin": 8,
+    "maxWidth": 80,
+    "maxLines": 2,
+    "textCase": "original",
+    "highlight": false,
+    "highlightColor": "#FFD43B",
+    "highlightScale": 100,
+    "wordAnimation": "none"
+  },
+  "presets": [
+    {
+      "id": "classic",
+      "label": "Classic",
+      "description": "White subtitles with a fine outline, two lines at the bottom.",
+      "style": {}
+    },
+    {
+      "id": "boxed",
+      "label": "Boxed",
+      "description": "White text on a soft dark plate, as on streaming services.",
+      "style": {
+        "weight": 500,
+        "size": 48,
+        "stroke": 0,
+        "box": true,
+        "boxColor": "#000000",
+        "boxOpacity": 72,
+        "boxPadding": 14,
+        "boxRadius": 10
+      }
+    },
+    {
+      "id": "whisper",
+      "label": "Whisper",
+      "description": "A small, light line in the lower third. Unobtrusive for landscape footage.",
+      "style": {
+        "weight": 400,
+        "size": 38,
+        "tracking": 0.5,
+        "leading": 1.3,
+        "stroke": 2,
+        "strokeColor": "#00000099",
+        "maxWidth": 70,
+        "maxLines": 1,
+        "safeMargin": 7
+      }
+    },
+    {
+      "id": "spotlight",
+      "label": "Spotlight",
+      "description": "Bold centred line; the spoken word lights up.",
+      "style": {
+        "weight": 800,
+        "size": 64,
+        "leading": 1.1,
+        "stroke": 4,
+        "placement": "middle",
+        "offsetY": 220,
+        "maxWidth": 70,
+        "highlight": true,
+        "highlightColor": "#24D5FF",
+        "highlightScale": 108
+      }
+    },
+    {
+      "id": "pop",
+      "label": "Pop",
+      "description": "Heavy uppercase words that pop in as they are spoken. Made for vertical video.",
+      "style": {
+        "weight": 900,
+        "size": 82,
+        "leading": 1.05,
+        "stroke": 7,
+        "placement": "middle",
+        "offsetY": 160,
+        "maxWidth": 76,
+        "maxLines": 2,
+        "textCase": "upper",
+        "highlight": true,
+        "highlightColor": "#FFD43B",
+        "highlightScale": 116,
+        "wordAnimation": "pop"
+      }
+    },
+    {
+      "id": "paper",
+      "label": "Paper",
+      "description": "Dark type on a white card. Calm and editorial.",
+      "style": {
+        "weight": 500,
+        "size": 46,
+        "leading": 1.25,
+        "fill": "#151515",
+        "stroke": 0,
+        "box": true,
+        "boxColor": "#FFFFFF",
+        "boxOpacity": 94,
+        "boxPadding": 16,
+        "boxRadius": 6
+      }
+    }
+  ]
+}

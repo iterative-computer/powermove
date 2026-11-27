@@ -1,0 +1,463 @@
+//! Layer groups.
+//!
+//! Ports `PM.groupLayers`, `PM.ungroupLayers`, `PM.moveToGroup` and
+//! `PM.normalizeGroupStack` of `legacy/core/layer-groups.ts`, with the
+//! geometry from the engine's `pm-edit` kernels (`groups::group_placement`,
+//! `groups::move_to_group`, `groups::ungroup`), and the group lock policy of
+//! `policyCommand`.
+
+use std::collections::HashSet;
+
+use pm_eval::bounds::NoHost;
+use pm_model::{Map, Value};
+
+use super::{Cx, layers, values};
+use crate::error::CommandError;
+
+/// Group commands. A locked target refuses the whole command.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum GroupCommand {
+    /// `group_layers` (Cmd+G): a new group layer `group_id` named `name`
+    /// (default "Group") above the topmost selected layer, its pivot at the
+    /// members' bounds center; the layers keep their world poses. Layers in
+    /// different groups refuse (`Select layers in the same group`). Label
+    /// "Group Layers".
+    Group {
+        layer_ids: Vec<String>,
+        group_id: String,
+        name: Option<String>,
+        time: f64,
+    },
+    /// `ungroup_layers` (Cmd+Shift+G): dissolves the groups, moving members
+    /// to the group's own parent group with world pose, aim, opacity and
+    /// visibility preserved (animated groups are baked to keys). Label
+    /// "Ungroup".
+    Ungroup { group_ids: Vec<String>, time: f64 },
+    /// `move_to_group`: moves layers into `group` (or out of every group
+    /// with `None`) keeping their world poses. Label "Move to Group".
+    MoveToGroup {
+        layer_ids: Vec<String>,
+        group: Option<String>,
+        time: f64,
+    },
+}
+
+impl GroupCommand {
+    pub fn label(&self) -> String {
+        match self {
+            GroupCommand::Group { .. } => "Group Layers",
+            GroupCommand::Ungroup { .. } => "Ungroup",
+            GroupCommand::MoveToGroup { .. } => "Move to Group",
+        }
+        .to_owned()
+    }
+
+    pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
+        match self {
+            GroupCommand::Group {
+                layer_ids,
+                group_id,
+                name,
+                time,
+            } => group(cx, layer_ids, group_id, name.as_deref(), *time),
+            GroupCommand::Ungroup { group_ids, time } => ungroup(cx, group_ids, *time),
+            GroupCommand::MoveToGroup {
+                layer_ids,
+                group,
+                time,
+            } => move_to_group(cx, layer_ids, group.as_deref(), *time),
+        }
+    }
+}
+
+/// `policyCommand`: a locked target (or one in a locked group) refuses.
+fn check_targets(cx: &Cx<'_>, ids: &[String]) -> Result<Option<String>, CommandError> {
+    let mut comp = None;
+    for id in ids {
+        if let Ok(loc) = cx.find(id) {
+            cx.check_lock(&loc, id)?;
+            comp.get_or_insert(loc.comp_id);
+        }
+    }
+    Ok(comp.flatten().or_else(|| cx.comp_id(None)))
+}
+
+fn index_of(layers: &[Value], id: &str) -> Option<usize> {
+    layers
+        .iter()
+        .position(|l| values::text(l, "id") == Some(id))
+}
+
+/// `PM.groupLayers(ids, name)`.
+pub(super) fn group(
+    cx: &mut Cx<'_>,
+    ids: &[String],
+    group_id: &str,
+    name: Option<&str>,
+    time: f64,
+) -> Result<(), CommandError> {
+    let comp = check_targets(cx, ids)?;
+    // Grouping reads ids, types and groups: the layers' heads.
+    let layers = cx.layer_stack(comp.as_deref());
+    let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let selected: Vec<&Value> = layers
+        .iter()
+        .filter(|l| values::text(l, "id").is_some_and(|i| wanted.contains(i)))
+        .collect();
+    if selected.is_empty() {
+        return Err(CommandError::Invalid("Select layers to group".into()));
+    }
+    if wanted.len() != selected.len() {
+        return Err(CommandError::Invalid("Layer not found".into()));
+    }
+    let roots: Vec<String> = selected
+        .iter()
+        .filter(|l| {
+            !layers::ancestors(&layers, l)
+                .iter()
+                .any(|g| values::text(g, "id").is_some_and(|i| wanted.contains(i)))
+        })
+        .filter_map(|l| values::text(l, "id").map(str::to_owned))
+        .collect();
+    let group_of = |id: &str| {
+        layers
+            .iter()
+            .find(|l| values::text(l, "id") == Some(id))
+            .and_then(|l| values::text(l, "group"))
+            .filter(|g| !g.is_empty())
+            .map(str::to_owned)
+    };
+    let parent = group_of(&roots[0]);
+    if roots.iter().any(|r| group_of(r) != parent) {
+        return Err(CommandError::Invalid(
+            "Select layers in the same group".into(),
+        ));
+    }
+    if cx.find(group_id).is_ok() {
+        return Err(CommandError::Invalid(format!(
+            "Layer id already exists: {group_id}"
+        )));
+    }
+    let comp_node = cx.comp_node(comp.as_deref())?;
+    let dim = |k: &str, d: f64| {
+        comp_node
+            .get(k)
+            .and_then(crate::model::number_of)
+            .unwrap_or(d)
+    };
+    let dims = (dim("w", 1920.0), dim("h", 1080.0), dim("dur", 5.0));
+    let label = name
+        .map(values::js_trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("Group");
+    let mut g = layers::make_layer(
+        "group",
+        group_id,
+        Some(label),
+        dims,
+        &Map::new(),
+        &Map::new(),
+    )?;
+    // If every selected non-audio layer is already 3D, start the new group in 3D
+    // so its pivot centers in X, Y, and Z over its 3D children.
+    let mut has_transformable = false;
+    let mut all_three_d = true;
+    for r in &roots {
+        if let Ok(loc) = cx.find(r)
+            && let Ok(node) = cx.layer_node(&loc)
+            && node.get("type").and_then(crate::model::str_of) != Some("audio")
+        {
+            has_transformable = true;
+            let is_3d = matches!(
+                node.get("threeD").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(true))
+            );
+            if !is_3d {
+                all_three_d = false;
+                break;
+            }
+        }
+    }
+    let group_three_d = has_transformable && all_three_d;
+    let root_set: HashSet<&str> = roots.iter().map(String::as_str).collect();
+    let member_ids = layers::expand_groups(&layers, &root_set);
+    let mut min_from = f64::INFINITY;
+    let mut max_end = f64::NEG_INFINITY;
+    for id in &member_ids {
+        if let Ok(loc) = cx.find(id)
+            && let Ok(node) = cx.layer_node(&loc)
+            && node.get("type").and_then(crate::model::str_of) != Some("group")
+            && let (Some(from), Some(dur)) = (
+                node.get("from").and_then(crate::model::number_of),
+                node.get("dur").and_then(crate::model::number_of),
+            )
+            && from.is_finite()
+            && dur.is_finite()
+            && dur >= 0.0
+        {
+            min_from = min_from.min(from);
+            max_end = max_end.max(from + dur);
+        }
+    }
+    let (group_from, group_dur) = if min_from.is_finite() && max_end.is_finite() {
+        let min_dur = 1.0 / cx.fps(comp.as_deref()).max(1.0);
+        (min_from, (max_end - min_from).max(min_dur))
+    } else {
+        (0.0, cx.duration(comp.as_deref()))
+    };
+    {
+        let m = values::obj(&mut g);
+        m.insert(
+            "group",
+            parent.as_deref().map(values::s).unwrap_or(Value::Null),
+        );
+        m.insert("collapsed", Value::Bool(false));
+        m.insert("from", Value::Number(group_from));
+        m.insert("dur", Value::Number(group_dur));
+        if group_three_d {
+            m.insert("threeD", Value::Bool(true));
+        }
+    }
+    let at = index_of(&layers, &roots[0]).unwrap_or(0);
+    let mut next = layers.clone();
+    next.insert(at, g.clone());
+    cx.insert_layer(comp.as_deref(), at, g)?;
+    for (index, l) in next.iter_mut().enumerate() {
+        if values::text(l, "id").is_some_and(|i| roots.iter().any(|r| r == i)) {
+            values::obj(l).insert("group", values::s(group_id));
+            let path = layers::layer_field(cx, comp.as_deref(), index, "group");
+            cx.set(path, values::s(group_id))?;
+        }
+    }
+    let next = layers::normalize_group_stack(next);
+    layers::write_order(cx, comp.as_deref(), &next)?;
+    // The pivot at the members' bounds center (an identity transform).
+    let members: HashSet<&str> = [group_id].into_iter().collect();
+    let now = cx.layer_stack(comp.as_deref());
+    let has_text = layers::expand_groups(&now, &members).iter().any(|id| {
+        now.iter()
+            .find(|l| values::text(l, "id") == Some(id.as_str()))
+            .is_some_and(|l| values::text(l, "type") == Some("text"))
+    });
+    // Without fonts a text group keeps its default placement; nothing moves.
+    if (!has_text || cx.text.is_some())
+        && let Some(index) = index_of(&now, group_id)
+    {
+        let time = values::finite(time, "time")?;
+        let mut measure = cx.measure(false)?;
+        cx.kernel(comp.as_deref(), |edit| {
+            pm_edit::groups::group_placement(edit, index, time, &mut *measure, &mut NoHost)
+                .map(|_| ())
+        })?;
+        cx.check_fonts()?;
+    }
+    Ok(())
+}
+
+/// `PM.ungroupLayers(ids)`: the checks here, the rebasing and baking in the
+/// engine's `groups::ungroup` kernel.
+fn ungroup(cx: &mut Cx<'_>, ids: &[String], time: f64) -> Result<(), CommandError> {
+    let comp = check_targets(cx, ids)?;
+    let heads = cx.layer_stack(comp.as_deref());
+    let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    // The groups whole (their effects, masks and visibility are checked);
+    // every other layer by its head.
+    let layers: Vec<Value> = heads
+        .into_iter()
+        .map(|head| match values::text(&head, "id") {
+            Some(id) if wanted.contains(id) && values::text(&head, "type") == Some("group") => cx
+                .find(id)
+                .and_then(|loc| cx.layer_node(&loc).map(pm_model::Node::to_value))
+                .unwrap_or(head),
+            _ => head,
+        })
+        .collect();
+    let groups: Vec<usize> = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            values::text(l, "id").is_some_and(|i| wanted.contains(i))
+                && values::text(l, "type") == Some("group")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if groups.is_empty() {
+        return Err(CommandError::Invalid("Select a group to ungroup".into()));
+    }
+    if layers.iter().any(|l| {
+        values::flag(l, "lock")
+            && layers::ancestors(&layers, l)
+                .iter()
+                .any(|g| values::text(g, "id").is_some_and(|i| wanted.contains(i)))
+    }) {
+        return Err(CommandError::Invalid(
+            "Unlock the group contents before ungrouping".into(),
+        ));
+    }
+    if groups.iter().any(|&g| values::flag(&layers[g], "solo")) {
+        return Err(CommandError::Invalid(
+            "Turn off Solo before ungrouping this group.".into(),
+        ));
+    }
+    if let Some(&styled) = groups.iter().find(|&&g| has_visual_style(&layers[g])) {
+        return Err(CommandError::Invalid(format!(
+            "Remove visual compositing from “{}” before ungrouping",
+            values::layer_name(&layers[styled], "")
+        )));
+    }
+    if groups.iter().any(|&g| {
+        let on = layers[g].get("on");
+        !constant(on, &Value::Bool(true)) && !constant(on, &Value::Bool(false))
+    }) {
+        return Err(CommandError::Invalid(
+            "Pre-compose this group to keep its animated visibility before ungrouping.".into(),
+        ));
+    }
+    let time = values::finite(time, "time")?;
+    cx.kernel(comp.as_deref(), |edit| {
+        pm_edit::groups::ungroup(edit, &groups, time).map(|_| ())
+    })?;
+    // The kernel moves the members; the group itself goes (or becomes a null
+    // when outside layers use it as a transform parent).
+    let now = cx.layer_stack(comp.as_deref());
+    let mut next = Vec::with_capacity(now.len());
+    let mut gone = Vec::new();
+    for (index, l) in now.iter().enumerate() {
+        let id = values::text(l, "id").unwrap_or_default().to_owned();
+        if wanted.contains(id.as_str()) && values::text(l, "type") == Some("group") {
+            let parented = now
+                .iter()
+                .any(|o| values::text(o, "parent") == Some(id.as_str()));
+            if parented {
+                let mut l = l.clone();
+                let m = values::obj(&mut l);
+                m.insert("type", values::s("null"));
+                m.insert("solo", Value::Bool(false));
+                for (field, value) in [("type", values::s("null")), ("solo", Value::Bool(false))] {
+                    let path = layers::layer_field(cx, comp.as_deref(), index, field);
+                    cx.set(path, value)?;
+                }
+                next.push(l);
+            } else {
+                gone.push(id);
+            }
+            continue;
+        }
+        next.push(l.clone());
+    }
+    for id in &gone {
+        cx.delete_layer(comp.as_deref(), id)?;
+    }
+    let next = layers::normalize_group_stack(next);
+    layers::write_order(cx, comp.as_deref(), &next)
+}
+
+/// `hasVisualStyle(layer)`.
+fn has_visual_style(l: &Value) -> bool {
+    let non_empty = |k: &str| {
+        l.get(k)
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+    };
+    non_empty("fx")
+        || non_empty("masks")
+        || l.get("matteSource").is_some_and(Value::is_truthy)
+        || l.get("transitionIn").is_some_and(Value::is_truthy)
+        || l.get("transitionOut").is_some_and(Value::is_truthy)
+        || l.get("blend").is_some_and(|b| {
+            b.as_object().is_some() || (b.is_truthy() && b.as_str() != Some("normal"))
+        })
+        || l.get("mblur")
+            .is_some_and(|b| b.as_object().is_some() || b.as_bool() == Some(true))
+}
+
+/// `constantProperty(prop, value)` for switches.
+fn constant(prop: Option<&Value>, value: &Value) -> bool {
+    match prop {
+        Some(p) if p.as_object().is_some() => {
+            if p.get("expr").is_some_and(Value::is_truthy) {
+                return false;
+            }
+            let keys = p.get("kf").and_then(Value::as_array);
+            match keys {
+                Some(k) if !k.is_empty() => k.iter().all(|key| key.get("v") == Some(value)),
+                _ => p.get("v") == Some(value),
+            }
+        }
+        Some(p) => p == value,
+        // `undefined === true` is false.
+        None => false,
+    }
+}
+
+/// `PM.moveToGroup(ids, target)`.
+fn move_to_group(
+    cx: &mut Cx<'_>,
+    ids: &[String],
+    target: Option<&str>,
+    time: f64,
+) -> Result<(), CommandError> {
+    let comp = check_targets(cx, ids)?;
+    let layers = cx.layer_stack(comp.as_deref());
+    let group = match target {
+        Some(t) => Some(
+            layers
+                .iter()
+                .find(|l| {
+                    values::text(l, "id") == Some(t) && values::text(l, "type") == Some("group")
+                })
+                .ok_or_else(|| CommandError::Invalid("Group not found".into()))?,
+        ),
+        None => None,
+    };
+    let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let selected: Vec<&Value> = layers
+        .iter()
+        .filter(|l| values::text(l, "id").is_some_and(|i| wanted.contains(i)))
+        .collect();
+    if selected.is_empty() || wanted.len() != selected.len() {
+        return Err(CommandError::Invalid("Layer not found".into()));
+    }
+    let locked = |l: &Value| {
+        values::flag(l, "lock")
+            || layers::ancestors(&layers, l)
+                .iter()
+                .any(|g| values::flag(g, "lock"))
+    };
+    if group.is_some_and(locked) || selected.iter().any(|l| locked(l)) {
+        return Err(CommandError::Invalid("Unlock layers before moving".into()));
+    }
+    if let Some(g) = group
+        && (wanted.contains(values::text(g, "id").unwrap_or_default())
+            || layers::ancestors(&layers, g)
+                .iter()
+                .any(|a| values::text(a, "id").is_some_and(|i| wanted.contains(i))))
+    {
+        return Err(CommandError::Invalid(
+            "Grouping would create a cycle".into(),
+        ));
+    }
+    let roots: Vec<usize> = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            values::text(l, "id").is_some_and(|i| wanted.contains(i))
+                && !layers::ancestors(&layers, l)
+                    .iter()
+                    .any(|g| values::text(g, "id").is_some_and(|i| wanted.contains(i)))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let target_index = target.and_then(|t| index_of(&layers, t));
+    layers::move_into_group(
+        cx,
+        comp.as_deref(),
+        &roots,
+        target_index,
+        target,
+        values::finite(time, "time")?,
+    )?;
+    let next = layers::normalize_group_stack(cx.layer_stack(comp.as_deref()));
+    layers::write_order(cx, comp.as_deref(), &next)
+}

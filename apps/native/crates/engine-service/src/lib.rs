@@ -1,0 +1,8465 @@
+//! In-process native rendering. No Node, napi entrypoints, bridge or GPUI.
+//! Callers own below-slot placement and pump native layers on the main thread.
+pub mod audio;
+pub mod clock;
+pub mod color;
+pub mod compat;
+pub mod export_estimate;
+pub use export_estimate::{ExportEstimate, ExportEstimateState, PresetEstimate};
+mod font_warm;
+pub mod frame_codec;
+mod frame_inputs;
+pub mod jobs;
+pub mod layers;
+pub mod media;
+pub mod memory;
+pub mod policy;
+mod present;
+pub mod qos;
+mod render;
+pub mod render_cache;
+pub mod resources;
+pub mod sequence_watch;
+mod scopes;
+mod settle;
+pub use scopes::ScopeResult;
+pub mod studio;
+pub mod surface;
+mod picker_sample;
+pub use surface::{SurfaceQueryKind, SurfaceReply};
+pub mod trace;
+pub mod transport;
+
+use anyhow::{Result, ensure};
+#[cfg(feature = "kernel")]
+use pm_kernel::actor::Published;
+#[cfg(feature = "kernel")]
+pub use pm_kernel::document::Snapshot;
+/// Standalone CLI snapshot when the optional kernel adapter is disabled.
+#[cfg(not(feature = "kernel"))]
+#[derive(Clone)]
+pub struct Snapshot {
+    pub doc_id: u64,
+    pub revision: u64,
+    pub document: std::sync::Arc<pm_model::Document>,
+}
+#[cfg(not(feature = "kernel"))]
+impl Snapshot {
+    pub fn open_comp(&self) -> Option<String> {
+        self.document
+            .to_value()?
+            .as_object()?
+            .get("compId")?
+            .as_str()
+            .map(str::to_owned)
+    }
+}
+pub use crate::media::MediaMap;
+use pm_protocol::{
+    clock::{AudioLevels, ClockSample, TransportCommand},
+    common::{Size, Ticks},
+};
+pub use policy::{Crop, Moment, Output, Quality, Stamp};
+pub use frame_inputs::draws_studio;
+pub use render::{FrameSpec, Scene, metal_device};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
+    time::Duration,
+};
+
+/// Geometry is normalized to the content viewport. Colours are linear P3 RGBA.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OverlayLine {
+    pub ends: [f32; 4],
+    pub color: [f32; 4],
+}
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverlayGeometry {
+    lines: Vec<OverlayLine>,
+    channels: Channels,
+}
+/// What the viewer shows of the picture: a display mode of the presenter
+/// alone. It never reaches a render, the render cache, a capture, the
+/// scopes or an export (a capture is drawn again without it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Channels {
+    #[default]
+    Rgb = 0,
+    Red = 1,
+    Green = 2,
+    Blue = 3,
+    /// Alpha as grey: white where opaque.
+    Alpha = 4,
+    /// The picture, with what is transparent tinted.
+    AlphaOverlay = 5,
+    /// The picture, with what its delivery cannot hold tinted: light over
+    /// the peak (SDR white, or an HDR project's master) magenta, colour
+    /// outside the delivery's gamut (Rec. 709, or Rec. 2020 for HDR) cyan.
+    RangeOverlay = 6,
+}
+#[repr(C)]
+pub(crate) struct OverlayParams {
+    count: u32,
+    reduced: u32,
+    /// The source is the whole composition (a disk render cache frame).
+    pub(crate) whole: u32,
+    /// [`Channels`]: the viewer's display mode (0 shows the picture).
+    pub(crate) channels: u32,
+    output: [f32; 4],
+    canvas: [f32; 4],
+    drawable: [f32; 2],
+    /// [`Channels::RangeOverlay`]: the peak in relative light (1.0 is SDR
+    /// white), and 1 when the delivery's gamut is Rec. 2020.
+    range: [f32; 2],
+    lines: [OverlayLine; OverlayGeometry::MAX_LINES],
+}
+impl OverlayGeometry {
+    /// Must match `viewer.metal`; the parameters stay inside Metal's 4 KiB inline limit.
+    pub const MAX_LINES: usize = 120;
+    pub fn new(lines: Vec<OverlayLine>) -> Result<Self> {
+        ensure!(
+            lines.len() <= Self::MAX_LINES,
+            "at most {} locked overlay lines",
+            Self::MAX_LINES
+        );
+        ensure!(
+            lines
+                .iter()
+                .all(|l| l.ends.iter().chain(&l.color).all(|v| v.is_finite())
+                    && (0. ..=1.).contains(&l.color[3])),
+            "invalid overlay geometry"
+        );
+        Ok(Self {
+            lines,
+            channels: Channels::Rgb,
+        })
+    }
+    /// The same lines with the viewer showing `channels` of the picture.
+    pub fn with_channels(self, channels: Channels) -> Self {
+        Self { channels, ..self }
+    }
+    /// The lines that can be drawn, at most [`Self::MAX_LINES`] of them: a
+    /// line with a non-finite end or color (geometry divided by a zero-size
+    /// composition, a transform beyond what a float holds) is left out, and
+    /// lines past the limit are dropped. Never fails: overlay geometry is
+    /// derived from the person's document on the main thread, where an
+    /// error has nowhere to go but a crash.
+    pub fn lossy(lines: impl IntoIterator<Item = OverlayLine>) -> Self {
+        Self {
+            lines: lines
+                .into_iter()
+                .filter(|l| {
+                    l.ends.iter().chain(&l.color).all(|v| v.is_finite())
+                        && (0. ..=1.).contains(&l.color[3])
+                })
+                .take(Self::MAX_LINES)
+                .collect(),
+            channels: Channels::Rgb,
+        }
+    }
+    fn params(&self) -> OverlayParams {
+        let mut p = OverlayParams {
+            count: self.lines.len() as u32,
+            reduced: 0,
+            whole: 0,
+            channels: self.channels as u32,
+            output: [0.; 4],
+            canvas: [0.; 4],
+            drawable: [0.; 2],
+            range: [1., 0.],
+            lines: [OverlayLine::default(); Self::MAX_LINES],
+        };
+        p.lines[..self.lines.len()].copy_from_slice(&self.lines);
+        p
+    }
+}
+/// GPUI supplies geometry/bindings once; this native Rust evaluator runs on
+/// the render worker against the very document and time used for the picture.
+/// It must never call GPUI, JS, or wait for the main thread.
+pub type LockedOverlayProvider =
+    Arc<dyn Fn(&pm_model::Document, &str, Ticks) -> Result<OverlayGeometry> + Send + Sync>;
+#[derive(Clone, Default, PartialEq)]
+pub struct MediaCatalog {
+    pub originals: BTreeMap<String, std::path::PathBuf>,
+    pub proxies: BTreeMap<String, std::path::PathBuf>,
+    /// Optimized media: full-size high-quality transcodes the viewer plays
+    /// in Automatic in place of their originals (Final Cut's optimized
+    /// media). Exports never read them.
+    pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// High-resolution originals whose preview should use a ready HD proxy.
+    /// Runtime-only policy; never serialized into the project.
+    pub automatic_proxies: std::collections::BTreeSet<String>,
+    /// Always Play Original: these assets never play a proxy or optimized
+    /// media, in any mode.
+    pub play_original: std::collections::BTreeSet<String>,
+    /// Assets the app is still resolving (just imported or relinked): the
+    /// viewer draws nothing for them until they land, never Media Offline.
+    pub resolving: std::collections::BTreeSet<String>,
+}
+/// The files a viewer reads in `mode`: while playing and dragging, and
+/// when paused. A paused frame shows the composition as an export draws
+/// it, so Automatic's HD proxies (a playback convenience for large
+/// sources) stand in only while playing or dragging; the proxies a person
+/// chose (Proxy Preferred, Proxy Only) stay in every moment.
+fn viewer_media(
+    media: &MediaCatalog,
+    mode: MediaMode,
+) -> (
+    Arc<pm_export::render::MediaPaths>,
+    Arc<pm_export::render::MediaPaths>,
+) {
+    let paths = |m: &MediaCatalog| {
+        let paths = m.viewer_paths(mode);
+        Arc::new(pm_export::render::MediaPaths {
+            originals: m.copied(&paths),
+            paths,
+            resolving: m.resolving.clone(),
+        })
+    };
+    let moving = paths(media);
+    let paused = if mode == MediaMode::Automatic && !media.automatic_proxies.is_empty() {
+        paths(&MediaCatalog {
+            automatic_proxies: Default::default(),
+            ..media.clone()
+        })
+    } else {
+        moving.clone()
+    };
+    (moving, paused)
+}
+/// What the viewer plays for each clip (View › Media). Exports read
+/// originals whatever this says; only an explicit draft export uses proxies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaMode {
+    /// HD proxies for large sources, otherwise originals/optimized media.
+    #[default]
+    Automatic,
+    /// Originals only: a clip whose original is missing is offline.
+    Originals,
+    /// A proxy where one exists, the original otherwise.
+    ProxyPreferred,
+    /// Proxies only: a clip without one is offline.
+    ProxyOnly,
+}
+impl MediaCatalog {
+    /// Export safety: a draft is the only path that can substitute proxy pixels.
+    pub fn export_paths(&self, draft: bool) -> pm_export::render::MediaPaths {
+        let mut paths = self.originals.clone();
+        if draft {
+            paths.extend(self.proxies.clone());
+        }
+        pm_export::render::MediaPaths {
+            originals: self.copied(&paths),
+            paths,
+            ..Default::default()
+        }
+    }
+    /// The originals of the assets `paths` draws from a proxy or optimized
+    /// copy: Interpret Footage describes the original, and the renderer
+    /// carries it to the copy (`pm_render::footage::for_copy`).
+    fn copied(
+        &self,
+        paths: &BTreeMap<String, std::path::PathBuf>,
+    ) -> BTreeMap<String, std::path::PathBuf> {
+        self.originals
+            .iter()
+            .filter(|(id, original)| paths.get(*id).is_some_and(|path| path != *original))
+            .map(|(id, original)| (id.clone(), original.clone()))
+            .collect()
+    }
+    /// The file the viewer reads for each asset in `mode`.
+    pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
+        // Most preferred last: each later map overrides the earlier ones.
+        let order: &[&BTreeMap<String, std::path::PathBuf>] = match mode {
+            MediaMode::Automatic => &[&self.proxies, &self.originals, &self.optimized],
+            MediaMode::Originals => &[&self.originals],
+            MediaMode::ProxyPreferred => &[&self.originals, &self.optimized, &self.proxies],
+            MediaMode::ProxyOnly => &[&self.proxies],
+        };
+        let mut paths = BTreeMap::new();
+        for map in order {
+            paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if mode == MediaMode::Automatic {
+            for id in &self.automatic_proxies {
+                if let Some(proxy) = self.proxies.get(id) {
+                    paths.insert(id.clone(), proxy.clone());
+                }
+            }
+        }
+        for id in &self.play_original {
+            match self.originals.get(id) {
+                Some(original) => paths.insert(id.clone(), original.clone()),
+                None => paths.remove(id),
+            };
+        }
+        paths
+    }
+    /// Assets the viewer draws from a proxy in `mode`.
+    pub fn proxied(&self, mode: MediaMode) -> usize {
+        let paths = self.viewer_paths(mode);
+        self.proxies
+            .iter()
+            .filter(|(id, path)| {
+                paths.get(*id) == Some(path) && self.originals.get(*id) != Some(path)
+            })
+            .count()
+    }
+    pub fn audio_paths(&self, mode: MediaMode) -> MediaMap {
+        MediaMap(Arc::new(
+            self.viewer_paths(mode)
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect(),
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct ViewerConfig {
+    pub snapshot: Snapshot,
+    pub composition: String,
+    pub media: MediaCatalog,
+    pub output: Output,
+    /// Retained caller layer; configure_layer must have run on the main thread.
+    /// None renders offscreen. The service never creates an NSWindow.
+    pub layer: Option<metal::MetalLayer>,
+    pub rate: pm_time::Rate,
+    pub end: Option<i64>,
+    pub audio: bool,
+}
+#[derive(Clone, Debug)]
+pub struct FrameReport {
+    pub stamp: Stamp,
+    pub time: Ticks,
+    pub cache_hit: bool,
+    pub gpu_ok: bool,
+    pub display_host_seconds: Option<f64>,
+    pub completion_host_seconds: Option<f64>,
+    pub pixels: Option<Vec<[f64; 3]>>,
+    pub worker_to_completion_ms: Option<f64>,
+    pub input_host_seconds: Option<f64>,
+    pub audio_host_seconds: Option<f64>,
+    pub moment: Moment,
+    /// Render resolution as a share of the drawable.
+    pub scale: f64,
+    /// A video layer showed its nearest decoded frame.
+    pub stand_ins: bool,
+    /// The final picture of its time: a capture, a paused viewer's settled
+    /// picture, or the rendered frame on disk. Every other frame is a
+    /// preview (also one at the composition's own size and Full quality):
+    /// whoever takes a viewer's picture for the delivered one asks this.
+    pub settled: bool,
+}
+/// A viewer's last settled picture, copied out of the engine's surface as
+/// it was presented (the engine's output pool keeps none of it), in
+/// extended linear Display P3 half floats, with the stamp and time it
+/// shows: a still of what the viewer shows costs no render.
+#[derive(Clone)]
+pub struct Picture {
+    pub stamp: Stamp,
+    pub time: Ticks,
+    width: usize,
+    height: usize,
+    row: usize,
+    bytes: Arc<[u8]>,
+}
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Picture({}×{} at {:?})", self.width, self.height, self.time)
+    }
+}
+impl Picture {
+    /// A copy of `surface` (half-float RGBA; none otherwise). Its GPU work
+    /// must have completed.
+    fn copy(
+        surface: &pm_gpu::bridge_out::surface::ExportedSurface,
+        stamp: Stamp,
+        time: Ticks,
+    ) -> Option<Self> {
+        if surface.format != pm_protocol::interop::SurfaceFormat::Rgba16Float {
+            return None;
+        }
+        let (width, height) = (surface.size.width as usize, surface.size.height as usize);
+        let row = surface.iosurface.bytes_per_row() as usize;
+        let bytes = surface.iosurface.read();
+        (width > 0 && height > 0 && row >= width * 8 && bytes.len() >= row * height).then(|| Self {
+            stamp,
+            time,
+            width,
+            height,
+            row,
+            bytes: bytes.into(),
+        })
+    }
+    /// The picture as 8-bit sRGB RGBA, opaque over black, box-scaled down
+    /// to at most `max_width` pixels wide, with its width and height.
+    /// Blocking: call it off the main thread.
+    pub fn srgb8(&self, max_width: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let (w, h, row, bytes) = (self.width, self.height, self.row, &self.bytes);
+        Some(srgb8(w, h, |x, y| {
+            let at = y * row + x * 8;
+            let c = |i: usize| half::f16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]]).to_f32();
+            [c(0), c(1), c(2)]
+        }, max_width as usize))
+    }
+}
+/// Extended linear Display P3 pixels (`at(x, y)`, premultiplied, so over
+/// black as they are) as 8-bit sRGB RGBA, box-scaled to `max_width`.
+fn srgb8(w: usize, h: usize, at: impl Fn(usize, usize) -> [f32; 3], max_width: usize) -> (u32, u32, Vec<u8>) {
+    let step = w.div_ceil(max_width.max(1)).max(1);
+    let (ow, oh) = ((w / step).max(1), (h / step).max(1));
+    // Display P3 to sRGB primaries (both D65), linear.
+    const M: [[f32; 3]; 3] = [
+        [1.224_940_2, -0.224_940_2, 0.],
+        [-0.042_056_955, 1.042_057, 0.],
+        [-0.019_637_555, -0.078_636_05, 1.098_273_6],
+    ];
+    let encode = |v: f32| {
+        let v = v.clamp(0., 1.);
+        let e = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1. / 2.4) - 0.055 };
+        (e * 255. + 0.5) as u8
+    };
+    let mut out = Vec::with_capacity(ow * oh * 4);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut sum = [0f32; 3];
+            for y in oy * step..((oy + 1) * step).min(h) {
+                for x in ox * step..((ox + 1) * step).min(w) {
+                    let p = at(x, y);
+                    for i in 0..3 {
+                        sum[i] += if p[i].is_finite() { p[i] } else { 0. };
+                    }
+                }
+            }
+            let n = (step * step) as f32;
+            let p = sum.map(|v| v / n);
+            for m in M {
+                out.push(encode(m[0] * p[0] + m[1] * p[1] + m[2] * p[2]));
+            }
+            out.push(255);
+        }
+    }
+    (ow as u32, oh as u32, out)
+}
+#[cfg(test)]
+mod picture_tests {
+    /// A held picture reads as sRGB: white, black and mid grey keep their
+    /// lightness, a P3-only red clips to sRGB red, and a wide picture is
+    /// box-scaled to the width asked for.
+    #[test]
+    fn a_picture_reads_as_srgb_and_scales_down() {
+        let one = |p: [f32; 3]| super::srgb8(1, 1, |_, _| p, 8).2;
+        assert_eq!(one([1., 1., 1.]), [255, 255, 255, 255]);
+        assert_eq!(one([0., 0., 0.]), [0, 0, 0, 255]);
+        assert_eq!(one([0.18, 0.18, 0.18])[..3], [118, 118, 118]);
+        assert_eq!(one([1., 0., 0.]), [255, 0, 0, 255]);
+        assert_eq!(one([f32::NAN, 4., -1.]), [0, 255, 0, 255]);
+        let (w, h, px) = super::srgb8(4, 2, |x, _| if x % 2 == 0 { [1.; 3] } else { [0.; 3] }, 2);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(px[..3], [188, 188, 188], "a box of white and black is linear half");
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct ViewerStatus {
+    pub refine_progress: Option<studio::RefineProgress>,
+    /// Explicit Studio calibration for the current immutable viewer scene.
+    pub export_estimate: ExportEstimateState,
+    pub frame: Option<FrameReport>,
+    /// The last settled picture presented, copied out of the engine's pool
+    /// ([`Picture`]); kept until another settles.
+    pub settled_picture: Option<Picture>,
+    /// How many settled pictures were copied (`settled_picture`).
+    pub settled_copies: u64,
+    pub clock: Option<ClockSample>,
+    pub levels: Option<AudioLevels>,
+    pub error: Option<String>,
+    pub stale_rejections: u64,
+    pub no_drawable: u64,
+    pub audio_fallback: bool,
+    pub skipped_targets: u64,
+    /// Display ticks whose frame was identical to the one already on screen.
+    /// The layer keeps showing it; no drawable is spent (see `run`).
+    pub held_frames: u64,
+    /// Paused pictures re-presented once because they never reached the glass.
+    pub represented: u64,
+    /// Frames completed for display under this viewer (Performance panel).
+    pub presented: u64,
+    /// Layers missing from the frame on screen, with why. The rest is drawn.
+    pub layer_failures: Vec<pm_render::LayerFailure>,
+    /// Effects the project uses whose provider isn't installed. Their
+    /// layers draw without them (bypassed, as After Effects does).
+    pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
+    /// The installed extensions that would provide `missing_effects` but
+    /// provide nothing now, with why: the notice names them.
+    pub unavailable: Vec<resources::Unavailable>,
+    /// Playing frames with a stand-in for a decode that missed its allowance.
+    pub stand_in_frames: u64,
+    /// Frames whose own stills exceeded the engine's image grant: drawn, and
+    /// kept while drawn, over budget (the trace row says by how much).
+    pub over_budget_frames: u64,
+    /// Auto's current playing resolution, for the viewer chrome.
+    pub effective_quality: f64,
+    /// Playing or waiting for the audio epoch: the host should keep its
+    /// display-phase source running so the start can align to vsync.
+    pub wants_display: bool,
+    /// GPU devices lost and rebuilt under this viewer.
+    pub device_losses: u64,
+    /// Times the worker started again after a panic (`supervise`).
+    pub restarts: u64,
+    /// A capture asked for (`capture_next`) that can't be delivered: the
+    /// viewer stopped after an internal error. Waiters stop waiting on it.
+    pub capture_failed: Option<String>,
+    /// Clips the viewer plays from a proxy (View › Media). Never counted as
+    /// originals.
+    pub proxied: usize,
+}
+impl ViewerStatus {
+    /// What the frame on screen leaves out, for the viewer's status line:
+    /// the commonest reason and how many layers it hides. `None`: nothing.
+    pub fn notice(&self) -> Option<String> {
+        let mut reasons: Vec<(&str, BTreeSet<&str>)> = Vec::new();
+        for f in &self.layer_failures {
+            match reasons.iter_mut().find(|(m, _)| *m == f.message) {
+                Some((_, layers)) => {
+                    layers.insert(&f.layer);
+                }
+                None => reasons.push((&f.message, BTreeSet::from([f.layer.as_str()]))),
+            }
+        }
+        reasons.sort_by_key(|(_, layers)| std::cmp::Reverse(layers.len()));
+        let layers = |n: usize| match n {
+            1 => "1 layer".to_owned(),
+            n => format!("{n} layers"),
+        };
+        let more = |n: usize| match n {
+            0 => String::new(),
+            n => format!(" (and {n} more)"),
+        };
+        if let Some((message, failed)) = reasons.first() {
+            let others = reasons.len() - 1 + self.missing_effects.len();
+            return Some(format!(
+                "Not drawn, {}: {message}{}",
+                layers(failed.len()),
+                more(others)
+            ));
+        }
+        let missing = self.missing_effects.first()?;
+        let owner = self
+            .unavailable
+            .iter()
+            .find(|u| u.would_provide(&missing.effect));
+        if let (None, Some(owner)) = (&missing.revision, owner) {
+            return Some(format!(
+                "{} {}: {} is bypassed on {}{}",
+                owner.name,
+                owner.why,
+                missing.effect,
+                layers(missing.layers),
+                more(self.missing_effects.len() - 1)
+            ));
+        }
+        let what = match &missing.revision {
+            Some(revision) => format!(
+                "Effect saved by a newer Powermove: {} version {revision}",
+                missing.effect
+            ),
+            None => match resources::named_extension(&missing.effect) {
+                Some(extension) => format!(
+                    "Effect not installed: {} (extension “{extension}”)",
+                    missing.effect
+                ),
+                None => format!("Effect not installed: {}", missing.effect),
+            },
+        };
+        Some(format!(
+            "{what}, bypassed on {}{}",
+            layers(missing.layers),
+            more(self.missing_effects.len() - 1)
+        ))
+    }
+}
+struct View {
+    config: ViewerConfig,
+    retired_presenters: Vec<usize>,
+    transient_snapshot: Option<Snapshot>,
+    transient_content: Option<u64>,
+    /// An earlier edition with the same setup inputs as this snapshot.
+    setup_edition: Option<u64>,
+    stamp: Stamp,
+    content: u64,
+    dirty: bool,
+    /// Nobody can see it (its window is a tab behind another): it draws
+    /// nothing, does not play, and its idle memory goes as any idle
+    /// viewer's.
+    hidden: bool,
+    /// Playing when it was hidden: it paused, and plays on at this rate
+    /// when shown again unless the person stopped or played it meanwhile.
+    resume_on_show: Option<pm_protocol::common::PlaybackRate>,
+    /// When its settled picture was copied (`ViewerStatus::settled_picture`),
+    /// in copies across all viewers: the oldest give theirs up first.
+    settled_seq: u64,
+    capture: bool,
+    /// A capture taken into a frame whose pixels haven't landed yet; a
+    /// restarted worker asks for it again.
+    capture_owed: bool,
+    /// The last `SetLoop` and `AudioScrub`, which a restarted worker's new
+    /// transport takes again.
+    looping: Option<pm_protocol::common::TickRange>,
+    audio_scrub: bool,
+    overlays: OverlayGeometry,
+    overlay_time: Option<Ticks>,
+    locked_provider: Option<LockedOverlayProvider>,
+    commands: VecDeque<TransportCommand>,
+    last_scrub: Option<Ticks>,
+    /// When the oldest pending command was sent (host s), for the
+    /// diagnostic trace's command-to-frame latency.
+    commands_sent: Option<f64>,
+    surface_queries: VecDeque<surface::Pending>,
+    picker_samples: VecDeque<picker_sample::Pending>,
+    export_estimate: Option<export_estimate::Pending>,
+    export_estimate_stamp: Option<Stamp>,
+    export_estimate_cancel: Arc<std::sync::atomic::AtomicU64>,
+    export_estimate_cache: Option<(Stamp,u64,ExportEstimate)>,
+    refine_progress_stamp: Option<Stamp>,
+    /// A Mixer monitor solo not yet handed to the transport.
+    monitor: Option<Vec<String>>,
+    #[cfg(feature = "kernel")]
+    audio_preview: GainPreviewSender,
+    audio_control: std::sync::Weak<audio::AudioLink>,
+    pause_requested_at: Option<i64>,
+    desired_rate: pm_protocol::common::PlaybackRate,
+    status: ViewerStatus,
+    phase: Option<(f64, f64)>,
+    input: Option<f64>,
+    pending_input: Option<f64>,
+    /// The status line is a wait for extensions still loading
+    /// (`render::DefinitionsPending`): new pins end it.
+    waiting_definitions: bool,
+    pipeline: trace::Pipeline,
+    mastering: color::Mastering,
+    resources: Arc<resources::ResourceSnapshot>,
+    quality: Quality,
+    studio_preview: studio::Preview,
+    studio_view: studio::ViewCamera,
+    camera_rest_at: Option<f64>,
+    focus_group: Option<String>,
+    /// Auto draws dragged frames of a slow project reduced (an editor's
+    /// viewer); otherwise every paused frame is exact.
+    adapt_drags: bool,
+    /// An edit is in progress (a kernel gesture is open: a layer, clip,
+    /// field or wheel being dragged). It uses the interactive frame policy.
+    editing: bool,
+    /// The open edit has rested on this revision (text being typed, a drag
+    /// held still): it is drawn as a resting picture, which the next step
+    /// interrupts like any paused one.
+    edit_rested: bool,
+    /// Host timestamp (seconds) of the latest document revision arrival, used
+    /// to avoid settling mid-scrub and to detect rapid non-gesture edit bursts
+    /// (e.g. arrow-key nudging).
+    last_edit_at: Option<f64>,
+    /// True while rapid non-gesture edits (2+ revisions within the settle window)
+    /// are arriving, keeping interactive preview rendering until input rests.
+    recent_edit: bool,
+    /// The skimmer (Final Cut's): while paused the viewer shows this time,
+    /// and the playhead stays where it is.
+    skim: Option<Ticks>,
+    /// The skimmer's last position and pointer time, for its velocity.
+    skim_input: Option<f64>,
+    skim_rate: pm_protocol::common::PlaybackRate,
+    /// The skimmer moved since the worker last looked.
+    skim_moved: bool,
+    /// Override answers of its document landed since the worker last
+    /// looked.
+    answers: bool,
+    /// What a refused picture waited for may have landed (override answers,
+    /// new definitions): it is tried again at once, not after the backoff
+    /// its retries reached.
+    retry_now: bool,
+    skim_audio: Option<bool>,
+    media_mode: MediaMode,
+    paths: Arc<pm_export::render::MediaPaths>,
+    /// What a paused frame reads: `paths` without Automatic's HD proxies.
+    paused_paths: Arc<pm_export::render::MediaPaths>,
+    /// Stamp sequence bumps that only moved the shown time (scrub seeks and
+    /// their pauses, skimmer moves): PM_FIX_PRESENT_STALE.
+    moves: u64,
+}
+/// While dragging, a finished frame of the same content (generation,
+/// document, revision) is presented even though newer playhead moves have
+/// arrived; the newest time is drawn next. Dropping it instead meant a drag
+/// that moves faster than a frame renders showed no picture until it stopped.
+/// `PM_FIX_PRESENT_STALE=0` restores dropping; `=1` accepts only frames older
+/// by playhead moves alone (the app bumps the stamp for more than moves).
+/// Diagnostics (traced viewers only): stamp bumps counted by source line and
+/// command kind, written into each frame's trace row as `bumps`.
+static BUMPS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+fn bump_site(line: u32, kind: &str) {
+    if trace::enabled() {
+        *BUMPS
+            .lock()
+            .unwrap()
+            .entry(format!("{line}{kind}"))
+            .or_default() += 1;
+    }
+}
+fn command_kind(cmd: Option<&TransportCommand>) -> &'static str {
+    match cmd {
+        Some(TransportCommand::Pause) => ":pause",
+        Some(TransportCommand::Seek {
+            mode: pm_protocol::clock::SeekMode::Scrub,
+            ..
+        }) => ":seek-scrub",
+        Some(TransportCommand::Seek { .. }) => ":seek-other",
+        Some(TransportCommand::Play { .. }) => ":play",
+        Some(_) => ":other",
+        None => ":none",
+    }
+}
+fn bumps_snapshot() -> serde_json::Value {
+    serde_json::to_value(&*BUMPS.lock().unwrap()).unwrap_or_default()
+}
+/// The last scrub time asked of each view, and repeats of it (diagnostics).
+static LAST_SCRUB: Mutex<BTreeMap<u64, (i64, u64)>> = Mutex::new(BTreeMap::new());
+
+fn only_moved(
+    v: &View,
+    stamp: Stamp,
+    moves: u64,
+    moment: Moment,
+    camera_motion: bool,
+    capture: bool,
+) -> bool {
+    // 1: only playhead moves since the frame's stamp. 2: the same content
+    // (generation, document, revision); a drag picture may carry the
+    // previous overlay or quality for one frame, never another document.
+    // While an edit is dragged every step is a new revision: its picture of
+    // an earlier step is shown, the newest drawn next (else a drag faster
+    // than a frame renders showed nothing until release).
+    // Likewise during continuous 3D camera motion (Fly WASD, mouse-look,
+    // orbit/pan), each finished camera frame presents even when newer 60 Hz
+    // poses arrived while it rendered, as long as no edit or capture landed.
+    let mode = pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE").or(Some(2));
+    if capture || !matches!(mode, Some(1 | 2)) {
+        return false;
+    }
+    if v.stamp.generation != stamp.generation || v.stamp.doc_id != stamp.doc_id {
+        return false;
+    }
+    if camera_motion {
+        return !v.capture
+            && v.camera_rest_at.is_some()
+            && v.stamp.revision == stamp.revision
+            && v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves);
+    }
+    moment == Moment::Scrub
+        && (((v.editing || v.recent_edit || v.last_edit_at.is_some())
+            && stamp.revision <= v.stamp.revision)
+            || (v.stamp.revision == stamp.revision
+                && (mode == Some(2)
+                    || v.stamp.sequence.wrapping_sub(stamp.sequence)
+                        == v.moves.wrapping_sub(moves))))
+}
+impl View {
+    /// A drag ends: the resting picture of where it ended is drawn next.
+    fn set_editing(&mut self, on: bool) {
+        if self.editing != on {
+            self.editing = on;
+            self.edit_rested = false;
+            if on {
+                self.recent_edit = false;
+            }
+            self.stamp.sequence += 1;
+            self.dirty = true;
+        }
+    }
+    fn set_studio_preview(&mut self, preview: studio::Preview) {
+        if self.studio_preview != preview {
+            self.studio_preview = preview;
+            self.stamp.sequence += 1;
+            self.dirty = true;
+        }
+    }
+    fn request_pause(&mut self, audio: &mut Option<Arc<audio::AudioLink>>) -> Result<bool> {
+        if self.desired_rate.num == 0 && self.resume_on_show.is_none() {
+            return Ok(false);
+        }
+        let at = (trace::now() * 1e6) as i64;
+        self.enqueue(TransportCommand::Pause)?;
+        // A start still in this queue has never reached audio. Cancel it
+        // instead of sending Play ahead of the worker's copy of Pause.
+        self.commands.retain(|cmd| !matches!(cmd,
+            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. }
+        ));
+        self.pause_requested_at.get_or_insert(at);
+        // Keep the link alive until the caller releases the viewer lock.
+        *audio = self.audio_control.upgrade();
+        if let Some(link) = audio {
+            link.send(audio::AudioCtl::Pause);
+        }
+        if let Some(clock) = &mut self.status.clock {
+            transport::freeze_sample(clock, at, self.config.rate.exact_frame_ticks().unwrap_or(1));
+        }
+        self.status.wants_display = false;
+        Ok(true)
+    }
+
+    fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
+        if matches!(cmd, TransportCommand::Seek { .. })
+            && matches!(self.commands.back(), Some(TransportCommand::Seek { .. }))
+        {
+            self.commands.pop_back();
+        }
+        // Leave a slot for Pause even when edits filled the normal queue.
+        let limit = if cmd == TransportCommand::Pause { 64 } else { 63 };
+        ensure!(self.commands.len() < limit, "transport queue full");
+        if matches!(
+            cmd,
+            TransportCommand::Play { .. }
+                | TransportCommand::Pause
+                | TransportCommand::Step { .. }
+                | TransportCommand::PlayAround { .. }
+        ) {
+            self.resume_on_show = None;
+        }
+        match cmd {
+            TransportCommand::Play { rate } => self.desired_rate = rate,
+            TransportCommand::Pause | TransportCommand::Step { .. } => {
+                self.desired_rate = pm_protocol::common::PlaybackRate::STOPPED
+            }
+            TransportCommand::PlayAround { .. } => {
+                self.desired_rate = pm_protocol::common::PlaybackRate::NORMAL
+            }
+            TransportCommand::SetLoop { range } => self.looping = range,
+            TransportCommand::AudioScrub { enabled } => self.audio_scrub = enabled,
+            _ => {}
+        }
+        let moved = matches!(
+            cmd,
+            TransportCommand::Pause
+                | TransportCommand::Seek {
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                    ..
+                }
+        );
+        self.last_scrub = None;
+        self.commands.push_back(cmd);
+        self.commands_sent.get_or_insert_with(trace::now);
+        self.stamp.sequence += 1;
+        bump_site(line!(), command_kind(self.commands.back()));
+        self.moves += u64::from(moved);
+        self.dirty = true;
+        Ok(())
+    }
+}
+/// Retire playback queues that grew beyond this after a document closes.
+const PROJECT_GPU_RENEWAL_BYTES: u64 = 128 << 20;
+
+/// Viewers that keep a settled picture at once, at most (the front tab's,
+/// popouts, windows side by side).
+const SETTLED_PICTURES: usize = 4;
+/// Settled pictures copied so far, across all viewers.
+static SETTLED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[derive(Default)]
+struct State {
+    views: BTreeMap<u64, View>,
+    retired_documents: BTreeSet<u64>,
+    next: u64,
+    content: u64,
+    stop: bool,
+    /// The worker stopped for good after repeated panics (`supervise`).
+    halted: Option<String>,
+    subscribers: Vec<async_channel::Sender<()>>,
+}
+impl State {
+    /// Takes a view out. Its document is closed (its caches, programs and
+    /// override answers go) only if no other view shows it by then.
+    /// At most [`SETTLED_PICTURES`] viewers keep their settled picture (a
+    /// whole picture each, 62 MB at 4K): the ones copied longest ago give
+    /// theirs up; a reader that took one keeps its own reference.
+    fn bound_settled_pictures(&mut self) {
+        let mut kept: Vec<(u64, u64)> = self
+            .views
+            .iter()
+            .filter(|(_, v)| v.status.settled_picture.is_some())
+            .map(|(id, v)| (v.settled_seq, *id))
+            .collect();
+        if kept.len() <= SETTLED_PICTURES {
+            return;
+        }
+        kept.sort_unstable();
+        for (_, id) in &kept[..kept.len() - SETTLED_PICTURES] {
+            if let Some(v) = self.views.get_mut(id) {
+                v.status.settled_picture = None;
+            }
+        }
+    }
+    fn remove_view(&mut self, id: u64) {
+        if let Some(view) = self.views.remove(&id) {
+            sequence_watch::global().track(&watch_owner(self, id), []);
+            let doc = view.stamp.doc_id;
+            if !self.views.values().any(|v| v.stamp.doc_id == doc) {
+                self.retired_documents.insert(doc);
+            }
+        }
+    }
+}
+type ScopeTap = (
+    pm_render::scopes::ScopeConfig,
+    async_channel::Sender<ScopeResult>,
+);
+/// The sequence watch's owner name of view `id` of the service holding
+/// `state`.
+fn watch_owner(state: &State, id: u64) -> String {
+    format!("view {:p} {id}", state as *const State)
+}
+#[cfg(test)]
+type CompletionHook = Arc<dyn Fn(metal::MTLCommandBufferStatus) + Send + Sync>;
+
+struct Shared {
+    state: Mutex<State>,
+    memory: Mutex<memory::CacheUsage>,
+    /// Times a closed document's caches were released (`CacheUsage`).
+    project_releases: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    project_device_renewals: std::sync::atomic::AtomicU64,
+    wake: std::sync::mpsc::SyncSender<()>,
+    /// Moves when a frame being drawn is superseded (a transport command, a
+    /// new revision, other media or quality, a viewer closing): a frame
+    /// waiting for a still being read stops waiting.
+    superseded: Arc<std::sync::atomic::AtomicU64>,
+    interactive: jobs::Activity,
+    /// The worker engine's current Metal device; a GPU loss replaces it.
+    device: Mutex<metal::Device>,
+    /// The viewer the Scopes panel analyzes, and where results go.
+    scopes: Mutex<Option<(u64, ScopeTap)>>,
+    disk: render_cache::DiskFrames,
+    /// What the worker has to draw, as a settled picture's slices see it.
+    traffic: Arc<settle::Traffic>,
+    #[cfg(test)]
+    before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_completed: Mutex<Option<CompletionHook>>,
+    #[cfg(test)]
+    invalidate_next_submission: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    paused_flight_peak: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    first_picture: Mutex<Option<std::sync::mpsc::Sender<Picture>>>,
+    /// Test record: each drawn frame's stamp, time and scale, in order.
+    #[cfg(test)]
+    drawn: Mutex<Vec<(Stamp, Ticks, f64)>>,
+    /// Every settled picture asked for: (viewer, stamp, time, scale).
+    #[cfg(test)]
+    settling: Mutex<Vec<(u64, Stamp, Ticks, f64)>>,
+    /// How each of them ended, in order.
+    #[cfg(test)]
+    settle_ends: Mutex<Vec<&'static str>>,
+    /// Test hook: runs on the settling thread before the next settled
+    /// picture prepares anything (an original that takes long to decode).
+    #[cfg(test)]
+    settle_hold: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    lose_device: std::sync::atomic::AtomicBool,
+    /// Test hook: the worker panics once, as a bug in a frame would.
+    #[cfg(test)]
+    panic_once: std::sync::atomic::AtomicBool,
+    /// Test hook: the next this many frames panic while rendering (a frame
+    /// already holding its capture).
+    #[cfg(test)]
+    panic_frames: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    invalid_call: std::sync::atomic::AtomicBool,
+    /// Every frame costs more than its refresh (Auto resolution tests).
+    #[cfg(test)]
+    slow_frames: std::sync::atomic::AtomicBool,
+    /// Test record: worker loop passes, and idle waits that ended by their
+    /// own timeout (not a wake).
+    #[cfg(test)]
+    passes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    idle_timeouts: std::sync::atomic::AtomicU64,
+    /// Test record: the engine's idle release is in effect.
+    #[cfg(test)]
+    idle_released: std::sync::atomic::AtomicBool,
+}
+impl Shared {
+    fn supersede(&self) {
+        self.superseded
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    /// The fonts changed: every viewer draws again, under a new stamp.
+    fn fonts_changed(&self) {
+        let mut state = self.state.lock().unwrap();
+        for v in state.views.values_mut() {
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+        }
+        self.wake.try_send(()).ok();
+    }
+}
+#[cfg(feature = "kernel")]
+type GainPreviewSender = Arc<Mutex<Option<std::sync::mpsc::Sender<audio::AudioCtl>>>>;
+
+#[derive(Clone)]
+pub struct Viewer {
+    id: u64,
+    shared: Arc<Shared>,
+    #[cfg(feature = "kernel")]
+    audio_preview: GainPreviewSender,
+}
+impl State {
+    fn notify(&mut self) {
+        self.subscribers.retain(|s| !s.is_closed());
+        for s in &self.subscribers {
+            let _ = s.try_send(());
+        }
+    }
+}
+impl Viewer {
+    fn edit(&self, f: impl FnOnce(&mut View) -> Result<()>) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        f(v)?;
+        self.shared.interactive.set(true);
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+    fn interrupt_frame(&self, view: &mut View) {
+        self.shared.supersede();
+        view.retry_now = true;
+    }
+    /// Immutable publication input, cheap COW tree clone. The snapshot is the
+    /// authoritative fallback if the consumer missed any change events.
+    #[cfg(feature = "kernel")]
+    pub fn publish(&self, p: &Published) -> Result<()> {
+        let preview = p
+            .ui_state
+            .viewer
+            .get("studioTier")
+            .and_then(pm_model::Value::as_str)
+            .map_or_else(studio::Preview::debug_default, studio::Preview::parse)
+            .map_err(anyhow::Error::msg)?;
+        self.snapshot_traced(
+            p.snapshot.clone(),
+            Some((
+                p.actor_work.as_secs_f64() * 1000.,
+                p.publication_work.as_secs_f64() * 1000.,
+            )),
+            Some(preview),
+            Some(p.entry.is_some()),
+            |previous| {
+                p.entry.is_some()
+                    && p.only_transform_values_since(previous.doc_id, previous.revision)
+            },
+        )
+    }
+    /// An edit is being dragged (`publish` says so from the kernel's open
+    /// gesture): newer input can supersede its interactive frames.
+    pub fn editing(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            if v.editing != on {
+                self.interrupt_frame(v);
+                v.set_editing(on);
+            }
+            Ok(())
+        })
+    }
+    /// Attach an event origin before dispatching an asynchronous kernel edit.
+    /// Keep it pending until a new revision; playback of the old revision
+    /// must not consume the edit's measurement token. The oldest pending
+    /// input wins: the next revision's frame is the first to show it.
+    pub fn input_event(&self, input: f64) {
+        if let Some(v) = self.shared.state.lock().unwrap().views.get_mut(&self.id) {
+            export_estimate::cancel(v,"export estimate cancelled by input");
+            v.pending_input.get_or_insert(input);
+        }
+    }
+    /// Disposable native timing preview. The authoritative snapshot/revision
+    /// and history stay untouched. A distinct content identity keeps transient
+    /// pixels out of the committed frame cache, including on Escape.
+    pub fn transient_snapshot(&self, snapshot: Option<Snapshot>) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        let content = state.content + 1;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        if let Some(snapshot) = &snapshot {
+            ensure!(
+                snapshot.doc_id == v.stamp.doc_id,
+                "preview document changed"
+            );
+        }
+        if snapshot.is_none() && v.transient_snapshot.is_none() {
+            return Ok(());
+        }
+        self.interrupt_frame(v);
+        v.set_editing(snapshot.is_some());
+        v.edit_rested = false;
+        v.last_edit_at = Some(trace::now());
+        v.transient_content = snapshot.as_ref().map(|_| content);
+        v.transient_snapshot = snapshot;
+        v.stamp.sequence += 1;
+        v.dirty = true;
+        state.content = content;
+        self.shared.interactive.set(true);
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+    pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
+        self.snapshot_traced(snapshot, None, None, None, |_| false)
+    }
+    fn snapshot_traced(
+        &self,
+        snapshot: Snapshot,
+        spans: Option<(f64, f64)>,
+        preview: Option<studio::Preview>,
+        editing: Option<bool>,
+        same_setup: impl FnOnce(&Snapshot) -> bool,
+    ) -> Result<()> {
+        self.edit(|v| {
+            ensure!(
+                snapshot.doc_id == v.stamp.doc_id,
+                "open a new viewer for a new document session"
+            );
+            ensure!(
+                snapshot.revision >= v.stamp.revision,
+                "stale kernel publication"
+            );
+            let before = v.stamp;
+            if let Some(preview) = preview {
+                v.set_studio_preview(preview);
+            }
+            if let Some(editing) = editing {
+                v.set_editing(editing);
+            }
+            if snapshot.revision > v.stamp.revision {
+                if let Some(input) = v.pending_input.take() {
+                    v.input.get_or_insert(input);
+                }
+                let (actor_ms, publication_ms) = spans.unwrap_or_default();
+                let now = trace::now();
+                let rapid = !v.editing
+                    && v.last_edit_at
+                        .is_some_and(|at| now - at <= policy::SETTLE_IDLE_SECONDS);
+                v.last_edit_at = Some(now);
+                if rapid {
+                    v.recent_edit = true;
+                }
+                v.pipeline = trace::Pipeline {
+                    request: now,
+                    actor_ms,
+                    publication_ms,
+                };
+                v.setup_edition = same_setup(&v.config.snapshot).then(|| {
+                    v.setup_edition
+                        .unwrap_or_else(|| v.config.snapshot.document.edition())
+                });
+                v.config.snapshot = snapshot;
+                v.edit_rested = false;
+                v.stamp.revision = v.config.snapshot.revision;
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                // Paused gizmo geometry names one revision and time; safe
+                // areas and guides are time-invariant and persist across edits.
+                if v.overlay_time.take().is_some() {
+                    v.overlays = OverlayGeometry::default();
+                }
+                v.dirty = true;
+            }
+            if v.stamp != before {
+                self.interrupt_frame(v);
+            }
+            Ok(())
+        })
+    }
+    /// Relink/asset resolver changes retire cached pixels even at one revision.
+    pub fn media(&self, media: MediaCatalog) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        // Its originals' sequences are watched whichever file it shows.
+        sequence_watch::global().track(
+            &watch_owner(&state, self.id),
+            media.originals.values().cloned(),
+        );
+        state.content += 1;
+        let content = state.content;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        (v.paths, v.paused_paths) = viewer_media(&media, v.media_mode);
+        self.shared.supersede();
+        v.status.proxied = media.proxied(v.media_mode);
+        v.config.media = media;
+        v.content = content;
+        v.stamp.sequence += 1;
+        bump_site(line!(), "");
+        v.dirty = true;
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+    /// Which file each clip plays from (View › Media). Audio follows it.
+    pub fn media_mode(&self, mode: MediaMode) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        state.content += 1;
+        let content = state.content;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        if v.media_mode == mode {
+            return Ok(());
+        }
+        v.media_mode = mode;
+        self.shared.supersede();
+        (v.paths, v.paused_paths) = viewer_media(&v.config.media, mode);
+        v.status.proxied = v.config.media.proxied(mode);
+        v.content = content;
+        v.stamp.sequence += 1;
+        bump_site(line!(), "");
+        v.dirty = true;
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+    /// Transient Free View for Studio 3D layers (3d-studio.md §4). `None`
+    /// looks through the composition's camera. Never edits the document.
+    pub fn studio_view(&self, view: Option<studio::FreeView>) -> Result<()> {
+        self.studio_camera(view.into())
+    }
+    pub fn studio_view_at(&self, view: Option<studio::FreeView>, input: f64) -> Result<()> {
+        self.studio_camera_at(view.into(), input)
+    }
+    pub fn studio_camera(&self, camera: studio::ViewCamera) -> Result<()> {
+        self.studio_camera_traced(camera, None)
+    }
+    pub fn studio_camera_at(&self, camera: studio::ViewCamera, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.studio_camera_traced(camera, Some(input))
+    }
+    fn studio_camera_traced(&self, camera: studio::ViewCamera, input: Option<f64>) -> Result<()> {
+        camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != camera {
+                let interactive = matches!(
+                    camera,
+                    studio::ViewCamera::Custom { .. } | studio::ViewCamera::Orthographic { .. },
+                );
+                let continuing = interactive && v.camera_rest_at.is_some();
+                // Entering or leaving camera motion interrupts any slow resting
+                // frame in flight. Continuing interactive ticks (e.g. 60 Hz Fly
+                // WASD / mouse-look) must not supersede an in-flight interactive
+                // camera frame, or scenes slower than 16 ms stall until key up.
+                if !continuing {
+                    self.interrupt_frame(v);
+                } else {
+                    v.retry_now = true;
+                }
+                v.camera_rest_at =
+                    interactive.then(|| trace::now() + policy::SETTLE_IDLE_SECONDS);
+                v.studio_view = camera;
+                v.stamp.sequence += 1;
+                if interactive {
+                    v.moves += 1;
+                }
+                v.dirty = true;
+                if let Some(input) = input {
+                    let origin = v.pending_input.take().unwrap_or(input);
+                    v.input.get_or_insert(origin);
+                    v.pipeline = trace::Pipeline {
+                        request: trace::now(),
+                        ..Default::default()
+                    };
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_pane(&self, pane: studio::Pane) -> Result<()> {
+        pane.camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != pane.camera || v.studio_preview != pane.tier {
+                self.interrupt_frame(v);
+                v.camera_rest_at = None;
+                v.studio_view = pane.camera;
+                v.studio_preview = pane.tier;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_state(&self) -> Result<studio::Pane> {
+        let state = self.shared.state.lock().unwrap();
+        let view = state
+            .views
+            .get(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        Ok(studio::Pane {
+            camera: view.studio_view.clone(),
+            tier: view.studio_preview,
+        })
+    }
+    /// Transient Studio worker tier, independent of viewer resolution.
+    pub fn studio_preview(&self, preview: studio::Preview) -> Result<()> {
+        self.edit(|v| {
+            if v.studio_preview != preview {
+                self.interrupt_frame(v);
+                v.set_studio_preview(preview);
+            }
+            Ok(())
+        })
+    }
+    /// Render resolution. Auto measures playback; stopped frames are full.
+    pub fn quality(&self, quality: Quality) -> Result<()> {
+        self.edit(|v| {
+            if v.quality != quality {
+                v.quality = quality;
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    /// Interactive group focus: isolate rendering to this group and its
+    /// descendants in the viewer without mutating the document or exports.
+    pub fn focus_group(&self, group: Option<String>) -> Result<()> {
+        self.edit(|v| {
+            if v.focus_group != group {
+                v.focus_group = group;
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    /// Auto draws this viewer's dragged frames at reduced resolution while
+    /// the project is slower than a refresh, and the frame exact once the
+    /// playhead stops (`policy::SCRUB_SETTLE_SECONDS`): the editor's viewer.
+    /// Whether the person can see this viewer. A hidden one (its window a
+    /// tab behind another) draws nothing until it is shown again, when it
+    /// draws its picture at once; its transport and edits carry on.
+    pub fn set_shown(&self, shown: bool) -> Result<()> {
+        self.edit(|v| {
+            if v.hidden == shown {
+                if !shown {
+                    self.interrupt_frame(v);
+                }
+                v.hidden = !shown;
+                v.dirty |= shown;
+            }
+            // Its still (a whole picture, 62 MB at 4K) goes: a reader that
+            // took it keeps its own reference; shown again, the viewer
+            // settles and copies a new one.
+            if !shown {
+                v.status.settled_picture = None;
+            }
+            Ok(())
+        })
+    }
+    pub fn adapt_drags(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.adapt_drags = on;
+            Ok(())
+        })
+    }
+    /// The skimmer: while paused the viewer shows `time` (on the drag path:
+    /// reduced while it moves, exact once it rests) without moving the
+    /// playhead; `None` returns to the playhead's frame. `input` is the
+    /// pointer event's host time; the pointer's speed sets the skim
+    /// audio's direction and speed.
+    pub fn skim(&self, time: Option<Ticks>, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.edit(|v| {
+            if v.skim == time {
+                return Ok(());
+            }
+            self.interrupt_frame(v);
+            v.skim_rate = match (v.skim, time, v.skim_input) {
+                (Some(a), Some(b), Some(at)) if input > at => skim_rate(
+                    (b.get() - a.get()) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                    input - at,
+                ),
+                _ => pm_protocol::common::PlaybackRate::NORMAL,
+            };
+            v.skim = time;
+            v.skim_input = Some(input);
+            v.skim_moved = true;
+            v.input = Some(input);
+            v.pipeline.request = trace::now();
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.moves += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Audio skimming: grains of the mix follow the skimmer.
+    pub fn skim_audio(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.skim_audio = Some(on);
+            Ok(())
+        })
+    }
+    /// Interactive scrubbing pauses and immediately requests the exact frame.
+    pub fn scrub(&self, time: Ticks) -> Result<()> {
+        self.scrub_at(time, trace::now())
+    }
+    /// NSEvent.timestamp in monotonic host seconds; preserve event origin.
+    pub fn scrub_at(&self, time: Ticks, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        if trace::enabled() {
+            let mut last = LAST_SCRUB.lock().unwrap();
+            let e = last.entry(self.id).or_insert((i64::MIN, 0));
+            if e.0 == time.get() {
+                e.1 += 1;
+                if e.1 % 20 == 1 {
+                    eprintln!(
+                        "PM_SCRUB_REPEAT view={} time={} repeats={} at={:.6}\n{}",
+                        self.id,
+                        time.get(),
+                        e.1,
+                        trace::now(),
+                        std::backtrace::Backtrace::force_capture()
+                    );
+                }
+            } else {
+                *e = (time.get(), 0);
+            }
+        }
+        let mut paused = false;
+        let mut audio = None;
+        self.edit(|v| {
+            // Repeated requests for the same position leave its frame in flight.
+            if v.last_scrub == Some(time) {
+                return Ok(());
+            }
+            v.input = Some(input);
+            v.pipeline.request = trace::now();
+            if v.desired_rate.num != 0 || v.resume_on_show.is_some() {
+                paused = v.request_pause(&mut audio)?;
+            }
+            // Replace an unconsumed scrub pair atomically, even under a burst
+            // of HID input (including while an earlier request_pause() is still
+            // pending on the worker thread).
+            let res = if matches!(
+                v.commands.back(),
+                Some(TransportCommand::Seek {
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                    ..
+                })
+            ) && v.commands.len() >= 2
+                && v.commands[v.commands.len() - 2] == TransportCommand::Pause
+            {
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            } else if v.commands.back() == Some(&TransportCommand::Pause) {
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            } else {
+                ensure!(v.commands.len() <= 61, "transport queue full");
+                v.enqueue(TransportCommand::Pause)?;
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            };
+            res?;
+            v.last_scrub = Some(time);
+            self.interrupt_frame(v);
+            if let Some(clock) = &mut v.status.clock {
+                clock.media_time = time;
+                clock.rate = pm_protocol::common::PlaybackRate::STOPPED;
+                clock.state = pm_protocol::clock::TransportState::Stopped;
+            }
+            Ok(())
+        })?;
+        if paused {
+            self.shared.state.lock().unwrap().notify();
+        }
+        Ok(())
+    }
+    /// Retarget a settled raster without exposing its drawable until complete.
+    pub fn retarget(&self, layer: metal::MetalLayer, crop: Option<Crop>) -> Result<()> {
+        self.edit(|v| {
+            if let Some(old) = &v.config.layer {
+                v.retired_presenters.push(foreign_types::ForeignType::as_ptr(old) as usize);
+            }
+            let size = layer.drawable_size();
+            v.config.output = Output {
+                width: size.width.round().max(1.) as u32,
+                height: size.height.round().max(1.) as u32,
+                crop,
+                ..v.config.output
+            };
+            v.config.layer = Some(layer);
+            self.interrupt_frame(v);
+            v.stamp.generation += 1;
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    pub fn configure(&self, output: Output) -> Result<()> {
+        output.validate()?;
+        self.edit(|v| {
+            let previous = v.config.output;
+            v.config.output = output;
+            // Headroom is display telemetry. The shader preserves extended
+            // values and WindowServer adapts them; it does not change pixels.
+            if output.width != previous.width
+                || output.height != previous.height
+                || output.display != previous.display
+                || output.crop != previous.crop
+            {
+                self.interrupt_frame(v);
+                v.stamp.generation += 1;
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    /// Geometry must name the revision AND exact media time it describes.
+    /// Animated gizmos need new geometry per frame or engine-side evaluation.
+    pub fn overlays(&self, stamp: Stamp, time: Ticks, geometry: OverlayGeometry) -> Result<()> {
+        self.edit(|v| {
+            ensure!(v.stamp == stamp, "stale overlay revision");
+            ensure!(
+                v.status
+                    .clock
+                    .as_ref()
+                    .is_some_and(|c| c.media_time == time && c.rate.num == 0),
+                "moving overlays require engine evaluation; static geometry is paused only"
+            );
+            v.overlays = geometry;
+            v.overlay_time = Some(time);
+            v.locked_provider = None;
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    pub fn locked_overlays(&self, provider: LockedOverlayProvider) -> Result<()> {
+        self.edit(|v| {
+            v.locked_provider = Some(provider);
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Safe areas are time-invariant and are drawn with every video frame.
+    pub fn safe_areas(&self, geometry: OverlayGeometry) -> Result<()> {
+        self.edit(|v| {
+            // Selection/time publications often resend the same guides. They
+            // must not retire a picture currently rendering those exact lines.
+            if v.overlay_time.is_none() && v.locked_provider.is_none() && v.overlays == geometry {
+                return Ok(());
+            }
+            v.overlays = geometry;
+            v.overlay_time = None;
+            v.locked_provider = None;
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    pub fn command(&self, cmd: TransportCommand) -> Result<()> {
+        self.command_traced(cmd, None)
+    }
+    /// Interactive transport input, measured through the frame it presents.
+    pub fn command_at(&self, cmd: TransportCommand, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.command_traced(cmd, Some(input))
+    }
+    fn command_traced(&self, cmd: TransportCommand, input: Option<f64>) -> Result<()> {
+        use pm_protocol::validate::Validate;
+        cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut paused = false;
+        let mut audio = None;
+        self.edit(|v| {
+            if cmd == TransportCommand::Pause {
+                paused = v.request_pause(&mut audio)?;
+                if !paused {
+                    return Ok(());
+                }
+            } else {
+                v.enqueue(cmd)?;
+            }
+            if let Some(input) = input {
+                v.input = Some(input);
+                v.pipeline = trace::Pipeline {
+                    request: trace::now(),
+                    ..Default::default()
+                };
+            }
+            self.interrupt_frame(v);
+            Ok(())
+        })?;
+        if paused {
+            self.shared.state.lock().unwrap().notify();
+        }
+        Ok(())
+    }
+    /// Update the playback mix without touching the presenter's frame state.
+    #[cfg(feature = "kernel")]
+    pub fn audio_gain_preview(&self, message: audio::GainPreview) {
+        let sender = self.audio_preview.lock().unwrap().clone();
+        if let Some(sender) = sender {
+            let _ = sender.send(audio::AudioCtl::GainPreview(message));
+        }
+    }
+
+    /// The Mixer's monitor solo: only these top-level layers are heard
+    /// (empty: every strip). Meters still read every strip.
+    pub fn monitor_solo(&self, solo: Vec<String>) -> Result<()> {
+        ensure!(solo.len() <= 4096, "too many solo strips");
+        self.edit(|v| {
+            v.monitor = Some(solo);
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Whether a run is asked for or in progress, including the moment a
+    /// new run waits for the audio clock (when the clock itself reads
+    /// stopped). A stop still draining is also consumed as Pause by toggles.
+    pub fn running(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0 || v.pause_requested_at.is_some())
+    }
+    /// Whether playback is currently desired: flips immediately on Play,
+    /// Shuttle, PlayAround, and Pause without lagging behind audio device
+    /// warmup or stop drain, and clears when the transport stops at end.
+    pub fn desired_playing(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0)
+    }
+    pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
+        let mut consumed = false;
+        let mut audio = None;
+        self.edit(|v| {
+            if key == transport::ShuttleKey::K && v.pause_requested_at.is_some() {
+                consumed = true;
+            } else if let Some(cmd) = transport::shuttle(key, v.desired_rate, from_pause) {
+                if cmd == TransportCommand::Pause {
+                    if v.request_pause(&mut audio)? {
+                        self.interrupt_frame(v);
+                    }
+                } else {
+                    v.enqueue(cmd)?;
+                    self.interrupt_frame(v);
+                }
+                consumed = true;
+            }
+            Ok(())
+        })?;
+        if consumed && key == transport::ShuttleKey::K {
+            self.shared.state.lock().unwrap().notify();
+        }
+        Ok(consumed)
+    }
+    /// The host's CADisplayLink timestamp/interval, in monotonic host seconds.
+    pub fn display_tick(&self, target: f64, interval: f64) -> Result<()> {
+        ensure!(
+            target.is_finite() && interval.is_finite() && (0.001..=0.1).contains(&interval),
+            "invalid display phase"
+        );
+        self.edit(|v| {
+            v.phase = Some((target, interval));
+            Ok(())
+        })
+    }
+    /// The engine still holds this view (it is not retired).
+    pub fn live(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .contains_key(&self.id)
+    }
+    /// Generation pin seam. Nonempty runtime requirements fail until P2 exists.
+    /// A snapshot that pins what the last one pinned (only who is still
+    /// loading changed) is taken for its names alone: no frame, installed
+    /// effect or cached picture is of other content because of it.
+    pub fn resources(&self, snapshot: Arc<resources::ResourceSnapshot>) -> Result<()> {
+        snapshot.validate()?;
+        let mut state = self.shared.state.lock().unwrap();
+        let content = state.content + 1;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        ensure!(
+            snapshot.generation >= v.resources.generation,
+            "stale resource generation"
+        );
+        if v.resources.generation == snapshot.generation {
+            return Ok(());
+        }
+        if resources::ResourceSnapshot::same_pins(&v.resources, &snapshot) {
+            // A frame still held names who it waits for on its next try.
+            v.resources = snapshot;
+            return Ok(());
+        }
+        v.resources = snapshot;
+        v.content = content;
+        v.stamp.generation += 1;
+        v.stamp.sequence += 1;
+        bump_site(line!(), "");
+        v.dirty = true;
+        v.retry_now = true;
+        // What a held frame said it was waiting for may be over: its line
+        // goes now, not when the next frame finally lands (a frame still
+        // waiting says for what on its next try).
+        let waited = std::mem::take(&mut v.waiting_definitions);
+        if waited {
+            v.status.error = None;
+        }
+        state.content = content;
+        if waited {
+            state.notify();
+        }
+        self.shared.interactive.set(true);
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+
+    /// Main-thread only: change the layer label and shader policy atomically.
+    /// Use explicit mastering peaks; dynamic headroom never edits authored light.
+    pub fn mastering(&self, main: objc2::MainThreadMarker, mode: color::Mastering) -> Result<()> {
+        mode.params()?;
+        self.edit(|v| {
+            if let Some(layer) = &v.config.layer {
+                layers::mastering_space(main, layer, mode)?;
+            }
+            v.mastering = mode;
+            v.stamp.generation += 1;
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    /// Sends this viewer's scope analysis while `tap` is set. Results arrive
+    /// off the main thread, at most ten a second.
+    pub fn scopes(&self, tap: Option<ScopeTap>) -> Result<()> {
+        *self.shared.scopes.lock().unwrap() = tap.map(|tap| (self.id, tap));
+        self.edit(|v| {
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    pub fn capture_next(&self) -> Result<()> {
+        if let Some(why) = &self.shared.state.lock().unwrap().halted {
+            anyhow::bail!("The viewer stopped after an internal error: {why}");
+        }
+        self.edit(|v| {
+            v.capture = true;
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            Ok(())
+        })
+    }
+    pub fn status(&self) -> ViewerStatus {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .get(&self.id)
+            .map(|v| {
+                let mut status = v.status.clone();
+                if v.refine_progress_stamp != Some(v.stamp) { status.refine_progress = None; }
+                if v.export_estimate_stamp != Some(v.stamp) {
+                    status.export_estimate = ExportEstimateState::Idle;
+                }
+                status
+            })
+            .unwrap_or_default()
+    }
+    pub fn identity(&self) -> u64 {
+        self.id
+    }
+    pub fn stamp(&self) -> Option<Stamp> {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .get(&self.id)
+            .map(|v| v.stamp)
+    }
+    pub fn retire(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.remove_view(self.id);
+        state.notify();
+        drop(state);
+        self.retired();
+    }
+    /// This view left `State::views`: its scope tap goes, the worker wakes.
+    fn retired(&self) {
+        self.shared.supersede();
+        let mut scopes = self.shared.scopes.lock().unwrap();
+        if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *scopes = None;
+        }
+        drop(scopes);
+        self.shared.wake.try_send(()).ok();
+    }
+}
+
+pub struct EngineService {
+    shared: Arc<Shared>,
+    thread: Option<JoinHandle<()>>,
+    compat: Arc<compat::CompatStores>,
+    layer_rasters: Option<Arc<compat::LayerRasters>>,
+}
+impl EngineService {
+    /// Start off the UI thread: renderer/shader initialization may take time.
+    pub fn start(gpu: pm_gpu::Gpu) -> Result<Self> {
+        let device = metal_device(&gpu);
+        let engine = render::Engine::new(gpu)?;
+        Self::start_engine(device, engine)
+    }
+    /// `shader_cache` is a folder kept across launches for translated shaders.
+    pub fn start_with_fonts(
+        gpu: pm_gpu::Gpu,
+        fonts: pm_render::text::host::RenderFonts,
+        shader_cache: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
+        let device = metal_device(&gpu);
+        let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
+        // The first scene installs the pinned definitions it uses. Keep the
+        // same shader cache for the viewer and its jobs (exports, cache fills).
+        jobs::set_shader_cache(shader_cache.clone());
+        // Its jobs' fonts are compared with the viewer's registry.
+        jobs::set_font_broker(Some(fonts.broker.clone()));
+        let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
+        engine.set_fonts(fonts);
+        let mut service = Self::start_engine(device, engine)?;
+        service.layer_rasters = Some(layer_rasters);
+        Ok(service)
+    }
+    /// The base rasters raster overrides start from (`render.raster`).
+    pub fn layer_rasters(&self) -> Option<Arc<compat::LayerRasters>> {
+        self.layer_rasters.clone()
+    }
+    /// A document's raster override answers (`compat::CompatStore`).
+    pub fn compat(&self, doc_id: u64) -> Arc<compat::CompatStore> {
+        self.compat.document(doc_id)
+    }
+    /// A document closed: its answers go.
+    pub fn forget_compat(&self, doc_id: u64) {
+        self.compat.forget(doc_id);
+    }
+    /// The renderer's latest cache counters (not OS or allocator footprint).
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        memory::CacheUsage {
+            // Read first: a release counted here is in the usage read next.
+            project_releases: self
+                .shared
+                .project_releases
+                .load(std::sync::atomic::Ordering::Acquire),
+            ..self.shared.memory.lock().unwrap().clone()
+        }
+    }
+    fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
+        let (wake, wakes) = std::sync::mpsc::sync_channel(1);
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            memory: Mutex::default(),
+            project_releases: Default::default(),
+            #[cfg(test)]
+            project_device_renewals: Default::default(),
+            wake,
+            superseded: Default::default(),
+            interactive: {
+                let interactive = jobs::Activity::default();
+                jobs::watch_activity(&interactive);
+                interactive
+            },
+            device: Mutex::new(device),
+            scopes: Mutex::new(None),
+            disk: render_cache::DiskFrames::default(),
+            traffic: Arc::default(),
+            #[cfg(test)]
+            before_submit: Mutex::new(None),
+            #[cfg(test)]
+            before_completed: Mutex::new(None),
+            #[cfg(test)]
+            invalidate_next_submission: Default::default(),
+            #[cfg(test)]
+            paused_flight_peak: Default::default(),
+            #[cfg(test)]
+            first_picture: Mutex::new(None),
+            #[cfg(test)]
+            drawn: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            settling: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            settle_ends: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            settle_hold: Mutex::new(None),
+            #[cfg(test)]
+            lose_device: Default::default(),
+            #[cfg(test)]
+            panic_once: Default::default(),
+            #[cfg(test)]
+            panic_frames: Default::default(),
+            #[cfg(test)]
+            invalid_call: Default::default(),
+            #[cfg(test)]
+            slow_frames: Default::default(),
+            #[cfg(test)]
+            passes: Default::default(),
+            #[cfg(test)]
+            idle_timeouts: Default::default(),
+            #[cfg(test)]
+            idle_released: Default::default(),
+        });
+        // A font installed or removed while a project is open: every viewer
+        // draws again with fonts of the new generation, and the frame its
+        // engine observes for the render cache has a new font identity, so
+        // frames rendered with the fonts before are not this state's.
+        let fonts = Arc::downgrade(&shared);
+        pm_text::system_fonts::on_change(move || {
+            fonts.upgrade().is_some_and(|shared| {
+                shared.fonts_changed();
+                true
+            })
+        });
+        // A sequence's files rendered again (seen by the sequence watch, off
+        // this thread): every viewer draws again, and its engine retires
+        // the pictures it cached of the earlier files.
+        let sequences = Arc::downgrade(&shared);
+        sequence_watch::global().listen(move |_| {
+            sequences.upgrade().is_some_and(|shared| {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+                drop(state);
+                shared.wake.try_send(()).ok();
+                true
+            })
+        });
+        // Answers that land redraw their document's viewers that wait for
+        // them (the worker knows which: `View::answers`); overrides that
+        // start or stop answering redraw every viewer of the document.
+        // Another document's viewers are never drawn again for them.
+        let compat = Arc::new(compat::CompatStores::default());
+        let redraw = Arc::downgrade(&shared);
+        compat.set_redraw(Arc::new(move |doc_id, every| {
+            if let Some(shared) = redraw.upgrade() {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    if v.stamp.doc_id == doc_id {
+                        v.answers = true;
+                        v.retry_now = true;
+                        v.dirty |= every;
+                    }
+                }
+                drop(state);
+                shared.wake.try_send(()).ok();
+            }
+        }));
+        engine.set_compat(Some(compat.clone()));
+        let worker = shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("pm-engine-service".into())
+            .spawn(move || {
+                // The frames this thread draws are what the person is looking
+                // at: it runs at the UI's class. At the default class a busy
+                // machine left it waiting for a core half the time (a heavy
+                // range played at 4 fps instead of 9), and the scheduler can
+                // place it on slower cores. Set on the thread itself, through
+                // pthread: `NSThread.qualityOfService` set after a thread
+                // has started does not change its class.
+                qos::set_interactive_qos();
+                supervise(engine, worker, wakes)
+            })?;
+        Ok(Self {
+            shared,
+            thread: Some(thread),
+            compat,
+            layer_rasters: None,
+        })
+    }
+    /// Call after the main-thread font broker's generation changes.
+    pub fn fonts_changed(&self) {
+        self.shared.fonts_changed();
+    }
+    /// The disk render cache: Render Selection, Keep Rendered, Delete
+    /// Rendered Frames and the timeline's render bar.
+    pub fn render_cache(&self) -> render_cache::DiskFrames {
+        self.shared.disk.clone()
+    }
+    /// Share with ExportHandle::start_scheduled; true defers new export bands.
+    pub fn export_activity(&self) -> jobs::Activity {
+        self.shared.interactive.clone()
+    }
+    /// Coalesced status edges. Read status() after every wake; idle is silent.
+    pub fn notifications(&self) -> async_channel::Receiver<()> {
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(());
+        self.shared.state.lock().unwrap().subscribers.push(tx);
+        rx
+    }
+    /// The device viewer layers and popouts start with. On device renewal,
+    /// the worker re-points layers it already draws into.
+    pub fn metal_device(&self) -> metal::Device {
+        self.shared.device.lock().unwrap().clone()
+    }
+    pub fn viewer(&self, config: ViewerConfig) -> Result<Viewer> {
+        self.place(config, None, Arc::default())
+    }
+    /// A viewer of a window whose resources come from `feed`: its first
+    /// frame already draws the feed's latest snapshot, and it follows the
+    /// feed from then on. A viewer placed and attached in two steps could
+    /// draw a frame in between without the window's extensions, so one
+    /// opened while they load would show the project once without its
+    /// effects.
+    pub fn viewer_fed(
+        &self,
+        config: ViewerConfig,
+        feed: &resources::ResourceFeed,
+    ) -> Result<Viewer> {
+        feed.place(|resources| self.place(config, None, resources))
+    }
+    /// [`Self::replace_viewer`] for a viewer that follows `feed` ([`Self::viewer_fed`]).
+    pub fn replace_viewer_fed(
+        &self,
+        old: &Viewer,
+        config: ViewerConfig,
+        feed: &resources::ResourceFeed,
+    ) -> Result<Viewer> {
+        let viewer = feed.place(|resources| self.place(config, Some(old.id), resources))?;
+        old.retired();
+        Ok(viewer)
+    }
+    /// `old`'s place shows `config` from now on (another composition of its
+    /// document, or another document). The two change places in one step: a
+    /// document that stays open is never without a view, so it keeps its
+    /// caches, programs, override answers and background fill, and the worker
+    /// keeps its device. On an error `old` is still in place.
+    pub fn replace_viewer(&self, old: &Viewer, config: ViewerConfig) -> Result<Viewer> {
+        let viewer = self.place(config, Some(old.id), Arc::default())?;
+        old.retired();
+        Ok(viewer)
+    }
+    fn place(
+        &self,
+        config: ViewerConfig,
+        replaces: Option<u64>,
+        resources: Arc<resources::ResourceSnapshot>,
+    ) -> Result<Viewer> {
+        config.output.validate()?;
+        ensure!(
+            config.rate.exact_frame_ticks().is_some(),
+            "frame rate must divide engine ticks exactly"
+        );
+        ensure!(
+            config.snapshot.revision == config.snapshot.document.revision(),
+            "snapshot revision mismatch"
+        );
+        if let Some(layer) = &config.layer {
+            use foreign_types::ForeignTypeRef;
+            let attached: *mut objc2::runtime::AnyObject = unsafe {
+                objc2::msg_send![layer.as_ptr() as *mut objc2::runtime::AnyObject, device]
+            };
+            ensure!(
+                attached.cast::<metal::MTLDevice>() == self.metal_device().as_ptr(),
+                "viewer layer must use the engine Metal device"
+            );
+            ensure!(
+                layer.pixel_format() == metal::MTLPixelFormat::RGBA16Float,
+                "viewer layer must be RGBA16Float"
+            );
+        }
+        let mut state = self.shared.state.lock().unwrap();
+        // As many viewers as there are open projects: a viewer nobody can
+        // see draws nothing and keeps no memory while idle.
+        let replaced = replaces.filter(|id| state.views.contains_key(id));
+        state.next += 1;
+        state.content += 1;
+        let id = state.next;
+        let content = state.content;
+        #[cfg(feature = "kernel")]
+        let audio_preview = GainPreviewSender::default();
+        let stamp = Stamp {
+            generation: 1,
+            doc_id: config.snapshot.doc_id,
+            revision: config.snapshot.revision,
+            sequence: 1,
+        };
+        let (paths, paused_paths) = viewer_media(&config.media, MediaMode::default());
+        let proxied = config.media.proxied(MediaMode::default());
+        sequence_watch::global().track(
+            &watch_owner(&state, id),
+            config.media.originals.values().cloned(),
+        );
+        state.views.insert(
+            id,
+            View {
+                retired_presenters: Vec::new(),
+                config,
+                transient_snapshot: None,
+                transient_content: None,
+                setup_edition: None,
+                stamp,
+                content,
+                dirty: true,
+                hidden: false,
+                resume_on_show: None,
+                settled_seq: 0,
+                capture: false,
+                capture_owed: false,
+                looping: None,
+                audio_scrub: false,
+                overlays: OverlayGeometry::default(),
+                overlay_time: None,
+                locked_provider: None,
+                commands: VecDeque::new(),
+                last_scrub: None,
+                commands_sent: None,
+                surface_queries: VecDeque::new(),
+                picker_samples: VecDeque::new(),
+                export_estimate: None,
+                export_estimate_stamp: None,
+                export_estimate_cancel: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                export_estimate_cache: None,
+                refine_progress_stamp: None,
+                monitor: None,
+                #[cfg(feature = "kernel")]
+                audio_preview: audio_preview.clone(),
+                audio_control: Default::default(),
+                pause_requested_at: None,
+                desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
+                status: ViewerStatus {
+                    proxied,
+                    ..Default::default()
+                },
+                phase: None,
+                input: None,
+                pending_input: None,
+                waiting_definitions: false,
+                pipeline: Default::default(),
+                mastering: Default::default(),
+                resources,
+                quality: Quality::Auto,
+                studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+                studio_view: studio::ViewCamera::Active,
+                camera_rest_at: None,
+                focus_group: None,
+                adapt_drags: false,
+                editing: false,
+                edit_rested: false,
+                last_edit_at: None,
+                recent_edit: false,
+                skim: None,
+                skim_input: None,
+                skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
+                skim_moved: false,
+                answers: false,
+                retry_now: false,
+                skim_audio: None,
+                media_mode: MediaMode::default(),
+                paths,
+                paused_paths,
+                moves: 0,
+            },
+        );
+        // After the new view is in: the document they share stays open.
+        if let Some(old) = replaced {
+            state.remove_view(old);
+        }
+        state.notify();
+        self.shared.wake.try_send(()).ok();
+        Ok(Viewer {
+            id,
+            shared: self.shared.clone(),
+            #[cfg(feature = "kernel")]
+            audio_preview,
+        })
+    }
+}
+impl Drop for EngineService {
+    fn drop(&mut self) {
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.stop = true;
+            self.shared.supersede();
+            for view in state.views.values_mut() {
+                surface::cancel(view, "surface query worker stopped");
+                export_estimate::cancel(view, "export estimate worker stopped");
+            }
+        }
+        self.shared.interactive.set(false);
+        self.shared.wake.try_send(()).ok();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+struct Runtime {
+    transport: transport::Transport,
+    revision: u64,
+    content: u64,
+    interval: f64,
+    next: f64,
+    /// Observed presentedTime − requested present time: the WindowServer/
+    /// compositor delay the picture cannot avoid. Media time is chosen for
+    /// requested + this lag, so a frame lands when its audio plays.
+    lag: present::PresentLag,
+    /// Most recent known vsync (host s) and refresh interval.
+    grid: Option<(f64, f64)>,
+    /// Refreshes ahead of the target at which a playing frame is encoded.
+    ahead: f64,
+    /// The content frame at the playing speed (s), for Auto's playback rule.
+    content_frame: f64,
+    /// Stamp/time already submitted. Repeating identical pixels at the
+    /// display rate only queues more drawables behind the compositor.
+    last: Option<(Stamp, Ticks)>,
+    /// A paused picture that never reached the glass was re-presented once
+    /// for this stamp (bounded: a hidden window does not loop).
+    represented: Option<Stamp>,
+    /// The last seek was a drag: paused video may stand in until it lands.
+    scrub: bool,
+    /// The last frame showed stand-ins: the landed counter it was drawn at.
+    stand_in: Option<u64>,
+    /// A dragged frame was drawn below full resolution: draw it exact once
+    /// the playhead has stayed put until then (host s).
+    refine_at: Option<f64>,
+    /// A paused picture drawn at once (a preview at the drawable's size)
+    /// that still owes its settled picture ([`FrameSpec::settles`]).
+    full_owed: Option<Stamp>,
+    /// That picture is on screen: its settled picture is asked for once
+    /// the viewer has rested until then (host s), unless it asks for
+    /// something newer first. It is drawn off this thread (`settle`) while
+    /// the preview stays up.
+    settle_at: Option<(Stamp, f64)>,
+    /// The stamp the settled picture is shown under: the one after the
+    /// preview's, taken when it was handed over. Any newer picture (a seek,
+    /// an edit, play) is a preview again.
+    full_for: Option<Stamp>,
+    /// A wide preview for this stamp fell back to the live renderer.
+    preview_fallback: Option<Stamp>,
+    /// First time a wide preview of this stamp needed override answers.
+    preview_pending: Option<(Stamp, f64)>,
+    /// A clock that stops on its own still owes the exact stopped frame.
+    was_playing: bool,
+    auto: policy::AutoQuality,
+    /// A transient refusal: draw again no earlier than this.
+    not_before: f64,
+    /// Frames in a row the layer gave no drawable (`nextDrawable` returned
+    /// nil). Each retry renders a whole frame, so they back off until one lands.
+    drawable_misses: u32,
+    /// Transient refusals in a row (fonts, GPU watchdog); retries back off
+    /// the same way, so a frame that keeps failing never renders at full rate.
+    refusals: u32,
+    /// When the frames started being refused as transient, or drawn with
+    /// override layers from an earlier frame, while they are.
+    waiting_since: Option<f64>,
+    /// When the capture asked for started waiting for its exact frame.
+    capture_waiting: Option<f64>,
+    prepared: f64,
+    lookahead: Lookahead,
+}
+/// Where media was last prepared ahead of the playhead, and the frames a
+/// video entering since then still needs prepared.
+#[derive(Default)]
+struct Lookahead {
+    /// The last look-ahead time and the video draws planned there.
+    last: Option<(Ticks, std::collections::HashSet<(String, u64)>)>,
+    /// Frames between two look-aheads where a video entered: its first
+    /// frame is among them, and the shared cache should hold it before the
+    /// playhead meets it. One is prepared per frame drawn.
+    refine: VecDeque<Ticks>,
+}
+impl Lookahead {
+    /// Notes what the look-ahead at `at` planned. A video new since the last
+    /// one entered between the two: queue every frame between them.
+    fn planned(&mut self, at: Ticks, videos: Vec<(String, u64)>, frame: i64) {
+        let videos: std::collections::HashSet<_> = videos.into_iter().collect();
+        if let Some((last, before)) = &self.last {
+            let (lo, hi) = (last.get().min(at.get()), last.get().max(at.get()));
+            let near = hi - lo
+                <= (2. * PREPARE_EVERY_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
+                    as i64;
+            if near && frame > 0 && !videos.is_subset(before) {
+                let mut t = lo - lo.rem_euclid(frame) + frame;
+                while t < hi && self.refine.len() < MAX_REFINE {
+                    self.refine.extend(Ticks::new(t).ok());
+                    t += frame;
+                }
+            }
+        }
+        self.last = Some((at, videos));
+    }
+}
+/// Entry frames queued at most (a quarter second at 120 fps).
+const MAX_REFINE: usize = 30;
+#[cfg(test)]
+mod lookahead_tests {
+    use super::*;
+    use pm_protocol::common::TICKS_PER_SECOND;
+
+    fn at(seconds: f64) -> Ticks {
+        Ticks::new((seconds * TICKS_PER_SECOND as f64) as i64).unwrap()
+    }
+
+    /// A video first planned at one look-ahead entered since the last: each
+    /// frame between them is queued, so its first frame is warmed. Known
+    /// videos, a jump, or the first look-ahead queue nothing.
+    #[test]
+    fn a_video_entering_between_look_aheads_queues_the_frames_between() {
+        let frame = TICKS_PER_SECOND / 24;
+        let clip = ("clip".to_owned(), 1);
+        let mut l = Lookahead::default();
+        l.planned(at(1.0), vec![], frame);
+        assert!(l.refine.is_empty());
+        l.planned(at(1.25), vec![clip.clone()], frame);
+        let queued: Vec<i64> = l.refine.drain(..).map(|t| t.get()).collect();
+        assert_eq!(
+            queued.len(),
+            5,
+            "the frames strictly between 1.0 s and 1.25 s"
+        );
+        assert!(
+            queued
+                .iter()
+                .all(|t| t % frame == 0 && *t > at(1.0).get() && *t < at(1.25).get())
+        );
+        l.planned(at(1.5), vec![clip.clone()], frame);
+        assert!(l.refine.is_empty(), "already planned");
+        l.planned(at(9.0), vec![clip, ("other".to_owned(), 1)], frame);
+        assert!(
+            l.refine.is_empty(),
+            "a jump says nothing about where it entered"
+        );
+    }
+}
+struct Flight {
+    id: u64,
+    stamp: Stamp,
+    moves: u64,
+    spec: FrameSpec,
+    camera_motion: bool,
+    /// `spec` is the final picture of its time (`FrameSpec::final_picture`).
+    settled: bool,
+    submission: render::Submission,
+    /// The completion callback has run, even if the drawable has yet to present.
+    gpu_done: bool,
+    drag_bytes: Option<u64>,
+    input: Option<f64>,
+    audio_host: Option<f64>,
+    pipeline: trace::Pipeline,
+    /// A playing frame's index and key in the disk render cache: gaps
+    /// between played frames are dropped frames (`DiskFrames::dropped`).
+    played: Option<(i64, [u8; 32])>,
+    /// Override layers this frame drew from an earlier answer.
+    late_layers: usize,
+    /// Read back only for the trace's picture hash, not asked as a capture.
+    picture_only: bool,
+}
+#[derive(Clone, Copy)]
+struct FlightSlot {
+    viewer: u64,
+    done: bool,
+    drag_bytes: Option<u64>,
+}
+
+impl Flight {
+    fn slot(&self) -> FlightSlot {
+        FlightSlot {
+            viewer: self.id,
+            done: self.gpu_done,
+            drag_bytes: self.drag_bytes,
+        }
+    }
+}
+
+/// Keep the two overlapping working sets within this allowance. Charge
+/// four working targets at the project's precision and one RGBA16F output
+/// per pixel. A cropped frame can allocate on its larger canvas.
+const DRAG_WORKING_BUDGET: u64 = 640 << 20;
+
+fn drag_working_bytes(output: Output, width: u32, height: u32, working_bpp: u64) -> Option<u64> {
+    (!output.is_zoomed()).then(|| u64::from(width) * u64::from(height) * (4 * working_bpp + 8))
+}
+
+fn drag_working_pixel_bytes(doc: &pm_model::Document) -> u64 {
+    match doc
+        .root()
+        .and_then(|root| pm_render::composite::project_color(root).ok())
+    {
+        Some(color) if color.precision == pm_protocol::color::Precision::Float32 => 16,
+        _ => 8, // Even eight-bit delivery renders into floating-point targets.
+    }
+}
+
+fn layer_drag_bytes(view: &View, runtime: &Runtime, now: f64) -> Option<u64> {
+    (view.editing
+        && !view.edit_rested
+        && !view.capture
+        && runtime.refine_at.is_none_or(|at| at > now))
+    .then_some(view.config.output)
+    .and_then(|out| {
+        let doc = &view
+            .transient_snapshot
+            .as_ref()
+            .unwrap_or(&view.config.snapshot)
+            .document;
+        drag_working_bytes(out, out.width, out.height, drag_working_pixel_bytes(doc))
+    })
+}
+
+/// An uncropped layer drag can start its next frame while the prior one
+/// renders. Leave only one frame ahead and wait for playing or zoomed work.
+fn has_render_slot(
+    flights: impl ExactSizeIterator<Item = FlightSlot>,
+    view: u64,
+    playing: bool,
+    next_drag_bytes: Option<u64>,
+) -> bool {
+    if flights.len() >= 3 {
+        return false;
+    }
+    if playing {
+        return true;
+    }
+    let mut unfinished = flights.filter(|f| f.viewer == view && !f.done);
+    unfinished.next().is_none_or(|first| {
+        first
+            .drag_bytes
+            .zip(next_drag_bytes)
+            .is_some_and(|(first, next)| first.saturating_add(next) <= DRAG_WORKING_BUDGET)
+            && unfinished.next().is_none()
+    })
+}
+
+/// A settled picture asked of the engine and not handed over yet.
+struct Settling {
+    id: u64,
+    stamp: Stamp,
+    preview: bool,
+    /// Set when its viewer takes a command: it gives way at once.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+/// A paused viewer whose settled picture is due.
+struct SettleAsk {
+    id: u64,
+    stamp: Stamp,
+    scene: Scene,
+    spec: FrameSpec,
+    mastering: color::Mastering,
+    resources: Arc<resources::ResourceSnapshot>,
+    focus_group: Option<String>,
+}
+/// The longest lead of a playing frame, in refreshes (50 ms at 120 Hz):
+/// what an edit made while playing waits at most before it is drawn.
+const MAX_LEAD_REFRESHES: f64 = 6.;
+/// A jump of more frames than this (2 s at 24 fps) between played frames
+/// is a seek, not a stall; a short seek taken for one only renders more.
+const DROPS_AT_MOST: i64 = 48;
+thread_local! {
+    // Studio captures use a separate renderer, reached through the compositor
+    // on this same worker. Exact reads and offscreen jobs keep their own policy.
+    static MATERIAL_PLAYBACK: std::cell::RefCell<Option<pm_render::media::Interrupt>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One frame taken from the shared state, drawn without its lock.
+struct Work {
+    transient: bool,
+    id: u64,
+    stamp: Stamp,
+    moves: u64,
+    scene: Scene,
+    setup_edition: Option<u64>,
+    /// What rendered frames are drawn from: a paused frame's media (never
+    /// Automatic's HD proxies), whatever this frame's moment reads.
+    rendered_media: Arc<pm_export::render::MediaPaths>,
+    spec: FrameSpec,
+    studio_preview: studio::Preview,
+    studio_view: studio::ViewCamera,
+    camera_motion: bool,
+    focus_group: Option<String>,
+    layer: Option<metal::MetalLayer>,
+    overlays: OverlayGeometry,
+    provider: Option<LockedOverlayProvider>,
+    capture: bool,
+    due: Option<f64>,
+    mastering: color::Mastering,
+    resources: Arc<resources::ResourceSnapshot>,
+    input: Option<f64>,
+    pipeline: trace::Pipeline,
+    audio_host: Option<f64>,
+    plan: Option<present::Plan>,
+    /// The composition's frame duration (0: not a whole number of ticks).
+    frame_ticks: i64,
+}
+/// How much of a frame's budget a video may wait for its exact frame.
+const DECODE_SHARE: f64 = 0.35;
+/// Clips this far ahead of the playhead open on background workers.
+/// Playback asks the extension realm for raster override layers ahead of the
+/// playhead, one batch at a time: far enough ahead that the answers land
+/// before their frames (the realm's measured time), as many frames per batch
+/// as cost about a tenth of a second. A realm slower than real time answers
+/// every few frames; the frames between draw the nearest answer. A frame
+/// rendered on disk is read, not drawn: nothing is asked for it.
+fn ask_ahead(
+    engine: &mut render::Engine,
+    disk: &render_cache::DiskFrames,
+    scene: &Scene,
+    spec: FrameSpec,
+    rate: Option<pm_protocol::common::PlaybackRate>,
+) {
+    let Some(store) = engine.compat().cloned() else {
+        return;
+    };
+    let Some(rate) = rate.filter(|r| r.num != 0) else {
+        return;
+    };
+    let frame = store.frame_ticks();
+    if frame <= 0 {
+        return;
+    }
+    let speed = rate.num as f64 / rate.den.max(1) as f64;
+    let Some((lead, frames)) = store.ahead(spec.time.get(), speed, spec.scale) else {
+        return;
+    };
+    let step = frame * i64::from(rate.num.signum());
+    // Land a frame early, on the frame grid.
+    let ahead = lead.as_secs_f64() * speed * pm_protocol::common::TICKS_PER_SECOND as f64;
+    let frames_ahead = (ahead / frame as f64).abs().ceil() as i64 + 1;
+    let at = (spec.time.get() + frames_ahead * step).max(0);
+    let Ok(at) = Ticks::new(at) else {
+        return;
+    };
+    if disk.rendered(scene, at) {
+        return;
+    }
+    let needs = engine.compat_needs(scene, at, spec);
+    store.request_ahead(needs, at.get(), frames, step);
+}
+
+/// A viewer whose settled picture waits for another's asks again this soon.
+const SETTLE_NEXT_SECONDS: f64 = 0.02;
+/// Asks the engine for `ask`'s settled picture: drawn off this thread, in
+/// slices that give way to this viewer's next command and leave every
+/// viewer's pictures the GPU first. The job, when one started.
+fn request_settle(
+    engine: &mut render::Engine,
+    shared: &Arc<Shared>,
+    ask: &SettleAsk,
+    recorder: Option<&trace::Recorder>,
+) -> (Settling, Result<render::Asked>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (id, stamp) = (ask.id, ask.stamp);
+    let spec = ask.spec;
+    engine.focus_group(ask.focus_group.clone());
+    engine.mastering = ask.mastering;
+    engine.set_resources(ask.resources.clone());
+    engine.use_compat_document(stamp.doc_id);
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Its viewer asked for something newer (a command not even taken yet
+    // counts), went away, or the service is stopping.
+    let (flag, service) = (cancel.clone(), Arc::downgrade(shared));
+    let stop = move || {
+        flag.load(Ordering::Acquire)
+            || service.upgrade().is_none_or(|shared| {
+                let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.stop
+                    || state
+                        .views
+                        .get(&id)
+                        .is_none_or(|v| v.stamp != stamp || !v.commands.is_empty())
+            })
+    };
+    // A command any viewer sent and the worker has not taken yet.
+    let service = Arc::downgrade(shared);
+    let pressing = move || {
+        service.upgrade().is_some_and(|shared| {
+            let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.views.values().any(|v| !v.commands.is_empty())
+        })
+    };
+    let gate = settle::gate(
+        shared.traffic.clone(),
+        Duration::from_secs_f64(policy::SETTLE_HOLD_SECONDS),
+        stop,
+        pressing,
+    );
+    #[cfg(test)]
+    let gate: pm_render::slices::Gate = {
+        let hold = Mutex::new(shared.settle_hold.lock().unwrap().take());
+        Arc::new(move |expected| {
+            if let Some(hold) = hold.lock().unwrap().take() {
+                hold();
+            }
+            gate(expected)
+        })
+    };
+    let asked = engine.settle(&ask.scene, spec, gate);
+    let now = trace::now();
+    if let Some(recorder) = recorder {
+        recorder.record(serde_json::json!({
+            "settle": match &asked {
+                Ok(render::Asked::Started) => "started",
+                Ok(render::Asked::Ready) => "ready",
+                Ok(render::Asked::Busy) => "busy",
+                Err(_) => "error",
+            },
+            "viewer_id": id, "viewport_preview": !spec.settled, "time": spec.time.get(), "at": now,
+        }));
+    }
+    (Settling { id, stamp, preview: !spec.settled, cancel }, asked)
+}
+
+fn settle(
+    engine: &mut render::Engine,
+    shared: &Arc<Shared>,
+    runtime: &mut BTreeMap<u64, Runtime>,
+    ask: SettleAsk,
+    recorder: Option<&trace::Recorder>,
+) -> Option<Settling> {
+    let (job, asked) = request_settle(engine, shared, &ask, recorder);
+    let (id, stamp) = (ask.id, ask.stamp);
+    let now = trace::now();
+    let mut state = shared.state.lock().unwrap();
+    let current = state
+        .views
+        .get(&id)
+        .is_some_and(|v| v.stamp == stamp && v.commands.is_empty());
+    let (Some(v), Some(r)) = (
+        state.views.get_mut(&id).filter(|_| current),
+        runtime.get_mut(&id),
+    ) else {
+        // Not its picture any more: one that started gives way by itself.
+        return matches!(asked, Ok(render::Asked::Started)).then_some(job);
+    };
+    match asked {
+        Ok(render::Asked::Started) => {
+            #[cfg(test)]
+            shared
+                .settling
+                .lock()
+                .unwrap()
+                .push((id, stamp, ask.spec.time, ask.spec.scale));
+            Some(job)
+        }
+        Ok(render::Asked::Ready) => {
+            // Kept from an earlier visit to this time: shown at once.
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            r.full_for = Some(v.stamp);
+            shared.wake.try_send(()).ok();
+            None
+        }
+        Ok(render::Asked::Busy) => {
+            r.settle_at = Some((stamp, now + SETTLE_NEXT_SECONDS));
+            None
+        }
+        Err(error) if render::transient(&error) => {
+            r.settle_at = Some((stamp, now + policy::SETTLE_IDLE_SECONDS));
+            None
+        }
+        Err(error) => {
+            v.status.error = Some(error.to_string());
+            None
+        }
+    }
+}
+
+const PREPARE_AHEAD_SECONDS: f64 = 0.75;
+const PREPARE_EVERY_SECONDS: f64 = 0.25;
+/// A transient refusal (fonts, GPU watchdog) waits this long to try again.
+const RETRY_SECONDS: f64 = 0.016;
+/// One frame, doubling per miss, to at most a second.
+fn drawable_retry(misses: u32) -> f64 {
+    (RETRY_SECONDS * f64::from(1u32 << misses.min(6))).min(1.)
+}
+/// A frame refused as transient this long is reported while it is retried.
+const WAITING_SHOWN_SECONDS: f64 = 3.0;
+/// A capture waiting this long for its exact frame fails, saying why.
+const CAPTURE_WAIT_SECONDS: f64 = 10.0;
+/// The viewer's note while extension layers keep showing an earlier frame.
+fn late_note(layers: usize) -> String {
+    match layers {
+        1 => "Still waiting: 1 extension layer shows an earlier frame.".into(),
+        n => format!("Still waiting: {n} extension layers show an earlier frame."),
+    }
+}
+/// A GPU lost again within this long of a rebuild backs off between these.
+const LOSS_WINDOW: Duration = Duration::from_secs(10);
+const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
+/// The skim audio's J/K/L rate for a skimmer that moved `seconds` of media
+/// in `elapsed` seconds: its direction, and 2x once it moves faster than
+/// one and a half times real time.
+fn skim_rate(seconds: f64, elapsed: f64) -> pm_protocol::common::PlaybackRate {
+    let speed = seconds / elapsed;
+    let num = if speed.abs() > 1.5 { 2 } else { 1 };
+    pm_protocol::common::PlaybackRate {
+        num: if seconds < 0. { -num } else { num },
+        den: 1,
+    }
+}
+/// Runs the worker; a panic in it (a bug a frame hit) must not leave every
+/// viewer blank, or poison the state the UI thread reads. The worker starts
+/// again on a fresh engine, as after a lost GPU, every view draws again, and
+/// the viewer reports what happened (its error line and the Error Log). Three
+/// panics within a minute stop it with that error showing.
+fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
+    let (fonts, compat, cache) = (
+        engine.fonts.clone(),
+        engine.compat.clone(),
+        engine.shader_cache.clone(),
+    );
+    let mut engine = Some(engine);
+    let mut recent = VecDeque::<std::time::Instant>::new();
+    while let Some(current) = engine.take() {
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(current, shared.clone(), &wakes)
+        }));
+        let Err(panic) = turn else { return };
+        shared.state.clear_poison();
+        shared.device.clear_poison();
+        shared.scopes.clear_poison();
+        let detail = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown cause".into());
+        eprintln!("Viewer worker panicked: {detail}");
+        let now = std::time::Instant::now();
+        recent.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        recent.push_back(now);
+        let next = (recent.len() < 3)
+            .then(|| {
+                pm_gpu::Gpu::new("pm-engine-service")
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .and_then(|gpu| render::Engine::with_shader_cache(gpu, cache.clone()))
+            })
+            .and_then(Result::ok);
+        let mut state = shared.state.lock().unwrap();
+        let restarted = next.is_some();
+        if !restarted {
+            state.halted = Some(detail.clone());
+        }
+        let now = trace::now();
+        for v in state.views.values_mut() {
+            surface::cancel(v, "surface query frame changed after worker restart");
+            export_estimate::cancel(v, "export estimate worker restarted");
+            v.status.error = Some(if restarted {
+                format!("The viewer restarted after an internal error.\n{detail}")
+            } else {
+                format!("The viewer stopped after an internal error.\n{detail}")
+            });
+            v.status.restarts += u64::from(restarted);
+            v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.dirty = true;
+            if restarted {
+                resume(v, now);
+            } else if std::mem::take(&mut v.capture) | std::mem::take(&mut v.capture_owed) {
+                v.status.capture_failed = Some(format!(
+                    "The viewer stopped after an internal error before the frame was captured.\n{detail}"
+                ));
+            }
+        }
+        state.notify();
+        if state.stop {
+            return;
+        }
+        drop(state);
+        if let Some(mut next) = next {
+            if let Some(fonts) = &fonts {
+                next.set_fonts(fonts.clone());
+            }
+            next.set_compat(compat.clone());
+            *shared.device.lock().unwrap() = next.metal().to_owned();
+            engine = Some(next);
+        }
+    }
+}
+
+/// What a restarted worker owes a view its old worker held: the transport
+/// (time, play state and rate, loop, audio scrub; the new transport opens
+/// its audio from the view's config) ahead of any command still queued, and
+/// a capture whose pixels never landed.
+fn resume(v: &mut View, now: f64) {
+    v.capture |= v.capture_owed;
+    let Some(clock) = v.status.clock else {
+        return;
+    };
+    let at = pm_protocol::common::HostMicros::new((now * 1e6) as u64)
+        .unwrap_or(pm_protocol::common::HostMicros::ZERO);
+    let mut restore = vec![
+        TransportCommand::SetLoop { range: v.looping },
+        TransportCommand::AudioScrub {
+            enabled: v.audio_scrub,
+        },
+        TransportCommand::Seek {
+            time: clock.media_time_at(at),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        },
+    ];
+    // The rate the old transport was running or starting at.
+    if v.desired_rate.num != 0 {
+        restore.push(TransportCommand::Play {
+            rate: v.desired_rate,
+        });
+    }
+    for cmd in restore.into_iter().rev() {
+        v.commands.push_front(cmd);
+    }
+}
+
+/// An autorelease pool for one pass of a long-lived thread's loop, popped when
+/// the pass ends however it ends (`continue`, `break`).
+struct LoopPool(*mut std::ffi::c_void);
+impl LoopPool {
+    fn push() -> Self {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+        }
+        // SAFETY: paired with the pop in Drop, on this thread, in LIFO order
+        // (pools pushed during the pass are popped within it).
+        Self(unsafe { objc_autoreleasePoolPush() })
+    }
+}
+impl Drop for LoopPool {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+        }
+        // SAFETY: the token from `push` on this thread.
+        unsafe { objc_autoreleasePoolPop(self.0) }
+    }
+}
+
+fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
+    // A stable observer survives cached sources; its work identity changes per frame.
+    let progress_work = Arc::new(Mutex::new(None::<(u64, Stamp)>));
+    let progress_context = progress_work.clone();
+    let weak = Arc::downgrade(&shared);
+    engine.studio_progress = Some(Arc::new(move |_request, progress| {
+        let Some((id, stamp)) = *progress_context.lock().unwrap() else { return true; };
+        let Some(shared) = weak.upgrade() else { return false; };
+        let mut state = shared.state.lock().unwrap();
+        if state.stop || state.halted.is_some() { return false; }
+        let Some(v) = state.views.get_mut(&id) else { return false; };
+        if v.stamp != stamp { return false; }
+        if v.status.refine_progress != Some(progress) || v.refine_progress_stamp != Some(stamp) {
+            v.status.refine_progress = Some(progress);
+            v.refine_progress_stamp = Some(stamp);
+            state.notify();
+        }
+        true
+    }));
+    engine.set_waker(Some(shared.wake.clone()));
+    engine.disk = Some(shared.disk.clone());
+    shared.disk.set_wake(shared.wake.clone());
+    shared.disk.set_activity(shared.interactive.clone());
+    let mut runtime = BTreeMap::<u64, Runtime>::new();
+    let mut flights = VecDeque::<Flight>::new();
+    let mut project_gpu_peak = 0;
+    // Each view's last played frame (disk render cache index).
+    let mut played: std::collections::HashMap<u64, i64> = Default::default();
+    let trace_path = trace::path().map(std::ffi::OsStr::to_os_string);
+    let recorder = trace_path.and_then(|path| match trace::Recorder::open(path) {
+        Ok(recorder) => Some(recorder),
+        Err(error) => {
+            eprintln!("Viewer diagnostic trace unavailable: {error}");
+            None
+        }
+    });
+    // Diagnostic (traced viewers, `PM_ENGINE_TRACE_PICTURES=1`): every
+    // playing frame's presented picture is read back as presented and its
+    // row carries a hash of its stored bytes (`Submission::picture_hash`),
+    // so two builds can be compared playing frame by playing frame. The readback costs time: never on in a timing run.
+    let trace_pictures =
+        recorder.is_some() && std::env::var_os("PM_ENGINE_TRACE_PICTURES").is_some();
+    // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
+    // tick, picture for the target vsync, unaligned audio start).
+    let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
+    let mut cursor = 0;
+    // Traced viewers: when the last retired frame's present pass left the GPU.
+    let mut gpu_free = 0f64;
+    let mut last_was_surface_query = false;
+    let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
+    // The settled picture being drawn off this thread, if one is.
+    let mut settling = None::<Settling>;
+    loop {
+        // Objects Metal and Core Animation autorelease on this thread outside
+        // a frame's own pool (a finished flight returning its drawable to the
+        // layer, device lookups after a rebuild) are drained every pass. This
+        // thread's implicit pool is never drained: it kept every closed
+        // project's viewer layer, and with it the layer's drawable pool.
+        let _pool = LoopPool::push();
+        let mut pass = trace::Pass::start(recorder.as_ref());
+        #[cfg(test)]
+        shared
+            .passes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(test)]
+        if shared
+            .lose_device
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            engine.destroy_device();
+        }
+        #[cfg(test)]
+        if shared
+            .invalid_call
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            engine.raise_validation_error();
+        }
+        #[cfg(test)]
+        if shared
+            .panic_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("injected viewer failure");
+        }
+        // Delivers a pending device-lost callback even while idle. One usage
+        // sample a pass: governing returns the usage it reported; `poll`
+        // runs wgpu callbacks only and changes none of the counted caches,
+        // but the device's allocation is read after it, as before.
+        let mut usage = engine.govern_memory();
+        engine.poll();
+        usage.gpu_allocated_bytes = engine.metal().current_allocated_size();
+        project_gpu_peak = project_gpu_peak.max(usage.gpu_allocated_bytes);
+        *shared.memory.lock().unwrap() = usage;
+        pass.mark("memory");
+        if engine.lost() {
+            // Work on the lost device never completes: forget it, rebuild,
+            // and draw every viewer again on the new device. A device lost
+            // again soon after a rebuild waits longer each time, and says so.
+            flights.clear();
+            backoff = if rebuilt_at.is_some_and(|t| t.elapsed() < LOSS_WINDOW) {
+                (backoff * 2).clamp(LOSS_BACKOFF.0, LOSS_BACKOFF.1)
+            } else {
+                Duration::ZERO
+            };
+            if !backoff.is_zero() {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.status.error = Some(format!(
+                        "The GPU keeps failing. Trying again in {} s.",
+                        backoff.as_secs_f64()
+                    ));
+                }
+                state.notify();
+                drop(state);
+                // Wakes do not cut the wait short; quitting does.
+                let until = std::time::Instant::now() + backoff;
+                while let Some(left) = until.checked_duration_since(std::time::Instant::now())
+                    && !shared.state.lock().unwrap().stop
+                {
+                    let _ = wakes.recv_timeout(left);
+                }
+            }
+            let rebuilt = engine.rebuild();
+            let mut state = shared.state.lock().unwrap();
+            if state.stop {
+                break;
+            }
+            match rebuilt {
+                Ok(next) => {
+                    engine = next;
+                    settling = None;
+                    rebuilt_at = Some(std::time::Instant::now());
+                    project_gpu_peak = 0;
+                    *shared.device.lock().unwrap() = engine.metal().to_owned();
+                    for (id, v) in state.views.iter_mut() {
+                        v.status.device_losses += 1;
+                        v.status.error = None;
+                        v.stamp.sequence += 1;
+                        bump_site(line!(), "");
+                        v.dirty = true;
+                        if let Some(r) = runtime.get_mut(id) {
+                            r.last = None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    for v in state.views.values_mut() {
+                        v.status.error = Some(format!("The GPU was lost and is not back yet: {e}"));
+                    }
+                }
+            }
+            state.notify();
+            drop(state);
+            if engine.lost() {
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        }
+        let mut state = shared.state.lock().unwrap();
+        for v in state.views.values_mut() {
+            for retired in v.retired_presenters.drain(..) {
+                engine.forget_presenter(retired);
+            }
+        }
+        // Completion is distinct from display. Never synthesize presentedTime.
+        let mut scrub_present_retry = f64::INFINITY;
+        let mut i = 0;
+        while i < flights.len() {
+            // Retired once its completion handler has recorded the outcome:
+            // Metal reports the status before that handler runs on its own
+            // queue, and a frame read in between looked failed (gpu_ok still
+            // false) and was never drawn again.
+            let gpu_ok = {
+                let trace = flights[i].submission.trace.lock().unwrap();
+                if trace.completed == 0. {
+                    i += 1;
+                    continue;
+                }
+                trace.gpu_ok
+            };
+            flights[i].gpu_done = true;
+            if gpu_ok && flights[i].submission.drawable.is_some() {
+                let flight = &flights[i];
+                let trace = flight.submission.trace.lock().unwrap();
+                let now = trace::now();
+                if trace.display.is_none() && now - trace.commit < 0.25 {
+                    // An untimed scrub can finish on the GPU but miss the
+                    // display. Give its current picture one earlier retry;
+                    // retain the original flight so its callback still wins
+                    // if it does get to the glass. Timed playback is unchanged.
+                    if flight.spec.moment == Moment::Scrub
+                        && let Some(view) = state.views.get_mut(&flight.id)
+                        && view.stamp == flight.stamp
+                        && view.commands.is_empty()
+                        && !view.hidden
+                        && !view.dirty
+                        && let Some(r) = runtime.get_mut(&flight.id)
+                        && r.scrub
+                        && r.last == Some((flight.stamp, flight.spec.time))
+                        && r.represented != Some(flight.stamp)
+                    {
+                        let retry = trace.completed + (3. * r.interval).max(0.025);
+                        if now >= retry {
+                            r.represented = Some(flight.stamp);
+                            view.dirty = true;
+                            view.status.represented += 1;
+                        } else {
+                            scrub_present_retry = scrub_present_retry.min(retry);
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+            let f = flights.remove(i).unwrap();
+            if !gpu_ok {
+                engine.clear_cache();
+            }
+            let mut represent = false;
+            if let Some(r) = runtime.get_mut(&f.id) {
+                let t = f.submission.trace.lock().unwrap();
+                match t.display.filter(|d| *d > 0.) {
+                    Some(display) => {
+                        r.grid = Some((display, r.interval));
+                        // Timed (playing) presents only; legacy requests the
+                        // target itself and never reads the estimate.
+                        if t.requested > 0. {
+                            r.lag.record(t.requested, display, r.interval);
+                        }
+                    }
+                    // Never shown on a layer: the screen may not hold it.
+                    None => {
+                        if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.spec.time))
+                        {
+                            r.last = None;
+                        }
+                        // A paused (untimed) present dropped during window
+                        // activation/reordering leaves an older picture on
+                        // screen; nothing else repaints while paused.
+                        if f.submission.drawable.is_some()
+                            && t.target == 0.
+                            && t.gpu_ok
+                            && r.represented != Some(f.stamp)
+                        {
+                            r.represented = Some(f.stamp);
+                            represent = true;
+                        }
+                    }
+                }
+                if !t.gpu_ok && r.last == Some((f.stamp, f.spec.time)) {
+                    r.last = None;
+                }
+                if t.gpu_ok && !t.cache_hit && f.spec.moment != Moment::Playing {
+                    let cost = (t.completed - t.worker_start) * 1000.;
+                    #[cfg(test)]
+                    let cost = if shared
+                        .slow_frames
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        f64::MAX
+                    } else {
+                        cost
+                    };
+                    r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
+                }
+                // A playing frame drawn here (not read from either cache).
+                if t.gpu_ok && !t.cache_hit && t.disk != 2 && f.spec.moment == Moment::Playing {
+                    let cost = (t.completed - t.worker_start) * 1000.;
+                    // The GPU's own work: from the render's submission to the
+                    // present pass (any wait for the frame before is in it).
+                    let gpu = ((t.gpu_start - t.render_submitted) * 1000.).max(0.);
+                    r.auto.record_play(
+                        cost,
+                        gpu,
+                        r.content_frame * 1000.,
+                        f.spec.scale,
+                        t.completed,
+                    );
+                }
+                // Frames skipped between two played ones at normal speed
+                // didn't play in real time: background rendering renders
+                // them.
+                match f.played {
+                    Some((n, id))
+                        if r.transport.rate() == pm_protocol::common::PlaybackRate::NORMAL =>
+                    {
+                        if let Some(before) = played.insert(f.id, n)
+                            && n > before + 1
+                            && n - before <= DROPS_AT_MOST
+                        {
+                            shared.disk.dropped(before, (n, id));
+                        }
+                    }
+                    _ => {
+                        played.remove(&f.id);
+                    }
+                }
+            }
+            if let Some(v) = state.views.get_mut(&f.id) {
+                let t = f.submission.trace.lock().unwrap();
+                // A playing frame read back for the trace alone: not a capture.
+                let traced_picture = f.picture_only && f.submission.readback.is_some();
+                let captured = f.submission.readback.is_some() && !f.picture_only;
+                v.status.over_budget_frames += u64::from(t.images_over.is_some());
+                if let Some(recorder) = &recorder {
+                    let mut row = serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
+                        "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
+                        "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
+                        "bumps":bumps_snapshot(),"present_requested":t.present_requested,"render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted,
+                        "images_over":t.images_over});
+                    // The render's own GPU time: from when the GPU was free
+                    // for it (its submission, or the frame before leaving
+                    // the GPU: one queue, in order) to the present pass.
+                    let render_gpu_ms = (t.render_submitted > 0. && t.gpu_start > 0.)
+                        .then(|| (t.gpu_start - t.render_submitted.max(gpu_free)) * 1e3);
+                    gpu_free = gpu_free.max(t.gpu_done);
+                    let r = runtime.get(&f.id);
+                    if let (Some(row), serde_json::Value::Object(more)) = (
+                        row.as_object_mut(),
+                        serde_json::json!({
+                            "interval": r.map(|r| r.interval), "ahead": r.map(|r| r.ahead),
+                            "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
+                            "source_stand_ins": t.source_stand_ins,
+                            "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
+                            "render_gpu_ms": render_gpu_ms,
+                            "render_size": f.spec.render_size(),
+                            "drawable_size": [f.submission.width, f.submission.height],
+                            "picture": traced_picture
+                                .then(|| format!("{:016x}", f.submission.picture_hash())),
+                            // Traced runs only: the decode service's running
+                            // counters and each memory client's weight, grant
+                            // and reported use, so a native stall can be read
+                            // against what the headless bench reports.
+                            "decode": pm_media::decode::diag::snapshot()
+                                .into_iter()
+                                .collect::<std::collections::BTreeMap<_, _>>(),
+                            "memory": pm_memory::clients(),
+                        }),
+                    ) {
+                        row.extend(more);
+                    }
+                    if !recorder.record(row) {
+                        v.status.error =
+                            Some("viewer diagnostic trace overflow/disconnected".into());
+                    }
+                }
+                if v.stamp != f.stamp
+                    && !only_moved(
+                        v,
+                        f.stamp,
+                        f.moves,
+                        f.spec.moment,
+                        f.camera_motion,
+                        captured,
+                    )
+                {
+                    v.status.stale_rejections += 1;
+                    // Its readback is for a stamp no one shows: ask again.
+                    v.capture |= captured;
+                    continue;
+                }
+                #[cfg(test)]
+                if t.gpu_ok
+                    && let Some(first) = shared.first_picture.lock().unwrap().take()
+                    && let Some(picture) =
+                        Picture::copy(&f.submission.surface, f.stamp, f.spec.time)
+                {
+                    let _ = first.send(picture);
+                }
+                if represent && v.commands.is_empty() {
+                    // Same stamp: an exact-cache re-present, not new content.
+                    v.dirty = true;
+                    v.status.represented += 1;
+                }
+                v.status.layer_failures = f.submission.failures.to_vec();
+                v.status.presented += 1;
+                // A captured frame's pixels stay with its stamp and time: a
+                // re-present of the same picture (no readback) keeps them.
+                let kept = v
+                    .status
+                    .frame
+                    .take()
+                    .filter(|r| r.stamp == f.stamp && r.time == f.spec.time)
+                    .and_then(|r| r.pixels);
+                // Captured pixels are delivered only from an exact frame: a
+                // paused, full-resolution picture with no stand-in and no
+                // disk frame. Anything else is asked again.
+                let readback = f
+                    .submission
+                    .readback
+                    .as_ref()
+                    .filter(|_| captured)
+                    .filter(|_| {
+                        let exact = f.spec.exact
+                            && f.spec.moment == Moment::Paused
+                            && f.spec.scale >= 1.
+                            && !f.submission.stand_ins
+                            && t.disk != 2;
+                        if !exact {
+                            v.capture = true;
+                            v.dirty = true;
+                        }
+                        exact
+                    });
+                pm_telemetry::note_viewer_frame(
+                    f.spec.moment == Moment::Playing,
+                    f.spec.moment == Moment::Scrub,
+                    t.display.filter(|t| *t > 0.),
+                );
+                v.status.frame = Some(FrameReport {
+                    stamp: f.stamp,
+                    time: f.spec.time,
+                    moment: f.spec.moment,
+                    scale: f.spec.scale,
+                    stand_ins: f.submission.stand_ins,
+                    settled: (f.settled || t.disk == 2) && !f.submission.stand_ins,
+                    cache_hit: t.cache_hit,
+                    gpu_ok,
+                    display_host_seconds: t.display.filter(|t| *t > 0.),
+                    completion_host_seconds: (t.completed > 0.).then_some(t.completed),
+                    worker_to_completion_ms: (t.completed > 0.)
+                        .then_some((t.completed - t.worker_start) * 1000.),
+                    input_host_seconds: f.input,
+                    audio_host_seconds: f.audio_host,
+                    pixels: readback.map(|_| f.submission.pixels()).or(kept),
+                });
+                // A newly settled picture is copied out of the pool, once:
+                // the viewer's still (`Picture`), without pinning a surface.
+                // Only at rest: frames read from disk are settled while
+                // playing, scrubbing or skimming too, and each copy is the
+                // whole picture, taken here under the state lock.
+                let resting = f.spec.moment == Moment::Paused
+                    && v.skim.is_none()
+                    && v.stamp == f.stamp
+                    && v.commands.is_empty()
+                    && runtime.get(&f.id).is_some_and(|r| {
+                        !r.scrub && r.transport.rate() == pm_protocol::common::PlaybackRate::STOPPED
+                    });
+                if resting
+                    && v.status.frame.as_ref().is_some_and(|r| r.settled && r.gpu_ok)
+                    && v.status.settled_picture.as_ref().is_none_or(|p| p.stamp != f.stamp || p.time != f.spec.time)
+                {
+                    v.status.settled_picture = Picture::copy(&f.submission.surface, f.stamp, f.spec.time);
+                    v.status.settled_copies += 1;
+                    v.settled_seq = SETTLED_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                }
+                // A stale, failed or dropped frame did not answer the input.
+                // Keep its origin through retries; never consume a newer one.
+                if t.gpu_ok
+                    && (t.display.is_some_and(|at| at > 0.) || f.submission.drawable.is_none())
+                    && v.input == f.input
+                {
+                    v.input = None;
+                }
+                if readback.is_some() {
+                    v.capture_owed = false;
+                }
+                // The fast paused picture is reported: its refinement, a
+                // new picture of the same time, is drawn next. (Asked for
+                // at submission, the new stamp made this report stale and
+                // the fast picture was never reported.)
+                // A picture read from disk is the composition-size frame
+                // already: nothing to refine.
+                if let Some(r) = runtime.get_mut(&f.id)
+                    && r.full_owed == Some(f.stamp)
+                {
+                    r.full_owed = None;
+                    r.settle_at = (t.disk != 2)
+                        .then(|| (f.stamp, trace::now() + policy::SETTLE_IDLE_SECONDS));
+                }
+            }
+            state.notify();
+        }
+        if state.stop {
+            break;
+        }
+        pass.mark("flights");
+        // A settled picture finished off this thread. It is shown only for
+        // the stamp it was asked for: the viewer's next frame, under a new
+        // stamp, presents it. Anything else keeps the preview.
+        // Judged by its own viewer's view and resources now, not by the
+        // last viewer this engine drew.
+        let asking = settling
+            .as_ref()
+            .and_then(|job| state.views.get(&job.id))
+            .map(|v| (v.mastering, v.resources.generation));
+        if let Some((timing, end)) = engine.take_settled(asking)
+            && let Some(job) = settling.take()
+        {
+            let now = trace::now();
+            let current = state
+                .views
+                .get(&job.id)
+                .is_some_and(|v| v.stamp == job.stamp && v.commands.is_empty())
+                && runtime.get(&job.id).is_some_and(|r| !r.transport.running());
+            let view = state.views.get_mut(&job.id).filter(|_| current);
+            let r = runtime.get_mut(&job.id).filter(|_| current);
+            let outcome = match (end, view, r) {
+                (render::Settled::Kept, Some(v), Some(r)) if job.preview => {
+                    v.dirty = true;
+                    r.preview_pending = None;
+                    "shown"
+                }
+                (render::Settled::Kept, Some(v), Some(r)) => {
+                    v.stamp.sequence += 1;
+                    bump_site(line!(), "");
+                    v.dirty = true;
+                    (r.full_owed, r.settle_at, r.full_for) = (None, None, Some(v.stamp));
+                    "shown"
+                }
+                (render::Settled::Kept, ..) => {
+                    // Not this viewer's picture any more; kept for when it is.
+                    engine.shelve_settled();
+                    "superseded"
+                }
+                (end, view, r) => {
+                    if job.preview
+                        && let Some(v) = view
+                    {
+                        // The live renderer can show its usual stand-ins or
+                        // errors if the background picture wasn't usable.
+                        v.dirty = true;
+                    }
+                    let (outcome, again) = match end {
+                        render::Settled::GaveWay => ("gave way", true),
+                        render::Settled::Unkept => ("unkept", true),
+                        render::Settled::Pending(needs) => {
+                            // Asked of the realm; its answers redraw.
+                            if current {
+                                engine.use_compat_document(job.stamp.doc_id);
+                                if let Some(store) = engine.compat() {
+                                    store.request(needs);
+                                }
+                            }
+                            ("pending", true)
+                        }
+                        render::Settled::Failed(error) if render::transient(&error) => {
+                            ("refused", true)
+                        }
+                        render::Settled::Failed(error) => {
+                            // The preview stays, and the viewer says why
+                            // its final picture is not there.
+                            if let Some(v) = state.views.get_mut(&job.id).filter(|_| current) {
+                                v.status.error = Some(error.to_string());
+                            }
+                            ("failed", false)
+                        }
+                        render::Settled::Kept => unreachable!("matched above"),
+                    };
+                    // Still this viewer's picture: asked for again once it
+                    // has rested.
+                    if let Some(r) = r {
+                        if job.preview {
+                            let wait_for_answer = outcome == "pending" && {
+                                let (stamp, since) = r.preview_pending.get_or_insert((job.stamp, now));
+                                if *stamp != job.stamp {
+                                    (*stamp, *since) = (job.stamp, now);
+                                }
+                                now - *since < WAITING_SHOWN_SECONDS
+                            };
+                            if !wait_for_answer && outcome != "gave way" {
+                                r.preview_fallback = Some(job.stamp);
+                            }
+                            r.not_before = now + SETTLE_NEXT_SECONDS;
+                        } else if again {
+                            r.settle_at = Some((job.stamp, now + policy::SETTLE_IDLE_SECONDS));
+                        }
+                    }
+                    outcome
+                }
+            };
+            #[cfg(test)]
+            shared.settle_ends.lock().unwrap().push(outcome);
+            if let Some(recorder) = &recorder {
+                let held = engine.settler_held().unwrap_or_default();
+                let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
+                recorder.record(serde_json::json!({
+                    "settled": outcome, "viewer_id": job.id, "viewport_preview": job.preview, "taken": now,
+                    "sent": timing.sent, "began": timing.began, "planned": timing.planned,
+                    "first_submission": timing.first_submission, "ended": timing.ended,
+                    "slices": timing.slices, "worst_slice_ms": timing.worst_slice_ms,
+                    "worst_unit_ms": timing.worst_unit_ms, "held_ms": timing.held_ms,
+                    "settler_kept_mib": mib(held.total()), "settler_peak_mib": mib(held.peak),
+                    "settler_budget_mib": mib(held.budget),
+                }));
+            }
+            state.notify();
+        }
+        pass.mark("settled");
+        if !last_was_surface_query
+            && state
+                .views
+                .values()
+                .any(|v| !v.surface_queries.is_empty() || !v.picker_samples.is_empty())
+        {
+            drop(state);
+            surface::run_one(&mut engine, &shared);
+            picker_sample::run_one(&mut engine, &shared);
+            last_was_surface_query = true;
+            continue;
+        }
+        last_was_surface_query = false;
+        let retired: Vec<_> = runtime
+            .keys()
+            .filter(|id| !state.views.contains_key(id))
+            .copied()
+            .collect();
+        let closed: Vec<_> = std::mem::take(&mut state.retired_documents)
+            .into_iter()
+            .filter(|doc| !state.views.values().any(|v| v.stamp.doc_id == *doc))
+            .collect();
+        if !retired.is_empty() || !closed.is_empty() {
+            let last_view_closed = state.views.is_empty();
+            if !closed.is_empty() && !flights.is_empty() {
+                // Let completion/presentation handlers give up the old
+                // command buffers before retiring their queues. No new work
+                // is submitted while a document is waiting for this drain.
+                state.retired_documents.extend(closed);
+                drop(state);
+                let _ = wakes.recv_timeout(Duration::from_millis(4));
+                continue;
+            }
+            if !closed.is_empty() {
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+            }
+            drop(state);
+            for id in retired {
+                runtime.remove(&id);
+            }
+            if !closed.is_empty() {
+                for doc in closed {
+                    if let Some(compat) = &engine.compat {
+                        compat.forget(doc);
+                    }
+                    shared.disk.forget_document(doc);
+                }
+                engine.release_project_memory();
+                settling = None;
+                // Queues and encoders can retain their high-water storage
+                // even after the renderer's caches have emptied.
+                if last_view_closed || project_gpu_peak >= PROJECT_GPU_RENEWAL_BYTES
+                    || engine.metal().current_allocated_size() >= PROJECT_GPU_RENEWAL_BYTES
+                {
+                    match objc2::rc::autoreleasepool(|_| {
+                        engine.rebuild().map(|next| engine = next)
+                    }) {
+                        Ok(()) => {
+                            project_gpu_peak = 0;
+                            let mut state = shared.state.lock().unwrap();
+                            *shared.device.lock().unwrap() = engine.metal().to_owned();
+                            for (id, view) in &mut state.views {
+                                view.stamp.sequence += 1;
+                                bump_site(line!(), "");
+                                view.dirty = true;
+                                if let Some(r) = runtime.get_mut(id) {
+                                    r.last = None;
+                                    (r.full_owed, r.settle_at, r.full_for) = (None, None, None);
+                                }
+                            }
+                            // The next submission retargets CAMetalLayer on
+                            // this worker, just as after a GPU loss.
+                            state.notify();
+                            #[cfg(test)]
+                            shared.project_device_renewals.fetch_add(1, std::sync::atomic::Ordering::Release);
+                        }
+                        Err(error) => eprintln!("Viewer cleanup could not renew the device: {error:#}"),
+                    }
+                    crate::memory::pressure_relief();
+                }
+                *shared.memory.lock().unwrap() = engine.memory_usage();
+                // Counted once it is all done and published (renewing the
+                // device takes seconds on a loaded machine): whoever sees
+                // the count sees the released state.
+                shared
+                    .project_releases
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
+            pass.mark("release");
+            continue;
+        }
+        // A new revision rebuilds the audio graph input, which walks the whole
+        // document (O(layers)). Do it without the state lock: the UI thread
+        // takes that lock to publish, configure and read status.
+        let stale: Vec<_> = state
+            .views
+            .iter()
+            .filter_map(|(id, v)| {
+                let r = runtime.get(id)?;
+                (r.revision != v.stamp.revision || r.content != v.content).then(|| {
+                    (
+                        *id,
+                        v.config.snapshot.clone(),
+                        v.config.media.audio_paths(v.media_mode),
+                        v.config.composition.clone(),
+                        v.stamp.revision,
+                        v.content,
+                    )
+                })
+            })
+            .collect();
+        if !stale.is_empty() {
+            drop(state);
+            let mut failures = Vec::new();
+            for (id, snapshot, media, composition, revision, content) in stale {
+                if let Some(r) = runtime.get_mut(&id) {
+                    if let Err(e) = r.transport.update(&snapshot, media, &composition) {
+                        failures.push((id, e.to_string()));
+                    }
+                    r.revision = revision;
+                    r.content = content;
+                }
+            }
+            // Fall through (no `continue`): a continuous stream of publications
+            // must not starve rendering. A newer publication's audio graph
+            // is picked up next pass, outside the lock as well.
+            state = shared.state.lock().unwrap();
+            pass.mark("audio graph");
+            if state.stop {
+                break;
+            }
+            for (id, error) in failures {
+                if let Some(v) = state.views.get_mut(&id) {
+                    v.status.error = Some(error);
+                }
+            }
+        }
+        let now = trace::now();
+        let landed = engine.media_landed();
+        let mut work = None;
+        let mut changed = false;
+        state.bound_settled_pictures();
+        let mut ids: Vec<_> = state.views.keys().copied().collect();
+        ids.sort_by_key(|id| (*id <= cursor, *id));
+        let mut ask = None::<SettleAsk>;
+        for id in ids {
+            let v = state.views.get_mut(&id).unwrap();
+            let r = runtime.entry(id).or_insert_with(|| {
+                let mut transport =
+                    transport::Transport::new(v.config.rate.exact_frame_ticks().unwrap());
+                transport.clock.set_end(v.config.end);
+                if v.config.audio {
+                    let levels_shared = shared.clone();
+                    let levels = Box::new(move |l| {
+                        if let Some(v) = levels_shared.state.lock().unwrap().views.get_mut(&id) {
+                            v.status.levels = Some(l);
+                        }
+                    });
+                    // No device or decoder is opened while holding state. The
+                    // AudioLink constructor only spawns its owner thread.
+                    if let Err(e) = transport.enable_audio(
+                        &v.config.snapshot.document,
+                        v.config.composition.clone(),
+                        v.config.media.audio_paths(v.media_mode),
+                        levels,
+                    ) {
+                        v.status.error = Some(e.to_string());
+                    }
+                }
+                if let Some(audio) = &transport.audio {
+                    v.audio_control = Arc::downgrade(audio);
+                    #[cfg(feature = "kernel")]
+                    {
+                        *v.audio_preview.lock().unwrap() = Some(audio.preview_sender());
+                    }
+                }
+                Runtime {
+                    transport,
+                    revision: v.stamp.revision,
+                    content: v.content,
+                    interval: 1. / 60.,
+                    next: now,
+                    lag: present::PresentLag::default(),
+                    grid: None,
+                    last: None,
+                    represented: None,
+                    ahead: 1.,
+                    content_frame: 0.,
+                    scrub: false,
+                    stand_in: None,
+                    refine_at: None,
+                    full_owed: None,
+                    settle_at: None,
+                    full_for: None,
+                    preview_fallback: None,
+                    preview_pending: None,
+                    was_playing: false,
+                    auto: Default::default(),
+                    not_before: 0.,
+                    drawable_misses: 0,
+                    refusals: 0,
+                    waiting_since: None,
+                    capture_waiting: None,
+                    prepared: 0.,
+                    lookahead: Lookahead::default(),
+                }
+            });
+            changed |= !v.commands.is_empty() || v.status.clock.is_none();
+            if let Some((target, interval)) = v.phase {
+                r.grid = Some((target, interval));
+            }
+            // Audio starts are placed on this viewer's last known vsync line.
+            r.transport.grid = r.grid.filter(|_| !legacy);
+            if let Some(sent) = v.commands_sent.take()
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({
+                    "commands": v.commands.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
+                    "sent": sent, "drained": now, "viewer_id": id,
+                }));
+            }
+            let mut pause_at = v.pause_requested_at.take();
+            let mut scrub_cmd = false;
+            while let Some(cmd) = v.commands.pop_front() {
+                // Any command (a seek, play) drops a pending settled picture,
+                // and one being drawn gives way.
+                (r.full_owed, r.settle_at, r.full_for) = (None, None, None);
+                if let Some(job) = settling.as_ref().filter(|job| job.id == id) {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+                if let TransportCommand::Seek { mode, .. } = cmd {
+                    r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                    scrub_cmd = r.scrub;
+                    r.refine_at = None;
+                }
+                let now = (now * 1e6) as i64;
+                if cmd == TransportCommand::Pause {
+                    r.transport.pause_at(pause_at.take().unwrap_or(now));
+                } else {
+                    r.transport.command(cmd, now);
+                }
+            }
+            // The exact frame of a stop: clear scrub only when stopping
+            // playback without an accompanying scrub seek (and do this before
+            // the in-flight flight cap so a later scrub does not see a stale
+            // was_playing=true and lose its Moment::Scrub).
+            let playing_now = r.transport.clock.is_playing();
+            if std::mem::replace(&mut r.was_playing, playing_now) && !playing_now {
+                if !scrub_cmd {
+                    r.scrub = false;
+                }
+                v.dirty = true;
+            }
+            // Nobody watches a hidden viewer: it does not play (its frames,
+            // audio and deadlines would hold exports, stills and the
+            // background render back). It pauses, and plays on when shown
+            // unless the person stopped or played it meanwhile.
+            if v.hidden && r.transport.running() && v.resume_on_show.is_none() {
+                let rate = r.transport.rate();
+                if v.enqueue(TransportCommand::Pause).is_ok() {
+                    v.resume_on_show = Some(rate);
+                }
+            } else if !v.hidden
+                && let Some(rate) = v.resume_on_show.take()
+            {
+                let _ = v.enqueue(TransportCommand::Play { rate });
+            }
+            // A settled picture being drawn for a stamp the viewer has left
+            // is never shown: it gives the worker back to the next picture
+            // (an edit moving again after a rest).
+            if let Some(job) = settling
+                .as_ref()
+                .filter(|job| job.id == id && job.stamp != v.stamp)
+            {
+                job.cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            if let Some(solo) = v.monitor.take() {
+                r.transport.monitor(solo);
+            }
+            if std::mem::take(&mut v.skim_moved) {
+                // A skim draws on the drag path; leaving returns exact.
+                r.scrub = v.skim.is_some();
+                r.refine_at = None;
+                (r.full_owed, r.settle_at, r.full_for) = (None, None, None);
+                if let Some(job) = settling.as_ref().filter(|job| job.id == id) {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+                let frame_ms = v.config.rate.exact_frame_ticks().map_or(0, |t| {
+                    (t as f64 * 1000. / pm_protocol::common::TICKS_PER_SECOND as f64).ceil() as u64
+                });
+                if let Some(a) = &r.transport.audio {
+                    a.send(audio::AudioCtl::Skim {
+                        at: v.skim.map(Ticks::get),
+                        rate: v.skim_rate,
+                        grain_ms: frame_ms.max(pm_audio::transport::GRAIN_MIN_MS as u64),
+                    });
+                }
+            }
+            if let (Some(on), Some(a)) = (v.skim_audio.take(), &r.transport.audio) {
+                a.send(audio::AudioCtl::SkimAudio(on));
+            }
+            let sample = r.transport.poll((now * 1e6) as i64);
+            if let Some((waited, fallback)) = r.transport.started.take()
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({
+                    "audio_start": true, "at": now, "viewer_id": id,
+                    "wait_ms": waited as f64 / 1e3, "fallback": fallback,
+                    "output_latency_us": sample.output_latency_us,
+                    "sample_host_us": sample.host_time.get(), "sample_media": sample.media_time.get(),
+                }));
+            }
+            changed |= v
+                .status
+                .clock
+                .as_ref()
+                .is_none_or(|old| old.rate != sample.rate || old.state != sample.state);
+            v.status.clock = Some(sample);
+            v.desired_rate = r.transport.rate();
+            v.status.audio_fallback = r.transport.fallback;
+            changed |= v.status.wants_display != r.transport.running();
+            v.status.wants_display = r.transport.running();
+            if let Some((_, interval)) = v.phase {
+                r.interval = interval;
+            }
+            let interval = r.interval;
+            if let Some((phase, _)) = v.phase.take()
+                && phase > now
+            {
+                // A late/repeated link tick must never rewind a submitted target.
+                r.next = r.next.max(phase);
+            }
+            if v.hidden {
+                continue;
+            }
+            let due = if r.transport.clock.is_playing() {
+                let mut due = r.next;
+                if due < now {
+                    let skipped = ((now - due) / interval).floor() as u64 + 1;
+                    v.status.skipped_targets += skipped;
+                    due += skipped as f64 * interval;
+                }
+                Some(due)
+            } else {
+                None
+            };
+            let playing = r.transport.clock.is_playing();
+            if settling.as_ref().is_some_and(|job| {
+                job.preview && job.id == id && job.stamp == v.stamp
+            }) {
+                continue;
+            }
+            if !has_render_slot(
+                flights.iter().map(Flight::slot),
+                id,
+                playing,
+                layer_drag_bytes(v, r, now),
+            ) {
+                continue;
+            }
+            // A playing frame starts a whole content frame before its vsync
+            // (24 fps at 120 Hz: five refreshes), so one that takes most of
+            // its content frame still lands on its own refresh; the timed
+            // present holds a finished frame in the layer until then, so
+            // pictures land on the refresh grid at the content's cadence.
+            // At least two refreshes when content changes at most every
+            // other refresh (WindowServer misses the vsync when GPU
+            // completion lands within ~2 ms of it): a drawable waits then
+            // at most one content frame, which three drawables absorb at
+            // one picture per content frame but not at the refresh rate.
+            let speed = sample.rate.num.unsigned_abs() as f64 / sample.rate.den.max(1) as f64;
+            let frame = v.config.rate.exact_frame_ticks().unwrap_or(1) as f64
+                / pm_protocol::common::TICKS_PER_SECOND as f64
+                / speed.max(1e-6);
+            r.content_frame = frame;
+            r.ahead = if !legacy && frame >= 1.99 * interval {
+                (frame / interval + 1e-3).floor().clamp(2., MAX_LEAD_REFRESHES)
+            } else {
+                1.
+            };
+            // The exact frame of a stand-in whose decode landed.
+            if r.stand_in.is_some_and(|at| at != landed) {
+                r.stand_in = None;
+                v.dirty = !playing || v.dirty;
+                // A frame held for a still being read draws at once.
+                r.not_before = r.not_before.min(now);
+            }
+            // The playhead stopped on a frame dragged at reduced resolution.
+            // A new picture of the same time: its own `frame:rendered`.
+            if !playing && r.refine_at.is_some_and(|at| now >= at) {
+                let edit_rest = if v.editing {
+                    policy::SETTLE_IDLE_SECONDS
+                } else {
+                    policy::SCRUB_SETTLE_SECONDS
+                };
+                if (v.editing || v.recent_edit)
+                    && let Some(at) = v.last_edit_at.filter(|at| now - *at < edit_rest)
+                {
+                    r.refine_at = Some(at + edit_rest);
+                } else {
+                    r.refine_at = None;
+                    r.scrub = false;
+                    v.edit_rested = v.editing;
+                    v.recent_edit = false;
+                    v.stamp.sequence += 1;
+                    bump_site(line!(), "");
+                    v.dirty = true;
+                }
+            }
+            if std::mem::take(&mut v.retry_now) {
+                r.not_before = r.not_before.min(now);
+            }
+            // Override answers landed for this viewer's document. A picture
+            // that waits for them (refused, drawn with a stand-in, or not
+            // drawn yet) is drawn again; a whole one stays as it is: its
+            // answers were all there, and drawing it again took the worker
+            // from a viewer that plays. A settled picture that waited for
+            // them is asked for now.
+            if std::mem::take(&mut v.answers) {
+                let whole = r.waiting_since.is_none()
+                    && r.stand_in.is_none()
+                    && v.status.frame.as_ref().is_some_and(|f| f.stamp == v.stamp);
+                v.dirty |= !whole;
+                if let Some((owed, at)) = r.settle_at.filter(|_| whole) {
+                    r.settle_at = Some((owed, at.min(now)));
+                }
+            }
+            // The paused picture has been on screen for the settle delay:
+            // its settled picture is asked for, and drawn off this thread
+            // while the preview stays up. A newer picture of this viewer
+            // settles on its own. Other viewers never put it off: its
+            // slices leave their pictures the GPU first and a playing
+            // viewer's frames their room (`settle::gate`), each held for a
+            // bounded time, so it settles in bounded time whatever they do.
+            if let Some((owed, at)) = r.settle_at
+                && now >= at
+            {
+                // An open edit that rests (text being typed, a drag held
+                // still) settles too: its drag frames are for while it moves.
+                let rests = v.quality.scale(&r.auto, Moment::Paused) == 1. && !r.scrub;
+                if owed != v.stamp || r.transport.running() || !rests {
+                    r.settle_at = None;
+                } else if v.dirty {
+                    // Its preview is being drawn again first.
+                    r.settle_at = Some((owed, now + policy::SETTLE_IDLE_SECONDS));
+                } else if settling.is_some() || ask.is_some() {
+                    // One settled picture at a time: this one is next.
+                    r.settle_at = Some((owed, now + SETTLE_NEXT_SECONDS));
+                } else {
+                    r.settle_at = None;
+                    let scene = Scene {
+                        doc: v
+                            .transient_snapshot
+                            .as_ref()
+                            .unwrap_or(&v.config.snapshot)
+                            .document
+                            .clone(),
+                        comp: v.config.composition.clone(),
+                        media: v.paused_paths.clone(),
+                        content: v.transient_content.unwrap_or(v.content),
+                    };
+                    let media = v.skim.unwrap_or(sample.media_time);
+                    let time = Ticks::new(r.transport.clock.snap(media.get()).max(0))
+                        .unwrap_or(Ticks::ZERO);
+                    let spec = FrameSpec {
+                        scale: FrameSpec::paused_full_scale(&scene, &v.config.output),
+                        exact: false,
+                        settled: true,
+                        ..FrameSpec::exact(time, v.config.output)
+                    };
+                    ask = Some(SettleAsk {
+                        id,
+                        stamp: v.stamp,
+                        scene,
+                        spec,
+                        mastering: v.mastering,
+                        resources: v.resources.clone(),
+                        focus_group: v.focus_group.clone(),
+                    });
+                }
+            }
+            if v.camera_rest_at.is_some_and(|at| now >= at) {
+                v.camera_rest_at = None;
+                v.dirty = true;
+            }
+            if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
+                continue;
+            }
+            if now < r.not_before {
+                continue;
+            }
+            // A timed present reaches glass `lag` after its request (measured
+            // from presentedTime). Pick the picture for that instant, and for
+            // forward play show each frame from the vsync nearest its onset,
+            // so picture onsets straddle their audio instead of trailing it.
+            // The request itself never depends on the estimate (see present).
+            let plan = due.map(|due| {
+                if legacy {
+                    present::Plan {
+                        requested: due,
+                        shown: due,
+                    }
+                } else {
+                    present::plan(due, interval, &r.lag, now)
+                }
+            });
+            let shown = plan.map(|p| p.shown);
+            let media = if let Some(shown) = shown {
+                let at = |s: f64| {
+                    let host = (s.max(0.) * 1e6) as u64;
+                    if pm_media::decode::diag::knob("PM_ABL_PLAY_START_FENCE") == Some(0) {
+                        // The old projection, for a controlled latency A/B.
+                        sample.media_time_at(pm_protocol::common::HostMicros::new(host).unwrap())
+                    } else {
+                        Ticks::new(r.transport.clock.picture_at(host as i64)).unwrap_or(Ticks::ZERO)
+                    }
+                };
+                let plain = at(shown);
+                let lead = at(shown + interval / 2.);
+                // A lead that wrapped to the loop start is the correct frame.
+                let forward = sample.rate.num > 0;
+                let inside = lead.get() < plain.get()
+                    || r.transport.clock.end().is_none_or(|end| lead.get() < end);
+                if forward && inside && !legacy {
+                    lead
+                } else {
+                    plain
+                }
+            } else {
+                // Paused under the skimmer: its time, not the playhead's.
+                v.skim.filter(|_| !playing).unwrap_or(sample.media_time)
+            };
+            let time =
+                Ticks::new(r.transport.clock.snap(media.get()).max(0)).unwrap_or(Ticks::ZERO);
+            r.next = due.unwrap_or(now) + interval;
+            let capture = v.capture;
+            if !legacy && due.is_some() && !v.dirty && !capture && r.last == Some((v.stamp, time)) {
+                // Held content frame: the layer already shows these pixels.
+                v.status.held_frames += 1;
+                continue;
+            }
+            let moment = if playing {
+                Moment::Playing
+            } else if r.scrub || (v.editing && !v.edit_rested) || v.recent_edit {
+                Moment::Scrub
+            } else {
+                Moment::Paused
+            };
+            let scene = Scene {
+                doc: v
+                    .transient_snapshot
+                    .as_ref()
+                    .unwrap_or(&v.config.snapshot)
+                    .document
+                    .clone(),
+                comp: v.config.composition.clone(),
+                media: if capture {
+                    Arc::new(v.config.media.export_paths(false))
+                } else if moment == Moment::Paused {
+                    v.paused_paths.clone()
+                } else {
+                    v.paths.clone()
+                },
+                content: v.transient_content.unwrap_or(v.content),
+            };
+            cursor = id;
+            let budget = frame.max(interval);
+            let camera_motion = !capture && v.camera_rest_at.is_some();
+            let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
+            let settling = r.full_for == Some(v.stamp);
+            let quality = if capture {
+                1.
+            } else {
+                v.quality.scale(
+                    &r.auto,
+                    if moment == Moment::Scrub
+                        && (!v.adapt_drags || ((v.editing || v.recent_edit) && !render::large_scene(&scene)))
+                    {
+                        Moment::Paused
+                    } else {
+                        moment
+                    },
+                )
+            };
+            // A paused frame at Full is shown at once at the drawable's
+            // size (a preview), then settles on the final picture of the
+            // whole composition at its own size once the viewer has rested
+            // (a capture reads that picture directly); playing and dragged
+            // frames keep their policy. (A play waiting for its audio start
+            // draws as it is.) Active 3D camera flight/orbit stays in preview
+            // mode and auto-settles via `camera_rest_at`.
+            let resting =
+                !camera_motion && quality == 1. && moment == Moment::Paused && !r.transport.running();
+            let text_grid = (!camera_motion
+                && quality == 1.
+                && (moment != Moment::Scrub || v.editing || v.recent_edit))
+                .then(|| engine.text_grid_scale(&scene, &v.config.output))
+                .flatten();
+            let (scale, settled) = if capture {
+                (full, false)
+            } else if let Some(scale) = text_grid {
+                // Keep the native glyph grid at Play and at Stop; the
+                // paused worker can settle directly without flashing a
+                // drawable-sized version of the title in between.
+                (scale, resting)
+            } else if resting && settling {
+                (full, true)
+            } else if resting && FrameSpec::exact(time, v.config.output).settles(&scene) {
+                r.full_owed = Some(v.stamp);
+                (1., false)
+            } else if resting {
+                (full, false)
+            } else {
+                (quality, false)
+            };
+            if let Some(drag_bytes) = layer_drag_bytes(v, r, now)
+                && scale > 1.
+                && !has_render_slot(
+                    flights.iter().map(Flight::slot),
+                    id,
+                    playing,
+                    Some((drag_bytes as f64 * scale * scale).ceil() as u64),
+                )
+            {
+                continue;
+            }
+            v.dirty = false;
+            work = Some(Work {
+                transient: v.transient_snapshot.is_some(),
+                id,
+                stamp: v.stamp,
+                moves: v.moves,
+                scene,
+                setup_edition: (moment == Moment::Scrub
+                    && v.editing
+                    && !capture
+                    && v.transient_snapshot.is_none())
+                .then_some(v.setup_edition)
+                .flatten(),
+                rendered_media: v.paused_paths.clone(),
+                spec: FrameSpec {
+                    time,
+                    output: v.config.output,
+                    // A capture reads the exact picture: a paused frame at full
+                    // resolution whatever the moment and quality, drawn only
+                    // from exact answers (no stand-in, cache or disk frame of
+                    // another moment).
+                    moment: if capture { Moment::Paused } else { moment },
+                    scale,
+                    decode_deadline: (playing && !capture).then(|| {
+                        std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
+                    }),
+                    exact: capture,
+                    settled,
+                },
+                studio_preview: if capture {
+                    studio::Preview::Final
+                } else if (playing || moment == Moment::Scrub || camera_motion)
+                    && matches!(v.studio_preview, studio::Preview::Refine | studio::Preview::Final)
+                {
+                    studio::Preview::Live
+                } else {
+                    v.studio_preview
+                },
+                studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
+                camera_motion: !capture && v.camera_rest_at.is_some(),
+                focus_group: if capture { None } else { v.focus_group.clone() },
+                layer: v.config.layer.clone(),
+                overlays: if v.overlay_time.is_none_or(|t| t == time) {
+                    v.overlays.clone()
+                } else {
+                    OverlayGeometry::default()
+                },
+                provider: v.locked_provider.clone(),
+                capture: {
+                    v.capture_owed |= v.capture;
+                    std::mem::take(&mut v.capture)
+                },
+                due,
+                mastering: v.mastering,
+                resources: v.resources.clone(),
+                input: v.input,
+                pipeline: v.pipeline,
+                audio_host: r
+                    .transport
+                    .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
+                    .map(|t| t / 1e6),
+                plan,
+                frame_ticks: v.config.rate.exact_frame_ticks().unwrap_or(0),
+            });
+            break;
+        }
+        // Only visible, running transport keeps the playback grant. Check
+        // every viewer even when the scheduler picked one and stopped scanning.
+        let visible_playback = state.views.iter().any(|(id, view)| {
+            !view.hidden
+                && runtime
+                    .get(id)
+                    .is_some_and(|r| r.transport.clock.is_playing())
+                && view.desired_rate != pm_protocol::common::PlaybackRate::STOPPED
+        });
+        engine.set_visible_playback(visible_playback);
+        // A view waiting out a missing drawable can't draw: exports go ahead.
+        let now = trace::now();
+        // A picture wanted and not submitted yet: a viewer to draw, a
+        // command to take, a play about to start.
+        let wanted = work.is_some()
+            || state.views.iter().any(|(id, v)| {
+                (v.dirty && !v.hidden && runtime.get(id).is_none_or(|r| r.not_before <= now))
+                    || !v.commands.is_empty()
+            })
+            || runtime
+                .values()
+                .any(|r| r.transport.running() && !r.transport.clock.is_playing());
+        // A settled picture is a picture someone is waiting for: jobs wait.
+        shared.interactive.set(
+            !flights.is_empty()
+                || wanted
+                || ask.is_some()
+                || settling.is_some()
+                || runtime.values().any(|r| r.transport.running())
+                // An export estimate measures this GPU: fills wait for it,
+                // as for an export, while it can run (one waiting for its 3D
+                // renderer to start measures nothing yet).
+                || state.views.values().any(|v| {
+                    v.export_estimate
+                        .as_ref()
+                        .is_some_and(export_estimate::Pending::runnable)
+                }),
+        );
+        // Its slices give those pictures the GPU first, and a playing
+        // viewer's frames their room.
+        let next_frame = runtime
+            .values()
+            .filter(|r| r.transport.clock.is_playing())
+            .map(|r| r.next - r.ahead * r.interval)
+            .fold(f64::INFINITY, f64::min);
+        shared
+            .traffic
+            .set(wanted, next_frame.is_finite().then_some(next_frame));
+        if changed {
+            state.notify();
+        }
+        pass.mark("schedule");
+        // A 3D scene's final picture is traced on this thread, as every 3D
+        // picture is (`render::Engine::draws_studio`): its viewer is drawn
+        // again for it under the stamp it shows (an export estimate holds
+        // that stamp).
+        let ask = ask.filter(|ask| {
+            if !shared.disk.draws_studio(&ask.scene)
+                && state
+                    .views
+                    .get(&ask.id)
+                    .is_none_or(|view| view.studio_view == studio::ViewCamera::Active)
+            {
+                return true;
+            }
+            if let (Some(v), Some(r)) = (state.views.get_mut(&ask.id), runtime.get_mut(&ask.id))
+                && v.stamp == ask.stamp
+            {
+                v.dirty = true;
+                (r.full_owed, r.settle_at, r.full_for) = (None, None, Some(v.stamp));
+            }
+            false
+        });
+        if let Some(ask) = ask {
+            if work.is_some() {
+                // A frame is due first; asked again at the next pass.
+                if let Some(r) = runtime.get_mut(&ask.id) {
+                    r.settle_at = Some((ask.stamp, now));
+                }
+            } else {
+                drop(state);
+                settling = settle(&mut engine, &shared, &mut runtime, ask, recorder.as_ref());
+                pass.mark("settle");
+                continue;
+            }
+        }
+        // A requested estimate never competes with viewer work, scanout or
+        // playback. Its small calibration passes check for new input between
+        // submissions, and stale results cannot enter the viewer's state.
+        if work.is_none() && flights.is_empty()
+            && !runtime.values().any(|r| r.transport.running())
+            && state.views.values().all(|v| !v.dirty && v.commands.is_empty() && v.surface_queries.is_empty() && v.picker_samples.is_empty())
+            && state.views.values().any(|v| v.export_estimate.as_ref().is_some_and(export_estimate::Pending::runnable))
+        {
+            drop(state);
+            export_estimate::run_one(&mut engine, &shared);
+            continue;
+        }
+        if let Some(Work {
+            transient,
+            id,
+            stamp,
+            moves,
+            scene,
+            setup_edition,
+            rendered_media,
+            spec,
+            studio_preview,
+            studio_view,
+            camera_motion,
+            focus_group,
+            layer,
+            overlays,
+            provider,
+            capture,
+            due,
+            mastering,
+            resources,
+            input,
+            pipeline,
+            audio_host,
+            plan,
+            frame_ticks,
+        }) = work
+        {
+            let superseded = &shared.superseded;
+            let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
+            let superseded = superseded.clone();
+            let interrupted = || superseded.load(std::sync::atomic::Ordering::Acquire) != armed;
+            let started = trace::now();
+            drop(state);
+            let trace = Arc::new(Mutex::new(trace::Trace {
+                worker_start: now,
+                target: due.unwrap_or(0.),
+                requested: plan.filter(|_| !legacy).map_or(0., |p| p.requested),
+                predicted: plan.map_or(0., |p| p.shown),
+                count_work: recorder.is_some(),
+                ..Default::default()
+            }));
+            engine.studio_preview(studio_preview);
+            engine.studio_camera(studio_view);
+            engine.camera_motion(camera_motion);
+            engine.focus_group(focus_group.clone());
+            engine.mastering = mastering;
+            engine.set_resources(resources.clone());
+            engine.use_compat_document(stamp.doc_id);
+            engine.reuse_scene_setup(&scene, setup_edition);
+            let overrides = engine
+                .compat()
+                .filter(|store| store.producing_now())
+                .map(|store| store.cache_identity());
+            shared.disk.viewing(spec.render_size());
+            // Fonts sync before the cache observes: a font change is seen
+            // before this frame looks for a disk frame.
+            let fonts = engine.font_generation();
+            // And the output tone of this frame's media as they are now,
+            // before the cache's identity takes it.
+            engine.sync_tone(&scene);
+            // Rendered frames are a paused frame's picture: observed (and
+            // so fingerprinted and filled) with its media even while a
+            // playing frame reads an HD proxy, or they would be drawn from
+            // the proxy and orphaned at every pause and play.
+            let rendered = Scene {
+                media: rendered_media,
+                ..scene.clone()
+            };
+            // Partial definitions while extensions load are never a fill's
+            // source: its frames would be drawn without their effects.
+            // A position-only preview has no disk frame for its new revision.
+            // Index the final state once the edit rests or finishes.
+            if !transient
+                && setup_edition.is_none()
+                && !engine.definitions_pending()
+                && shared.disk.observe(
+                    &rendered,
+                    engine.definitions(),
+                    overrides,
+                    engine.tone_identity(),
+                    fonts,
+                    stamp.doc_id,
+                    spec.time,
+                )
+            {
+                // A frame uploaded ahead is of the state before.
+                engine.drop_upload_ahead();
+                if let Some(recorder) = &recorder {
+                    recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+                }
+            }
+            pass.mark("observe");
+            if spec.wide_viewport(&scene)
+                && !engine.definitions_pending()
+                && !engine.draws_studio(&scene, spec.time)
+                && runtime.get(&id).is_none_or(|r| r.preview_fallback != Some(stamp))
+            {
+                let ask = SettleAsk {
+                    id,
+                    stamp,
+                    scene: scene.clone(),
+                    spec,
+                    mastering,
+                    resources,
+                    focus_group,
+                };
+                let asked = if settling.is_some() {
+                    Ok(render::Asked::Busy)
+                } else {
+                    let (job, asked) = request_settle(&mut engine, &shared, &ask, recorder.as_ref());
+                    if matches!(asked, Ok(render::Asked::Started)) {
+                        settling = Some(job);
+                    }
+                    asked
+                };
+                match asked {
+                    Ok(render::Asked::Ready) => {}
+                    Ok(asked) => {
+                        let mut state = shared.state.lock().unwrap();
+                        if let Some(v) = state.views.get_mut(&id).filter(|v| v.stamp == stamp) {
+                            v.input = v.input.or(input);
+                            if matches!(asked, render::Asked::Busy) {
+                                v.dirty = true;
+                                if let Some(r) = runtime.get_mut(&id) {
+                                    r.not_before = trace::now() + SETTLE_NEXT_SECONDS;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.preview_fallback = Some(stamp);
+                        }
+                    }
+                }
+            }
+            let landed_before = engine.media_landed();
+            let tap = shared
+                .scopes
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(viewer, _)| *viewer == id)
+                .map(|(_, tap)| tap.clone());
+            if tap.is_some() && engine.scope_frames.is_none() {
+                engine.scopes_changed();
+            }
+            engine.scope_frames = tap;
+            #[cfg(test)]
+            if shared
+                .panic_frames
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                panic!("injected frame failure");
+            }
+            let picture_only = trace_pictures && spec.moment == Moment::Playing && !capture;
+            // Whose frame a 3D refinement's progress belongs to.
+            *progress_work.lock().unwrap() = Some((id, stamp));
+            let result = if interrupted() {
+                Err(pm_render::RenderError::Abandoned.into())
+            } else {
+                provider
+                    .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
+                    .and_then(|overlays| {
+                        let read = if capture {
+                            render::Readback::Capture
+                        } else if picture_only {
+                            render::Readback::Presented
+                        } else {
+                            render::Readback::None
+                        };
+                        let interrupt = (superseded.clone(), armed);
+                        if spec.moment == Moment::Playing {
+                            engine.set_playback_interrupt(Some(interrupt.clone()));
+                        } else {
+                            engine.set_frame_interrupt(&scene, Some(interrupt.clone()));
+                        }
+                        if matches!(spec.moment, Moment::Playing | Moment::Scrub) && !spec.exact {
+                            MATERIAL_PLAYBACK.replace(Some(interrupt));
+                        }
+                        let frame =
+                            engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
+                        MATERIAL_PLAYBACK.replace(None);
+                        if spec.moment == Moment::Playing {
+                            engine.set_playback_interrupt(None);
+                        } else {
+                            engine.set_frame_interrupt(&scene, None);
+                        }
+                        frame
+                    })
+            };
+            *progress_work.lock().unwrap() = None;
+            pass.mark("frame");
+            // Media ahead of the playhead is prepared after this frame is
+            // submitted: building its plan must not delay this present.
+            let large_scene = render::large_scene(&scene);
+            let mut prepare_at = None;
+            let mut refine_at = None;
+            if spec.moment == Moment::Playing
+                && let Some(r) = runtime.get_mut(&id)
+            {
+                if now - r.prepared >= PREPARE_EVERY_SECONDS {
+                    let ahead = (PREPARE_AHEAD_SECONDS
+                        * pm_protocol::common::TICKS_PER_SECOND as f64)
+                        * f64::from(r.transport.rate().num.signum());
+                    let at = (spec.time.get() + ahead as i64).max(0);
+                    prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
+                } else {
+                    refine_at = r.lookahead.refine.front().copied();
+                }
+            } else if let Some(r) = runtime.get_mut(&id) {
+                r.lookahead = Lookahead::default();
+            }
+            #[cfg(test)]
+            if let Some(hook) = shared.before_submit.lock().unwrap().take() {
+                hook();
+            }
+            // Publication/resize and final submission are serialized by this
+            // short lock. Render and drawable acquisition never hold it.
+            let mut request_overrides = None;
+            let mut refine_overrides = false;
+            let mut state = shared.state.lock().unwrap();
+            if let Some(v) = state.views.get_mut(&id) {
+                // Input and the Metal handoff share this lock. No obsolete
+                // result can reach the drawable after newer input takes it.
+                let abandoned = matches!(
+                    result.as_ref().err().and_then(|e| e.downcast_ref::<pm_render::RenderError>()),
+                    Some(pm_render::RenderError::Abandoned)
+                );
+                if abandoned
+                    || interrupted()
+                    || (v.stamp != stamp
+                        && !only_moved(v, stamp, moves, spec.moment, camera_motion, capture))
+                {
+                    if let Some(recorder) = &recorder {
+                        recorder.record(serde_json::json!({
+                            "rejected_before_commit": true, "at": trace::now(),
+                            "view_stamp": format!("{:?}", v.stamp), "frame_stamp": format!("{:?}", stamp),
+                            "view_moves": v.moves, "frame_moves": moves,
+                            "moment": format!("{:?}", spec.moment), "capture": capture,
+                            "knob": pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE"),
+                        }));
+                    }
+                    v.status.stale_rejections += 1;
+                    v.capture |= capture;
+                    v.dirty = true;
+                    if spec.moment != Moment::Playing
+                        && let Some(r) = runtime.get_mut(&id)
+                    {
+                        r.auto.record_interrupted(
+                            (trace::now() - started) * 1000.,
+                            r.interval * 1000.,
+                            spec.scale,
+                        );
+                    }
+                    continue;
+                }
+                if let Some(failure) = &engine.definition_failure {
+                    v.status.error = Some(failure.clone());
+                }
+                if v.status.missing_effects != engine.missing_effects {
+                    v.status.missing_effects = engine.missing_effects.clone();
+                }
+                let owners: Vec<_> = v
+                    .resources
+                    .unavailable
+                    .iter()
+                    .filter(|u| {
+                        engine
+                            .missing_effects
+                            .iter()
+                            .any(|m| resources::provides(&u.id, &m.effect))
+                    })
+                    .cloned()
+                    .collect();
+                if v.status.unavailable != owners {
+                    v.status.unavailable = owners;
+                }
+                match result {
+                    Ok(Some(mut s)) => {
+                        #[cfg(test)]
+                        shared
+                            .drawn
+                            .lock()
+                            .unwrap()
+                            .push((stamp, spec.time, spec.scale));
+                        v.status.error = None;
+                        let late_layers = s.compat_late.len();
+                        // Ask from the current plan when we skip building
+                        // a second plan ahead of the playhead.
+                        let late = std::mem::take(&mut s.compat_late);
+                        if !late.is_empty()
+                            && (spec.moment == Moment::Scrub
+                                || (spec.moment == Moment::Playing && large_scene))
+                        {
+                            request_overrides = Some(late);
+                        }
+                        // The drawable was another size than configured (a
+                        // resize whose publication lagged): later frames
+                        // render at the size actually shown.
+                        let shown = v.config.output.resized(s.width, s.height);
+                        if s.drawable.is_some() && shown != v.config.output {
+                            v.config.output = shown;
+                            v.dirty = true;
+                        }
+                        v.status.stand_in_frames +=
+                            u64::from(s.stand_ins && spec.moment == Moment::Playing);
+                        // A share of Full: a paused frame rendered above the
+                        // drawable is Full.
+                        v.status.effective_quality = spec.scale.min(1.);
+                        if let Some(r) = runtime.get_mut(&id) {
+                            // Every dragged frame settles: once the playhead
+                            // rests, the same time is drawn again exact.
+                            if spec.moment == Moment::Scrub {
+                                // An open edit rests a little longer: its
+                                // exact picture is not interrupted by the
+                                // next step (a key typed at a person's pace).
+                                let rest = if v.editing {
+                                    policy::SETTLE_IDLE_SECONDS
+                                } else {
+                                    policy::SCRUB_SETTLE_SECONDS
+                                };
+                                let moved_at = v
+                                    .last_edit_at
+                                    .filter(|_| v.editing || v.recent_edit)
+                                    .unwrap_or(v.pipeline.request);
+                                r.refine_at = Some(moved_at + rest);
+                            }
+                            if capture {
+                                r.capture_waiting = None;
+                            }
+                            r.stand_in = s.stand_ins.then_some(landed_before);
+                            r.drawable_misses = 0;
+                            r.refusals = 0;
+                            // Override layers drawn from an earlier frame are
+                            // still waited for: the wait goes on, and past a
+                            // few seconds the viewer says so.
+                            if late_layers == 0 {
+                                r.waiting_since = None;
+                            } else {
+                                let now = trace::now();
+                                let since = *r.waiting_since.get_or_insert(now);
+                                if now - since >= WAITING_SHOWN_SECONDS {
+                                    v.status.error = Some(late_note(late_layers));
+                                }
+                            }
+                        }
+                        #[cfg(test)]
+                        {
+                            s.before_completed = shared.before_completed.lock().unwrap().take();
+                            if shared
+                                .invalidate_next_submission
+                                .swap(false, std::sync::atomic::Ordering::Relaxed)
+                            {
+                                engine.invalidate_submission(&mut s);
+                            }
+                        }
+                        let completed = Arc::downgrade(&shared);
+                        s.submit_notifying(
+                            plan.map(|p| p.requested),
+                            Some(Arc::new(move || {
+                                // Bounded tokens cannot lose a wake; callbacks
+                                // never acquire the service state lock.
+                                if let Some(completed) = completed.upgrade() {
+                                    completed.wake.try_send(()).ok();
+                                }
+                            })),
+                        );
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.last = Some((stamp, spec.time));
+                        }
+                        let played = (spec.moment == Moment::Playing)
+                            .then(|| shared.disk.frame_id(&scene, spec.time))
+                            .flatten();
+                        flights.push_back(Flight {
+                            id,
+                            stamp,
+                            moves,
+                            spec,
+                            camera_motion,
+                            settled: spec.final_picture(&scene),
+                            submission: s,
+                            gpu_done: false,
+                            drag_bytes: (spec.moment == Moment::Scrub && !spec.exact)
+                                .then(|| spec.render_size())
+                                .and_then(|size| {
+                                    drag_working_bytes(
+                                        spec.output,
+                                        size.width,
+                                        size.height,
+                                        drag_working_pixel_bytes(&scene.doc),
+                                    )
+                                }),
+                            input,
+                            audio_host,
+                            pipeline,
+                            played,
+                            late_layers,
+                            picture_only,
+                        });
+                        #[cfg(test)]
+                        if spec.moment != Moment::Playing {
+                            let unfinished =
+                                flights.iter().filter(|f| f.id == id && !f.gpu_done).count();
+                            shared
+                                .paused_flight_peak
+                                .fetch_max(unfinished, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Ok(None) => {
+                        v.capture |= capture;
+                        v.status.no_drawable += 1;
+                        v.dirty = true;
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.drawable_misses = r.drawable_misses.saturating_add(1);
+                            r.not_before = trace::now() + drawable_retry(r.drawable_misses);
+                        }
+                    }
+                    Err(e) if e.is::<render::SettledPending>() => {
+                        // The settled picture handed over is gone (its
+                        // kept surface was let go, or the drawable is
+                        // another size now): the preview is drawn, and
+                        // settles again.
+                        v.dirty = true;
+                        v.input = input;
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.full_for = None;
+                        }
+                    }
+                    Err(e) if render::transient(&e) => {
+                        v.capture |= capture;
+                        v.dirty = true;
+                        // A raster override's layers: asked of the realm; its
+                        // answers redraw (`CompatStore::answer_all`).
+                        let pending = match e.downcast_ref::<pm_render::RenderError>() {
+                            Some(pm_render::RenderError::CompatPending(needs)) => {
+                                Some(needs.clone())
+                            }
+                            _ => None,
+                        };
+                        if spec.moment != Moment::Playing || large_scene {
+                            refine_overrides = pending.is_some()
+                                && !large_scene
+                                && runtime.get(&id).is_some_and(|r| r.full_owed == Some(stamp));
+                            request_overrides = pending;
+                        }
+                        if let Some(recorder) = &recorder {
+                            recorder.record(serde_json::json!({
+                                "refused": refusal_kind(&e),
+                                "time": spec.time.get(),
+                                "at": trace::now(),
+                            }));
+                        }
+                        if let Some(r) = runtime.get_mut(&id) {
+                            let now = trace::now();
+                            r.refusals = r.refusals.saturating_add(1);
+                            // A playing frame retries at once each tick: a
+                            // backoff doubled up to 1 s held playback for a
+                            // second after a few refusals (a shader compiling).
+                            r.not_before = now
+                                + if spec.moment == policy::Moment::Playing {
+                                    RETRY_SECONDS
+                                } else {
+                                    drawable_retry(r.refusals - 1)
+                                };
+                            // A still being read: drawn again when it lands
+                            // (`media_landed`), not by polling a stalled read.
+                            if matches!(
+                                e.downcast_ref::<pm_render::RenderError>(),
+                                Some(pm_render::RenderError::MediaPending)
+                            ) {
+                                r.stand_in = Some(landed);
+                                if spec.moment != policy::Moment::Playing {
+                                    r.not_before = now + 1.;
+                                }
+                            }
+                            // Retried for good, but never silently: past a few
+                            // seconds the viewer says what it waits for.
+                            let since = *r.waiting_since.get_or_insert(now);
+                            if now - since >= WAITING_SHOWN_SECONDS {
+                                v.status.error = Some(format!("Still waiting: {e}"));
+                                v.waiting_definitions = e.is::<render::DefinitionsPending>();
+                            }
+                            // A capture waits for its exact frame, but not
+                            // forever: past its bound it fails, saying why.
+                            if capture {
+                                let since = *r.capture_waiting.get_or_insert(now);
+                                if now - since >= CAPTURE_WAIT_SECONDS {
+                                    r.capture_waiting = None;
+                                    v.capture = false;
+                                    v.capture_owed = false;
+                                    v.status.capture_failed = Some(format!(
+                                        "The exact frame could not be captured: still waiting after {CAPTURE_WAIT_SECONDS} s ({e})."
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        v.status.error = Some(e.to_string());
+                        if capture {
+                            v.capture_owed = false;
+                            v.status.capture_failed =
+                                Some(format!("The exact frame could not be captured: {e}"));
+                        }
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.waiting_since = None;
+                            r.capture_waiting = None;
+                        }
+                    }
+                }
+            }
+            state.notify();
+            drop(state);
+            pass.mark("submit");
+            if !interrupted()
+                && let Some(needs) = request_overrides
+                && let Some(store) = engine.compat().cloned()
+            {
+                store.request(needs);
+                // Refinement's answers queue behind the frame on screen.
+                if refine_overrides && !interrupted() {
+                    let scale = FrameSpec::paused_full_scale(&scene, &spec.output);
+                    let ahead = engine.compat_needs(&scene, spec.time, FrameSpec { scale, ..spec });
+                    if !interrupted() {
+                        store.request_behind(ahead);
+                    }
+                }
+            }
+            // Traced viewers: what this thread does after a playing frame
+            // before it can take the next one.
+            let after = (recorder.is_some() && spec.moment == Moment::Playing).then(trace::now);
+            let start = after.unwrap_or_default();
+            let (mut asked, mut uploaded) = (start, start);
+            // Speculation gets only the slack left by the foreground
+            // frame. Heavy scenes cannot afford a second inline plan.
+            let slack = || {
+                !interrupted() && (!large_scene || due.is_some_and(|at| at - trace::now() > 0.004))
+            };
+            if spec.moment == Moment::Playing && slack() {
+                let rate = runtime.get(&id).map(|r| r.transport.rate());
+                if !large_scene {
+                    ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                }
+                if after.is_some() {
+                    asked = trace::now();
+                }
+                // The next frame, if it is rendered, is uploaded in this
+                // frame's slack instead of at its own turn.
+                let step = frame_ticks * i64::from(rate.map_or(1, |r| r.num.signum()));
+                if slack() && let Ok(next) = Ticks::new(spec.time.get() + step) {
+                    engine.upload_ahead(&scene, next);
+                }
+                if after.is_some() {
+                    uploaded = trace::now();
+                }
+            }
+            // A frame rendered on disk is read, not drawn: planning it and
+            // opening its media ahead would only hold this thread (a quarter
+            // of a second on a heavy project) while frames are due.
+            // A composition without stills or videos has none to open ahead.
+            let mut prepared = None;
+            if slack() {
+                if let Some(at) = prepare_at {
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.prepared = now;
+                    }
+                    if (large_scene || engine.has_visual_media(&scene))
+                        && !shared.disk.rendered(&scene, at)
+                    {
+                        let videos = engine.prepare(&scene, at, spec);
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.lookahead.planned(at, videos, frame_ticks);
+                        }
+                        prepared = Some("ahead");
+                    }
+                } else if let Some(at) = refine_at {
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.lookahead.refine.pop_front();
+                    }
+                    if !shared.disk.rendered(&scene, at) {
+                        engine.prepare(&scene, at, spec);
+                        prepared = Some("entry");
+                    }
+                }
+            }
+            if let (Some(recorder), Some(start)) = (&recorder, after) {
+                recorder.record(serde_json::json!({
+                    "after_frame": true, "at": start, "time": spec.time.get(), "viewer_id": id,
+                    "ask_ahead_ms": (asked - start) * 1e3,
+                    "upload_ahead_ms": (uploaded - asked) * 1e3,
+                    "prepare_ms": (trace::now() - uploaded) * 1e3,
+                    "prepared": prepared,
+                    "realm": engine.compat().map(|store| store.trace()),
+                }));
+            }
+            pass.mark("ahead");
+        } else {
+            let waiting = runtime
+                .values()
+                .any(|r| r.stand_in.is_some() || r.not_before > now);
+            // A dragged frame waiting to be drawn exact wakes the loop then.
+            // A viewer without a slot is woken by completion. An expired
+            // settle deadline cannot make it drawable before that wake.
+            let settle = runtime
+                .iter()
+                .filter(|(id, r)| {
+                    has_render_slot(
+                        flights.iter().map(Flight::slot),
+                        **id,
+                        r.transport.clock.is_playing(),
+                        state
+                            .views
+                            .get(id)
+                            .and_then(|v| layer_drag_bytes(v, r, now)),
+                    )
+                })
+                .flat_map(|(_, r)| [r.refine_at, r.settle_at.map(|(_, at)| at)])
+                .flatten()
+                .chain(state.views.values().filter_map(|v| v.camera_rest_at))
+                .map(|at| (at - now).max(0.001))
+                .fold((scrub_present_retry - now).max(0.001), f64::min);
+            let busy =
+                waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
+            // Only back-offs pending, nothing playing: sleep until the first is due.
+            let backoff = (flights.is_empty()
+                && runtime
+                    .values()
+                    .all(|r| r.stand_in.is_none() && !r.transport.running()))
+            .then(|| {
+                runtime
+                    .values()
+                    .map(|r| r.not_before - now)
+                    .filter(|wait| *wait > 0.)
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .filter(|wait| wait.is_finite());
+            let timeout = if let Some(wait) = backoff {
+                Duration::from_secs_f64(wait.max(0.001))
+            } else if waiting {
+                Duration::from_millis(2)
+            } else if busy {
+                let now = trace::now();
+                let next = runtime
+                    .values()
+                    .filter_map(|r| {
+                        if r.transport.clock.is_playing() && flights.len() < 3 {
+                            Some((r.next - r.ahead * r.interval - now).max(0.0001))
+                        } else if r.transport.running() && !r.transport.clock.is_playing() {
+                            Some(0.001) // waiting for the first audio epoch
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(0.25_f64, f64::min);
+                Duration::from_secs_f64(next)
+            } else {
+                Duration::from_secs(3600)
+            };
+            let surface_query_waiting = state
+                .views
+                .values()
+                .any(|v| !v.surface_queries.is_empty() || !v.picker_samples.is_empty());
+            drop(state);
+            let tap = shared.scopes.lock().unwrap().clone();
+            let timeout = engine
+                .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
+                .map_or(timeout, |retry| timeout.min(retry));
+            let timeout = if surface_query_waiting {
+                Duration::from_millis(1)
+            } else if settle.is_finite() {
+                timeout.min(Duration::from_secs_f64(settle))
+            } else {
+                timeout
+            };
+            pass.mark("scopes");
+            let maintained = engine.maintain_memory();
+            if maintained.idle {
+                shared.disk.release_idle_reads();
+                for r in runtime.values() {
+                    if let Some(audio) = &r.transport.audio {
+                        audio.send(audio::AudioCtl::MemoryPressure);
+                    }
+                }
+            }
+            if maintained.released {
+                // What was let go is reported now, not at the next pass.
+                *shared.memory.lock().unwrap() = engine.govern_memory();
+            }
+            #[cfg(test)]
+            shared.idle_released.store(
+                engine.is_idle_released(),
+                std::sync::atomic::Ordering::Release,
+            );
+            pass.mark("idle release");
+            // While anything is busy (playing, frames in flight, a wait) the
+            // loop looks again within 250 ms, as before. Idle, it sleeps
+            // until its next upkeep deadline: lease requests and pressure,
+            // edits, decodes, disk reads, settled pictures and a device loss
+            // all wake it, so it no longer polls for them four times a
+            // second. A device loss nothing wakes for is noticed within
+            // IDLE_CAP.
+            const IDLE_CAP: Duration = Duration::from_secs(10);
+            let cap = if busy {
+                Duration::from_millis(250)
+            } else {
+                engine.next_maintenance().unwrap_or(IDLE_CAP).min(IDLE_CAP)
+            };
+            // The wait is not the pass's time.
+            drop(pass);
+            let waited = wakes.recv_timeout(timeout.min(cap));
+            #[cfg(test)]
+            if !busy && waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                shared
+                    .idle_timeouts
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            #[cfg(not(test))]
+            let _ = waited;
+        }
+    }
+    drop(flights); // Command completion handlers hold their source leases.
+    drop(runtime); // Shutdown/join audio away from the UI thread and state lock.
+}
+
+/// Windowless renderer for CLI/MCP and independent pixel comparisons.
+pub struct Headless {
+    engine: render::Engine,
+}
+impl Headless {
+    /// Why the last frame drew some effect as nothing (its definition could
+    /// not be built), if it did.
+    pub fn definition_failure(&self) -> Option<&str> {
+        self.engine.definition_failure.as_deref()
+    }
+    pub fn memory_usage(&self) -> memory::CacheUsage {
+        self.engine.memory_usage()
+    }
+
+    /// Submit a preview frame without allocating a CPU pixel readback.
+    pub fn preview(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        self.preview_inner(scene, spec)
+    }
+
+    /// Pump the main-thread font broker while the render thread waits for
+    /// replies, including during a frame's first text layout.
+    pub fn preview_with_pump(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        pump: impl FnMut(),
+    ) -> Result<()> {
+        with_pump(|| self.preview_inner(scene, spec), pump)
+    }
+
+    /// Keep one render thread for a sequence while the caller pumps its
+    /// main-thread services. Recreating it per frame changes allocator
+    /// ownership and does not model the app's persistent render worker.
+    pub fn run_with_pump<T: Send>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> T + Send,
+        pump: impl FnMut(),
+    ) -> T {
+        with_pump(|| run(self), pump)
+    }
+
+    fn preview_inner(&mut self, scene: &Scene, spec: FrameSpec) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let rendered = objc2::rc::autoreleasepool(|_| -> Result<()> {
+                let Some(s) = self.engine.frame_settled(
+                    scene,
+                    spec,
+                    None,
+                    &OverlayGeometry::default(),
+                    false,
+                    Arc::default(),
+                )?
+                else {
+                    anyhow::bail!("no headless surface");
+                };
+                s.commit();
+                s.complete()?;
+                anyhow::ensure!(
+                    s.failures.is_empty(),
+                    "memory benchmark frame omitted {} layers: {}",
+                    s.failures.len(),
+                    s.failures
+                        .iter()
+                        .map(|f| f.message.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                Ok(())
+            });
+            match rendered {
+                Ok(_) => {
+                    self.engine.poll();
+                    return Ok(());
+                }
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn release_idle_memory(&mut self) {
+        self.engine.release_idle_memory();
+    }
+    /// Releases every cache owned by the previous project. The renderer and
+    /// device stay available for the next project in the same window.
+    pub fn release_project_memory(&mut self) {
+        self.engine.release_project_memory();
+    }
+    pub fn memory_pressure(&mut self, pressure: memory::Pressure) {
+        memory::simulate_pressure(pressure);
+        self.engine.govern_memory();
+        self.engine.poll();
+    }
+    pub fn new() -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| {
+            Ok(Self {
+                engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+            })
+        })
+    }
+    pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Result<Self> {
+        let mut h = Self::new()?;
+        h.engine.set_fonts(fonts);
+        Ok(h)
+    }
+    pub fn mastering(&mut self, mode: color::Mastering) -> Result<()> {
+        mode.params()?;
+        self.engine.mastering = mode;
+        Ok(())
+    }
+    pub fn frame(
+        &mut self,
+        scene: &Scene,
+        time: Ticks,
+        size: Size,
+        overlays: &OverlayGeometry,
+    ) -> Result<Vec<[f64; 3]>> {
+        self.frame_spec_settled(
+            scene,
+            FrameSpec::exact(
+                time,
+                Output {
+                    width: size.width,
+                    height: size.height,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            ),
+            overlays,
+        )
+    }
+    /// One viewer frame exactly as the worker requests it, drawn again after
+    /// the same transient refusals the worker retries.
+    pub fn frame_spec_settled(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        overlays: &OverlayGeometry,
+    ) -> Result<Vec<[f64; 3]>> {
+        Ok(self.frame_spec_read(scene, spec, overlays)?.0)
+    }
+    /// Reads rendered frames from `disk` where a viewer's engine would: a
+    /// playing, dragged or paused frame that is on disk is presented from
+    /// it instead of drawn.
+    pub fn read_rendered_frames(&mut self, disk: render_cache::DiskFrames) {
+        self.engine.disk = Some(disk);
+    }
+    /// [`Self::frame_spec_settled`], and whether the picture was a rendered
+    /// frame read from disk ([`Self::read_rendered_frames`]).
+    pub fn frame_spec_read(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        overlays: &OverlayGeometry,
+    ) -> Result<(Vec<[f64; 3]>, bool)> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let trace = Arc::new(Mutex::new(trace::Trace::default()));
+            match self
+                .engine
+                .frame_settled(scene, spec, None, overlays, true, trace.clone())
+            {
+                Ok(s) => {
+                    let s = s.ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
+                    s.commit();
+                    s.complete()?;
+                    let from_disk = trace.lock().unwrap().disk == 2;
+                    return Ok((s.pixels(), from_disk));
+                }
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    pub fn export_reference(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.engine.export(scene, time, size) {
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS));
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
+/// Font registries belong to the main thread; a render can synchronously
+/// request more fonts at any point. Pumping only between renders deadlocks.
+fn with_pump<T: Send>(work: impl FnOnce() -> T + Send, mut pump: impl FnMut()) -> T {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| objc2::rc::autoreleasepool(|_| work()));
+        while !worker.is_finished() {
+            pump();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+    use foreign_types::ForeignTypeRef;
+
+    #[test]
+    fn a_paused_view_limits_gpu_work_without_waiting_for_the_display() {
+        let slot = |viewer, done| FlightSlot {
+            viewer,
+            done,
+            drag_bytes: None,
+        };
+        let first = slot(1, false);
+        assert!(!has_render_slot([first].into_iter(), 1, false, None));
+        assert!(!has_render_slot([first].into_iter(), 1, false, Some(1)));
+        for (width, height, working_bpp, fits) in [
+            (2000, 1120, 8, true), // 1000 × 560 pt at 2×
+            (2000, 1120, 16, true),
+            (3840, 2160, 8, true),
+            (3840, 2160, 16, false),
+            (5120, 2880, 8, false),
+        ] {
+            let output = Output {
+                width,
+                height,
+                headroom: 1.,
+                display: 1,
+                crop: None,
+            };
+            let drag_bytes = drag_working_bytes(output, width, height, working_bpp);
+            let drag = FlightSlot {
+                drag_bytes,
+                ..first
+            };
+            assert_eq!(
+                has_render_slot([drag].into_iter(), 1, false, drag_bytes),
+                fits
+            );
+            assert!(!has_render_slot(
+                [drag, drag].into_iter(),
+                1,
+                false,
+                drag_bytes
+            ));
+            assert!(
+                drag_working_bytes(
+                    Output {
+                        crop: Some(policy::Crop {
+                            x: 1,
+                            y: 0,
+                            canvas_width: width + 1,
+                            canvas_height: height,
+                        }),
+                        ..output
+                    },
+                    width,
+                    height,
+                    working_bpp,
+                )
+                .is_none()
+            );
+        }
+        assert!(has_render_slot([slot(1, true)].into_iter(), 1, false, None));
+        assert!(has_render_slot([first].into_iter(), 2, false, None));
+        assert!(has_render_slot([first, first].into_iter(), 1, true, None));
+        assert!(!has_render_slot(
+            [first, slot(1, true), slot(2, false)].into_iter(),
+            1,
+            true,
+            None,
+        ));
+    }
+
+    #[test]
+    fn the_first_viewer_picture_draws_current_and_saved_builtins() {
+        fn first_pixels(service: &EngineService, version: Option<(u32, &str)>) -> Vec<u8> {
+            let mut config = shapes_config(None);
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            if let Some((revision, _)) = version {
+                project["layers"][0]["fx"] = serde_json::json!([
+                    {"id":"probe-invert","type":"invert","version":revision,"on":true,"p":{}}
+                ]);
+            }
+            let project = pm_model::json::parse(&project.to_string()).unwrap();
+            let mut document = pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                config.snapshot.revision,
+            );
+            document.set_saving_app_version(version.map(|(_, saved)| saved.to_owned()));
+            config.snapshot.document = Arc::new(document);
+            let (first, pictures) = std::sync::mpsc::channel();
+            *service.shared.first_picture.lock().unwrap() = Some(first);
+            let viewer = service.viewer(config).unwrap();
+            let frame = pictures.recv_timeout(Duration::from_secs(25)).unwrap();
+            assert_eq!(
+                frame.stamp.sequence, 1,
+                "the first picture must be the original preview"
+            );
+            assert_eq!(frame.time, Ticks::ZERO);
+            assert!(viewer.status().layer_failures.is_empty());
+            frame
+                .bytes
+                .chunks_exact(frame.row)
+                .take(frame.height)
+                .flat_map(|row| row[..frame.width * 8].iter().copied())
+                .collect()
+        }
+
+        let eager =
+            || EngineService::start(pm_gpu::Gpu::new("first-picture-eager").unwrap()).unwrap();
+        let without_effect = first_pixels(&eager(), None);
+        for version in [(2, "1.3.0"), (1, "1.3.0")] {
+            let expected = first_pixels(&eager(), Some(version));
+            assert_ne!(
+                expected, without_effect,
+                "invert {version:?} must change the picture"
+            );
+            let app = EngineService::start_with_fonts(
+                pm_gpu::Gpu::new("first-picture-app").unwrap(),
+                pm_render::text::host::RenderFonts::new(pm_text::host::FontBroker::new()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                first_pixels(&app, Some(version)),
+                expected,
+                "invert {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pause_freezes_the_viewer_while_the_worker_is_busy() {
+        let (_shaders, service) = rebuilding_service("pause-while-encoding");
+        let view = shapes_viewer(&service, None);
+        wait_for(&view, "initial frame", |status| status.frame.is_some());
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        view.command(TransportCommand::Play { rate: pm_protocol::common::PlaybackRate::NORMAL }).unwrap();
+        blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+        view.command(TransportCommand::Pause).unwrap();
+        let first = view.stamp().unwrap();
+        let is_toggle_pause = view.running();
+        let frozen = view.status();
+        view.command(TransportCommand::Pause).unwrap();
+        let duplicate = view.stamp().unwrap();
+        release.send(()).unwrap();
+        assert!(is_toggle_pause, "a toggle during the pending stop still pauses");
+        assert!(!frozen.wants_display);
+        assert_eq!(frozen.clock.unwrap().state, pm_protocol::clock::TransportState::Stopped);
+        assert_eq!(duplicate, first, "duplicate Pause does not queue more work");
+        wait_for(&view, "paused frame", |status| status.frame.as_ref().is_some_and(|f| f.stamp == first));
+        assert!(!view.running());
+    }
+
+    #[test]
+    fn headless_pump_answers_fonts_during_a_blocking_render() {
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_wake(Arc::new(|| {}));
+        let worker = broker.clone();
+        with_pump(
+            move || worker.ask(Vec::new(), Vec::new(), Duration::from_millis(500)),
+            || {
+                for ask in broker.take_asks() {
+                    ask.answer(Ok(pm_text::host::FontReply::default()));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(broker.counts(), (1, 1, 0));
+    }
+    #[test]
+    fn revision_and_output_change_while_encoding_reject_the_submission() {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 99,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let service = EngineService::start(pm_gpu::Gpu::new("stale-worker-test").unwrap()).unwrap();
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let v = service
+            .viewer(ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot: snapshot.clone(),
+                media: Default::default(),
+                output: Output {
+                    width: 160,
+                    height: 90,
+                    display: 1,
+                    headroom: 1.,
+                    crop: None,
+                },
+                layer: None,
+                rate: pm_time::Rate::FPS_30,
+                end: None,
+                audio: false,
+            })
+            .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let old = v.stamp().unwrap();
+        v.configure(Output {
+            width: 320,
+            height: 180,
+            display: 2,
+            headroom: 2.,
+            crop: None,
+        })
+        .unwrap();
+        v.snapshot(Snapshot {
+            revision: 2,
+            document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), 2)),
+            ..snapshot
+        })
+        .unwrap();
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = v.status();
+            assert!(status.error.is_none(), "{:?}", status.error);
+            if let Some(frame) = status.frame {
+                assert_ne!(frame.stamp, old);
+                // The new revision's picture: the current one, or the fast
+                // picture whose refinement (the next stamp) is being drawn.
+                let now = v.stamp().unwrap();
+                assert_eq!(
+                    (frame.stamp.generation, frame.stamp.revision),
+                    (now.generation, now.revision)
+                );
+                assert!(
+                    now.sequence - frame.stamp.sequence <= 1,
+                    "{frame:?} {now:?}"
+                );
+                assert!(status.stale_rejections >= 1);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A service whose engine keeps its translated shaders in a folder, as
+    /// the app's does. An engine rebuilt after a failure reads them back;
+    /// without the folder it translates every built-in shader again, which
+    /// takes longer than a test may wait for a restart (two rebuilds took
+    /// more than 20 s: a pending capture's failure was never seen).
+    fn rebuilding_service(label: &str) -> (tempfile::TempDir, EngineService) {
+        let shaders = tempfile::tempdir().unwrap();
+        let gpu = pm_gpu::Gpu::new(label).unwrap();
+        let device = metal_device(&gpu);
+        let engine =
+            render::Engine::with_shader_cache(gpu, Some(shaders.path().to_owned())).unwrap();
+        let service = EngineService::start_engine(device, engine).unwrap();
+        (shaders, service)
+    }
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn live_gain_does_not_request_picture_or_transport_work() {
+        let (_shaders, service) = rebuilding_service("gain-audio-only");
+        let viewer = shapes_viewer(&service, None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        *viewer.audio_preview.lock().unwrap() = Some(sender);
+        let state = service.shared.state.lock().unwrap();
+        let view = &state.views[&viewer.id];
+        let (stamp, content, dirty) = (view.stamp, view.content, view.dirty);
+        let gesture = audio::GainPreview::gesture();
+        let send = std::thread::spawn(move || {
+            viewer.audio_gain_preview(audio::GainPreview::Sample {
+                gesture,
+                base_revision: None,
+                commands: vec![],
+            });
+        });
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(audio::AudioCtl::GainPreview(audio::GainPreview::Sample { gesture: received, .. }))
+                if received == gesture
+        ));
+        send.join().unwrap();
+        assert_eq!(view.stamp, stamp);
+        assert_eq!(view.content, content);
+        assert_eq!(view.dirty, dirty);
+        assert!(view.transient_snapshot.is_none());
+        assert!(view.commands.is_empty());
+    }
+    #[test]
+    fn transient_timing_preview_preserves_authoritative_snapshot_and_audio_identity() {
+        let (_shaders, service) = rebuilding_service("transient-timing-preview");
+        let v = shapes_viewer(&service, None);
+        let (base, content) = {
+            let state = service.shared.state.lock().unwrap();
+            let view = &state.views[&v.id];
+            (view.config.snapshot.clone(), view.content)
+        };
+        let mut document =
+            pm_model::Document::from_root(base.document.root().cloned(), base.revision);
+        let path = vec![
+            "comps".into(),
+            base.open_comp().unwrap().into(),
+            "layers".into(),
+            0usize.into(),
+            "from".into(),
+        ];
+        document
+            .apply_ops_at(
+                &[pm_model::Op::Leaf(pm_model::Patch::set(
+                    path,
+                    pm_model::Value::Number(2.),
+                ))],
+                base.revision + 1,
+            )
+            .unwrap();
+        let preview = Snapshot {
+            doc_id: base.doc_id,
+            revision: base.revision + 1,
+            document: Arc::new(document),
+        };
+        v.transient_snapshot(Some(preview.clone())).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = &state.views[&v.id];
+            assert!(Arc::ptr_eq(&view.config.snapshot.document, &base.document));
+            assert!(Arc::ptr_eq(
+                &view.transient_snapshot.as_ref().unwrap().document,
+                &preview.document
+            ));
+            assert_eq!(view.stamp.revision, base.revision);
+            assert_eq!(
+                view.content, content,
+                "preview must not rebuild the audio graph"
+            );
+            assert_ne!(view.transient_content, Some(content));
+        }
+        v.transient_snapshot(None).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = &state.views[&v.id];
+            assert!(view.transient_snapshot.is_none());
+            assert!(view.transient_content.is_none());
+            assert!(Arc::ptr_eq(&view.config.snapshot.document, &base.document));
+            assert_eq!(view.stamp.revision, base.revision);
+        }
+    }
+    fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
+        service.viewer(shapes_config(layer)).unwrap()
+    }
+    #[test]
+    fn trim_precomp_keeps_full_quality_then_settles_without_idle_draws() {
+        let mut config = shapes_config(None);
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        let child = serde_json::json!({
+            "id": "nested", "name": "Nested", "w": project["w"], "h": project["h"],
+            "fps": project["fps"], "dur": project["dur"], "layers": project["layers"],
+        });
+        let channel = |v: f64| serde_json::json!({"v":v,"kf":[],"expr":null});
+        let layer = serde_json::json!({
+            "id":"pre", "type":"precomp", "name":"Nested", "on":true,
+            "from":0., "dur":3., "fx":[], "masks":[],
+            "p": {
+                "position.x":channel(0.), "position.y":channel(0.),
+                "anchor.x":channel(0.), "anchor.y":channel(0.),
+                "scale.x":channel(100.), "scale.y":channel(100.),
+                "rotation":channel(0.), "opacity":channel(100.), "skew":channel(0.),
+            },
+            "d":{"comp":"nested", "w":project["w"], "h":project["h"], "trim":0.},
+        });
+        project["comps"] = serde_json::json!({"nested":child});
+        project["layers"] = serde_json::json!([layer]);
+        let document = |project: &serde_json::Value, revision| {
+            Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                )),
+                revision,
+            ))
+        };
+        config.snapshot.document = document(&project, config.snapshot.revision);
+        let snapshot = config.snapshot.clone();
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("precomp-trim-quality").unwrap()).unwrap();
+        let v = service.viewer(config).unwrap();
+        v.adapt_drags(true).unwrap();
+        service
+            .shared
+            .slow_frames
+            .store(true, std::sync::atomic::Ordering::Release);
+        v.command(TransportCommand::Seek {
+            time: seconds(1.),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        wait_for(&v, "the initial settled precomp", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.settled && f.time == seconds(1.))
+        });
+        v.editing(true).unwrap();
+        let mut drag = None;
+        for revision in snapshot.revision + 1..snapshot.revision + 60 {
+            let from = if revision % 2 == 0 { 0.2 } else { 0.4 };
+            project["layers"][0]["from"] = from.into();
+            project["layers"][0]["dur"] = (3. - from).into();
+            v.snapshot(Snapshot {
+                revision,
+                document: document(&project, revision),
+                ..snapshot.clone()
+            })
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(frame) = v
+                .status()
+                .frame
+                .filter(|f| f.gpu_ok && f.moment == Moment::Scrub)
+            {
+                drag = Some(frame);
+                break;
+            }
+        }
+        let drag = drag.expect("a frame of the precomp trim");
+        let released = std::time::Instant::now();
+        v.editing(false).unwrap();
+        let revision = v.stamp().unwrap().revision;
+        let settled = wait_for(&v, "the released trim's full-quality picture", |s| {
+            s.frame.as_ref().is_some_and(|f| {
+                f.stamp.revision == revision
+                    && f.time == seconds(1.)
+                    && f.gpu_ok
+                    && f.settled
+                    && !f.stand_ins
+            })
+        });
+        println!(
+            "PRECOMP_TRIM release_ms={} drag_scale={} settled_scale={}",
+            released.elapsed().as_millis(),
+            drag.scale,
+            settled.frame.as_ref().unwrap().scale,
+        );
+        assert!(
+            settled.layer_failures.is_empty(),
+            "{:?}",
+            settled.layer_failures
+        );
+        assert!(
+            settled.frame.as_ref().unwrap().scale > 1.,
+            "settle at composition density"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            v.status().presented,
+            settled.presented,
+            "a settled trim draws nothing while idle"
+        );
+        v.retire();
+        assert!(
+            drag.scale >= 1.,
+            "a precomp trim must not draw a draft raster: {drag:?}"
+        );
+    }
+
+    fn shapes_config(layer: Option<metal::MetalLayer>) -> ViewerConfig {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 98,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        ViewerConfig {
+            composition: snapshot.open_comp().unwrap(),
+            snapshot,
+            media: Default::default(),
+            output: Output {
+                width: 160,
+                height: 90,
+                display: 1,
+                headroom: 1.,
+                crop: None,
+            },
+            layer,
+            rate: pm_time::Rate::FPS_30,
+            end: None,
+            audio: false,
+        }
+    }
+    #[test]
+    fn input_origin_survives_a_stale_submission_until_a_frame_lands() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("stale-input-origin").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        // A captured frame is exact: it never lands as a drag picture of an
+        // earlier state (`only_moved`), so the change below makes it stale.
+        v.capture_next().unwrap();
+        let input = trace::now();
+        v.scrub_at(Ticks::from_whole_seconds(1), input).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Like a UI publication arriving while its first frame encodes.
+        v.studio_preview(studio::Preview::Refine).unwrap();
+        release.send(()).unwrap();
+        let status = drawn(&v);
+        assert!(status.stale_rejections > 0);
+        assert_eq!(status.frame.unwrap().input_host_seconds, Some(input));
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn scrub_burst_after_pause_coalesces_without_filling_transport_queue() {
+        let service = EngineService::start(pm_gpu::Gpu::new("scrub-burst-pause").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        // Trigger one frame that blocks the worker on `before_submit`.
+        v.capture_next().unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Now pause (sets `pause_requested_at = Some(...)`) and immediately
+        // fire a 120 Hz scrub burst while the worker is still blocked.
+        v.command(TransportCommand::Pause).unwrap();
+        for step in 0..100 {
+            v.scrub_at(Ticks::new((step + 1) * 1000).unwrap(), trace::now())
+                .expect("scrub burst after pause must coalesce and never overflow queue");
+        }
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(view.pause_requested_at.is_some());
+            assert!(view.commands.len() <= 3, "commands={:?}", view.commands);
+        }
+        release.send(()).unwrap();
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        assert_eq!(status.error, None);
+    }
+    #[test]
+    fn a_scrub_burst_rejects_the_in_flight_scrub_and_draws_the_latest_position() {
+        let service = EngineService::start(pm_gpu::Gpu::new("scrub-latest").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let superseded = Ticks::from_whole_seconds(1);
+        let latest = Ticks::from_whole_seconds(2);
+        v.scrub(superseded).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let first_generation = service.shared.superseded.load(std::sync::atomic::Ordering::Acquire);
+        for _ in 0..20 {
+            v.scrub(superseded).unwrap();
+        }
+        assert_eq!(
+            service.shared.superseded.load(std::sync::atomic::Ordering::Acquire),
+            first_generation
+        );
+        for step in 1..=100 {
+            v.scrub(Ticks::new(superseded.get() + step * 1000).unwrap()).unwrap();
+        }
+        v.scrub(latest).unwrap();
+        assert_eq!(service.shared.state.lock().unwrap().views[&v.id].commands.len(), 2);
+        release.send(()).unwrap();
+        let status = wait_for(&v, "the latest scrub", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok && f.time == latest)
+        });
+        assert!(status.stale_rejections >= 1);
+        assert!(service.shared.drawn.lock().unwrap().iter().all(|(_, t, _)| *t != superseded));
+    }
+
+    #[test]
+    fn fly_camera_updates_do_not_select_auto_scrub_quality() {
+        let service = EngineService::start(pm_gpu::Gpu::new("fly-auto-quality").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.adapt_drags(true).unwrap();
+        service.shared.slow_frames.store(true, std::sync::atomic::Ordering::Release);
+        let shown = |v: &Viewer| {
+            let stamp = v.stamp();
+            wait_for(v, "camera frame", |s| s.frame.as_ref().is_some_and(|f| f.gpu_ok && Some(f.stamp) == stamp))
+        };
+        shown(&v);
+        let mut camera = studio::FreeView { ortho: false, roll: 0., eye: [0., 0., 5.], target: [0.; 3], zoom: 1. };
+        for step in 0..4 {
+            camera.eye[0] = f64::from(step);
+            v.studio_view_at(Some(camera), trace::now()).unwrap();
+            let status = shown(&v);
+            let frame = status.frame.unwrap();
+            assert_eq!(frame.moment, Moment::Paused);
+            assert!(frame.scale >= 1., "camera motion reduced Auto: {frame:?}");
+        }
+        v.studio_view(None).unwrap();
+        assert!(shown(&v).frame.unwrap().scale >= 1.);
+        v.retire();
+    }
+
+    #[test]
+    fn camera_input_keeps_the_oldest_origin_across_superseded_frames() {
+        let service=EngineService::start(pm_gpu::Gpu::new("camera-input-origin").unwrap()).unwrap();
+        let v=shapes_viewer(&service,None);v.capture_next().unwrap();drawn(&v);
+        let (entered,signal)=std::sync::mpsc::channel();let (release,barrier)=std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap()=Some(Box::new(move||{entered.send(()).unwrap();barrier.recv_timeout(Duration::from_secs(10)).unwrap();}));
+        let origin=trace::now();v.input_event(origin);
+        let mut camera=studio::FreeView{ortho:false,roll:0.,eye:[0.,0.,5.],target:[0.;3],zoom:1.};
+        v.studio_view_at(Some(camera),origin+0.001).unwrap();signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        camera.eye[0]=1.;v.studio_view_at(Some(camera),origin+0.002).unwrap();v.capture_next().unwrap();release.send(()).unwrap();
+        let status=drawn(&v);assert!(status.stale_rejections>0);assert_eq!(status.frame.unwrap().input_host_seconds,Some(origin));
+        v.capture_next().unwrap();assert_eq!(drawn(&v).frame.unwrap().input_host_seconds,None);
+    }
+    #[test]
+    fn interactive_frame_step_retains_its_event_origin() {
+        let service = EngineService::start(pm_gpu::Gpu::new("step-input-origin").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let stamp = v.stamp();
+        for invalid in [0., -1., f64::NAN, f64::INFINITY] {
+            assert!(
+                v.command_at(TransportCommand::Step { frames: 1 }, invalid)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            v.stamp(),
+            stamp,
+            "invalid origins must not enqueue commands"
+        );
+        let input = trace::now();
+        v.command_at(TransportCommand::Step { frames: 1 }, input)
+            .unwrap();
+        v.capture_next().unwrap();
+        let frame = drawn(&v).frame.unwrap();
+        assert_eq!(frame.input_host_seconds, Some(input));
+        assert_eq!(
+            frame.time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
+        v.command(TransportCommand::Step { frames: 1 }).unwrap();
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn identical_safe_areas_preserve_an_in_flight_frame() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        v.command_at(TransportCommand::Step { frames: 1 }, trace::now())
+            .unwrap();
+        v.capture_next().unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before = v.stamp();
+        v.safe_areas(OverlayGeometry::default()).unwrap();
+        let after = v.stamp();
+        release.send(()).unwrap();
+        let status = drawn(&v);
+        assert_eq!(
+            before, after,
+            "unchanged guides/gizmos must not invalidate the frame"
+        );
+        assert_eq!(status.stale_rejections, 0);
+        assert_eq!(
+            status.frame.unwrap().time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
+    }
+    #[test]
+    fn surface_hovers_coalesce_without_dropping_clicks_and_the_queue_is_bounded() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("surface query queue").unwrap()).unwrap();
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let viewer = shapes_viewer(&service, None);
+        viewer.capture_next().unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stamp = viewer.stamp().unwrap();
+        let first = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.4, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        let _next = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        assert!(
+            first
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("superseded")
+        );
+        let click = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+            .unwrap();
+        let _hover = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.6, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        let mut rest = vec![];
+        for _ in 0..5 {
+            rest.push(
+                viewer
+                    .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+                    .unwrap(),
+            );
+        }
+        let count = service.shared.state.lock().unwrap().views[&viewer.id]
+            .surface_queries
+            .len();
+        let full = viewer.pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click);
+        let click_pending = !click.is_closed();
+        release.send(()).unwrap();
+        assert_eq!(count, 8);
+        assert!(full.is_err());
+        assert!(click_pending, "hover must not supersede a click");
+        drop(service);
+        assert!(
+            click.try_recv().is_ok(),
+            "shutdown must settle accepted queries"
+        );
+        assert!(
+            viewer
+                .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+                .is_err()
+        );
+        drop(viewer);
+    }
+    /// A paused viewer's settled picture is copied out of the engine's pool
+    /// once, with the stamp and time of the frame it shows: a still of what
+    /// the viewer shows costs no render and pins no pool surface (PM-444).
+    #[test]
+    fn a_settled_picture_is_copied_out_of_the_pool() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-copy").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let status = wait_for(&v, "a settled picture copied", |s| {
+            s.settled_picture.is_some()
+                && s.frame.as_ref().is_some_and(|f| f.settled && Some(f.stamp) == v.stamp())
+        });
+        let (picture, frame) = (status.settled_picture.unwrap(), status.frame.unwrap());
+        assert_eq!((picture.stamp, picture.time), (frame.stamp, frame.time));
+        let (w, h, rgba) = picture.srgb8(64).unwrap();
+        assert!(w <= 64 && w > 0 && h > 0);
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // Not copied again while the same picture is shown.
+        let again = v.status().settled_picture.unwrap();
+        assert!(Arc::ptr_eq(&again.bytes, &picture.bytes));
+    }
+    /// A hidden viewer gives its settled picture up at once (a reader that
+    /// took it keeps its own), and at most `SETTLED_PICTURES` viewers keep
+    /// one: twenty settled tabs held a whole picture each (PM-453 review).
+    #[test]
+    fn a_hidden_viewer_gives_its_settled_picture_up_and_few_viewers_keep_one() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-bound").unwrap()).unwrap();
+        let settled = |v: &Viewer| {
+            wait_for(v, "a settled picture copied", |s| s.settled_picture.is_some());
+        };
+        let hidden = shapes_viewer(&service, None);
+        settled(&hidden);
+        let taken = hidden.status().settled_picture.unwrap();
+        hidden.set_shown(false).unwrap();
+        assert!(hidden.status().settled_picture.is_none(), "a hidden viewer kept its still");
+        assert!(!taken.bytes.is_empty(), "a reader keeps the still it took");
+        let shown: Vec<_> = (0..SETTLED_PICTURES + 2)
+            .map(|_| {
+                let v = shapes_viewer(&service, None);
+                settled(&v);
+                v
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let kept = shown
+                .iter()
+                .filter(|v| v.status().settled_picture.is_some())
+                .count();
+            if kept <= SETTLED_PICTURES {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{kept} settled pictures kept");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            shown.last().unwrap().status().settled_picture.is_some(),
+            "the newest keeps its still"
+        );
+    }
+    /// Nobody watches a hidden viewer: it pauses (its frames and deadlines
+    /// would hold exports, stills and the background render back), and
+    /// plays on when shown, unless the person paused it meanwhile (PM-453
+    /// review).
+    #[test]
+    fn a_hidden_viewer_pauses_and_plays_on_when_shown_unless_paused_meanwhile() {
+        use pm_protocol::common::PlaybackRate;
+        let service = EngineService::start(pm_gpu::Gpu::new("hidden-pauses").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let playing = |s: &ViewerStatus| s.clock.as_ref().is_some_and(|c| c.rate != PlaybackRate::STOPPED);
+        let range = pm_protocol::common::TickRange {
+            start: Ticks::ZERO,
+            end: seconds(1.),
+        };
+        v.command(TransportCommand::SetLoop { range: Some(range) }).unwrap();
+        v.command(TransportCommand::Play { rate: PlaybackRate::NORMAL }).unwrap();
+        wait_for(&v, "playing", playing);
+        v.set_shown(false).unwrap();
+        wait_for(&v, "paused while hidden", |s| !playing(s));
+        v.set_shown(true).unwrap();
+        wait_for(&v, "playing on when shown", playing);
+        v.set_shown(false).unwrap();
+        wait_for(&v, "paused while hidden again", |s| !playing(s));
+        v.command(TransportCommand::Pause).unwrap();
+        v.set_shown(true).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!playing(&v.status()), "paused by the person, it played on when shown");
+    }
+    fn drawn(v: &Viewer) -> ViewerStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = v.status();
+            if let Some(frame) = &status.frame
+                && frame.gpu_ok
+                && frame.pixels.is_some()
+                && Some(frame.stamp) == v.stamp()
+            {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "{status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A layer resized without a configure (its size publication lagged):
+    /// the frame is drawn at the drawable's size and later frames follow it,
+    /// instead of the drawable being dropped and the frame retried forever.
+    #[test]
+    fn a_drawable_of_another_size_is_drawn_not_retried() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("drawable-size-test").unwrap()).unwrap();
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_framebuffer_only(false);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(200., 100.));
+        let v = shapes_viewer(&service, Some(layer));
+        // The first frame shows that the drawable differs; the next renders
+        // at its size.
+        std::thread::sleep(Duration::from_millis(300));
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        assert_eq!(status.error, None);
+        assert_eq!(status.no_drawable, 0);
+        let pixels = status.frame.unwrap().pixels.unwrap();
+        assert_eq!(pixels.len(), 200 * 100);
+        // Settled: no frame keeps being asked for. (Its settled picture
+        // comes once the viewer has rested; nothing after that.)
+        let completed = || v.status().frame.and_then(|f| f.completion_host_seconds);
+        let quiet = Duration::from_secs_f64(policy::SETTLE_IDLE_SECONDS + 0.5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let before = completed();
+            std::thread::sleep(quiet);
+            if completed() == before {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a paused viewer keeps drawing"
+            );
+        }
+        assert_eq!(v.status().no_drawable, 0);
+    }
+
+    /// A closed project's viewer layer is freed with its drawables: nothing
+    /// the engine thread autoreleased while returning drawables keeps it.
+    #[test]
+    fn a_retired_viewers_layer_is_released() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-release-test").unwrap()).unwrap();
+        let weak = objc2::rc::autoreleasepool(|_| {
+            let layer = metal::MetalLayer::new();
+            layer.set_device(&service.metal_device());
+            layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            layer.set_framebuffer_only(false);
+            layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+            // This thread has no run loop to commit the implicit transaction
+            // those property changes opened (it retains the layer).
+            // SAFETY: a class method with no arguments.
+            unsafe {
+                let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+            }
+            // SAFETY: a live CAMetalLayer; the Retained takes its own reference.
+            let object = unsafe {
+                objc2::rc::Retained::retain(
+                    foreign_types::ForeignType::as_ptr(&layer).cast::<objc2::runtime::AnyObject>(),
+                )
+            }
+            .unwrap();
+            let weak = objc2::rc::Weak::from_retained(&object);
+            let v = shapes_viewer(&service, Some(layer));
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.capture_next().unwrap();
+            drawn(&v);
+            v.retire();
+            weak
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while objc2::rc::autoreleasepool(|_| weak.load().is_some()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retired viewer's layer is still alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_notice_names_the_commonest_reason_a_layer_is_not_drawn() {
+        let failure = |layer: &str, message: &str| pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: layer.into(),
+            message: message.into(),
+        };
+        let mut status = ViewerStatus::default();
+        assert_eq!(status.notice(), None);
+        status.layer_failures = vec![
+            failure("a", "no definition for effect deep-glow.effect"),
+            failure("b", "no definition for effect deep-glow.effect"),
+            failure("b", "no definition for effect deep-glow.effect"),
+            failure("c", "no definition for effect progressive-blur"),
+        ];
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 2 layers: no definition for effect deep-glow.effect (and 1 more)")
+        );
+    }
+
+    #[test]
+    fn the_notice_reports_a_refused_effect_bypassed_on_a_drawn_layer() {
+        let status = ViewerStatus {
+            layer_failures: vec![pm_render::LayerFailure {
+                composition: "c".into(),
+                layer: "caption".into(),
+                message: "effect shadow bypassed: no definition for invalid input".into(),
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 1 layer: effect shadow bypassed: no definition for invalid input")
+        );
+    }
+
+    #[test]
+    fn the_notice_names_an_effect_that_is_bypassed_because_it_is_not_installed() {
+        let missing = |effect: &str, layers| pm_render::effects::versions::MissingEffect {
+            effect: effect.into(),
+            revision: None,
+            layers,
+        };
+        let mut status = ViewerStatus {
+            missing_effects: vec![missing("acme.glow", 4), missing("acme.blur", 1)],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Effect not installed: acme.glow (extension “acme”), bypassed on 4 layers (and 1 more)")
+        );
+        // Installed, but providing nothing now: named, with why.
+        let off = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "acme".into(),
+                name: "Acme Effects".into(),
+                why: "is turned off".into(),
+                provides: vec![],
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            off.notice().as_deref(),
+            Some("Acme Effects is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
+        );
+        // An id its extension's doesn't name (`glow-kit` provides
+        // `acme.glow`): named by what it provided when it last ran (PM-435).
+        let unnamed = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "glow-kit".into(),
+                name: "Glow Kit".into(),
+                why: "is turned off".into(),
+                provides: vec!["acme.glow".into()],
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            unnamed.notice().as_deref(),
+            Some("Glow Kit is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
+        );
+        let newer = ViewerStatus {
+            missing_effects: vec![pm_render::effects::versions::MissingEffect {
+                revision: Some("99".into()),
+                ..missing("blur", 1)
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            newer.notice().as_deref(),
+            Some("Effect saved by a newer Powermove: blur version 99, bypassed on 1 layer")
+        );
+        status.layer_failures = vec![pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: "a".into(),
+            message: "media for asset x is offline".into(),
+        }];
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 1 layer: media for asset x is offline (and 2 more)")
+        );
+    }
+
+    #[test]
+    fn a_resized_crop_stays_inside_its_canvas() {
+        let output = Output {
+            width: 100,
+            height: 50,
+            display: 1,
+            headroom: 1.,
+            crop: Some(Crop {
+                x: 30,
+                y: 10,
+                canvas_width: 130,
+                canvas_height: 60,
+            }),
+        };
+        let resized = output.resized(103, 51);
+        assert_eq!((resized.width, resized.height), (103, 51));
+        resized.validate().unwrap();
+        assert_eq!(output.resized(100, 50), output);
+    }
+
+    /// Tests that build a whole second engine (every built-in translated)
+    /// run one at a time, so their limits measure the engine, not contention.
+    static REBUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A panic in the worker (a bug a frame hit) restarts it: the viewer
+    /// reports it and draws the same picture again, and the UI thread's
+    /// reads of its status keep working.
+    #[test]
+    fn a_worker_panic_restarts_the_worker_and_the_viewer_draws_again() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (_shaders, service) = rebuilding_service("panic-test");
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .panic_once
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while v.status().restarts == 0 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Reported until the restarted worker draws a good frame.
+        let error = v.status().error;
+        assert!(
+            error.is_none()
+                || error.as_deref().is_some_and(|e| e.starts_with(
+                    "The viewer restarted after an internal error.\ninjected viewer failure"
+                )),
+            "{error:?}"
+        );
+        v.capture_next().unwrap();
+        let after = drawn(&v);
+        assert_eq!(after.error, None, "a good frame clears the report");
+        assert_eq!(after.frame.unwrap().pixels.unwrap(), before);
+    }
+
+    fn wait_for(v: &Viewer, what: &str, ok: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = v.status();
+            if ok(&status) {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}: {status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn seconds(t: f64) -> Ticks {
+        Ticks::new((t * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap()
+    }
+
+    /// Waits for the worker's idle release, then for passes to stop.
+    fn idle_released(service: &EngineService, v: &Viewer) {
+        wait_for(v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !service
+            .shared
+            .idle_released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Released after two seconds at rest, the worker sleeps: no idle wait
+    /// ends by its own timeout for seconds (it used to end four times a
+    /// second). Other tests' engines may wake it (their leases rebalance
+    /// the grant), so only its own timeouts are counted.
+    #[test]
+    fn an_idle_released_viewer_sleeps() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("idle-sleep-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        idle_released(&service, &v);
+        let timeouts = || {
+            service
+                .shared
+                .idle_timeouts
+                .load(std::sync::atomic::Ordering::Acquire)
+        };
+        let before = timeouts();
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            timeouts() - before <= 1,
+            "an idle worker timed out {} times in 3 s",
+            timeouts() - before
+        );
+        // Still a working viewer: a seek wakes it and draws.
+        v.command(TransportCommand::Seek {
+            time: seconds(0.5),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        wait_for(&v, "a frame after the sleep", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.time == seconds(0.5))
+        });
+    }
+
+    /// A lease request (another client's registration rebalances the
+    /// grant) wakes an idle-released worker at once instead of waiting for
+    /// a poll.
+    #[test]
+    fn a_lease_request_wakes_an_idle_engine() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("lease-wake-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        idle_released(&service, &v);
+        std::thread::sleep(Duration::from_millis(100));
+        let passes = || service.shared.passes.load(std::sync::atomic::Ordering::Acquire);
+        let before = passes();
+        let started = std::time::Instant::now();
+        let other = memory::Registration::new(1, |_, _| {});
+        while passes() == before {
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "a lease request did not wake the idle worker"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(other);
+    }
+
+    /// A restart keeps each viewer's transport: a paused viewer stays where
+    /// it was, a playing one keeps playing from where it was (not stopped at
+    /// zero), with its loop.
+    #[test]
+    fn a_worker_restart_keeps_time_play_state_and_loop() {
+        use pm_protocol::clock::{SeekMode, TransportState};
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (_shaders, service) = rebuilding_service("restart-transport");
+        let paused = shapes_viewer(&service, None);
+        let playing = shapes_viewer(&service, None);
+        paused
+            .command(TransportCommand::Seek {
+                time: seconds(1.5),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let range = pm_protocol::common::TickRange {
+            start: seconds(1.),
+            end: seconds(2.5),
+        };
+        for cmd in [
+            TransportCommand::SetLoop { range: Some(range) },
+            TransportCommand::Seek {
+                time: seconds(1.),
+                mode: SeekMode::Exact,
+            },
+            TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            },
+        ] {
+            playing.command(cmd).unwrap();
+        }
+        wait_for(&paused, "paused at 1.5 s", |s| {
+            s.clock.is_some_and(|c| c.media_time == seconds(1.5))
+        });
+        wait_for(&playing, "playing in the loop", |s| {
+            s.clock
+                .is_some_and(|c| c.state != TransportState::Stopped && c.loop_range == Some(range))
+        });
+        service
+            .shared
+            .panic_once
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        wait_for(&paused, "restart", |s| s.restarts == 1);
+        // The new transport's first samples.
+        // A frame of the restart's stamp: drawn by the new worker, whose
+        // transport took the restored commands first.
+        let p = wait_for(&paused, "paused after restart", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == paused.stamp().unwrap())
+        });
+        let clock = p.clock.unwrap();
+        assert_eq!(clock.state, TransportState::Stopped);
+        assert_eq!(clock.media_time, seconds(1.5), "still at 1.5 s, not zero");
+        let s = wait_for(&playing, "playing after restart", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == playing.stamp().unwrap())
+                && s.clock.is_some_and(|c| c.state != TransportState::Stopped)
+        });
+        let clock = s.clock.unwrap();
+        assert_eq!(clock.rate, pm_protocol::common::PlaybackRate::NORMAL);
+        let heard = clock.media_time_at(
+            pm_protocol::common::HostMicros::new((trace::now() * 1e6) as u64).unwrap(),
+        );
+        assert!(
+            heard >= range.start && heard < range.end,
+            "plays on inside its loop: {heard:?}"
+        );
+        wait_for(&playing, "loop kept", |s| {
+            s.clock.is_some_and(|c| c.loop_range == Some(range))
+        });
+    }
+
+    /// A capture whose frame was rendering when the worker panicked is
+    /// drawn by the restarted worker; nobody asks again.
+    #[test]
+    fn a_capture_in_flight_at_a_panic_is_delivered_after_restart() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (_shaders, service) = rebuilding_service("restart-capture");
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .panic_frames
+            .store(1, std::sync::atomic::Ordering::Release);
+        v.capture_next().unwrap();
+        wait_for(&v, "restart", |s| s.restarts == 1);
+        let after = drawn(&v);
+        assert_eq!(after.frame.unwrap().pixels.unwrap(), before);
+        assert_eq!(after.capture_failed, None);
+    }
+
+    /// When the worker stops for good (three panics in a minute), a pending
+    /// capture fails with the reason and later captures are refused: no
+    /// waiter waits forever.
+    #[test]
+    fn a_capture_pending_when_the_viewer_stops_fails() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (_shaders, service) = rebuilding_service("stop-capture");
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        service
+            .shared
+            .panic_frames
+            .store(3, std::sync::atomic::Ordering::Release);
+        v.capture_next().unwrap();
+        let status = wait_for(&v, "capture failed", |s| s.capture_failed.is_some());
+        assert_eq!(status.restarts, 2);
+        assert!(
+            status
+                .capture_failed
+                .unwrap()
+                .contains("injected frame failure")
+        );
+        assert!(v.capture_next().is_err());
+    }
+
+    /// A removed or reset GPU: the worker rebuilds its device, points the
+    /// viewer's layer and the service's device at it, and the viewer draws
+    /// again without anyone reopening it.
+    #[test]
+    fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (_shaders, service) = rebuilding_service("lost-device-test");
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_framebuffer_only(false);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+        let v = shapes_viewer(&service, Some(layer.clone()));
+        let old = service.metal_device();
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .lose_device
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while v.status().device_losses == 0 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        v.capture_next().unwrap();
+        let after = drawn(&v);
+        assert_eq!(after.error, None);
+        assert_eq!(after.device_losses, 1);
+        assert_eq!(
+            after.frame.unwrap().pixels.unwrap(),
+            before,
+            "same picture on the new device"
+        );
+        // Metal hands back the same system device object for the same GPU,
+        // so here the rebuilt engine's device equals the old one; a removed
+        // GPU gives a new one, which the layer and the service then report.
+        let new = service.metal_device();
+        assert_eq!(new.as_ptr(), old.as_ptr());
+        assert_eq!(
+            layer.device().as_ptr(),
+            new.as_ptr(),
+            "the layer follows the rebuild"
+        );
+    }
+
+    /// Metal reports a command buffer complete before its completion handler
+    /// runs; a frame retired in between must not read as failed. Under load
+    /// the dragged frame then never showed (the bench's "scrub stuck").
+    #[test]
+    fn a_late_completion_handler_never_loses_a_dragged_frame() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("late-completion-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        crate::render::LATE_COMPLETION_MS.store(30, std::sync::atomic::Ordering::Relaxed);
+        for (i, at) in (1..=8).map(|i| {
+            (
+                i,
+                Ticks::new(i * pm_protocol::common::TICKS_PER_SECOND / 6).unwrap(),
+            )
+        }) {
+            v.scrub(at).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                // Display ticks keep the worker polling, as a display link and
+                // the bench do: it looks at its flights while the handler is late.
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status.frame.as_ref().is_some_and(|f| {
+                    f.time == at && f.gpu_ok && f.completion_host_seconds.is_some()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "drag step {i} never showed: {status:?}"
+                );
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+        crate::render::LATE_COMPLETION_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        v.retire();
+    }
+
+    fn hold_next_completion(
+        service: &EngineService,
+    ) -> (
+        std::sync::mpsc::Receiver<metal::MTLCommandBufferStatus>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, hold) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        let release = Mutex::new(release);
+        *service.shared.before_completed.lock().unwrap() = Some(Arc::new(move |status| {
+            let _ = entered.send(status);
+            let _ = release.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }));
+        (hold, resume)
+    }
+
+    fn wait_for_pose(v: &Viewer, at: Ticks) {
+        wait_for(v, "scrub pose", |status| {
+            v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+            status
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.gpu_ok && f.completion_host_seconds.is_some())
+        });
+    }
+
+    #[test]
+    fn a_retina_layer_drag_can_pipeline_one_more_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("layer-drag-pipeline").unwrap()).unwrap();
+        let mut config = shapes_config(None);
+        config.output = config.output.resized(2000, 1120);
+        let v = service.viewer(config).unwrap();
+        wait_for_pose(&v, seconds(0.));
+        v.editing(true).unwrap();
+        wait_for(&v, "drag preview", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Scrub)
+        });
+        let (hold, resume) = hold_next_completion(&service);
+        v.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        v.scrub(seconds(0.4)).unwrap();
+        wait_for(&v, "second drag frame submitted", |_| {
+            service.shared.paused_flight_peak.load(Ordering::Acquire) == 2
+        });
+        v.scrub(seconds(0.6)).unwrap();
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(0.6));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 2);
+        v.retire();
+    }
+
+    #[test]
+    fn an_unsuccessful_completion_admits_the_queued_pose() {
+        use std::sync::atomic::Ordering;
+
+        // Metal API validation diagnoses the expired reference before
+        // commit. Run this test with the driver's completion enabled.
+        if std::env::var_os("MTL_DEBUG_LAYER").is_some_and(|v| v != "0") {
+            return;
+        }
+
+        let service = EngineService::start(pm_gpu::Gpu::new("failed-flight").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        service
+            .shared
+            .invalidate_next_submission
+            .store(true, Ordering::Relaxed);
+        v.scrub(seconds(0.2)).unwrap();
+        assert_eq!(
+            hold.recv_timeout(Duration::from_secs(5)).unwrap(),
+            metal::MTLCommandBufferStatus::Error,
+        );
+        v.scrub(seconds(0.4)).unwrap();
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(0.4));
+        assert!(!service.shared.invalidate_next_submission.load(Ordering::Relaxed));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
+        v.retire();
+    }
+
+    #[test]
+    fn a_pause_waits_for_its_playing_flight_and_then_draws_the_seek() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("pause-with-flight").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Playing)
+        });
+        let (hold, resume) = hold_next_completion(&service);
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        service
+            .shared
+            .paused_flight_peak
+            .store(0, Ordering::Release);
+        v.command(TransportCommand::Pause).unwrap();
+        let at = seconds(0.2);
+        v.command(TransportCommand::Seek {
+            time: at,
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let passes = service.shared.passes.load(Ordering::Acquire);
+        wait_for(&v, "worker checked the paused request", |_| {
+            service.shared.passes.load(Ordering::Acquire) >= passes + 2
+        });
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 0);
+        resume.send(()).unwrap();
+        wait_for(&v, "paused seek", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Paused && f.time == at)
+        });
+        v.retire();
+    }
+
+    #[test]
+    fn an_unfinished_paused_view_does_not_block_another_view() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("independent-flights").unwrap()).unwrap();
+        let first = shapes_viewer(&service, None);
+        let second = shapes_viewer(&service, None);
+        wait_for_pose(&first, seconds(0.));
+        wait_for_pose(&second, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        first.scrub(seconds(0.2)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+        let at = seconds(0.6);
+        second.scrub(at).unwrap();
+        wait_for(&second, "other view recorded its frame", |_| {
+            service
+                .shared
+                .drawn
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, time, _)| *time == at)
+        });
+        resume.send(()).unwrap();
+        wait_for_pose(&second, at);
+        first.retire();
+        second.retire();
+    }
+
+    #[test]
+    fn the_latest_scrub_reaches_the_viewer_after_one_unfinished_frame() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("queued-scrub-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for_pose(&v, seconds(0.));
+        let (hold, resume) = hold_next_completion(&service);
+        v.scrub(seconds(0.25)).unwrap();
+        hold.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let passes = service.shared.passes.load(Ordering::Acquire);
+        for i in 2..=8 {
+            v.scrub(seconds(f64::from(i) * 0.25)).unwrap();
+            v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+        }
+        wait_for(&v, "worker polled the queued scrubs", |_| {
+            service.shared.passes.load(Ordering::Acquire) >= passes + 2
+        });
+        resume.send(()).unwrap();
+        wait_for_pose(&v, seconds(2.));
+        assert_eq!(service.shared.paused_flight_peak.load(Ordering::Relaxed), 1);
+        v.retire();
+    }
+
+    /// The skimmer shows its time without moving the playhead, and the
+    /// viewer returns to the playhead's frame when the pointer leaves.
+    #[test]
+    fn the_skimmer_shows_its_frame_and_leaves_the_playhead() {
+        let service = EngineService::start(pm_gpu::Gpu::new("skim-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let frame = |v: &Viewer, at: Ticks| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                v.display_tick(trace::now() + 1. / 60., 1. / 60.).unwrap();
+                let status = v.status();
+                if status
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
+                {
+                    return status;
+                }
+                assert!(std::time::Instant::now() < deadline, "{at:?}: {status:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let playhead = Ticks::new(pm_protocol::common::TICKS_PER_SECOND / 3).unwrap();
+        v.scrub(playhead).unwrap();
+        frame(&v, playhead);
+        for (i, at) in [1, 2, 3, 2]
+            .map(|s| Ticks::new(s * pm_protocol::common::TICKS_PER_SECOND / 2).unwrap())
+            .into_iter()
+            .enumerate()
+        {
+            v.skim(Some(at), trace::now() + i as f64 * 0.016).unwrap();
+            let status = frame(&v, at);
+            assert_eq!(
+                status.clock.unwrap().media_time,
+                playhead,
+                "skimming never moves the playhead"
+            );
+        }
+        v.skim(None, trace::now()).unwrap();
+        frame(&v, playhead);
+        v.retire();
+    }
+
+    #[test]
+    fn skim_rates_follow_the_pointer() {
+        assert_eq!(skim_rate(0.05, 0.1).num, 1);
+        assert_eq!(skim_rate(-0.05, 0.1).num, -1);
+        assert_eq!(skim_rate(0.4, 0.1).num, 2);
+        assert_eq!(skim_rate(-0.4, 0.1).num, -2);
+    }
+
+    /// The fixture is 640 × 360 in a 160 × 90 drawable (Fit at a quarter):
+    /// a paused frame renders the composition at its own size, as an export
+    /// does, so pixel-sized effects look as delivered, and the final pass
+    /// shows it at the drawable's.
+    #[test]
+    fn a_paused_full_frame_renders_at_the_composition_size_and_shows_at_the_drawable() {
+        let service = EngineService::start(pm_gpu::Gpu::new("paused-full-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        let frame = status.frame.as_ref().unwrap();
+        assert_eq!(frame.pixels.as_ref().unwrap().len(), 160 * 90);
+        assert_eq!((frame.moment, frame.scale), (Moment::Paused, 4.));
+        assert_eq!(status.effective_quality, 1., "Full");
+    }
+
+    /// A paused frame shows at once at the drawable's size, then a refined
+    /// picture of the same time at the composition's; a seek starts over,
+    /// and playback never waits for (or draws) a refinement.
+    #[test]
+    fn a_paused_frame_is_shown_at_once_then_refined_and_play_skips_the_refinement() {
+        use pm_protocol::clock::SeekMode;
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("paused-refine-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let drawn = || service.shared.drawn.lock().unwrap().clone();
+        // The frames drawn of `time` from `from` on: their scales in order.
+        let scales = |from: usize, time: Ticks| -> Vec<f64> {
+            drawn()[from..]
+                .iter()
+                .filter(|(_, t, _)| *t == time)
+                .map(|(_, _, scale)| *scale)
+                .collect()
+        };
+        let refined = |from: usize, time: Ticks| {
+            wait_for(&v, "the refinement", |_| scales(from, time).contains(&4.));
+            scales(from, time)
+        };
+        let first = wait_for(&v, "a first frame", |s| s.frame.is_some())
+            .frame
+            .unwrap()
+            .time;
+        assert_eq!(refined(0, first)[..2], [1., 4.], "at once, then refined");
+        let (fast, fine) = {
+            let d = drawn();
+            let fast = d
+                .iter()
+                .find(|(_, t, s)| *t == first && *s == 1.)
+                .unwrap()
+                .0;
+            let fine = d
+                .iter()
+                .find(|(_, t, s)| *t == first && *s == 4.)
+                .unwrap()
+                .0;
+            (fast, fine)
+        };
+        assert!(
+            fine.sequence > fast.sequence,
+            "a new picture of the same time"
+        );
+        // A seek: the fast picture of the new time, then its refinement.
+        let from = drawn().len();
+        v.command(TransportCommand::Seek {
+            time: seconds(1.),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        assert_eq!(refined(from, seconds(1.))[..2], [1., 4.]);
+        // Play right after a pause's fast picture: nothing more is drawn at
+        // the composition's size while the transport runs.
+        let from = drawn().len();
+        v.command(TransportCommand::Seek {
+            time: seconds(0.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.moment == Moment::Playing)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            drawn()[from..].iter().all(|(_, _, scale)| *scale <= 1.),
+            "{:?}",
+            &drawn()[from..]
+        );
+    }
+
+    #[test]
+    fn a_slow_live_edit_draws_reduced_and_settles_at_full_resolution() {
+        let service = EngineService::start(pm_gpu::Gpu::new("edit-drag-auto").unwrap()).unwrap();
+        let mut config = shapes_config(None);
+        let mut project = serde_json::from_str::<serde_json::Value>(
+            include_str!("../tests/fixtures/shapes.json"),
+        ).unwrap();
+        let layers = project["layers"].as_array_mut().unwrap();
+        let mut spare = layers[0].clone();
+        spare["on"] = false.into();
+        for i in 0..256 {
+            spare["id"] = format!("disabled-{i}").into();
+            layers.push(spare.clone());
+        }
+        config.snapshot.document = Arc::new(pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(&project.to_string()).unwrap(),
+            )),
+            config.snapshot.revision,
+        ));
+        let snapshot = config.snapshot.clone();
+        let v = service.viewer(config).unwrap();
+        v.adapt_drags(true).unwrap();
+        service.shared.slow_frames.store(true, std::sync::atomic::Ordering::Release);
+        wait_for(&v, "the first picture", |s| s.frame.as_ref().is_some_and(|f| f.gpu_ok));
+        v.editing(true).unwrap();
+        v.snapshot(Snapshot {
+            revision: 2,
+            document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), 2)),
+            ..snapshot
+        }).unwrap();
+        let status = wait_for(&v, "a reduced edit preview", |s| {
+            s.frame.as_ref().is_some_and(|f| {
+                f.gpu_ok && f.stamp.revision == 2 && f.moment == Moment::Scrub && f.scale < 1.
+            })
+        });
+        let scale = status.frame.unwrap().scale;
+        assert!(scale == policy::AUTO_FLOOR || scale == policy::AUTO_DRAG_FLOOR);
+        v.editing(false).unwrap();
+        wait_for(&v, "the full edit picture", |s| {
+            s.frame.as_ref().is_some_and(|f| {
+                f.gpu_ok && f.stamp.revision == 2 && f.moment == Moment::Paused && f.scale >= 1.
+            })
+        });
+    }
+
+    /// An edit left resting with its gesture still open (text being typed,
+    /// a drag held still) settles its picture as a release does: the
+    /// reduced drag frames are for while it moves.
+    #[test]
+    fn an_open_edit_that_rests_settles_its_picture() {
+        let service = EngineService::start(pm_gpu::Gpu::new("edit-settle-test").unwrap()).unwrap();
+        let config = shapes_config(None);
+        let snapshot = config.snapshot.clone();
+        let v = service.viewer(config).unwrap();
+        let settling = || service.shared.settling.lock().unwrap().clone();
+        wait_for(&v, "the first settled picture", |_| !settling().is_empty());
+        v.editing(true).unwrap();
+        v.snapshot(Snapshot {
+            revision: 2,
+            document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), 2)),
+            ..snapshot
+        })
+        .unwrap();
+        wait_for(&v, "the settled picture of the resting edit", |s| {
+            settling().iter().any(|(_, stamp, _, _)| stamp.revision == 2)
+                && s.frame.as_ref().is_some_and(|f| f.settled)
+        });
+        // And it stays put: no drag frame drawn again and again.
+        let presented = v.status().presented;
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(v.status().presented, presented, "a resting edit draws nothing more");
+    }
+
+    /// A settled picture is one whole final frame on the worker, which
+    /// nothing interrupts once its draw has begun: it begins only when the
+    /// viewer has rested. A click through the timeline (each seek sent as
+    /// the picture of the one before lands) never begins one for a time it
+    /// passes; the time it rests on settles.
+    #[test]
+    fn a_settled_picture_waits_for_the_viewer_to_rest() {
+        use pm_protocol::clock::SeekMode;
+        let service = EngineService::start(pm_gpu::Gpu::new("settle-rest-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let settling = || service.shared.settling.lock().unwrap().clone();
+        wait_for(&v, "the first settled picture", |_| !settling().is_empty());
+        let before = settling().len();
+        let times: Vec<Ticks> = (1..=6).map(|n| seconds(0.1 * f64::from(n))).collect();
+        for time in &times {
+            v.command(TransportCommand::Seek {
+                time: *time,
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+            wait_for(&v, "the picture of the seek", |s| {
+                s.frame
+                    .as_ref()
+                    .is_some_and(|f| f.time == *time && Some(f.stamp) == v.stamp())
+            });
+        }
+        let rested = *times.last().unwrap();
+        wait_for(&v, "the settled picture of the time it rests on", |_| {
+            settling()[before..]
+                .iter()
+                .any(|(_, _, time, scale)| *time == rested && *scale == 4.)
+        });
+        let passed: Vec<Ticks> = settling()[before..]
+            .iter()
+            .map(|(_, _, time, _)| *time)
+            .filter(|time| *time != rested)
+            .collect();
+        assert!(
+            passed.is_empty(),
+            "a seek of the click-through met a settled picture being drawn: {passed:?}"
+        );
+    }
+
+    /// Nothing waits for a settled picture. While one is still preparing
+    /// (an original that takes long to decode: held here), its viewer's
+    /// seek is drawn, another viewer opens and shows its picture, and the
+    /// held one gives way to the seek once it looks; the time the viewer
+    /// rests on then settles. Stopping the service while a settled picture
+    /// prepares returns at once.
+    #[test]
+    fn a_seek_another_viewer_and_a_stop_never_wait_for_a_settled_picture() {
+        use pm_protocol::clock::SeekMode;
+        let service = EngineService::start(pm_gpu::Gpu::new("settle-off-worker").unwrap()).unwrap();
+        // The next settled picture is held where it begins, until released.
+        let hold = |service: &EngineService| {
+            let (entered, began) = std::sync::mpsc::channel();
+            let (release, barrier) = std::sync::mpsc::channel::<()>();
+            *service.shared.settle_hold.lock().unwrap() = Some(Box::new(move || {
+                entered.send(()).unwrap();
+                let _ = barrier.recv_timeout(Duration::from_secs(60));
+            }));
+            (began, release)
+        };
+        let (began, release) = hold(&service);
+        let v = shapes_viewer(&service, None);
+        began
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the first settled picture is asked for");
+        // Its viewer seeks: the picture of the seek is shown meanwhile.
+        let time = seconds(0.5);
+        v.command(TransportCommand::Seek {
+            time,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        wait_for(
+            &v,
+            "the picture of a seek sent while a picture settles",
+            |s| s.frame.as_ref().is_some_and(|f| f.time == time),
+        );
+        // Another viewer opens and shows its picture meanwhile.
+        let other = shapes_viewer(&service, None);
+        wait_for(&other, "another viewer's picture while one settles", |s| {
+            s.frame.is_some()
+        });
+        assert!(
+            service.shared.settle_ends.lock().unwrap().is_empty(),
+            "the held picture is still preparing"
+        );
+        // Released, it gives way to the seek: never shown.
+        release.send(()).unwrap();
+        let ends = || service.shared.settle_ends.lock().unwrap().clone();
+        wait_for(&v, "the held picture gives way", |_| !ends().is_empty());
+        assert_eq!(ends()[0], "gave way");
+        // The time the viewer rests on settles.
+        wait_for(&v, "the settled picture of the seek", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == time && f.scale == 4.)
+        });
+        drop(other);
+        // A settled picture prepares again: the service stops meanwhile.
+        let (began, release) = hold(&service);
+        v.command(TransportCommand::Seek {
+            time: seconds(1.),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        began
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the settled picture of the second seek is asked for");
+        let (stopped, done) = std::sync::mpsc::channel();
+        let stop = std::thread::spawn(move || {
+            drop(v);
+            drop(service);
+            stopped.send(()).unwrap();
+        });
+        done.recv_timeout(Duration::from_secs(10))
+            .expect("stopping the service waited for a settled picture");
+        release.send(()).unwrap();
+        stop.join().unwrap();
+    }
+
+    #[test]
+    fn a_wide_paused_viewport_keeps_the_worker_available() {
+        let service = EngineService::start(pm_gpu::Gpu::new("wide-paused-preview").unwrap()).unwrap();
+        let mut config = shapes_config(None);
+        let snapshot = &mut config.snapshot;
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"][0]["fx"] = serde_json::json!([
+            {"id":"wide-blur","type":"blur","version":1,"on":true,"p":{}}
+        ]);
+        let value = pm_model::json::parse(&project.to_string()).unwrap();
+        snapshot.document = Arc::new(pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(value)),
+            1,
+        ));
+        config.output.crop = Some(policy::Crop {
+            x: 333, y: 275, canvas_width: 6400, canvas_height: 3600,
+        });
+        let (entered, began) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        *service.shared.settle_hold.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let wide = service.viewer(config).unwrap();
+        began.recv_timeout(Duration::from_secs(10)).unwrap();
+        let other = shapes_viewer(&service, None);
+        wait_for_pose(&other, seconds(0.));
+        assert!(wide.status().frame.is_none());
+        resume.send(()).unwrap();
+        wait_for_pose(&wide, seconds(0.));
+        assert_eq!(service.shared.settle_ends.lock().unwrap()[0], "shown");
+    }
+
+    /// A paused viewer settles while another plays, in bounded time: its
+    /// settled picture is drawn off the worker in slices that leave the
+    /// playing viewer's frames their room, so neither waits for the other
+    /// to stop. Its preview says it is not the final picture; the settled
+    /// one says it is. The other is of another project (its own resources):
+    /// the settled picture is judged by its own viewer's state, not by the
+    /// last viewer the engine drew.
+    #[test]
+    fn a_paused_viewer_settles_while_another_plays() {
+        use pm_protocol::clock::TransportState;
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("settle-other-viewer-test").unwrap()).unwrap();
+        let playing = shapes_viewer(&service, None);
+        playing
+            .resources(Arc::new(resources::ResourceSnapshot {
+                generation: 7,
+                ..Default::default()
+            }))
+            .unwrap();
+        playing
+            .command(TransportCommand::SetLoop {
+                range: Some(pm_protocol::common::TickRange {
+                    start: seconds(0.),
+                    end: seconds(2.),
+                }),
+            })
+            .unwrap();
+        playing
+            .command(TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        wait_for(&playing, "playing", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.moment == Moment::Playing)
+        });
+        let paused = shapes_viewer(&service, None);
+        let preview = wait_for(&paused, "the paused viewer's picture", |s| {
+            s.frame.is_some()
+        });
+        assert!(
+            !preview.frame.unwrap().settled,
+            "a preview is not the final picture"
+        );
+        let shown_before = playing.status().presented;
+        let asked = std::time::Instant::now();
+        let settled = wait_for(&paused, "its settled picture while the other plays", |s| {
+            s.frame.as_ref().is_some_and(|f| f.settled && f.scale == 4.)
+        });
+        assert!(settled.frame.unwrap().settled);
+        // Bounded: the settle delay, the picture itself, and at most a hold
+        // per slice; never "once the other stops".
+        assert!(
+            asked.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            asked.elapsed()
+        );
+        let other = playing.status();
+        assert_eq!(
+            other.clock.map(|c| c.state),
+            Some(TransportState::Playing),
+            "the other viewer played throughout"
+        );
+        assert!(
+            other.presented > shown_before,
+            "the playing viewer kept presenting"
+        );
+        let ends = service.shared.settle_ends.lock().unwrap().clone();
+        assert!(
+            !ends.contains(&"unkept"),
+            "a settled picture was judged by the other viewer's state: {ends:?}"
+        );
+    }
+
+    /// A paused viewer keeps its settled picture beside a playing one.
+    /// Asked to draw again under the same stamp (a picture that did not
+    /// reach the glass is presented once more; a monitor change), it
+    /// presents that picture again: it is not drawn as a preview and
+    /// settled a second time, each such round taking the worker from the
+    /// viewer that plays (the playing viewer's frames had taken its place
+    /// among the kept frames, and two projects' viewers, whose resources
+    /// are pinned apart, dropped every kept frame at each turn).
+    #[test]
+    fn a_paused_viewer_keeps_its_settled_picture_beside_a_playing_one() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-kept-test").unwrap()).unwrap();
+        let playing = shapes_viewer(&service, None);
+        playing
+            .command(TransportCommand::SetLoop {
+                range: Some(pm_protocol::common::TickRange {
+                    start: seconds(0.),
+                    end: seconds(2.),
+                }),
+            })
+            .unwrap();
+        playing
+            .command(TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let paused = shapes_viewer(&service, None);
+        // Another project: its resources are pinned on their own.
+        paused
+            .resources(Arc::new(resources::ResourceSnapshot {
+                generation: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        wait_for(&paused, "its settled picture", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.settled && Some(f.stamp) == paused.stamp())
+        });
+        let doc = paused.stamp().unwrap().doc_id;
+        // What the paused viewer has drawn at the drawable's size (its
+        // previews), and how often it has settled.
+        let previews = || {
+            service
+                .shared
+                .drawn
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(stamp, _, scale)| stamp.doc_id == doc && *scale == 1.)
+                .count()
+        };
+        let settles = || {
+            service
+                .shared
+                .settling
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(viewer, ..)| *viewer == paused.id)
+                .count()
+        };
+        let (drawn, settled) = (previews(), settles());
+        for _ in 0..4 {
+            // The playing viewer draws more frames than are kept.
+            let shown = playing.status().presented;
+            wait_for(&playing, "the other viewer plays on", |s| {
+                s.presented >= shown + 12
+            });
+            paused.monitor_solo(Vec::new()).unwrap();
+            std::thread::sleep(Duration::from_secs_f64(2. * policy::SETTLE_IDLE_SECONDS));
+        }
+        assert_eq!(
+            (previews(), settles()),
+            (drawn, settled),
+            "a redraw of the settled picture drew a preview and settled again"
+        );
+        assert!(paused.status().frame.unwrap().settled);
+    }
+
+    /// Override answers landing redraw the viewers of their own document
+    /// that wait for them. A whole picture of another document (a second
+    /// project window, paused) is not drawn again for them: each redraw of
+    /// it took the worker from the viewer that plays.
+    #[test]
+    fn override_answers_redraw_only_the_viewers_that_wait_for_them() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("answers-redraw-test").unwrap()).unwrap();
+        let other = shapes_viewer(&service, None);
+        wait_for(&other, "the other project's settled picture", |s| {
+            s.frame.as_ref().is_some_and(|f| f.settled)
+        });
+        let other_doc = other.stamp().unwrap().doc_id;
+        let drawn = |doc: u64| {
+            service
+                .shared
+                .drawn
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(stamp, ..)| stamp.doc_id == doc)
+                .count()
+        };
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        let time = seconds(2.);
+        v.command(TransportCommand::Seek {
+            time,
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let before = drawn(other_doc);
+        // Answered until its picture is drawn (each batch redraws).
+        wait_for(&v, "the picture its answers were waited for", |s| {
+            let needs: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+            if !needs.is_empty() {
+                store.answer_all(
+                    1,
+                    1,
+                    needs
+                        .into_iter()
+                        .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                        .collect(),
+                );
+            }
+            s.frame.as_ref().is_some_and(|f| f.time == time)
+        });
+        assert_eq!(
+            drawn(other_doc),
+            before,
+            "another project's whole picture was drawn again for these answers"
+        );
+    }
+
+    /// A viewer whose drawable is the composition's own size shows a
+    /// preview at once and settles on the final picture, a new picture of
+    /// the same time, like any other: its final frame is not drawn on the
+    /// worker the moment a seek lands.
+    #[test]
+    fn a_viewer_at_the_compositions_size_shows_a_preview_then_settles() {
+        use pm_protocol::clock::SeekMode;
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("settle-full-size-test").unwrap()).unwrap();
+        let v = service
+            .viewer(ViewerConfig {
+                output: Output {
+                    width: 640,
+                    height: 360,
+                    display: 1,
+                    headroom: 1.,
+                    crop: None,
+                },
+                ..shapes_config(None)
+            })
+            .unwrap();
+        let time = seconds(1.);
+        v.command(TransportCommand::Seek {
+            time,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        let settling = || service.shared.settling.lock().unwrap().clone();
+        let drawn = || service.shared.drawn.lock().unwrap().clone();
+        wait_for(&v, "the settled picture", |s| {
+            let asked: Vec<_> = settling()
+                .into_iter()
+                .filter(|(_, _, t, _)| *t == time)
+                .collect();
+            // Shown under the stamp after the one it was asked for.
+            asked.len() == 1
+                && s.frame.as_ref().is_some_and(|f| {
+                    Some(f.stamp) == v.stamp() && f.stamp.sequence == asked[0].1.sequence + 1
+                })
+                && drawn().iter().any(|(stamp, ..)| Some(*stamp) == v.stamp())
+        });
+        let drawn: Vec<(Stamp, f64)> = service
+            .shared
+            .drawn
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, t, _)| *t == time)
+            .map(|(stamp, _, scale)| (*stamp, *scale))
+            .collect();
+        assert_eq!(
+            drawn.len(),
+            2,
+            "a preview, then the settled picture: {drawn:?}"
+        );
+        assert!(drawn.iter().all(|(_, scale)| *scale == 1.), "{drawn:?}");
+        assert!(drawn[1].0.sequence > drawn[0].0.sequence, "a new picture");
+        let settled = settling();
+        let settled: Vec<_> = settled.iter().filter(|(_, _, t, _)| *t == time).collect();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(
+            (settled[0].1, settled[0].1.sequence + 1),
+            (drawn[0].0, drawn[1].0.sequence),
+            "asked for the preview's stamp, shown as the picture after it"
+        );
+        assert_eq!(
+            *service.shared.settle_ends.lock().unwrap().last().unwrap(),
+            "shown"
+        );
+    }
+
+    /// A crop that is the whole canvas (Fit, whose window the shell can round
+    /// a pixel narrower than its canvas) renders at the composition's size
+    /// like no crop; a zoomed-in window keeps its scale.
+    #[test]
+    fn a_whole_canvas_crop_is_fit_and_a_zoomed_one_keeps_its_scale() {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 98,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let scene = Scene {
+            doc: snapshot.document.clone(),
+            comp: snapshot.open_comp().unwrap(),
+            media: Default::default(),
+            content: 0,
+        };
+        let output = |crop| Output {
+            width: 160,
+            height: 90,
+            display: 1,
+            headroom: 1.,
+            crop,
+        };
+        let whole = Some(crate::policy::Crop {
+            x: 0,
+            y: 0,
+            canvas_width: 160,
+            canvas_height: 90,
+        });
+        let zoomed = Some(crate::policy::Crop {
+            x: 40,
+            y: 20,
+            canvas_width: 640,
+            canvas_height: 360,
+        });
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(None)), 4.);
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(whole)), 4.);
+        // Fit rounded a pixel narrow (the shell's 1265 on 1266).
+        let narrow = Some(crate::policy::Crop {
+            x: 0,
+            y: 0,
+            canvas_width: 161,
+            canvas_height: 90,
+        });
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(narrow)), 4.);
+        assert_eq!(FrameSpec::paused_full_scale(&scene, &output(zoomed)), 1.);
+    }
+
+    /// The composition-size surface is admitted whole within a byte budget,
+    /// or not at all: an 8K composition in a 4K or 1440p drawable draws at
+    /// the drawable's size, a UHD one in a 1080p drawable at its own.
+    #[test]
+    fn paused_supersampling_fits_a_byte_budget() {
+        let scene = |w: u32, h: u32| {
+            let mut project: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+            (project["w"], project["h"]) = (w.into(), h.into());
+            let doc = pm_model::json::parse(&project.to_string()).unwrap();
+            Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(doc)),
+                    1,
+                )),
+                comp: "Pshapes-primitives-root".into(),
+                media: Default::default(),
+                content: 0,
+            }
+        };
+        let output = |width, height| Output {
+            width,
+            height,
+            display: 1,
+            headroom: 1.,
+            crop: None,
+        };
+        let fill =
+            |w: u32, h: u32| FrameSpec::paused_full_scale(&scene(w, h), &output(w / 2, h / 2));
+        assert_eq!(
+            FrameSpec::paused_full_scale(&scene(7680, 4320), &output(3840, 2160)),
+            1.
+        );
+        assert_eq!(
+            FrameSpec::paused_full_scale(&scene(7680, 4320), &output(2560, 1440)),
+            1.
+        );
+        assert_eq!(fill(3840, 2160), 2.);
+        let bytes = 3841. * 2161. * 8.;
+        assert!(bytes <= render::PAUSED_FULL_BYTES as f64);
+    }
+
+    /// Automatic's HD proxy plays a large clip, but a paused frame reads
+    /// its original, as an export does; a proxy chosen in View › Media
+    /// stays when paused.
+    #[test]
+    fn an_automatic_proxy_stands_in_only_while_playing() {
+        let fixture = |name: &str| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../engine/fixtures")
+                .join(name)
+        };
+        let (original, proxy) = (fixture("h264-aac.mp4"), fixture("hevc.mp4"));
+        let project = pm_model::json::parse(
+            r##"{"id":"P","name":"P","compId":"C","compName":"C","w":160,"h":90,"fps":30,"dur":3,"bg":"#000000",
+            "layers":[{"id":"v","type":"video","name":"large clip","from":0,"dur":3,"on":true,"solo":false,"mblur":false,
+              "p":{"position.x":{"v":80,"kf":[],"expr":null},"position.y":{"v":45,"kf":[],"expr":null},"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[],"expr":null},"scale.y":{"v":100,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null}},
+              "fx":[],"masks":[],"d":{"asset":"large-clip","trim":0,"speed":1,"w":160,"h":90}}],
+            "comps":{},"assets":{"large-clip":{"id":"large-clip","type":"video","name":"large clip","w":160,"h":90,"dur":3}},
+            "markers":[],"work":[0,3],"params":{}}"##,
+        )
+        .unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 97,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let mut media = MediaCatalog::default();
+        media
+            .originals
+            .insert("large-clip".into(), original.clone());
+        media.proxies.insert("large-clip".into(), proxy.clone());
+        media.automatic_proxies.insert("large-clip".into());
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("automatic-proxy-test").unwrap()).unwrap();
+        let v = service
+            .viewer(ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot,
+                media,
+                output: Output {
+                    width: 160,
+                    height: 90,
+                    display: 1,
+                    headroom: 1.,
+                    crop: None,
+                },
+                layer: None,
+                rate: pm_time::Rate::FPS_30,
+                end: Some(3 * pm_protocol::common::TICKS_PER_SECOND),
+                audio: false,
+            })
+            .unwrap();
+        // The clip's file in this test's viewer requests of `moment`.
+        let read = |moment: Moment| {
+            crate::render::MEDIA_SAMPLED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(exact, m, _)| !exact && *m == moment)
+                .filter_map(|(_, _, paths)| paths.paths.get("large-clip").cloned())
+                .filter(|p| *p == original || *p == proxy)
+                .collect::<Vec<_>>()
+        };
+        wait_for(&v, "a paused frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.moment == Moment::Paused)
+        });
+        assert_eq!(v.status().proxied, 1, "Automatic plays the proxy");
+        let paused = read(Moment::Paused);
+        assert!(
+            !paused.is_empty() && paused.iter().all(|p| *p == original),
+            "{paused:?}"
+        );
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        wait_for(&v, "a playing frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.moment == Moment::Playing)
+        });
+        let playing = read(Moment::Playing);
+        assert!(
+            !playing.is_empty() && playing.iter().all(|p| *p == proxy),
+            "{playing:?}"
+        );
+        v.command(TransportCommand::Pause).unwrap();
+        // A proxy a person chose stays when paused.
+        v.media_mode(MediaMode::ProxyOnly).unwrap();
+        let stamp = v.stamp().unwrap();
+        wait_for(&v, "a paused frame in Proxy Only", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
+        });
+        assert_eq!(read(Moment::Paused).last(), Some(&proxy));
+        v.media_mode(MediaMode::ProxyPreferred).unwrap();
+        let stamp = v.stamp().unwrap();
+        wait_for(&v, "a paused frame in Proxy Preferred", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
+        });
+        assert_eq!(read(Moment::Paused).last(), Some(&proxy));
+        // Optimized media outranks the original in Automatic, paused too.
+        let optimized = fixture("h264-aac.mov");
+        let mut media = MediaCatalog::default();
+        media
+            .originals
+            .insert("large-clip".into(), original.clone());
+        media.proxies.insert("large-clip".into(), proxy.clone());
+        media
+            .optimized
+            .insert("large-clip".into(), optimized.clone());
+        media.automatic_proxies.insert("large-clip".into());
+        v.media_mode(MediaMode::Automatic).unwrap();
+        v.media(media).unwrap();
+        let stamp = v.stamp().unwrap();
+        wait_for(&v, "a paused frame with optimized media", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.moment == Moment::Paused)
+        });
+        let last = crate::render::MEDIA_SAMPLED
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(exact, m, _)| !exact && *m == Moment::Paused)
+            .and_then(|(_, _, paths)| paths.paths.get("large-clip").cloned());
+        assert_eq!(last, Some(optimized));
+        v.retire();
+    }
+
+    /// A capture taken during a reduced drag (explicit Half quality, a
+    /// scrub) reads an exact frame: paused, at least full resolution (the
+    /// composition's size, as an export), final resampler. (Other tests'
+    /// captures share the record.)
+    #[test]
+    fn a_capture_during_a_reduced_drag_reads_the_exact_frame() {
+        use pm_render::sampling::Sampling;
+        let service = EngineService::start(pm_gpu::Gpu::new("capture-drag-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.quality(crate::policy::Quality::Half).unwrap();
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let edition = service.shared.state.lock().unwrap().views[&v.id]
+            .config.snapshot.document.edition();
+        let captured = || {
+            crate::render::SAMPLED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(owner, exact, ..)| *owner == edition && *exact)
+                .map(|(_, _, moment, scale, sampling)| (*moment, *scale, *sampling))
+                .collect::<Vec<_>>()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut second = 1;
+        while captured().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no capture landed in a drag"
+            );
+            v.scrub(Ticks::from_whole_seconds(second % 3)).unwrap();
+            v.capture_next().unwrap();
+            drawn(&v);
+            second += 1;
+        }
+        assert!(
+            captured()
+                .iter()
+                .all(|&(moment, scale, sampling)| moment == Moment::Paused
+                    && scale >= 1.
+                    && sampling == Sampling::Final),
+            "{:?}",
+            captured()
+        );
+        v.retire();
+    }
+
+    /// Overlay geometry from a zero-size composition (a division by zero)
+    /// or a transform too large for a float is left out line by line; what
+    /// can be drawn is kept, and nothing fails.
+    #[test]
+    fn overlay_lines_that_cannot_be_drawn_are_left_out() {
+        let line = |x: f32| OverlayLine {
+            ends: [x, 0., 1., 1.],
+            color: [1., 1., 1., 1.],
+        };
+        let zero_width = (1.0f64 / 0.0) as f32;
+        let beyond_float = (1e42f64 / 1920.) as f32;
+        assert!(zero_width.is_infinite() && beyond_float.is_infinite());
+        let bad = [line(zero_width), line(f32::NAN), line(beyond_float)];
+        assert!(OverlayGeometry::new(bad.to_vec()).is_err());
+        let kept = OverlayGeometry::lossy(bad.into_iter().chain([line(0.25), line(0.5)]));
+        let firsts: Vec<f32> = kept.lines.iter().map(|l| l.ends[0]).collect();
+        assert_eq!(firsts, [0.25, 0.5]);
+        let many = OverlayGeometry::lossy((0..500).map(|_| line(0.5)));
+        assert_eq!(many.lines.len(), OverlayGeometry::MAX_LINES);
+    }
+
+    /// A viewer whose document has a raster override answering through the
+    /// returned log: every shape asks the realm, which answers only what the
+    /// test answers.
+    fn overridden(
+        service: &EngineService,
+        v: &Viewer,
+    ) -> (
+        Arc<compat::CompatStore>,
+        Arc<Mutex<Vec<pm_protocol::snapshot::CompatNeed>>>,
+    ) {
+        let store = service.compat(v.stamp().unwrap().doc_id);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        store.set_sink(Some(Arc::new(
+            move |_, _, needs: Vec<pm_protocol::snapshot::CompatNeed>| {
+                log.lock().unwrap().extend(needs)
+            },
+        )));
+        store.set_state(true, 1, 1);
+        (store, asked)
+    }
+
+    /// Showing another composition of an open document (the editor's
+    /// composition switch, paused) never closes the document, whatever the
+    /// worker is doing at that moment (here: playing another window's
+    /// project, so it looks at its views all the time). Nothing of the
+    /// project is released, and its override layers still ask, and are drawn
+    /// from, the store the window's extensions hold from before the switch.
+    #[test]
+    fn a_composition_switch_keeps_the_document_and_its_override_answers() {
+        let (_shaders, service) = rebuilding_service("comp-switch-test");
+        let other = shapes_viewer(&service, None);
+        other
+            .command(TransportCommand::SetLoop {
+                range: Some(pm_protocol::common::TickRange {
+                    start: seconds(0.),
+                    end: seconds(2.),
+                }),
+            })
+            .unwrap();
+        other
+            .command(TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let config = shapes_config(None);
+        let mut v = service.viewer(config.clone()).unwrap();
+        let first = wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let doc = first.frame.unwrap().stamp.doc_id;
+        assert_ne!(other.stamp().unwrap().doc_id, doc);
+        let (store, asked) = overridden(&service, &v);
+        for switch in 1..=40i64 {
+            v = service.replace_viewer(&v, config.clone()).unwrap();
+            // The frame at a new time lands only once every override layer
+            // in it was asked for and answered through the window's store.
+            let at = Ticks::new(switch * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap();
+            v.command(TransportCommand::Seek {
+                time: at,
+                mode: pm_protocol::clock::SeekMode::Exact,
+            })
+            .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let mut answered = 0;
+            loop {
+                let needs = std::mem::take(&mut *asked.lock().unwrap());
+                answered += needs.len();
+                if !needs.is_empty() {
+                    store.answer_all(
+                        1,
+                        1,
+                        needs
+                            .into_iter()
+                            .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                            .collect(),
+                    );
+                }
+                let status = v.status();
+                if answered > 0
+                    && status
+                        .frame
+                        .as_ref()
+                        .is_some_and(|f| f.gpu_ok && f.time == at && !f.stand_ins)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "switch {switch}: {answered} override layers asked the window's store: {status:?}"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                Arc::ptr_eq(&service.compat(doc), &store),
+                "switch {switch} gave the document another answer store"
+            );
+            assert_eq!(
+                service.memory_usage().project_releases,
+                0,
+                "switch {switch} released the open project's memory"
+            );
+        }
+        v.retire();
+        // A document whose last view closed is released, once, and its
+        // answers go with it: a later view of it would ask another store,
+        // which the window's extensions never hear from. That is why a
+        // switch replaces the view instead of retiring it first.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while service.memory_usage().project_releases != 1 {
+            assert!(std::time::Instant::now() < deadline, "never released");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!Arc::ptr_eq(&service.compat(doc), &store));
+        other.retire();
+    }
+
+    #[test]
+    fn replacing_a_high_water_document_renews_the_device_and_draws_the_new_viewer() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("project-renew-test").unwrap()).unwrap();
+        let old = shapes_viewer(&service, None);
+        let first = wait_for(&old, "the first document's frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let old_doc = first.frame.unwrap().stamp.doc_id;
+        let allocation = service.metal_device().new_buffer(
+            PROJECT_GPU_RENEWAL_BYTES,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+        old.scrub(Ticks::ZERO).unwrap();
+        wait_for(&old, "the worker to observe the allocation", |_| {
+            service.memory_usage().gpu_allocated_bytes >= PROJECT_GPU_RENEWAL_BYTES
+        });
+        drop(allocation);
+
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+        let mut config = shapes_config(Some(layer));
+        // The test also builds without the kernel's document ID allocator.
+        config.snapshot.doc_id = old_doc + 1;
+        let viewer = service.replace_viewer(&old, config).unwrap();
+        wait_for(&viewer, "project cleanup and the replacement frame", |s| {
+            service.memory_usage().project_releases == 1
+                && s.frame.as_ref().is_some_and(|f| f.gpu_ok && f.stamp.doc_id == old_doc + 1)
+        });
+        assert_eq!(service.shared.project_device_renewals.load(Ordering::Acquire), 1);
+        assert_eq!(viewer.status().device_losses, 0);
+        viewer.retire();
+    }
+
+    /// A capture is an exact read: full resolution and paused whatever the
+    /// quality and moment, so Half never reaches the pixels delivered.
+    #[test]
+    fn a_capture_reads_the_exact_full_resolution_frame_at_half_quality() {
+        let service = EngineService::start(pm_gpu::Gpu::new("capture-half-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.quality(crate::policy::Quality::Half).unwrap();
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        v.scrub(seconds(1.)).unwrap();
+        v.capture_next().unwrap();
+        let s = wait_for(&v, "captured pixels", |s| {
+            s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
+        });
+        let f = s.frame.unwrap();
+        // Exact is Full: the composition's size (640 × 360 in 160 × 90).
+        assert_eq!(
+            (f.scale, f.moment, f.stand_ins),
+            (4., Moment::Paused, false)
+        );
+        v.retire();
+    }
+
+    /// A capture whose override layers are never answered is not delivered
+    /// from a stand-in: it waits its bound, then fails saying why.
+    #[test]
+    fn a_capture_waiting_on_unanswered_layers_fails_after_its_bound() {
+        let service = EngineService::start(pm_gpu::Gpu::new("capture-wait-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (_store, asked) = overridden(&service, &v);
+        // A time not drawn yet (no cached frame from before the override).
+        v.scrub(seconds(2.)).unwrap();
+        v.capture_next().unwrap();
+        let start = std::time::Instant::now();
+        let deadline = start + Duration::from_secs_f64(CAPTURE_WAIT_SECONDS + 10.);
+        let failed = loop {
+            let s = v.status();
+            assert!(
+                s.frame.as_ref().is_none_or(|f| f.pixels.is_none()),
+                "pixels delivered without the layers"
+            );
+            if let Some(why) = s.capture_failed {
+                break why;
+            }
+            assert!(std::time::Instant::now() < deadline, "{s:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(start.elapsed().as_secs_f64() >= CAPTURE_WAIT_SECONDS - 0.5);
+        assert!(failed.contains("could not be captured"), "{failed}");
+        assert!(
+            !asked.lock().unwrap().is_empty(),
+            "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// A picture that waited long for its override layers is drawn the moment
+    /// their answers land, not after the backoff its retries reached (up to a
+    /// second: twice that on a project's first picture, as each load step's
+    /// new wrappers asked again).
+    #[test]
+    fn a_picture_waiting_for_its_layers_draws_the_moment_they_are_answered() {
+        let service = EngineService::start(pm_gpu::Gpu::new("answers-land-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.scrub(seconds(2.)).unwrap();
+        // The wait line appears on a refusal some seconds in: retries are a
+        // second apart by now, and one has just been made.
+        wait_for(&v, "the wait line", |s| s.error.is_some());
+        let needs: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        assert!(!needs.is_empty(), "the layers were asked for");
+        let stamp = v.stamp().unwrap();
+        let answered = std::time::Instant::now();
+        store.answer_all(
+            1,
+            1,
+            needs
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        wait_for(&v, "the answered picture", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.stamp == stamp)
+        });
+        assert!(
+            answered.elapsed() < Duration::from_millis(400),
+            "drawn {:?} after its answers landed",
+            answered.elapsed()
+        );
+        v.retire();
+    }
+
+    /// A paused picture waiting for its override answers asks for its
+    /// refinement's (at the composition's scale, 4× here) right behind its
+    /// own, so they are drawn while it finishes: the moment its batch is
+    /// answered, the refinement's goes, before the refinement is tried.
+    #[test]
+    fn a_paused_picture_asks_for_its_refinements_answers_behind_its_own() {
+        let service = EngineService::start(pm_gpu::Gpu::new("prefetch-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.command(TransportCommand::Seek {
+            time: seconds(2.),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let first: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        let scale = first[0].scale;
+        assert!(
+            first
+                .iter()
+                .all(|n| n.time == seconds(2.) && n.scale == scale)
+        );
+        // Answering the picture's batch sends the queued refinement batch.
+        store.answer_all(
+            1,
+            1,
+            first
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        let ahead = asked.lock().unwrap().clone();
+        assert!(
+            !ahead.is_empty(),
+            "the refinement's answers were not asked ahead"
+        );
+        assert!(
+            ahead
+                .iter()
+                .all(|n| n.time == seconds(2.) && (n.scale - 4. * scale).abs() < 1e-9),
+            "{ahead:?}"
+        );
+        v.retire();
+    }
+
+    /// Override layers that keep showing an earlier frame while playing are
+    /// still waited for: the viewer says so past a few seconds, and frames
+    /// with stand-ins don't silence it.
+    #[test]
+    fn layers_left_on_an_earlier_frame_keep_the_wait_note() {
+        let service = EngineService::start(pm_gpu::Gpu::new("late-note-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.scrub(Ticks::ZERO).unwrap();
+        // The first frame's layers are answered (passed through); later ones
+        // never are.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while asked.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let first: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        store.answer_all(
+            1,
+            1,
+            first
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        v.command(TransportCommand::SetLoop {
+            // No frame in the loop is answered: every one shows the 0 s answers.
+            range: Some(pm_protocol::common::TickRange {
+                start: seconds(0.5),
+                end: seconds(2.5),
+            }),
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        let s = wait_for(&v, "the wait note", |s| {
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("earlier frame"))
+        });
+        assert!(s.frame.is_some_and(|f| f.stand_ins));
+        v.retire();
+    }
+
+    /// A drag at full resolution settles too: once the playhead rests, the
+    /// same time is drawn again exact (paused), so no drag stand-in stays.
+    #[test]
+    fn a_full_resolution_drag_settles_to_an_exact_frame() {
+        let service = EngineService::start(pm_gpu::Gpu::new("full-drag-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.quality(crate::policy::Quality::Full).unwrap();
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let at = seconds(1.);
+        v.scrub(at).unwrap();
+        wait_for(&v, "the dragged frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.moment == Moment::Scrub)
+        });
+        wait_for(&v, "the settled frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.moment == Moment::Paused && f.gpu_ok)
+        });
+        v.retire();
+    }
+
+    /// Auto never plays softer than the paused picture: however slow the
+    /// frames, playback renders at full resolution (late frames are dropped).
+    #[test]
+    fn auto_plays_slow_frames_at_full_resolution() {
+        let service = EngineService::start(pm_gpu::Gpu::new("auto-play-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        service
+            .shared
+            .slow_frames
+            .store(true, std::sync::atomic::Ordering::Release);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        v.command(TransportCommand::SetLoop {
+            range: Some(pm_protocol::common::TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::from_whole_seconds(2),
+            }),
+        })
+        .unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while seen.len() < 12 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            let status = v.status();
+            if let Some(f) = status
+                .frame
+                .filter(|f| f.gpu_ok && f.moment == Moment::Playing)
+            {
+                assert_eq!(f.scale, 1., "played frame {} reduced", seen.len());
+                assert_eq!(status.effective_quality, 1.);
+                seen.insert(f.time);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        v.retire();
+    }
+
+    #[test]
+    fn a_slow_drag_draws_reduced_then_its_stopped_frame_exact_as_a_new_picture() {
+        let service = EngineService::start(pm_gpu::Gpu::new("drag-test").unwrap()).unwrap();
+        let shown = |v: &Viewer| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !v.status().frame.is_some_and(|f| f.gpu_ok) {
+                assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let v = shapes_viewer(&service, None);
+        v.adapt_drags(true).unwrap();
+        service
+            .shared
+            .slow_frames
+            .store(true, std::sync::atomic::Ordering::Release);
+        shown(&v);
+        let at = Ticks::from_whole_seconds(1);
+        v.scrub(at).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let reduced = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.gpu_ok) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            reduced.scale,
+            crate::policy::AUTO_FLOOR,
+            "a slow drag is reduced"
+        );
+        // Settled: the same time again, exact, as a picture of its own (a
+        // new stamp: the window tells extensions `frame:rendered` again).
+        let exact = loop {
+            let status = v.status();
+            // Exact: Full, the composition's size (scale 4 here).
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale >= 1.) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline, "never drawn exact");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(exact.stamp.sequence > reduced.stamp.sequence);
+        // A viewer that does not adapt keeps every paused frame exact.
+        let plain = shapes_viewer(&service, None);
+        shown(&plain);
+        plain.scrub(at).unwrap();
+        let f = loop {
+            if let Some(f) = plain.status().frame.filter(|f| f.time == at) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(f.scale, 1.);
+        v.retire();
+        plain.retire();
+    }
+
+    /// A validation error fails the frame that raised it, visibly, without a
+    /// rebuild, and that frame is never cached or reused.
+    #[test]
+    fn a_gpu_validation_error_fails_its_frame_and_never_caches_it() {
+        let service = EngineService::start(pm_gpu::Gpu::new("validation-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let good = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .invalid_call
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while service
+            .shared
+            .invalid_call
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+        let refused = v.stamp().unwrap();
+        let error = loop {
+            let status = v.status();
+            if let Some(error) = status.error {
+                break error;
+            }
+            assert!(
+                status.frame.as_ref().is_none_or(|f| f.stamp != refused),
+                "the refused frame was shown"
+            );
+            assert!(std::time::Instant::now() < deadline, "{status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(error.contains("refused this frame"), "{error}");
+        assert_eq!(
+            v.status().device_losses,
+            0,
+            "a validation error is not a loss"
+        );
+        v.scrub(Ticks::ZERO).unwrap();
+        v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+        v.capture_next().unwrap();
+        let again = drawn(&v);
+        assert_eq!(again.error, None);
+        assert!(
+            !again.frame.as_ref().unwrap().cache_hit,
+            "the refused frame was cached"
+        );
+        v.scrub(Ticks::ZERO).unwrap();
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
+    }
+
+    #[test]
+    fn rapid_non_gesture_edit_burst_uses_interactive_scrub_and_settles() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("rapid-nudge-burst").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let base = service
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .get(&v.id)
+            .unwrap()
+            .config
+            .snapshot
+            .clone();
+        let next = |rev: u64| Snapshot {
+            doc_id: base.doc_id,
+            revision: rev,
+            document: base.document.clone(),
+        };
+        // First non-gesture edit: single edit, not yet a rapid burst.
+        v.snapshot(next(base.revision + 1)).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(!view.recent_edit);
+            assert!(view.last_edit_at.is_some());
+        }
+        // Second non-gesture edit right after: enters interactive rapid-edit burst.
+        v.snapshot(next(base.revision + 2)).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(view.recent_edit);
+            // A finished scrub frame from revision + 1 is accepted via only_moved
+            // rather than dropped in a stale_rejections freeze loop.
+            let earlier = Stamp {
+                revision: base.revision + 1,
+                ..view.stamp
+            };
+            assert!(only_moved(view, earlier, view.moves, Moment::Scrub, false, false));
+        }
+        v.retire();
+    }
+
+    #[test]
+    fn continuous_fly_camera_updates_present_frames_while_moving() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("fly-continuous-present").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let mut camera = studio::FreeView {
+            ortho: false,
+            roll: 0.,
+            eye: [0., 0., 5.],
+            target: [0.; 3],
+            zoom: 1.,
+        };
+        let t0 = trace::now();
+        v.studio_view_at(Some(camera), t0).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before_ticks = service
+            .shared
+            .superseded
+            .load(std::sync::atomic::Ordering::Acquire);
+        let before_presented = v.status().presented;
+        // Simulate 60 Hz WASD Fly ticks arriving while the in-flight interactive
+        // camera frame is still rendering.
+        for step in 1..=5 {
+            camera.eye[2] = 5. - 0.1 * f64::from(step);
+            v.studio_view_at(Some(camera), t0 + 0.016 * f64::from(step))
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .shared
+                .superseded
+                .load(std::sync::atomic::Ordering::Acquire),
+            before_ticks,
+            "continuing Fly camera ticks must not abort in-flight camera frames"
+        );
+        let final_stamp = v.stamp();
+        release.send(()).unwrap();
+        let status = wait_for(&v, "latest fly camera frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && Some(f.stamp) == final_stamp)
+        });
+        // Both the in-flight frame AND the latest frame must have presented
+        // (zero stale rejections while flying!).
+        assert!(
+            status.presented >= before_presented + 2,
+            "expected in-flight and final fly frames to present: before={before_presented}, after={}",
+            status.presented
+        );
+        assert_eq!(status.stale_rejections, 0);
+        v.retire();
+    }
+
+    #[test]
+    fn scrub_while_playing_pauses_immediately_and_keeps_sought_clock_time() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("scrub-while-playing").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        v.capture_next().unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Click the timeline ruler at 2.0s while playback is running and the worker is busy.
+        let target = Ticks::from_whole_seconds(2);
+        v.scrub(target).unwrap();
+        let status = v.status();
+        assert!(!status.wants_display);
+        let clock = status.clock.expect("clock present");
+        assert_eq!(clock.state, pm_protocol::clock::TransportState::Stopped);
+        assert_eq!(clock.media_time, target);
+        release.send(()).unwrap();
+        v.capture_next().unwrap();
+        let landed = drawn(&v);
+        assert_eq!(landed.frame.unwrap().time, target);
+        v.retire();
+    }
+}
+
+/// What kind of transient refusal a frame met, for the diagnostic trace
+/// (never its message: messages can name documents, media or paths).
+fn refusal_kind(error: &anyhow::Error) -> &'static str {
+    match error.downcast_ref::<pm_render::RenderError>() {
+        Some(pm_render::RenderError::CompatPending(_)) => "raster-override",
+        Some(pm_render::RenderError::WatchdogPending) => "watchdog",
+        Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
+        Some(pm_render::RenderError::MediaPending) => "still",
+        _ if error.is::<render::CompilerBusy>() => "shader-compiler",
+        _ if error.is::<render::DiskFramePending>() => "disk-frame",
+        _ if error.is::<render::DefinitionsPending>() => "definitions",
+        _ => "fonts",
+    }
+}

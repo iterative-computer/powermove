@@ -1,3 +1,7 @@
+# Local development: production.ts refuses to serve with any development setting when ENVIRONMENT=production.
+ENVIRONMENT=development
+# PostHog events go only from production; POSTHOG_LOCAL=1 sends them from here too (to wrangler.jsonc's project).
+# POSTHOG_LOCAL=1
 LOCAL_POSTGRES=1
 DATABASE_URL=postgres://powermove:powermove@localhost:54329/powermove
 BETTER_AUTH_SECRET=local-development-secret-32-characters-long
@@ -19,3 +23,13 @@ TURNSTILE_ENABLED=1
 TURNSTILE_SITE_KEY=1x00000000000000000000AA
 TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
 TURNSTILE_CLEARANCE_DAYS=30
+
+# Billing and Aero against the local fakes (`bun run dev:stripe` and `bun run dev:ai`, or all of it with
+# `bun run local:billing`). These are fake values; real Stripe and provider keys are Worker secrets only.
+STRIPE_SECRET_KEY=sk_test_powermove_local_fake
+STRIPE_WEBHOOK_SECRET=whsec_powermove_local_fake
+STRIPE_API_BASE=http://localhost:12111
+OPENAI_API_KEY=local-simulator
+ANTHROPIC_API_KEY=local-simulator
+AERO_OPENAI_BASE_URL=http://localhost:4010/openai/v1
+AERO_ANTHROPIC_BASE_URL=http://localhost:4010/anthropic/v1

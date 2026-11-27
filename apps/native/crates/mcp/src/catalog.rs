@@ -1,0 +1,506 @@
+//! Owner-pinned main catalog with the two owner-selected Studio 3D contracts.
+//! Tagged data stays available as compatibility evidence.
+use crate::{Error, Result};
+use serde_json::Value;
+use std::sync::OnceLock;
+
+pub fn catalog() -> &'static Value {
+    static VALUE: OnceLock<Value> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        let mut value: Value =
+            serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
+                .expect("frozen catalog");
+        let studio: Value =
+            serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json"))
+                .expect("3D source catalog");
+        for replacement in studio["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing 3D tool");
+            *tool = replacement.clone();
+        }
+        let projects: Value = serde_json::from_str(include_str!("../fixtures/project-native-catalog.json"))
+            .expect("native project catalog");
+        for replacement in projects["tools"].as_array().unwrap() {
+            let tool = value["tools"].as_array_mut().unwrap().iter_mut()
+                .find(|t| t["name"] == replacement["name"]).expect("existing project tool");
+            *tool = replacement.clone();
+        }
+        // The media importer takes image sequences as File ▸ Import Image
+        // Sequence does (an additive `sequence` argument).
+        let media: Value =
+            serde_json::from_str(include_str!("../fixtures/media-native-catalog.json"))
+                .expect("native media catalog");
+        for replacement in media["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing media tool");
+            *tool = replacement.clone();
+        }
+        // Native authoring guidance extends the frozen compatibility catalog.
+        let viewer_handles: Value =
+            serde_json::from_str(include_str!("../fixtures/viewer-handles-native-catalog.json"))
+                .expect("viewer-handle authoring catalog");
+        let extensions: Value =
+            serde_json::from_str(include_str!("../fixtures/extension-session-native-catalog.json"))
+                .expect("native extension session catalog");
+        for replacement in viewer_handles["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(extensions["tools"].as_array().unwrap())
+        {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing authoring tool");
+            *tool = replacement.clone();
+        }
+        for tool in value["tools"].as_array_mut().unwrap() {
+            if COMPOSITION_TOOLS.contains(&tool["name"].as_str().unwrap_or("")) {
+                tool["inputSchema"]["properties"]["compositionId"] = serde_json::json!({
+                    "type":"string", "minLength":1,
+                    "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
+                });
+            }
+            if tool["name"] == "apply_commands" {
+                let description = tool["description"].as_str().unwrap();
+                tool["description"] = Value::String(format!(
+                    "{description} Use add_marker only when requested or when a few sparse structural cues would help."
+                ));
+            }
+            if tool["name"] == "render_frames" {
+                tool["inputSchema"]["properties"]["width"]["maximum"] = serde_json::json!(8192);
+            }
+            let overlay = &speed_catalog()["overlays"][tool["name"].as_str().unwrap()];
+            if let Some(note) = overlay["note"].as_str() {
+                let existing = tool["description"].as_str().unwrap();
+                tool["description"] = Value::String(format!("{note}\n\n{existing}"));
+            }
+            if let Some(properties) = overlay["properties"].as_object() {
+                tool["inputSchema"]["properties"].as_object_mut().unwrap().extend(properties.clone());
+            }
+        }
+        transition_fields(&mut value);
+        // Native build tools extend the app subset beside the pinned contract.
+        value["app"].as_array_mut().unwrap().extend([
+            Value::String("panel_begin".into()),
+            Value::String("panel_build".into()),
+            Value::String("export_project".into()),
+        ]);
+        value
+    })
+}
+/// Keep the pinned v1 contract intact; the native cleaner accepts these
+/// optional fields for reciprocal edge pairs and stored offset intent.
+fn transition_fields(value: &mut Value) {
+    let fields = value["commandFields"]["set_transition"]
+        .as_array_mut()
+        .unwrap();
+    for key in ["pairedWith", "offset"] {
+        if !fields.iter().any(|field| field == key) {
+            fields.push(Value::String(key.into()));
+        }
+    }
+}
+pub fn legacy_catalog() -> &'static Value {
+    static LEGACY: OnceLock<Value> = OnceLock::new();
+    LEGACY.get_or_init(|| {
+        serde_json::from_str(include_str!("../fixtures/catalog-v1.2.0.json"))
+            .expect("legacy catalog")
+    })
+}
+pub fn tools() -> &'static Vec<Value> {
+    catalog()["tools"].as_array().unwrap()
+}
+pub fn spec(name: &str) -> Option<&'static Value> {
+    tools()
+        .iter()
+        .chain(native_tools())
+        .find(|t| t["name"] == name)
+}
+/// What a session lists: the pinned main catalog, then the native tools.
+pub fn served_tools() -> Vec<Value> {
+    tools().iter().chain(native_tools()).cloned().collect()
+}
+/// Tools the native app serves beside the pinned main catalog (which they
+/// are not part of): the window's commands, by id.
+pub fn native_tools() -> &'static Vec<Value> {
+    static NATIVE: OnceLock<Vec<Value>> = OnceLock::new();
+    NATIVE.get_or_init(|| {
+        let mut tools: Vec<Value> = serde_json::from_str(include_str!("../fixtures/native-tools.json"))
+            .expect("native tools");
+        tools.extend(speed_catalog()["tools"].as_array().unwrap().iter().cloned());
+        tools.push(serde_json::from_str(include_str!("../fixtures/effect-lab-native-tool.json"))
+            .expect("native effect lab tool"));
+        tools
+    })
+}
+fn speed_catalog() -> &'static Value {
+    static SPEED: OnceLock<Value> = OnceLock::new();
+    SPEED.get_or_init(|| serde_json::from_str(include_str!("../fixtures/mcp-speed-catalog.json"))
+        .expect("MCP speed catalog"))
+}
+pub fn permits(subset: &str, name: &str) -> bool {
+    if name == "render_effect_lab" {
+        return matches!(subset, "app" | "inspection");
+    }
+    if subset == "app" && ["panel_begin", "panel_build"].contains(&name) { return true; }
+    catalog()[subset]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n == name)
+}
+/// Every public tool name.
+pub fn names() -> Vec<String> {
+    tools()
+        .iter()
+        .chain(native_tools())
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect()
+}
+/// What an internal Editor run may call: inspection, plus edits that go through
+/// its own session, so the provider's shell and files stay out of reach.
+pub fn composition_names() -> Vec<String> {
+    const EDITS: &[&str] = &[
+        "start_session",
+        "finish_session",
+        "rollback_changes",
+        "project_memory",
+        "select_layers",
+        "apply_commands",
+        "edit_layer_strips",
+        "edit_video",
+        "edit_3d",
+        "fork_builtin_extension",
+        "stage_fork_rebase",
+        "publish_extensions",
+        "panel_begin",
+        "panel_build",
+    ];
+    names()
+        .into_iter()
+        .filter(|name| permits("inspection", name) || EDITS.contains(&name.as_str()))
+        .collect()
+}
+pub fn validate(name: &str, args: &Value) -> Result<()> {
+    let schema =
+        &spec(name).ok_or_else(|| Error::invalid(format!("Unknown tool: {name}")))?["inputSchema"];
+    validate_value(schema, args, "arguments")
+}
+fn validate_value(s: &Value, v: &Value, path: &str) -> Result<()> {
+    let bad = || Error::invalid(format!("Invalid {path}"));
+    if let Some(variants) = s["oneOf"].as_array()
+        && variants
+            .iter()
+            .filter(|s| validate_value(s, v, path).is_ok())
+            .count()
+            != 1
+    {
+        return Err(bad());
+    }
+    let matches = |t: &str| match t {
+        "object" => v.is_object(),
+        "array" => v.is_array(),
+        "string" => v.is_string(),
+        "boolean" => v.is_boolean(),
+        "null" => v.is_null(),
+        "number" => v.is_number(),
+        "integer" => v.as_f64().is_some_and(|n| n.fract() == 0.0),
+        _ => false,
+    };
+    if let Some(t) = s["type"].as_str() {
+        if !matches(t) {
+            return Err(bad());
+        }
+    } else if let Some(ts) = s["type"].as_array()
+        && !ts.iter().any(|t| t.as_str().is_some_and(matches))
+    {
+        return Err(bad());
+    }
+    if let Some(values) = s["enum"].as_array()
+        && !values.contains(v)
+    {
+        return Err(bad());
+    }
+    if let Some(o) = v.as_object() {
+        if let Some(required) = s["required"].as_array() {
+            for k in required {
+                if !o.contains_key(k.as_str().unwrap()) {
+                    return Err(Error::invalid(format!(
+                        "Missing {path}.{}",
+                        k.as_str().unwrap()
+                    )));
+                }
+            }
+        }
+        for (k, value) in o {
+            if let Some(child) = s["properties"].get(k) {
+                validate_value(child, value, &format!("{path}.{k}"))?;
+            } else if s["additionalProperties"] == false {
+                return Err(Error::invalid(format!("Unknown {path}.{k}")));
+            }
+        }
+    }
+    if let Some(a) = v.as_array() {
+        if s["minItems"].as_u64().is_some_and(|n| a.len() < n as usize)
+            || s["maxItems"].as_u64().is_some_and(|n| a.len() > n as usize)
+        {
+            return Err(bad());
+        }
+        if s["uniqueItems"] == true && a.iter().enumerate().any(|(i, v)| a[..i].contains(v)) {
+            return Err(bad());
+        }
+        for (i, value) in a.iter().enumerate() {
+            if s.get("items").is_some() {
+                validate_value(&s["items"], value, &format!("{path}[{i}]"))?;
+            }
+        }
+    }
+    if let Some(t) = v.as_str() {
+        let len = t.encode_utf16().count(); // JSON Schema as consumed by the shipped JS host.
+        if s["minLength"].as_u64().is_some_and(|n| len < n as usize)
+            || s["maxLength"].as_u64().is_some_and(|n| len > n as usize)
+        {
+            return Err(bad());
+        }
+        if let Some(p) = s["pattern"].as_str()
+            && !regex::Regex::new(p).map_err(|_| bad())?.is_match(t)
+        {
+            return Err(bad());
+        }
+    }
+    if let Some(n) = v.as_f64()
+        && (s["minimum"].as_f64().is_some_and(|b| n < b)
+            || s["maximum"].as_f64().is_some_and(|b| n > b)
+            || s["exclusiveMinimum"].as_f64().is_some_and(|b| n <= b))
+    {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// Tools with concrete bodies/adapters. HOST_BACKED tools need an injected
+/// native worker capabilities; without them they still fail explicitly.
+pub const IMPLEMENTED: &[&str] = &[
+    "project_memory",
+    "list_projects",
+    "create_project",
+    "open_project",
+    "start_session",
+    "finish_session",
+    "manage_project",
+    "save_project",
+    "export_project",
+    "get_project_state",
+    "get_timeline",
+    "select_layers",
+    "apply_commands",
+    "edit_layer_strips",
+    "rollback_changes",
+    "get_panel_layout",
+    "inspect_creative_workspace",
+    "inspect_creative_extension",
+    "get_3d_scene",
+    "edit_3d",
+    "check_project",
+    "list_media",
+    "manage_media",
+    "edit_video",
+    "render_frames",
+    "probe_media",
+    "sample_media_frames",
+    "media_contact_sheet",
+    "media_waveform",
+    "export_video",
+    "export_status",
+    "export_captions",
+    "transcribe_media",
+    "generate_captions",
+    "import_media",
+    "replace_media",
+    "import_media_to_timeline",
+    "thread_list",
+    "thread_read",
+    "validate_effect",
+    "fork_builtin_extension",
+    "stage_fork_rebase",
+    "publish_extensions",
+    "store_search",
+    "store_extension",
+    "store_source",
+    "open_panel",
+    "get_panel_state",
+    "interact_panel",
+    "capture_panel",
+    "computer_use_panel",
+    "panel_begin",
+    "panel_build",
+    "set_panel_layout",
+    "get_workspace_state",
+    "thread_launch",
+    "thread_send",
+    "thread_cancel",
+];
+/// Adapter availability is distinct from a working standalone backend.
+pub const HOST_BACKED: &[&str] = &[
+    "transcribe_media",
+    "generate_captions",
+    "thread_list",
+    "thread_read",
+    "import_media",
+    "replace_media",
+    "import_media_to_timeline",
+    "fork_builtin_extension",
+    "stage_fork_rebase",
+    "publish_extensions",
+    "render_frames",
+    "probe_media",
+    "sample_media_frames",
+    "media_contact_sheet",
+    "media_waveform",
+    "export_video",
+    "store_search",
+    "store_extension",
+    "store_source",
+    "open_panel",
+    "get_panel_state",
+    "interact_panel",
+    "capture_panel",
+    "computer_use_panel",
+    "panel_begin",
+    "panel_build",
+    "set_panel_layout",
+    "get_workspace_state",
+    "thread_launch",
+    "thread_send",
+    "thread_cancel",
+];
+pub fn backing(name: &str) -> &'static str {
+    match name {
+        "start_session" | "finish_session" | "rollback_changes" => {
+            "kernel history marks, guarded restore and squash; isolated workspace"
+        }
+        "get_project_state" | "get_timeline" | "select_layers" | "apply_commands" => {
+            "pm-kernel document/commands/selection"
+        }
+        "edit_layer_strips" => "pm-kernel timing/layers and atomic id-keyed operations",
+        "list_projects" | "create_project" | "open_project" | "manage_project" | "save_project" => {
+            "pm-kernel library/shell/PMV writer"
+        }
+        "render_frames"
+        | "export_video"
+        | "probe_media"
+        | "sample_media_frames"
+        | "media_contact_sheet"
+        | "media_waveform"
+        | "transcribe_media" => "engine-service/media jobs",
+        "validate_effect" => "native effect registration checks and pm-glsl compilation",
+        "project_memory" => {
+            "kernel non-revision durable memory metadata admission and application actor binding"
+        }
+        "get_panel_layout" => "pm-kernel saved workspace and winning panel registrations",
+        "set_panel_layout" => {
+            "workspace editing state and external workspace Undo/Redo continuation host"
+        }
+        "get_workspace_state" => {
+            "macOS shell viewport, renderer diagnostics, projects-screen state and full extension-health records"
+        }
+        "capture_panel" => {
+            "macOS registered panel renderer, encoded pixels and stable capture target validation"
+        }
+        "computer_use_panel" => {
+            "macOS panel input/capture host, observed pixel bounds and stable target validation"
+        }
+        "open_panel" | "get_panel_state" | "interact_panel" => {
+            "macOS shell/remote-DOM panel host, fresh semantic refs and stable element IDs"
+        }
+        "store_search" | "store_extension" | "store_source" => {
+            "native Store same-origin bounded HTTP transport (search/detail/release/tree/file)"
+        }
+        n if n.starts_with("store_") => {
+            "Store install/publish host: verified artifacts, durable StoreKernel, permission/trust, provenance, local-tree hashes and native publish confirmation"
+        }
+        "get_3d_scene" | "check_project" => {
+            "pm-kernel evaluated composition/3D/source-timing queries and optional live media registry"
+        }
+        "edit_video" => "pm-kernel guarded id-keyed layer edits and source-aware timing adapter",
+        "export_captions" => "native caption text exporter",
+        "edit_3d" => "pm-scene3d and guarded kernel Studio document commands",
+        "generate_captions" => "kernel caption commands and transcription runtime",
+        "list_media" => {
+            "pm-kernel asset/folder/reference snapshot and optional live media registry"
+        }
+        "manage_media" => "pm-kernel guarded asset/folder edits and native media Undo",
+        "replace_media" | "import_media" | "import_media_to_timeline" => {
+            "durable media import/version service: verified bytes, fingerprints, retained versions and native Undo"
+        }
+        "fork_builtin_extension" | "stage_fork_rebase" | "publish_extensions" => {
+            "the app's extension host: shipped built-in sources, native compiler, isolated activation and reload"
+        }
+        "inspect_creative_workspace" | "inspect_creative_extension" => {
+            "creative-app inventory service"
+        }
+        _ => "agent runtime, user MCP servers and scripting sandbox",
+    }
+}
+
+/// Tools whose model and timeline are relative to a composition.
+pub const COMPOSITION_TOOLS: &[&str] = &[
+    "get_project_state",
+    "apply_commands",
+    "render_frames",
+    "check_project",
+    "select_layers",
+    "edit_layer_strips",
+    "edit_video",
+    "edit_3d",
+    "get_timeline",
+    "get_3d_scene",
+    "export_captions",
+    "export_video",
+    "generate_captions",
+    "import_media_to_timeline",
+];
+#[cfg(test)]
+mod panel_build_tools_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn panel_build_is_discoverable_and_validates_progress() {
+        assert!(names().iter().any(|n| n == "panel_begin"));
+        assert!(permits("app", "panel_begin"));
+        assert!(!permits("inspection", "panel_begin"));
+        assert!(validate("panel_begin", &json!({"title":"Grade", "placement":{"beside":"inspector"}, "planned":[{"kind":"slider","label":"Exposure"}]})).is_ok());
+        assert!(
+            validate(
+                "panel_build",
+                &json!({"build_id":"build", "event":"commit", "row":1})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "panel_build",
+                &json!({"build_id":"build", "event":"pretend"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "panel_build",
+                &json!({"build_id":"build", "event":"commit", "row":-1})
+            )
+            .is_err()
+        );
+    }
+}

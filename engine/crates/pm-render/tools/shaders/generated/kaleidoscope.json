@@ -1,0 +1,21 @@
+{
+ "name": "kaleidoscope",
+ "kind": "shader",
+ "covers": [
+  "matrices",
+  "helper-rot",
+  "switch"
+ ],
+ "prompt": "Kaleidoscope pattern with a segments setting (3, 4, 6, or 8 — use a switch on it) and slow rotation.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "6052c5d7f9e46321b767f74fc4de4752b04b83d321f57f7e35a0388d60f29e64",
+  "seconds": 18.229,
+  "generated": "2026-10-17T07:32:19.201Z"
+ },
+ "code": "// Kaleidoscope — mirrored wedge symmetry with slow rotation.\n// Segments snaps to 3, 4, 6 or 8 (5 -> 6, 7 -> 8).\nuniform float uSegments;  // @param 6 3 8\nuniform float uRotSpeed;  // @param 0.08 -1 1\nuniform float uZoom;      // @param 2.5 0.5 8\nuniform float uFlow;      // @param 0.15 0 1\nuniform vec3  uColorA;    // @param #FF6B1A\nuniform vec3  uColorB;    // @param #1AB8FF\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n\n  int s = int(floor(uSegments + 0.5));\n  float n;\n  switch (s) {\n    case 3: n = 3.0; break;\n    case 4: n = 4.0; break;\n    case 5:\n    case 6: n = 6.0; break;\n    case 7:\n    case 8: n = 8.0; break;\n    default: n = 6.0; break;\n  }\n\n  // slow rotation of the whole kaleidoscope\n  p = rot(iTime * uRotSpeed) * p;\n\n  float r = length(p);\n  float a = atan(p.y, p.x);\n  float seg = 6.28318530718 / n;\n  a = mod(a, seg);\n  a = abs(a - seg * 0.5);           // mirror within wedge\n  vec2 q = vec2(cos(a), sin(a)) * r;\n\n  float t = iTime * uFlow;\n  vec2 k = q * uZoom;\n  float v = fbm(k + vec2(t, -0.7 * t));\n  v += 0.5 * fbm(k * 2.3 + v * 1.5 - t * 0.5);\n  v /= 1.5;\n\n  float rings = sin(12.0 * r - iTime * 0.6 + v * 7.0) * 0.5 + 0.5;\n  float facet = smoothstep(0.02, 0.0, abs(a - seg * 0.5) * r) * 0.25; // soft seam glow\n\n  vec3 col = mix(uColorA, uColorB, smoothstep(0.3, 0.7, v));\n  col *= 0.35 + 0.85 * rings;\n  col += pow(rings * v, 3.0) * 0.6 + facet;\n\n  float vig = 1.0 - 0.6 * dot(p, p);\n  fragColor = vec4(clamp(col * vig, 0.0, 1.0), 1.0);\n}\n",
+ "definition": null,
+ "summary": "The kaleidoscope shader layer is written but not compiled or rendered, because no live Powermove tools were attached to this run. A `switch` rounds `uSegments` to 3, 4, 6 or 8 mirrored segments (5 becomes 6 and 7 becomes 8). The whole pattern rotates slowly with `uRotSpeed` (default 0.08 rad/s). You can also adjust `uZoom` (pattern scale), `uFlow` (how fast the pattern drifts) and the two colours `uColorA`/`uColorB` in the Inspector."
+}

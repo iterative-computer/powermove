@@ -1,0 +1,22 @@
+{
+ "name": "sdf-badge",
+ "kind": "shader",
+ "covers": [
+  "helper-sdf",
+  "alpha-output",
+  "param-color",
+  "param-float"
+ ],
+ "prompt": "A rounded badge shape with an outline and soft drop shadow, transparent background. Corner radius and outline width sliders, fill and outline colors.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "7426d143b70657dbc34169a2d79ad7f9610242936dccf17bbafca19b7689e04e",
+  "seconds": 21.06,
+  "generated": "2026-10-17T07:31:31.014Z"
+ },
+ "code": "// Rounded badge — fill, outline and soft drop shadow on a transparent background.\nuniform float uRadius;        // @param 0.45 0 1\nuniform float uOutline;       // @param 6 0 40\nuniform vec3  uFill;          // @param #FF6B1A\nuniform vec3  uOutlineColor;  // @param #FFFFFF\nuniform float uShadowOpacity; // @param 0.45 0 1\nuniform float uShadowBlur;    // @param 18 0 60\nuniform float uShadowOffset;  // @param 8 0 40\n\nvoid main() {\n  vec2 px = uv * iResolution;\n  vec2 c = iResolution * 0.5;\n\n  // Leave room around the badge so the shadow is not clipped by the layer edge.\n  float margin = min(uShadowBlur * 1.2 + uShadowOffset + 4.0, min(iResolution.x, iResolution.y) * 0.3);\n  vec2 hb = max(c - margin, vec2(1.0));\n  float r = clamp(uRadius, 0.0, 1.0) * min(hb.x, hb.y);\n\n  // Badge shape (pixel-space SDF, 1px anti-aliasing).\n  float d = sdBox(px - c, hb - r) - r;\n  float shape = clamp(0.5 - d, 0.0, 1.0);\n  float inner = clamp(0.5 - (d + uOutline), 0.0, 1.0);\n\n  // Fill with a subtle top-lit gradient, outline ring around it.\n  vec3 fillCol = uFill * (0.9 + 0.15 * uv.y);\n  vec3 col = mix(uOutlineColor, fillCol, inner);\n\n  // Soft drop shadow, offset downward.\n  float ds = sdBox(px - c + vec2(0.0, uShadowOffset), hb - r) - r;\n  float blur = max(uShadowBlur, 0.5);\n  float sa = uShadowOpacity * (1.0 - smoothstep(-blur * 0.5, blur, ds));\n\n  // Composite badge over shadow (straight alpha output).\n  float a = shape + sa * (1.0 - shape);\n  vec3 outCol = a > 0.0 ? (col * shape) / a : vec3(0.0);\n  fragColor = vec4(outCol, a);\n}\n",
+ "definition": null,
+ "summary": "I wrote the shader layer: a rounded badge with a fill, an outline and a soft drop shadow beneath it, on a transparent background. Controls: uRadius (corner radius, 0–1 of half the shorter side), uOutline (outline width, 0–40 px), uFill and uOutlineColor (colors), plus uShadowOpacity, uShadowBlur and uShadowOffset. I haven't compiled or rendered it because no live Powermove tools were attached, so the shadow could appear above the badge instead of below, depending on the layer's vertical direction."
+}

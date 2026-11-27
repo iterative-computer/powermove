@@ -1,0 +1,5 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<clipPath id="h"><rect x="0" y="0" width="8" height="16"/></clipPath>
+<rect x="3.6" y="3.6" width="8.8" height="8.8" rx="1.5" stroke="black" stroke-width="1.5" transform="rotate(45 8 8)"/>
+<g clip-path="url(#h)"><rect x="3.25" y="3.25" width="9.5" height="9.5" rx="1.75" fill="black" transform="rotate(45 8 8)"/></g>
+</svg>

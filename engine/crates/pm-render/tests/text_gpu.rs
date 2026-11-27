@@ -1,0 +1,1654 @@
+//! The GPU text path against its CPU reference and itself:
+//!
+//! - the float paint pass (coverage curve, color glyph images, Gaussian
+//!   blur, item order) equals `pm_text::render::paint` within float
+//!   rounding when both read the same `vello_cpu` coverage;
+//! - forced R32Float area coverage and the CPU coverage fallback agree (SSIM);
+//! - rasters are deterministic and the content-keyed cache returns them;
+//! - without fonts a text layer is refused, not drawn wrong.
+//!
+//! Runs without the harness (the CoreText registry needs the main thread).
+
+mod support;
+
+#[cfg(target_os = "macos")]
+fn main() {
+    use pm_protocol::color::Precision;
+    use pm_render::text::gpu::Coverage;
+    use pm_render::{RenderError, Renderer};
+    use serde_json::json;
+    use support::doc::{ch, layer, no_fill, project};
+
+    let fonts = || {
+        Box::new(support::text::MainThreadFonts(
+            pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+            None,
+        ))
+    };
+    if std::env::var_os("PM_LARGE_GROUP_TEST_ONLY").is_some() {
+        frame_prefix_large_plane_groups_under_adjustment();
+        return;
+    }
+    frame_prefix_large_plane_groups_under_adjustment();
+    packed_glow_specialization_preserves_gpu_bits();
+    density_replay_keeps_compat_passthrough_layers(fonts());
+    a_base_text_window_reads_the_same_texels_as_the_whole_canvas(fonts());
+    let blur = json!({
+        "text": "Blur in\nsecond line", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
+        "font": "SF Pro Display", "weight": 700, "size": 44, "tracking": -2, "leading": 1.2,
+        "color": "#F2F2F2", "align": "center", "italic": false,
+        "animators": [{"id": "a1", "name": "blur", "enabled": true, "mode": "stagger", "unit": "characters",
+            "order": "forward", "direction": "in", "easing": "cubicOut", "p": {
+                "amount": ch(json!(100)), "delay": ch(json!(0)), "duration": ch(json!(0.8)),
+                "stagger": ch(json!(0.03)), "opacity": ch(json!(0)), "blur": ch(json!(11))}}]
+    });
+    let emoji = json!({
+        "text": "Emoji 👋🏽 🇰🇷 ❤️ and text", "font": "SF Pro Display", "weight": 500, "size": 36,
+        "color": "#FF3B30", "align": "left"
+    });
+    let caption = json!({
+        "cues": [{"id": "c1", "text": "Stroked caption with a highlight", "start": 0, "end": 3}],
+        "style": {"preset": "pop", "font": "SF Pro Display", "weight": 900, "italic": false, "size": 64,
+            "tracking": 0, "leading": 1.05, "fill": "#FFFFFF", "stroke": 7, "strokeColor": "#000000",
+            "box": true, "boxColor": "#202020", "boxOpacity": 60, "boxPadding": 14, "boxRadius": 10,
+            "placement": "middle", "align": "center", "offsetX": 0, "offsetY": 0, "safeMargin": 8,
+            "maxWidth": 76, "maxLines": 2, "textCase": "upper", "highlight": true,
+            "highlightColor": "#FFD43B", "highlightScale": 116, "wordAnimation": "pop"}
+    });
+    let docs = [
+        ("blur", "text", blur, 0.3, 1.5),
+        ("emoji", "text", emoji, 0.0, 1.0),
+        ("caption", "captions", caption, 1.05, 0.75),
+    ];
+    let doc_of = |ty: &str, d: &serde_json::Value| {
+        let l = layer("l", ty, d.clone(), 960.0, 540.0, 10.0);
+        let v = project(1920, 1080, 10.0, no_fill(), vec![l]);
+        pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1)
+    };
+    let mut gpu = Renderer::headless().expect("a Metal device");
+    // The exact rasterizer is what this gate holds to its reference.
+    gpu.text().set_weight(pm_render::text::TextWeight::Exact);
+    gpu.set_text_fonts(Some(fonts()));
+    gpu.text_gpu().set_coverage(Coverage::Area);
+    let mut cpu = Renderer::headless().expect("a Metal device");
+    // The exact rasterizer is what this gate holds to its reference.
+    cpu.text().set_weight(pm_render::text::TextWeight::Exact);
+    cpu.set_text_fonts(Some(fonts()));
+    cpu.text_gpu().set_coverage(Coverage::Cpu);
+    let mut failures = Vec::new();
+    for (name, ty, d, t, scale) in &docs {
+        let doc = doc_of(ty, d);
+        let a = gpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        let b = cpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            a.plan.key, b.plan.key,
+            "{name}: the plan does not depend on the coverage source"
+        );
+        // Paint pass vs the CPU reference over the same (vello_cpu) coverage.
+        let reference = pm_render::text::gpu::render_cpu(&b.plan);
+        let max = b
+            .pixels
+            .iter()
+            .zip(&reference.data)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        println!(
+            "{name:<8} {}x{} paint pass vs CPU reference: max |Δ| {max:.6}",
+            b.plan.width(),
+            b.plan.height()
+        );
+        // One code value: an N32 canvas rounds the GPU's f32 blur and the
+        // CPU's f64 one to either side of a step (the difference of two
+        // codes, in f32, is 1/255 to within an ulp).
+        if max > 1.0 / 255.0 + f32::EPSILON {
+            failures.push(format!(
+                "{name}: paint pass differs from the CPU reference by {max}"
+            ));
+        }
+        // GPU coverage vs the CPU fallback.
+        let (w, h) = (a.plan.width() as usize, a.plan.height() as usize);
+        let rgba8 = |p: &[f32]| -> Vec<u8> {
+            p.iter()
+                .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                .collect()
+        };
+        let (ink, _, ratio) =
+            pm_render::parity::text_ssim(&rgba8(&b.pixels), &rgba8(&a.pixels), w, h);
+        println!(
+            "{name:<8} R32Float area vs CPU coverage: ink SSIM {ink:.5}, ink ratio {ratio:.4}"
+        );
+        if ink < 0.995 {
+            failures.push(format!("{name}: GPU and CPU coverage differ (SSIM {ink})"));
+        }
+        // Determinism and the raster cache.
+        let hits = gpu.text_gpu().stats.cache_hits;
+        let again = gpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.pixels, a.pixels, "{name}: deterministic");
+        assert_eq!(
+            gpu.text_gpu().stats.cache_hits,
+            hits + 1,
+            "{name}: served from the cache"
+        );
+        gpu.text_gpu().clear();
+        let fresh = gpu
+            .text_raster(&doc, "Ptest-root", "l", *t, *scale, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.pixels, a.pixels, "{name}: repainted identically");
+    }
+    // Glyph images beyond the atlas: an 80 degree skew of 75 px text at 2x
+    // (150 device px) and a 45 degree rotation of a Zapfino glyph whose
+    // upright outline fits a plot. Skia draws both as paths; neither may
+    // reach the A8 atlas (which panicked on masks over 512 px).
+    let animated = |text: &str, font: &str, size: f64, p: serde_json::Value| {
+        json!({
+            "text": text, "font": font, "weight": 400, "size": size, "color": "#101010",
+            "align": "left", "italic": false,
+            "animators": [{"id": "a1", "name": "transform", "enabled": true, "mode": "stagger",
+                "unit": "characters", "order": "forward", "direction": "in", "easing": "linear",
+                "p": p}]
+        })
+    };
+    let stagger = |key: &str, value: f64| {
+        let mut p = json!({"amount": ch(json!(100)), "delay": ch(json!(0)),
+            "duration": ch(json!(1)), "stagger": ch(json!(0))});
+        p[key] = ch(json!(value));
+        p
+    };
+    let oversized = [
+        (
+            "skew80",
+            animated("Hi", "Arial", 75.0, stagger("skew", 80.0)),
+        ),
+        (
+            "rotated",
+            animated("g", "Zapfino", 50.0, stagger("rotation", 45.0)),
+        ),
+    ];
+    for (name, d) in &oversized {
+        let doc = doc_of("text", d);
+        let raster = |r: &mut Renderer| {
+            r.text_raster(&doc, "Ptest-root", "l", 0.0, 2.0, Precision::Float32)
+                .unwrap()
+                .unwrap()
+        };
+        let a = raster(&mut gpu);
+        let ink = a.pixels.chunks_exact(4).filter(|p| p[3] > 0.5).count();
+        println!(
+            "{name:<8} {}x{} beyond-atlas glyphs: {ink} inked px",
+            a.plan.width(),
+            a.plan.height()
+        );
+        if ink == 0 {
+            failures.push(format!("{name}: the oversized glyph drew nothing"));
+        }
+        if a.plan.scene.items.iter().any(|i| {
+            !matches!(&i.content, pm_text::render::scene::ItemContent::Coverage { paths }
+                if !paths.is_empty())
+        }) {
+            failures.push(format!(
+                "{name}: transformed glyph left the outline coverage path"
+            ));
+        }
+        gpu.text_gpu().clear();
+        assert_eq!(raster(&mut gpu).pixels, a.pixels, "{name}: deterministic");
+    }
+    // Without fonts a text layer is refused.
+    let mut bare = Renderer::headless().expect("a Metal device");
+    // The exact rasterizer is what this gate holds to its reference.
+    bare.text().set_weight(pm_render::text::TextWeight::Exact);
+    let doc = doc_of("text", &docs[1].2);
+    let request = pm_render::RenderRequest::sized(
+        pm_protocol::common::Size::new(320, 180),
+        Precision::Float16,
+    );
+    match bare.render(
+        &doc,
+        "Ptest-root",
+        support::ticks(0.0),
+        &request,
+        &pm_render::MapResolver::default(),
+    ) {
+        Err(RenderError::Unsupported(u)) => {
+            assert!(
+                u.iter()
+                    .any(|u| matches!(u.feature, pm_render::Feature::Text(_))),
+                "{u:?}"
+            );
+        }
+        Ok(_) => failures.push("a text layer rendered without fonts".into()),
+        Err(e) => failures.push(format!("unexpected error without fonts: {e}")),
+    }
+    linear_overlap_and_colr_source(&mut gpu, &mut failures);
+    linear_project_text_source(&mut gpu, &mut failures);
+    let fresh = || {
+        let mut r = Renderer::headless().expect("a Metal device");
+        // The exact rasterizer is what this gate holds to its reference.
+        r.text().set_weight(pm_render::text::TextWeight::Exact);
+        r.set_text_fonts(Some(fonts()));
+        r
+    };
+    level1_plans_are_reused_until_their_inputs_change(&mut gpu, &mut fresh(), &mut failures);
+    legacy_affine_planes_match_2d(&mut gpu, &mut failures);
+    direct_fractional_coverage(&mut gpu, &mut failures);
+    half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
+    unchanged_text_is_uploaded_once_across_viewer_frames(&mut fresh(), &mut failures);
+    for f in &failures {
+        println!("FAILED {f}");
+    }
+    assert!(failures.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+fn a_base_text_window_reads_the_same_texels_as_the_whole_canvas(
+    fonts: Box<dyn pm_render::text::TextFonts>,
+) {
+    use pm_protocol::color::Precision;
+    use pm_render::Renderer;
+    use serde_json::json;
+    use support::doc::{layer, load, no_fill, project};
+
+    let title = layer(
+        "title",
+        "text",
+        json!({"text":"M", "font":"SF Pro Display", "size":420, "color":"#F2F2F2"}),
+        960.,
+        540.,
+        1.,
+    );
+    let document = load(&project(1920, 1080, 1., no_fill(), vec![title]));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(fonts));
+    let whole = renderer
+        .layer_raster(
+            &document,
+            "Ptest-root",
+            "title",
+            None,
+            0.,
+            4.,
+            Precision::Float16,
+        )
+        .unwrap()
+        .unwrap();
+    let [x, y, w, h] = whole.pixels.crop;
+    let (dx, dy) = (w / 4, h / 4);
+    let win = [x + dx, y + dy, w / 2, h / 2];
+    let part = renderer
+        .layer_raster_window(
+            &document,
+            "Ptest-root",
+            "title",
+            None,
+            0.,
+            4.,
+            Precision::Float16,
+            Some(win),
+        )
+        .unwrap()
+        .unwrap();
+    let geometry = renderer
+        .layer_raster_geometry(&document, "Ptest-root", "title", None, 0., 4.)
+        .unwrap()
+        .unwrap();
+    for result in [&part, &geometry] {
+        assert_eq!(
+            (
+                result.canvas,
+                result.box_size,
+                result.anchor,
+                result.selection
+            ),
+            (whole.canvas, whole.box_size, whole.anchor, whole.selection)
+        );
+    }
+    assert!(geometry.pixels.pixels.is_empty());
+    assert_eq!(part.pixels.crop, win);
+    assert!(part.pixels.pixels.iter().any(|p| *p > 0.));
+    let stride = (win[2] * 4) as usize;
+    for (row, painted) in part.pixels.pixels.chunks_exact(stride).enumerate() {
+        let start = ((row + dy as usize) * w as usize + dx as usize) * 4;
+        assert!(
+            painted
+                .iter()
+                .zip(&whole.pixels.pixels[start..start + stride])
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "window row {row}"
+        );
+    }
+}
+
+/// Both pipelines draw the same branch of a synthetic packed blur on Metal.
+/// Compare raw targets before presentation can round away a low-bit change.
+#[cfg(target_os = "macos")]
+fn packed_glow_specialization_preserves_gpu_bits() {
+    use pm_gpu::target::Target;
+    use pm_render::effects::program::{Call, GpuProgram};
+    use wgpu::util::DeviceExt;
+
+    const SIZE: u32 = 32;
+    const BLUR: &str = r#"#version 300 es
+precision highp float;
+precision highp int;
+ in vec2 v_st;
+ out vec4 o;
+ uniform sampler2D u_tex;
+ uniform int u_pass;
+ uniform float u_highQuality;
+ uniform float u_dispersion;
+ void main() {
+   if (u_pass != 6) { o = vec4(0.0); return; }
+   int xs = u_highQuality > 0.5 ? 4 : 3;
+   int ys = u_highQuality > 0.5 ? 12 : 6;
+   vec3 sum = vec3(0.0);
+   float total = 0.0;
+   for (int y = -12; y <= 12; y++) {
+     if (abs(y) > ys) continue;
+     for (int x = -4; x <= 4; x++) {
+       if (abs(x) > xs) continue;
+       vec2 offset = vec2(float(x) / float(xs), float(y) / float(ys));
+       float weight = exp(-3.5 * dot(offset, offset));
+       vec2 tap = v_st + offset * vec2(0.27, 0.39);
+       vec3 rgb = texture(u_tex, tap).rgb;
+       if (u_dispersion > 0.0) {
+         rgb.r = texture(u_tex, tap + offset * u_dispersion).r;
+         rgb.b = texture(u_tex, tap - offset * u_dispersion).b;
+       }
+       sum += rgb * weight;
+       total += weight;
+     }
+   }
+   o = vec4(sum / total, 1.0);
+ }"#;
+
+    let gpu = pm_gpu::Gpu::new("packed glow bit parity").expect("Metal device");
+    let device = &gpu.device;
+    let queue = &gpu.queue;
+    let mut program = GpuProgram::new(
+        device,
+        pm_glsl::translate(BLUR, 0).expect("translate the synthetic blur"),
+        "packed glow proof",
+    )
+    .expect("compile the synthetic blur");
+    let input = Target::new(
+        device,
+        "packed glow seed",
+        SIZE,
+        SIZE,
+        wgpu::TextureFormat::Rgba32Float,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let mut seed = 0x5e12_74b9_u32;
+    let samples: Vec<u8> = (0..SIZE * SIZE * 4)
+        .flat_map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            ((seed >> 8) as f32 / (1 << 21) as f32).to_le_bytes()
+        })
+        .collect();
+    queue.write_texture(
+        input.texture.as_image_copy(),
+        &samples,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 16),
+            rows_per_image: Some(SIZE),
+        },
+        input.texture.size(),
+    );
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let uniform = |block, calls: &[(String, Call)]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &GpuProgram::block_bytes(block, calls),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    };
+    let fblock = program.fragment_block.as_ref().unwrap();
+    let fbuf = uniform(
+        fblock,
+        &[
+            ("u_pass".into(), Call::I(6)),
+            ("u_highQuality".into(), Call::F(vec![0.])),
+            ("u_dispersion".into(), Call::F(vec![0.])),
+        ],
+    );
+    let (_, binding) = &program.samplers[0];
+    let fragment = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &program.fragment_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: fblock.binding,
+                resource: fbuf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: wgpu::BindingResource::TextureView(&input.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: *binding + pm_glsl::SAMPLER_BINDING_OFFSET,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    let vblock = program.vertex_block.as_ref().unwrap();
+    let size = SIZE as f32;
+    let vbuf = uniform(
+        vblock,
+        &[
+            (
+                "u_m".into(),
+                Call::M3([size, 0., 0., 0., size, 0., 0., 0., 1.]),
+            ),
+            ("u_res".into(), Call::F(vec![size, size])),
+        ],
+    );
+    let vertex = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &program.vertex_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: vblock.binding,
+            resource: vbuf.as_entire_binding(),
+        }],
+    });
+    let draw = |pipeline: &wgpu::RenderPipeline, format| {
+        let out = Target::new(
+            device,
+            "packed glow readback",
+            SIZE,
+            SIZE,
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &fragment, &[]);
+            pass.set_bind_group(1, &vertex, &[]);
+            pass.draw(0..4, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+        pm_gpu::readback::read_raw(device, queue, &out.texture).unwrap()
+    };
+    for format in [
+        wgpu::TextureFormat::Rgba32Float,
+        wgpu::TextureFormat::Rgba16Float,
+    ] {
+        let original = draw(program.pipeline(device, format).unwrap(), format);
+        let rewritten = draw(
+            program
+                .glow_blur_pipeline(device, format)
+                .expect("the rewrite must compile"),
+            format,
+        );
+        assert!(original.iter().any(|&byte| byte != 0), "the blur must draw");
+        let different = original
+            .iter()
+            .zip(&rewritten)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(different, 0, "packed blur changed {format:?} bytes");
+        println!(
+            "packed glow blur: {} identical {format:?} bytes",
+            original.len()
+        );
+    }
+}
+
+/// A text-heavy layer (large glyphs of many shapes and color emoji, more
+/// than the raster cache keeps as one raster) drawn again after each
+/// submitted viewer frame resolves and uploads its glyphs once: later frames
+/// read the glyph caches, which stay within their own byte caps.
+#[cfg(target_os = "macos")]
+fn unchanged_text_is_uploaded_once_across_viewer_frames(
+    renderer: &mut pm_render::Renderer,
+    failures: &mut Vec<String>,
+) {
+    use pm_protocol::color::Precision;
+    use support::doc::{layer, no_fill, project};
+    let d = serde_json::json!({
+        "text": "ABCDEFGHIJKLM\nNOPQRSTUVWXYZ\nabcdefghijklm\nnopqrstuvwxyz\n0123456789&@#\n😀😎🥳🤖👻🎃🚀🌈🍕🎸🐙🦊",
+        "font": "SF Pro Display", "weight": 700, "size": 150, "leading": 1.1,
+        "color": "#F2F2F2", "align": "left"
+    });
+    let v = project(
+        3840,
+        2160,
+        10.0,
+        no_fill(),
+        vec![layer("l", "text", d, 1920.0, 1080.0, 10.0)],
+    );
+    let doc = pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1);
+    renderer.text_gpu().clear();
+    let frame = |renderer: &mut pm_render::Renderer| {
+        let before = renderer.text_gpu().stats;
+        let raster = renderer
+            .text_raster(&doc, "Ptest-root", "l", 0.0, 2.0, Precision::Float16)
+            .unwrap()
+            .unwrap();
+        // What the viewer does once a frame's commands are submitted.
+        renderer.trim_submitted_frame_caches();
+        let after = renderer.text_gpu().stats;
+        (
+            after.glyph_uploads - before.glyph_uploads,
+            after.image_uploads - before.image_uploads,
+            after.cache_hits - before.cache_hits,
+            raster.pixels,
+        )
+    };
+    let (glyphs, images, _, first) = frame(renderer);
+    let cached = renderer.text_gpu().cached_bytes();
+    println!(
+        "text-heavy layer: first frame uploaded {glyphs} glyph outlines and {images} color images; {cached} bytes held after the frame"
+    );
+    if glyphs < 60 || images < 10 {
+        failures.push(format!(
+            "the text-heavy layer is not text-heavy: {glyphs} glyphs, {images} images"
+        ));
+    }
+    for n in 2..=6 {
+        let (glyphs, images, hits, pixels) = frame(renderer);
+        if hits != 0 {
+            failures.push(
+                "the text-heavy raster fits the raster cache: the test proves nothing".into(),
+            );
+        }
+        if glyphs != 0 || images != 0 {
+            failures.push(format!(
+                "frame {n} of unchanged text uploaded {glyphs} glyph outlines and {images} color images again"
+            ));
+        }
+        if pixels != first {
+            failures.push(format!("frame {n} of unchanged text drew other pixels"));
+        }
+    }
+    // Every text cache has a byte cap: rasters 4 MiB (and as much idle in
+    // their pool), color images 8 MiB, glyph outlines 8 MiB, free outline
+    // textures 2 MiB, coverage storage 8 MiB.
+    let held = renderer.text_gpu().cached_bytes();
+    if held > 34 * 1024 * 1024 {
+        failures.push(format!("text caches hold {held} bytes after six frames"));
+    }
+}
+
+/// Text paint into an RGBA16F raster stores the nearest half of each
+/// computed value (`src/nearest_half.rs`), where Metal's own store
+/// truncates: every pixel of a one-glyph-run raster at half precision is
+/// the nearest half of the same paint at f32.
+#[cfg(target_os = "macos")]
+fn half_paint_stores_the_nearest_half(
+    renderer: &mut pm_render::Renderer,
+    failures: &mut Vec<String>,
+) {
+    use pm_protocol::color::Precision;
+    use support::doc::{layer, no_fill, project};
+    let d = serde_json::json!({
+        "text": "HI", "font": "SF Pro Display", "weight": 900, "size": 96,
+        "color": "#090909", "align": "left"
+    });
+    let v = project(
+        640,
+        360,
+        10.0,
+        no_fill(),
+        vec![layer("l", "text", d, 320.0, 180.0, 10.0)],
+    );
+    let doc = pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1);
+    let mut raster = |precision| {
+        renderer
+            .text_raster(&doc, "Ptest-root", "l", 0.0, 1.0, precision)
+            .unwrap()
+            .unwrap()
+            .pixels
+    };
+    let (full, half) = (raster(Precision::Float32), raster(Precision::Float16));
+    assert_eq!(full.len(), half.len());
+    let nearest = |v: f32| pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(v));
+    let mut rounded_up = 0;
+    for (i, (f, h)) in full.iter().zip(&half).enumerate() {
+        if *h != nearest(*f) {
+            failures.push(format!(
+                "half text paint at value {i}: {h} is not the nearest half of {f}"
+            ));
+            return;
+        }
+        rounded_up += usize::from(nearest(*f) > *f);
+    }
+    println!("half text paint: {rounded_up} values a truncating store would keep an ulp low");
+    if rounded_up == 0 {
+        failures.push("half text paint: no value rounds up, the check proves nothing".into());
+    }
+}
+
+/// Auto and Direct must take the same eligible contour path and retain
+/// analytic coverage at fractional phases. Area and an independent f64
+/// outline reference judge the same whole, uncropped 96 px glyph.
+#[cfg(target_os = "macos")]
+fn direct_fractional_coverage(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use kurbo::Affine;
+    use pm_protocol::color::{Precision, WorkingEncoding};
+    use pm_reference::compare::{Class, geometry, same_geometry};
+    use pm_render::text::gpu::{Coverage, TextGpu};
+    use pm_text::render::scene::{ItemContent, TextScene};
+    use serde_json::json;
+
+    let mut samples = Vec::new();
+    for text in ["H", "Powermove"] {
+        let layer = support::doc::layer(
+            "t",
+            "text",
+            json!({"text":text, "font":"SF Pro Display", "size":96,
+                "weight":600, "color":"#FFFFFF", "align":"left"}),
+            48.0,
+            38.0,
+            3.0,
+        );
+        let project = support::doc::project(768, 192, 3.0, support::doc::no_fill(), vec![layer]);
+        let document = pm_model::Document::new(
+            Some(pm_model::json::parse(&project.to_string()).unwrap()),
+            1,
+        );
+        let raster = renderer
+            .text_raster(&document, "Ptest-root", "t", 0.0, 1.0, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        let items = raster.plan.scene.items.clone();
+        assert!(items.iter().all(
+            |item| matches!(&item.content, ItemContent::Coverage { paths } if paths.len() == 1)
+        ));
+        samples.push(items);
+    }
+    let device = renderer.device();
+    let queue = renderer.queue();
+    let mut area = TextGpu::new(device);
+    area.set_coverage(Coverage::Area);
+    let mut auto = TextGpu::new(device);
+    let mut direct = TextGpu::new(device);
+    direct.set_coverage(Coverage::Direct);
+    let render = |painter: &mut TextGpu, plan: &pm_render::text::TextPlan| {
+        let mut pool = pm_gpu::TargetPool::new();
+        let mut held = Vec::new();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fractional direct text coverage gate"),
+        });
+        let view = painter
+            .render(
+                device,
+                queue,
+                &mut encoder,
+                &mut pool,
+                &mut held,
+                plan,
+                Precision::Float32,
+                WorkingEncoding::Standard,
+            )
+            .unwrap();
+        queue.submit([encoder.finish()]);
+        let pixels = pm_gpu::readback::read_f32(device, queue, view.texture()).unwrap();
+        for target in held {
+            pool.give(target);
+        }
+        pixels
+    };
+    for (sample, items) in samples.into_iter().enumerate() {
+        let bounds = items
+            .iter()
+            .skip(1)
+            .fold(items[0].bounds, |bounds, item| bounds.union(item.bounds));
+        for (phase, (fx, fy)) in [(0.0, 0.0), (0.125, 0.375), (0.5, 0.75), (0.875, 0.25)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut items = items.clone();
+            let shift = Affine::translate((42.0 + fx - bounds.x0, 36.0 + fy - bounds.y0));
+            for item in &mut items {
+                item.bounds = shift.transform_rect_bbox(item.bounds);
+                if let ItemContent::Coverage { paths } = &mut item.content {
+                    for path in paths {
+                        path.transform = shift * path.transform;
+                    }
+                }
+                item.color = [1.0; 4];
+                item.opacity = 1.0;
+                item.blur = 0.0;
+            }
+            let scene = TextScene {
+                width: 768,
+                height: 192,
+                items,
+            };
+            let reference = support::text_reference::render(&scene);
+            assert_eq!(reference.unreferenced, 0);
+            let plan = pm_render::text::TextPlan::whole(scene);
+            let area_pixels = render(&mut area, &plan);
+            let auto_pixels = render(&mut auto, &plan);
+            let direct_pixels = render(&mut direct, &plan);
+            assert_eq!(
+                auto_pixels, direct_pixels,
+                "eligible Auto and Direct differ"
+            );
+            let alpha = |pixels: &[f64]| pixels.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+            let area_f64: Vec<f64> = area_pixels.iter().map(|v| f64::from(*v)).collect();
+            let direct_f64: Vec<f64> = direct_pixels.iter().map(|v| f64::from(*v)).collect();
+            let expected_geometry = geometry(&alpha(&reference.rgba), 768);
+            let area_geometry = geometry(&alpha(&area_f64), 768);
+            let direct_geometry = geometry(&alpha(&direct_f64), 768);
+            let mut edge_pixels = 0usize;
+            let (mut area_max, mut direct_max, mut between_max) = (0.0f64, 0.0f64, 0.0f64);
+            for (i, class) in reference.classes.iter().enumerate() {
+                if *class != Class::Edge {
+                    continue;
+                }
+                edge_pixels += 1;
+                for channel in 0..4 {
+                    let at = i * 4 + channel;
+                    area_max = area_max.max((area_f64[at] - reference.rgba[at]).abs() * 255.0);
+                    direct_max =
+                        direct_max.max((direct_f64[at] - reference.rgba[at]).abs() * 255.0);
+                    between_max = between_max.max((direct_f64[at] - area_f64[at]).abs() * 255.0);
+                }
+            }
+            println!(
+                "case 3 sample {sample} phase {phase}: edges {edge_pixels}, max CV Area/reference {area_max:.4}, Direct/reference {direct_max:.4}, Direct/Area {between_max:.4}; area {:.6}/{:.6}/{:.6}; centroid {:?}/{:?}/{:?}",
+                area_geometry.area,
+                direct_geometry.area,
+                expected_geometry.area,
+                area_geometry.centroid,
+                direct_geometry.centroid,
+                expected_geometry.centroid,
+            );
+            if edge_pixels == 0 || area_max > 1.0 || direct_max > 1.0 || between_max > 1.0 {
+                failures.push(format!(
+                "direct phase {phase}: edge pixels {edge_pixels}, Area/ref {area_max:.4}, Direct/ref {direct_max:.4}, Direct/Area {between_max:.4} CV"
+            ));
+            }
+            for (name, actual) in [("Area", area_geometry), ("Direct", direct_geometry)] {
+                if let Err(reason) = same_geometry(&actual, &expected_geometry, 1e-3) {
+                    failures.push(format!("direct phase {phase} {name}: {reason}"));
+                }
+            }
+        }
+    }
+    if direct.stats.pages != 0 || auto.stats.pages != 0 || area.stats.pages < 8 {
+        failures.push(format!(
+            "coverage routing: Direct pages {}, Auto pages {}, Area pages {}",
+            direct.stats.pages, auto.stats.pages, area.stats.pages
+        ));
+    }
+}
+
+/// Two translucent glyphs of different colors overlap in the project
+/// working space. The synthetic COLR source has palette alpha in an already
+/// decoded working image; the shader must not decode it a second time.
+#[cfg(target_os = "macos")]
+fn linear_overlap_and_colr_source(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use kurbo::{Affine, Rect};
+    use pm_protocol::color::{Precision, WorkingEncoding};
+    use pm_text::render::colr::RgbaF32;
+    use pm_text::render::scene::{ImagePixels, Item, ItemContent, TextScene};
+    use std::sync::Arc;
+
+    let layer = support::doc::layer(
+        "t",
+        "text",
+        serde_json::json!({
+            "text": "H", "font": "SF Pro Display", "size": 48,
+            "weight": 600, "color": "#ffffff"
+        }),
+        64.0,
+        48.0,
+        3.0,
+    );
+    let document = support::doc::project(128, 96, 3.0, support::doc::no_fill(), vec![layer]);
+    let document = pm_model::Document::new(
+        Some(pm_model::json::parse(&document.to_string()).unwrap()),
+        1,
+    );
+    let raster = renderer
+        .text_raster(&document, "Ptest-root", "t", 0.0, 1.0, Precision::Float32)
+        .unwrap()
+        .unwrap();
+    let mut glyph = raster
+        .plan
+        .scene
+        .items
+        .iter()
+        .find(|item| matches!(&item.content, ItemContent::Coverage { paths } if !paths.is_empty()))
+        .expect("outlined H")
+        .clone();
+    let move_to = Affine::translate((38.25 - glyph.bounds.x0, 21.5 - glyph.bounds.y0));
+    glyph.bounds = move_to.transform_rect_bbox(glyph.bounds);
+    if let ItemContent::Coverage { paths } = &mut glyph.content {
+        for path in paths {
+            path.transform = move_to * path.transform;
+        }
+    }
+    glyph.color = [0.95, 0.08, 0.15, 0.55];
+    let mut blue = glyph.clone();
+    blue.color = [0.07, 0.28, 0.95, 0.45];
+    let colr = Item {
+        content: ItemContent::Image {
+            image: ImagePixels::WorkingF32(Arc::new(RgbaF32 {
+                width: 8,
+                height: 8,
+                // A constant palette color with 40% alpha, premultiplied
+                // in the already-linear project working domain.
+                data: [0.3f32, 0.08, 0.02, 0.4].repeat(64),
+            })),
+            transform: Affine::translate((112.0, 80.0)),
+        },
+        color: [1.0; 4],
+        opacity: 1.0,
+        curve: pm_text::render::smoothing::IDENTITY,
+        blur: 0.0,
+        bounds: Rect::new(112.0, 80.0, 120.0, 88.0),
+    };
+    let scene = TextScene {
+        width: 128,
+        height: 96,
+        items: vec![glyph, blue, colr],
+    };
+    let ideal = support::text_reference::render_in_working(&scene, WorkingEncoding::LinearLight);
+    let colr_pixel = 83 * 128 + 115;
+    if ideal.unreferenced == 0
+        || ideal.classes[colr_pixel] != pm_reference::compare::Class::Unreferenced
+        || !ideal.rgba[colr_pixel * 4].is_nan()
+    {
+        failures.push("COLR graph pixels were incorrectly used as independent reference".into());
+    }
+    let plan = pm_render::text::TextPlan::whole(scene);
+    let device = renderer.device();
+    let queue = renderer.queue();
+    let mut painter = pm_render::text::gpu::TextGpu::new(device);
+    let mut pool = pm_gpu::TargetPool::new();
+    let mut held = Vec::new();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("linear overlapping text gate"),
+    });
+    let view = painter
+        .render(
+            device,
+            queue,
+            &mut encoder,
+            &mut pool,
+            &mut held,
+            &plan,
+            Precision::Float32,
+            WorkingEncoding::LinearLight,
+        )
+        .unwrap();
+    queue.submit([encoder.finish()]);
+    for target in held {
+        pool.give(target);
+    }
+    let actual = pm_gpu::readback::read_f32(device, queue, view.texture()).unwrap();
+    let (mut overlap, mut max_cv) = (0usize, 0.0f64);
+    for (i, (a, r)) in actual
+        .chunks_exact(4)
+        .zip(ideal.rgba.chunks_exact(4))
+        .enumerate()
+    {
+        if ideal.classes[i] == pm_reference::compare::Class::Unreferenced {
+            continue;
+        }
+        // Fully covered portions of both glyphs isolate paint-domain math
+        // from the independently quantified area coverage at glyph edges.
+        if r[3] < 0.7524 {
+            continue;
+        }
+        overlap += 1;
+        for c in 0..4 {
+            max_cv = max_cv.max((f64::from(a[c]) - r[c]).abs() * 255.0);
+        }
+    }
+    println!("case 0: linear glyph overlap {overlap} pixels, max {max_cv:.3} CV");
+    if overlap < 20 || max_cv > 1.0 {
+        failures.push(format!(
+            "linear glyph overlap {overlap} pixels, max {max_cv:.3} CV"
+        ));
+    }
+    let offset = colr_pixel * 4;
+    let expected = [0.3f64, 0.08, 0.02, 0.4];
+    let image_max = (0..4)
+        .map(|c| (f64::from(actual[offset + c]) - expected[c]).abs() * 255.0)
+        .fold(0.0f64, f64::max);
+    println!("case 1: working COLR palette alpha max {image_max:.3} CV");
+    if image_max > 1.0 {
+        failures.push(format!("working COLR palette alpha max {image_max:.3} CV"));
+    }
+}
+
+/// Exercise the actual project `Source::Text` execution path, including its
+/// encoded=false texture flag. Two translucent midtone glyphs overlap in the
+/// project's linear working domain; a second display decode changes them by
+/// far more than one code value.
+#[cfg(target_os = "macos")]
+/// A level 1 source texture is reused until its content/density changes.
+/// Fractional layer movement changes the compositor transform, not Canvas
+/// glyph placement or coverage. A fresh renderer must produce the same pixels;
+/// keys include renderer-local font identities.
+fn level1_plans_are_reused_until_their_inputs_change(
+    renderer: &mut pm_render::Renderer,
+    fresh: &mut pm_render::Renderer,
+    failures: &mut Vec<String>,
+) {
+    use pm_protocol::color::Precision;
+    use pm_protocol::common::Size;
+    use pm_render::plan::{Content, Source};
+    use serde_json::json;
+
+    let doc = |text: &str, x: f64| {
+        let l = support::doc::layer(
+            "l",
+            "text",
+            json!({"text": text, "font": "SF Pro Display", "size": 40,
+                "weight": 600, "color": "#303030", "align": "left"}),
+            x,
+            48.0,
+            3.0,
+        );
+        let v = support::doc::project(160, 96, 3.0, support::doc::no_fill(), vec![l]);
+        pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1)
+    };
+    let request = pm_render::RenderRequest::sized(Size::new(160, 96), Precision::Float32);
+    let resolver = pm_render::MapResolver::default();
+    let text_of = |r: &mut pm_render::Renderer, d: &pm_model::Document, t: f64| {
+        let (plan, plan_failures) = r
+            .plan(d, "Ptest-root", support::ticks(t), &request, &resolver)
+            .unwrap();
+        assert!(plan_failures.is_empty(), "{plan_failures:?}");
+        plan.draws
+            .iter()
+            .find_map(|draw| match &draw.content {
+                Content::Texture {
+                    source: Source::Text(text),
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a text draw")
+    };
+    // The reused renderer above uses Area; keep its independent witness
+    // on the same coverage implementation before comparing exact pixels.
+    fresh
+        .text_gpu()
+        .set_coverage(pm_render::text::gpu::Coverage::Area);
+    let one = doc("One", 80.0);
+    let first = text_of(renderer, &one, 0.0);
+    let later = text_of(renderer, &one, 1.0);
+    if !std::sync::Arc::ptr_eq(&first.scene, &later.scene) {
+        failures.push("a still text layer was laid out again".into());
+    }
+    for (name, edited) in [("edited", doc("Two", 80.0)), ("moved", doc("One", 64.125))] {
+        let made = text_of(renderer, &edited, 0.0);
+        let pixels = |r: &mut pm_render::Renderer| {
+            let frame = r
+                .render(
+                    &edited,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            r.read_rgba(&frame).unwrap()
+        };
+        let actual = pixels(renderer);
+        let expected = pixels(fresh);
+        let max_cv = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| f64::from((a - b).abs()) * 255.0)
+            .fold(0.0f64, f64::max);
+        // Allow atlas-coordinate roundoff, well below one output code value.
+        if max_cv > 0.01
+            || (name == "edited" && made.key == first.key)
+            || (name == "moved" && made.key != first.key)
+        {
+            failures.push(format!(
+                "{name}: stale text plan; fresh render differs by {max_cv:.6} CV; key unchanged {}",
+                made.key == first.key
+            ));
+        }
+    }
+}
+
+fn linear_project_text_source(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use pm_protocol::color::{Precision, WorkingEncoding};
+    use pm_protocol::common::Size;
+    use pm_reference::composite::{Blend, blend, scale};
+    use pm_render::plan::{Content, Source};
+    use serde_json::json;
+
+    let glyph = |id: &str, color: &str| {
+        support::doc::layer(
+            id,
+            "text",
+            json!({"text":"H", "font":"SF Pro Display", "size":48,
+                "weight":600, "color":color, "align":"left"}),
+            38.0,
+            28.0,
+            3.0,
+        )
+    };
+    let mut project = support::doc::project(
+        128,
+        96,
+        3.0,
+        support::doc::no_fill(),
+        vec![glyph("top", "#4080C099"), glyph("bottom", "#A0604099")],
+    );
+    project["color"] = json!({"mode":"standard", "linearBlending":true,
+        "precision":"float32", "blendDomain":"hdrSafe"});
+    project["colorDepth"] = json!(32);
+    let doc = pm_model::Document::new(
+        Some(pm_model::json::parse(&project.to_string()).unwrap()),
+        1,
+    );
+    let working = pm_render::composite::color::project_color(doc.root().unwrap())
+        .unwrap()
+        .working();
+    assert_eq!(working, WorkingEncoding::LinearLight);
+    let request = pm_render::RenderRequest::sized(Size::new(128, 96), Precision::Float32);
+    let resolver = pm_render::MapResolver::default();
+    let (plan, plan_failures) = renderer
+        .plan(&doc, "Ptest-root", support::ticks(0.0), &request, &resolver)
+        .unwrap();
+    assert!(plan_failures.is_empty(), "{plan_failures:?}");
+    let mut ideal = vec![0.0f64; 128 * 96 * 4];
+    let mut layers = 0usize;
+    let mut overlap = vec![0u8; 128 * 96];
+    for draw in &plan.draws {
+        let Content::Texture {
+            source: Source::Text(text),
+            alpha,
+            ..
+        } = &draw.content
+        else {
+            continue;
+        };
+        layers += 1;
+        let layer = support::text_reference::render_in_working(&text.scene, working);
+        assert_eq!(layer.unreferenced, 0);
+        // Independently sample the local glyph canvas through its quad.
+        // The source may be ink-cropped and no longer shares the frame grid.
+        let inverse = kurbo::Affine::new(draw.matrix).inverse();
+        let [x0, y0, x1, y1] = text.crop.map(|v| v as usize);
+        let tap = |x: isize, y: isize, c: usize| {
+            let x = (x + x0 as isize).clamp(x0 as isize, x1 as isize - 1) as usize;
+            let y = (y + y0 as isize).clamp(y0 as isize, y1 as isize - 1) as usize;
+            layer.rgba[(y * text.scene.width as usize + x) * 4 + c]
+        };
+        for y in 0..96 {
+            for x in 0..128 {
+                let q = inverse * kurbo::Point::new(x as f64 + 0.5, y as f64 + 0.5);
+                if !(0.0..=1.0).contains(&q.x) || !(0.0..=1.0).contains(&q.y) {
+                    continue;
+                }
+                let (sx, sy) = (q.x * (x1 - x0) as f64 - 0.5, q.y * (y1 - y0) as f64 - 0.5);
+                let (ix, iy) = (sx.floor() as isize, sy.floor() as isize);
+                let (fx, fy) = (sx - sx.floor(), sy - sy.floor());
+                let src = std::array::from_fn(|c| {
+                    (tap(ix, iy, c) * (1.0 - fx) + tap(ix + 1, iy, c) * fx) * (1.0 - fy)
+                        + (tap(ix, iy + 1, c) * (1.0 - fx) + tap(ix + 1, iy + 1, c) * fx) * fy
+                });
+                let i = y * 128 + x;
+                if src[3] > 0.5 {
+                    overlap[i] += 1;
+                }
+                let dst = &mut ideal[i * 4..][..4];
+                let result = blend(
+                    Blend::Normal,
+                    scale(src, *alpha),
+                    [dst[0], dst[1], dst[2], dst[3]],
+                );
+                dst.copy_from_slice(&result);
+            }
+        }
+    }
+    assert_eq!(layers, 2, "both text layers use Source::Text");
+    let frame = renderer
+        .render(&doc, "Ptest-root", support::ticks(0.0), &request, &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let actual = renderer.read_rgba(&frame).unwrap();
+    // The renderer's final EncodeFlip writes premultiplied E even when its
+    // intermediate composition used linear light. Encode the completed f64
+    // reference once, after all source-over operations.
+    let output: Vec<f64> = ideal
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let alpha = p[3];
+            [
+                if alpha > 0.0 {
+                    pm_reference::color::Transfer::Srgb.from_linear(p[0] / alpha) * alpha
+                } else {
+                    0.0
+                },
+                if alpha > 0.0 {
+                    pm_reference::color::Transfer::Srgb.from_linear(p[1] / alpha) * alpha
+                } else {
+                    0.0
+                },
+                if alpha > 0.0 {
+                    pm_reference::color::Transfer::Srgb.from_linear(p[2] / alpha) * alpha
+                } else {
+                    0.0
+                },
+                alpha,
+            ]
+        })
+        .collect();
+    let mut max_cv = 0.0f64;
+    let mut worst = (0usize, [0.0f64; 4], [0.0f64; 4]);
+    let mut overlap_pixels = 0usize;
+    let mut midtones = 0usize;
+    for (i, (a, r)) in actual
+        .chunks_exact(4)
+        .zip(output.chunks_exact(4))
+        .enumerate()
+    {
+        overlap_pixels += usize::from(overlap[i] == 2);
+        midtones += usize::from(ideal[i * 4 + 3] > 0.5 && (0.05..0.5).contains(&ideal[i * 4]));
+        for c in 0..4 {
+            let delta = (f64::from(a[c]) - r[c]).abs() * 255.0;
+            if delta > max_cv {
+                max_cv = delta;
+                worst = (
+                    i,
+                    std::array::from_fn(|channel| f64::from(a[channel])),
+                    r.try_into().unwrap(),
+                );
+            }
+        }
+    }
+    println!(
+        "case 2: linear project Source::Text {overlap_pixels} overlap pixels, {midtones} midtones, max {max_cv:.3} CV"
+    );
+    if max_cv > 1.0 {
+        println!(
+            "case 2 worst pixel ({},{}): actual {:?}, independent encoded {:?}, independent working {:?}",
+            worst.0 % 128,
+            worst.0 / 128,
+            worst.1,
+            worst.2,
+            &ideal[worst.0 * 4..worst.0 * 4 + 4],
+        );
+    }
+    if overlap_pixels < 20 || midtones < 20 || max_cv > 1.0 {
+        failures.push(format!(
+            "linear project Source::Text overlap {overlap_pixels}, midtones {midtones}, max {max_cv:.3} CV"
+        ));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}
+
+/// Equivalent affine placements use the same coverage; perspective keeps
+/// the local canvas and its projective sampler.
+#[cfg(target_os = "macos")]
+fn legacy_affine_planes_match_2d(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use serde_json::json;
+    use support::doc::*;
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Smoothed);
+    let request = pm_render::RenderRequest::sized(
+        pm_protocol::common::Size::new(320, 180),
+        pm_protocol::color::Precision::Float32,
+    );
+    for (rotation, scale) in [(0.0, 100), (0.0, 123), (17.0, 123)] {
+        let mut l = layer(
+            "text",
+            "text",
+            json!({"text":"Canvas glyphs", "font":"Arial", "size":32, "weight":600, "color":"#E0D0C0", "align":"left"}),
+            80.125,
+            100.375,
+            2.0,
+        );
+        set(&mut l, "scale.x", json!(scale));
+        set(&mut l, "scale.y", json!(scale));
+        set(&mut l, "rotation", json!(rotation));
+        let mut pixels = vec![];
+        for three_d in [false, true] {
+            l["threeD"] = json!(three_d);
+            let doc = load(&project(320, 180, 2.0, no_fill(), vec![l.clone()]));
+            let frame = renderer
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            pixels.push(renderer.read_rgba(&frame).unwrap());
+        }
+        let max = pixels[0]
+            .iter()
+            .zip(&pixels[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        if max >= 1.0 / 255.0 {
+            failures.push(format!(
+                "legacy text flat plane at {rotation} degrees changes canvas edge by {max}"
+            ));
+        }
+        l["threeD"] = json!(true);
+        set(&mut l, "rotation.y", json!(35));
+        let doc = load(&project(320, 180, 2.0, no_fill(), vec![l]));
+        let (plan, errors) = renderer
+            .plan(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.0),
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            plan.draws.iter().any(|draw| {
+                matches!(&draw.content, pm_render::plan::Content::Placed(p)
+                if p.plane.is_some_and(|m| m[2] != 0.0 || m[5] != 0.0)
+                && matches!(&p.content, pm_render::plan::Content::Texture {
+                    source: pm_render::plan::Source::Text(_), ..
+                }))
+            }),
+            "perspective text must retain its local raster"
+        );
+        let frame = renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.0),
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let projected = renderer.read_rgba(&frame).unwrap();
+        assert!(projected.chunks_exact(4).any(|p| p[3] > 0.5));
+        assert!(
+            projected
+                .iter()
+                .zip(&pixels[1])
+                .any(|(a, b)| (a - b).abs() > 0.1)
+        );
+    }
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Exact);
+}
+
+#[cfg(target_os = "macos")]
+fn density_replay_keeps_compat_passthrough_layers(fonts: Box<dyn pm_render::text::TextFonts>) {
+    use pm_eval::{JsResult, Scope};
+    use pm_model::Node;
+    use pm_protocol::{
+        color::Precision,
+        common::{PixelRect, Size},
+    };
+    use pm_render::compat::{CompatAnswer, CompatRasters, CompatSource};
+    use pm_render::composite::effects::EffectFrame;
+    use pm_render::composite::{EffectHost, PreparedEffects};
+    use pm_render::{Feature, MapResolver, RenderRequest, Renderer};
+    use serde_json::json;
+    use std::sync::Arc;
+    use support::doc::{layer, load, no_fill, project, set};
+
+    struct PhysicalEffect;
+    impl EffectHost for PhysicalEffect {
+        fn prepare<'d>(
+            &self,
+            _: &mut Scope<'_, 'd>,
+            _: &'d Node,
+            _: EffectFrame,
+        ) -> JsResult<Result<Option<PreparedEffects>, Feature>> {
+            Ok(Ok(None))
+        }
+        fn needs_composition_density<'d>(
+            &self,
+            _: &mut Scope<'_, 'd>,
+            layer: &'d Node,
+            _: f64,
+            _: bool,
+        ) -> JsResult<bool> {
+            Ok(pm_eval::node::truthy(pm_eval::node::member(
+                Some(layer),
+                "fx",
+            )))
+        }
+    }
+
+    struct Native;
+    impl CompatRasters for Native {
+        fn producing(&self, source: CompatSource) -> bool {
+            source == CompatSource::RasterOverride
+        }
+        fn answer(
+            &self,
+            _: &str,
+            _: &str,
+            _: f64,
+            _: f64,
+            _: CompatSource,
+            _: Option<PixelRect>,
+        ) -> CompatAnswer {
+            CompatAnswer::Native
+        }
+    }
+
+    let shape = layer(
+        "box",
+        "shape",
+        json!({
+            "shape": "rect", "w": 160, "h": 80, "color": "#FF0000", "stroke": 0,
+        }),
+        1500.,
+        850.,
+        2.,
+    );
+    let text = layer(
+        "title",
+        "text",
+        json!({
+            "text": "Visible", "font": "Helvetica", "weight": 600, "size": 60, "color": "#FFFFFF",
+        }),
+        1500.,
+        700.,
+        2.,
+    );
+    let mut effect_owner = layer(
+        "physical",
+        "solid",
+        json!({"color": "#000000", "w": 2, "h": 2}),
+        10.,
+        10.,
+        2.,
+    );
+    set(
+        &mut effect_owner,
+        "fx",
+        json!([{"id": "fx", "type": "physical", "on": true, "p": {}}]),
+    );
+    let doc = load(&project(
+        1920,
+        1080,
+        2.,
+        no_fill(),
+        vec![text, shape, effect_owner],
+    ));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(fonts));
+    renderer.set_effect_host(Some(Arc::new(PhysicalEffect)));
+    let mut request = RenderRequest::sized(Size::new(778, 438), Precision::Float32);
+    request.output_kind = pm_render::OutputKind::Preview;
+    request.preview_canvas = true;
+    request.read_ahead = true;
+    let draw = |renderer: &mut Renderer| {
+        let frame = renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        renderer.read_rgba(&frame).unwrap()
+    };
+    let expected = draw(&mut renderer);
+    let pixel = |x: usize, y: usize| (y * 778 + x) * 4;
+    assert!(expected[pixel(608, 345)] > 0.9, "bottom-right box");
+    assert!(
+        (260..310).any(|y| (550..680).any(|x| expected[pixel(x, y)] > 0.9)),
+        "bottom-right text"
+    );
+    renderer.set_compat_rasters(Some(Arc::new(Native)));
+    assert!(
+        draw(&mut renderer) == expected,
+        "native overrides preserve the density replay"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn frame_prefix_large_plane_groups_under_adjustment() {
+    use pm_model::{
+        Document,
+        json::{Value, parse},
+        patch::{Patch, PathPart},
+    };
+    use pm_protocol::{color::Precision, common::Size};
+    use pm_render::{MapResolver, RenderRequest, Renderer};
+    use serde_json::json;
+    use std::time::Instant;
+    use support::doc::{ch, layer, no_fill, project};
+
+    let renderer = |reuse| {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&pm_render::builtin_definitions())
+            .unwrap();
+        r.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
+            pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+            None,
+        ))));
+        r.set_draw_reuse(reuse);
+        r
+    };
+    let (mut cached, mut fresh) = (renderer(true), renderer(false));
+    let mut adjustment = layer("adjustment", "adjustment", json!({}), 0., 0., 10.);
+    adjustment["fx"] = json!([{"id":"glow","type":"glow","on":true,"p":{
+        "radius": ch(json!(12)), "threshold": ch(json!(20)), "intensity": ch(json!(150))
+    }}]);
+    let mut mover = layer("mover", "null", json!({}), 0., 0., 10.);
+    mover["threeD"] = json!(true);
+    let mut wash = layer(
+        "wash",
+        "solid",
+        json!({"w":160,"h":100,"color":"#884455"}),
+        50.,
+        80.,
+        10.,
+    );
+    wash["parent"] = json!("mover");
+    wash["threeD"] = json!(true);
+    let mut layers = vec![adjustment, mover, wash];
+    for (name, duration) in [("active", 10.), ("inactive", 6.)] {
+        let mut group = layer(name, "group", json!({}), 0., 0., duration);
+        group["threeD"] = json!(true);
+        group["p"]["opacity"] = ch(json!(92));
+        layers.push(group);
+        for i in 0..300 {
+            let (ty, data) = if i < 280 && i % 42 == 1 {
+                (
+                    "shader",
+                    json!({
+                        "w": 36, "h": 20,
+                        "code": "uniform float gain;\nvoid main(){fragColor=vec4(gain,abs(sin(iTime)),0.5,1.0);}",
+                        "uniforms": {"gain":ch(json!(0.3))}
+                    }),
+                )
+            } else if i % 12 == 0 {
+                (
+                    "text",
+                    json!({"text":"Menu","font":"Helvetica","size":16,"color":"#f2f2f2"}),
+                )
+            } else {
+                (
+                    "shape",
+                    json!({"shape":"ellipse","w":30,"h":18,"color":"#3080a0"}),
+                )
+            };
+            let mut child = layer(
+                &format!("{name}-{i}"),
+                ty,
+                data,
+                30. + (i % 24) as f64 * 72.,
+                35. + (i / 24) as f64 * 70.,
+                duration,
+            );
+            child["group"] = json!(name);
+            child["threeD"] = json!(i % 2 == 0);
+            layers.push(child);
+        }
+    }
+    let mut doc = Document::new(
+        Some(parse(&project(1920, 1080, 10., no_fill(), layers).to_string()).unwrap()),
+        1,
+    );
+    let paths = MapResolver::default();
+    let key = |k: &str| PathPart::Key(k.into());
+    let request = RenderRequest::at_scale(Size::new(1920, 1080), 1., Precision::Float16);
+    let time = support::ticks(6.2);
+    let draw = |renderer: &mut Renderer, doc: &Document| {
+        let start = Instant::now();
+        let frame = renderer
+            .render(doc, "Ptest-root", time, &request, &paths)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let submission = start.elapsed().as_secs_f64() * 1000.;
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        (pixels, submission, start.elapsed().as_secs_f64() * 1000.)
+    };
+    for _ in 0..3 {
+        draw(&mut cached, &doc);
+        draw(&mut fresh, &doc);
+    }
+    let mut cached_ms = Vec::new();
+    let mut fresh_ms = Vec::new();
+    let before = cached.draw_reuse_stats();
+    for step in 0..8 {
+        let (index, x) = if step == 7 {
+            (4, 48.)
+        } else {
+            (1, step as f64 * 3. + 1.)
+        };
+        let mut path = vec![key("layers"), PathPart::Index(index as f64)];
+        path.extend(["p", "position.x", "v"].map(key));
+        // Viewer publications keep immutable snapshots alive across edits.
+        let mut next = doc.clone();
+        next.apply(&[Patch::set(path, Value::Number(x))]).unwrap();
+        let step_before = cached.draw_reuse_stats();
+        doc = next;
+        let (a, a_submit, a_total) = draw(&mut cached, &doc);
+        let (b, b_submit, b_total) = draw(&mut fresh, &doc);
+        assert!(
+            a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+            "step {step}"
+        );
+        let stats = cached.draw_reuse_stats();
+        if step == 7 {
+            assert_eq!(
+                stats.group_hits, step_before.group_hits,
+                "the changed group must redraw"
+            );
+            assert!(stats.planned > step_before.planned + 1);
+        } else {
+            cached_ms.push((a_submit, a_total));
+            fresh_ms.push((b_submit, b_total));
+        }
+    }
+    let after = cached.draw_reuse_stats();
+    assert!(
+        after.reused >= before.reused + 14,
+        "{before:?} -> {after:?}"
+    );
+    assert!(
+        after.group_hits >= before.group_hits + 7,
+        "{before:?} -> {after:?}"
+    );
+    assert!(
+        after.planned <= before.planned + 320,
+        "{before:?} -> {after:?}"
+    );
+
+    let mut path = vec![key("layers"), PathPart::Index(5.)];
+    path.extend(["d", "uniforms", "gain", "v"].map(key));
+    doc.apply(&[Patch::set(path, Value::Number(0.75))]).unwrap();
+    let (a, ..) = draw(&mut cached, &doc);
+    let (b, ..) = draw(&mut fresh, &doc);
+    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+    assert_eq!(cached.draw_reuse_stats().group_hits, after.group_hits);
+
+    // At full opacity a collapsed group is flattened. Reuse its plain
+    // prefix before the same adjustment, including the text and planes.
+    let mut path = vec![key("layers"), PathPart::Index(3.)];
+    path.extend(["p", "opacity", "v"].map(key));
+    doc.apply(&[Patch::set(path, Value::Number(100.))]).unwrap();
+    // Limit work to the viewer's visible region; the glow expands its
+    // accumulator, so a kept prefix must cover that expanded region.
+    let mut request = request;
+    request.region = Some(pm_protocol::common::PixelRect {
+        x: 30,
+        y: 20,
+        width: 900,
+        height: 700,
+    });
+    let draw_roi = |renderer: &mut Renderer, doc: &Document| {
+        let frame = renderer
+            .render(doc, "Ptest-root", time, &request, &paths)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        (renderer.read_rgba(&frame).unwrap(), frame.legend)
+    };
+    for _ in 0..2 {
+        assert_eq!(draw_roi(&mut cached, &doc), draw_roi(&mut fresh, &doc));
+    }
+    let before_prefix = cached.draw_reuse_stats();
+    for x in [27., 36.] {
+        let mut path = vec![key("layers"), PathPart::Index(1.)];
+        path.extend(["p", "position.x", "v"].map(key));
+        doc.apply(&[Patch::set(path, Value::Number(x))]).unwrap();
+        assert_eq!(draw_roi(&mut cached, &doc), draw_roi(&mut fresh, &doc));
+    }
+    let after_prefix = cached.draw_reuse_stats();
+    assert!(
+        after_prefix.prefix_frames > before_prefix.prefix_frames,
+        "{before_prefix:?} -> {after_prefix:?}"
+    );
+    let median = |samples: &[(f64, f64)], metric: fn(&(f64, f64)) -> f64| {
+        let mut sorted: Vec<_> = samples.iter().map(metric).collect();
+        sorted.sort_by(f64::total_cmp);
+        sorted[sorted.len() / 2]
+    };
+    eprintln!(
+        "600 layers, submission {:.1} -> {:.1} ms, render + readback {:.1} -> {:.1} ms, \
+         cache {before:?} -> {after:?}, prefix {before_prefix:?} -> {after_prefix:?}",
+        median(&fresh_ms, |t| t.0),
+        median(&cached_ms, |t| t.0),
+        median(&fresh_ms, |t| t.1),
+        median(&cached_ms, |t| t.1),
+    );
+}

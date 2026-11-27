@@ -1,0 +1,376 @@
+{
+ "id": "P3d-missing-model",
+ "name": "Missing model",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "solid",
+  "angle": 0,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   }
+  ]
+ },
+ "compId": "P3d-missing-model-root",
+ "compName": "Missing model",
+ "layers": [
+  {
+   "id": "L002",
+   "type": "extension",
+   "name": "Present model",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 1.5,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.object",
+    "version": 1,
+    "w": 640,
+    "h": 360,
+    "data": {
+     "object": {
+      "source": {
+       "primitive": "sphere"
+      },
+      "material": {
+       "p": {
+        "color": {
+         "v": "#3FCF8E",
+         "kf": [],
+         "expr": null
+        },
+        "roughness": {
+         "v": 0.45,
+         "kf": [],
+         "expr": null
+        },
+        "metalness": {
+         "v": 0.1,
+         "kf": [],
+         "expr": null
+        },
+        "emissive": {
+         "v": "#000000",
+         "kf": [],
+         "expr": null
+        },
+        "emissiveIntensity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        },
+        "opacity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        }
+       },
+       "maps": {},
+       "doubleSided": true
+      },
+      "useSourceMaterials": false,
+      "slots": [],
+      "castShadow": true,
+      "receiveShadow": true
+     }
+    },
+    "params": {}
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L001",
+   "type": "extension",
+   "name": "Model with absent asset",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.object",
+    "version": 1,
+    "w": 640,
+    "h": 360,
+    "data": {
+     "object": {
+      "source": {
+       "assetId": "media-missing:absent-model.glb"
+      },
+      "material": {
+       "p": {
+        "color": {
+         "v": "#C7C4FF",
+         "kf": [],
+         "expr": null
+        },
+        "roughness": {
+         "v": 0.4,
+         "kf": [],
+         "expr": null
+        },
+        "metalness": {
+         "v": 0.1,
+         "kf": [],
+         "expr": null
+        },
+        "emissive": {
+         "v": "#000000",
+         "kf": [],
+         "expr": null
+        },
+        "emissiveIntensity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        },
+        "opacity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        }
+       },
+       "maps": {},
+       "doubleSided": true
+      },
+      "useSourceMaterials": false,
+      "slots": [],
+      "castShadow": true,
+      "receiveShadow": true
+     }
+    },
+    "params": {}
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

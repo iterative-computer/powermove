@@ -1,0 +1,1178 @@
+use pm_engine_service::*;
+use pm_protocol::{
+    clock::{SeekMode, TransportCommand as C},
+    common::{PlaybackRate, Size, TICKS_PER_SECOND, TickRange, Ticks},
+};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use transport::{ShuttleKey::*, shuttle};
+
+fn snapshot() -> Snapshot {
+    let project = pm_model::json::parse(include_str!("fixtures/shapes.json")).unwrap();
+    #[cfg(feature = "kernel")]
+    {
+        pm_kernel::document::DocumentStore::new_untitled(project).snapshot()
+    }
+    #[cfg(not(feature = "kernel"))]
+    {
+        static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Snapshot {
+            doc_id: ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        }
+    }
+}
+fn scene(s: &Snapshot) -> Scene {
+    Scene {
+        doc: s.document.clone(),
+        comp: s.open_comp().unwrap(),
+        media: Default::default(),
+        content: s.doc_id,
+    }
+}
+fn config(s: Snapshot) -> ViewerConfig {
+    ViewerConfig {
+        composition: s.open_comp().unwrap(),
+        snapshot: s,
+        media: Default::default(),
+        output: Output {
+            width: 320,
+            height: 180,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        },
+        layer: None,
+        rate: pm_time::Rate::FPS_30,
+        end: Some(3 * TICKS_PER_SECOND),
+        audio: false,
+    }
+}
+fn wait_frame(v: &Viewer, stamp: Stamp) -> FrameReport {
+    let start = Instant::now();
+    loop {
+        let status = v.status();
+        assert!(status.error.is_none(), "{:?}", status.error);
+        if let Some(f) = status.frame
+            && f.stamp == stamp
+        {
+            assert!(f.gpu_ok);
+            return f;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "frame timed out: {stamp:?}, the viewer is at {:?}: {:?}",
+            v.stamp(),
+            v.status()
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+#[test]
+fn transport_jkl_pause_seek_step_and_loop() {
+    let mut t = transport::Transport::new(TICKS_PER_SECOND / 30);
+    assert!(shuttle(K, PlaybackRate::STOPPED, true).is_none());
+    assert!(shuttle(J, PlaybackRate::STOPPED, false).is_none());
+    let ladder = [
+        (L, 1),
+        (L, 2),
+        (L, 4),
+        (L, 8),
+        (L, 8),
+        (J, -1),
+        (J, -2),
+        (J, -4),
+        (J, -8),
+        (J, -8),
+        (L, 1),
+    ];
+    for (key, expected) in ladder {
+        t.command(shuttle(key, t.rate(), true).unwrap(), 1_000_000);
+        assert_eq!(t.rate().num, expected);
+    }
+    t.command(C::Pause, 1_500_000);
+    assert_eq!(t.rate(), PlaybackRate::STOPPED);
+    t.command(
+        C::Seek {
+            time: Ticks::from_whole_seconds(1),
+            mode: SeekMode::Exact,
+        },
+        2_000_000,
+    );
+    t.command(C::Step { frames: -1 }, 2_000_000);
+    assert_eq!(
+        t.poll(2_000_000).media_time.get(),
+        TICKS_PER_SECOND - TICKS_PER_SECOND / 30
+    );
+    t.command(
+        C::SetLoop {
+            range: Some(TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::from_whole_seconds(2),
+            }),
+        },
+        2_000_000,
+    );
+    t.command(
+        C::Play {
+            rate: PlaybackRate::NORMAL,
+        },
+        2_000_000,
+    );
+    assert!(t.poll(5_000_000).media_time < Ticks::from_whole_seconds(2));
+}
+#[test]
+fn cache_key_includes_every_content_coordinate() {
+    let k = policy::CacheKey {
+        studio_preview: studio::Preview::Live,
+        content: 1,
+        revision: 3,
+        time: 7,
+        width: 100,
+        height: 100,
+        crop: None,
+        moment: policy::Moment::Paused,
+        scale: 1f64.to_bits(),
+        sampling: pm_render::sampling::Sampling::Final,
+        finished: false,
+        studio_view: 0,
+        focus_group: 0,
+        inputs: 5,
+        tone: 0,
+        fonts: Some(1),
+        resources: 1,
+    };
+    for other in [
+        policy::CacheKey {
+            studio_preview: studio::Preview::Refine,
+            ..k
+        },
+        policy::CacheKey { content: 2, ..k },
+        policy::CacheKey { studio_view: 1, ..k },
+        policy::CacheKey { focus_group: 1, ..k },
+        // A media file saved again by another app.
+        policy::CacheKey { inputs: 6, ..k },
+        // The view's tone, the fonts or the contributed definitions moved.
+        policy::CacheKey { tone: 9, ..k },
+        policy::CacheKey {
+            fonts: Some(2),
+            ..k
+        },
+        policy::CacheKey { resources: 2, ..k },
+        policy::CacheKey { revision: 4, ..k },
+        policy::CacheKey { width: 101, ..k },
+        policy::CacheKey { height: 101, ..k },
+        policy::CacheKey {
+            crop: Some(policy::Crop {
+                x: 1,
+                y: 0,
+                canvas_width: 200,
+                canvas_height: 200,
+            }),
+            ..k
+        },
+    ] {
+        assert!(!k.same_content(other));
+    }
+    assert_ne!(k, policy::CacheKey { time: 8, ..k });
+    // Another density or resampler at one render size is another picture.
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            scale: 0.5f64.to_bits(),
+            ..k
+        }
+    );
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            sampling: pm_render::sampling::Sampling::Playback,
+            ..k
+        }
+    );
+    // A playing frame is never the exact paused picture of its time.
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            moment: policy::Moment::Playing,
+            ..k
+        }
+    );
+}
+#[test]
+fn export_resolver_never_silently_uses_proxies() {
+    let c = MediaCatalog {
+        originals: [("a".into(), "original.mov".into())].into(),
+        proxies: [
+            ("a".into(), "proxy.mov".into()),
+            ("b".into(), "proxy-only.mov".into()),
+        ]
+        .into(),
+        optimized: [("a".into(), "optimized.mov".into())].into(),
+        ..Default::default()
+    };
+    assert_eq!(c.export_paths(false).paths.len(), 1);
+    assert_eq!(
+        c.export_paths(true).paths.len(),
+        2,
+        "optimized media never exports"
+    );
+    assert_eq!(
+        c.export_paths(false).paths["a"].to_str(),
+        Some("original.mov")
+    );
+    assert_eq!(c.export_paths(true).paths["a"].to_str(), Some("proxy.mov"));
+    // A draft's proxy is named with its original, so Interpret Footage is
+    // carried to it as the proxy's maker left it; a file drawn as itself
+    // (an original, or a proxy whose original is gone) names none.
+    assert!(c.export_paths(false).originals.is_empty());
+    let draft = c.export_paths(true).originals;
+    assert_eq!(draft.len(), 1);
+    assert_eq!(draft["a"].to_str(), Some("original.mov"));
+}
+#[test]
+fn headless_pixels_equal_export_reference_and_overlays_share_pass() {
+    let s = snapshot();
+    let scene = scene(&s);
+    let size = Size::new(320, 180);
+    let mut h = Headless::new().unwrap();
+    let time = Ticks::from_whole_seconds(1);
+    let actual = h.frame(&scene, time, size, &Default::default()).unwrap();
+    let reference = h.export_reference(&scene, time, size).unwrap();
+    let mut errors: Vec<_> = actual
+        .iter()
+        .zip(reference.chunks_exact(4))
+        .map(|(a, b)| color::delta(*a, color::p3(b)))
+        .collect();
+    errors.sort_by(f64::total_cmp);
+    let p99 = errors[errors.len() * 99 / 100];
+    let max = *errors.last().unwrap();
+    println!(
+        "headless/export ΔE2000: pixels={} p99={p99:.6} max={max:.6}",
+        errors.len()
+    );
+    assert!(p99 <= 1. && max <= 2.);
+    assert!(actual.iter().any(|p| p[0] > 0.1)); // Not an all-black false match.
+    let overlay = OverlayGeometry::new(vec![OverlayLine {
+        ends: [0., 0.5, 1., 0.5],
+        color: [0., 1., 0., 1.],
+    }])
+    .unwrap();
+    let drawn = h.frame(&scene, time, size, &overlay).unwrap();
+    assert_eq!(drawn[90 * 320 + 160], [0., 1., 0.]);
+    assert_eq!(drawn[0], actual[0]);
+}
+
+#[test]
+fn closing_a_project_returns_every_reported_cache_to_empty() {
+    let s = snapshot();
+    let scene = scene(&s);
+    let mut h = Headless::new().unwrap();
+    let baseline = h.memory_usage();
+    let pixels = h
+        .frame(
+            &scene,
+            Ticks::ZERO,
+            Size::new(320, 180),
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(h.memory_usage().resident_bytes() > baseline.resident_bytes());
+    h.release_project_memory();
+    let closed = h.memory_usage();
+    assert_eq!(
+        closed.resident_bytes(),
+        baseline.resident_bytes(),
+        "{closed:?}"
+    );
+    assert_eq!(closed.decoder_sessions, 0);
+    assert_eq!(closed.binding_bytes, 0);
+    assert_eq!(closed.decoder_pool_free_bytes, 0);
+    assert_eq!(closed.target_pool_idle, 0);
+    let reopened = h
+        .frame(
+            &scene,
+            Ticks::ZERO,
+            Size::new(320, 180),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        pixels, reopened,
+        "cache lifetime must not change exact pixels"
+    );
+}
+
+/// The service's cache counters once it has released a closed project
+/// (the release is counted when it is complete, device renewal included;
+/// the bound is only for a worker that never gets there).
+fn released(service: &EngineService) -> memory::CacheUsage {
+    let start = Instant::now();
+    loop {
+        let usage = service.memory_usage();
+        if usage.project_releases > 0 {
+            return usage;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "the closed project was never released: {usage:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn retiring_the_last_view_releases_its_document_and_shared_caches() {
+    let service =
+        EngineService::start(pm_gpu::Gpu::new("project-retirement-test").unwrap()).unwrap();
+    let c = config(snapshot());
+    let document = Arc::downgrade(&c.snapshot.document);
+    let v = service.viewer(c).unwrap();
+    let (scopes, results) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, scopes)))
+        .unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    v.retire();
+    // The release is counted once it is done: by then everything is gone.
+    let u = released(&service);
+    assert_eq!(u.resident_bytes(), 0, "closed caches retained: {u:?}");
+    assert!(document.upgrade().is_none(), "closed document retained");
+    assert!(results.is_closed(), "closed viewer retained its scope tap");
+    assert_eq!(u.decoder_sessions, 0);
+    assert_eq!(u.decoder_pool_free_bytes, 0);
+}
+
+/// A paused playhead in a rendered range shows the rendered frame: its
+/// picture is the composition-size frame on disk, so it is not drawn again
+/// and has no refinement to wait for (whatever a background fill is doing
+/// to the GPU). Outside the range a paused picture is drawn and refined.
+#[test]
+fn a_paused_frame_in_a_rendered_range_shows_the_rendered_frame() {
+    let service = EngineService::start(pm_gpu::Gpu::new("paused-disk-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&viewer, viewer.stamp().unwrap());
+    // Frames 30 to 32 rendered (the fill child), once the scene is read.
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let start = Instant::now();
+    while disk
+        .start_fill(1., 1.1, exe, jobs::Activity::default(), |_| {})
+        .is_err()
+    {
+        assert!(start.elapsed() < Duration::from_secs(20), "scene not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while disk.bars().running || disk.bars().done == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            disk.bars()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(disk.bars().error, None);
+    let settled = |ticks: i64| {
+        viewer
+            .command(C::Seek {
+                time: Ticks::new(ticks).unwrap(),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        // Any refinement has landed after this long.
+        std::thread::sleep(Duration::from_secs(3));
+        let stamp = viewer.stamp().unwrap();
+        wait_frame(&viewer, stamp)
+    };
+    // The composition is twice the drawable: a drawn paused picture is
+    // refined at scale 2; the rendered frame is shown as it is.
+    let drawn = settled(2 * TICKS_PER_SECOND);
+    assert_eq!(drawn.scale, 2., "outside the range: drawn and refined");
+    // Frame 30 starts the reader on the range (a slow test build may still
+    // draw it); frame 31 is then read when the playhead gets to it.
+    settled(TICKS_PER_SECOND);
+    let rendered = settled(TICKS_PER_SECOND + TICKS_PER_SECOND / 30);
+    assert_eq!(rendered.scale, 1., "in the range: the frame on disk");
+    viewer.retire();
+}
+
+/// A stop releases what is idle (targets, read-ahead) and keeps the engine:
+/// its device, compiled programs and pipelines stay, so the next play
+/// starts warm. (Renewing the device two seconds after every stop gave the
+/// recording pools' high-water storage back, and made every play after a
+/// pause compile and upload everything again.) The still stays as it was.
+#[test]
+fn a_stop_releases_idle_targets_and_keeps_the_engine_warm() {
+    let service = EngineService::start(pm_gpu::Gpu::new("stopped-warm-test").unwrap()).unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while viewer.status().presented < 3 {
+        assert!(Instant::now() < deadline, "playback did not advance");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    viewer.command(C::Pause).unwrap();
+    while viewer
+        .status()
+        .clock
+        .is_none_or(|c| c.state != pm_protocol::clock::TransportState::Stopped)
+    {
+        assert!(Instant::now() < deadline, "playback did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    viewer.capture_next().unwrap();
+    let pixels = wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap();
+    let created = service.memory_usage().targets_created;
+    assert!(created > 0);
+    // The idle release (two seconds after the last frame), and well past it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while service.memory_usage().target_pool_idle != 0 {
+        assert!(Instant::now() < deadline, "idle targets stayed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let after = service.memory_usage();
+    assert_eq!(after.target_pool_idle, 0);
+    assert_eq!(
+        after.targets_created, created,
+        "the same engine: nothing was made again, and no new one took its place"
+    );
+    assert_eq!(
+        viewer.status().frame.unwrap().pixels.as_ref(),
+        Some(&pixels)
+    );
+    viewer.capture_next().unwrap();
+    assert_eq!(
+        pixels,
+        wait_frame(&viewer, viewer.stamp().unwrap()).pixels.unwrap()
+    );
+    viewer.retire();
+}
+
+#[test]
+fn closing_the_last_view_retires_device_pools_and_reopens_with_identical_exact_pixels() {
+    let service =
+        EngineService::start(pm_gpu::Gpu::new("idle-device-renewal-test").unwrap()).unwrap();
+    let input = snapshot();
+    let first = service.viewer(config(input.clone())).unwrap();
+    first.capture_next().unwrap();
+    let pixels = wait_frame(&first, first.stamp().unwrap()).pixels.unwrap();
+    assert!(service.memory_usage().targets_created > 0);
+    first.retire();
+    assert_eq!(
+        released(&service).targets_created,
+        0,
+        "old device pools stayed live"
+    );
+    let reopened = service.viewer(config(input)).unwrap();
+    reopened.capture_next().unwrap();
+    assert_eq!(
+        pixels,
+        wait_frame(&reopened, reopened.stamp().unwrap())
+            .pixels
+            .unwrap()
+    );
+    reopened.retire();
+}
+
+#[test]
+fn closing_one_document_keeps_the_other_view_usable() {
+    let service = EngineService::start(pm_gpu::Gpu::new("other-project-test").unwrap()).unwrap();
+    let first = config(snapshot());
+    let closed = Arc::downgrade(&first.snapshot.document);
+    let a = service.viewer(first).unwrap();
+    let b = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&a, a.stamp().unwrap());
+    wait_frame(&b, b.stamp().unwrap());
+    a.retire();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while closed.upgrade().is_some() {
+        assert!(Instant::now() < deadline, "closed project stayed live");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    b.command(C::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Exact,
+    })
+    .unwrap();
+    wait_frame(&b, b.stamp().unwrap());
+    b.retire();
+}
+
+#[test]
+fn large_source_automatic_preview_uses_hd_proxy_but_exports_and_original_mode_do_not() {
+    use pm_engine_service::MediaMode;
+    let mut catalog = MediaCatalog {
+        originals: [("large".into(), "original.mov".into())].into(),
+        proxies: [("large".into(), "hd.mov".into())].into(),
+        optimized: [("large".into(), "full-size.mov".into())].into(),
+        automatic_proxies: ["large".into()].into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Automatic)["large"].to_str(),
+        Some("hd.mov")
+    );
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Originals)["large"].to_str(),
+        Some("original.mov")
+    );
+    assert_eq!(
+        catalog.export_paths(false).paths["large"].to_str(),
+        Some("original.mov")
+    );
+    catalog.play_original.insert("large".into());
+    assert_eq!(
+        catalog.viewer_paths(MediaMode::Automatic)["large"].to_str(),
+        Some("original.mov")
+    );
+}
+/// Rendered frames are drawn from what a paused frame reads, never from
+/// Automatic's HD proxy, even when the frame that opened the composition
+/// to the disk cache was a playing one reading that proxy.
+#[test]
+fn rendered_frames_are_drawn_from_originals_while_playback_reads_an_hd_proxy() {
+    let service = EngineService::start(pm_gpu::Gpu::new("rendered-media-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let mut config = config(snapshot());
+    config.media = MediaCatalog {
+        originals: [("large".into(), "original.mov".into())].into(),
+        proxies: [("large".into(), "hd.mov".into())].into(),
+        automatic_proxies: ["large".into()].into(),
+        ..Default::default()
+    };
+    let viewer = service.viewer(config).unwrap();
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let start = Instant::now();
+    while viewer.status().presented < 3 {
+        assert!(start.elapsed() < Duration::from_secs(20), "no playback");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let from = disk.rendered_from().expect("the composition is observed");
+    assert_eq!(from["large"].to_str(), Some("original.mov"));
+    viewer.retire();
+}
+
+#[test]
+fn worker_exact_cache_and_revision_resize_retirement() {
+    let s = snapshot();
+    let service = EngineService::start(pm_gpu::Gpu::new("service-test").unwrap()).unwrap();
+    let v = service.viewer(config(s.clone())).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    v.command(C::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Scrub,
+    })
+    .unwrap();
+    let first = wait_frame(&v, v.stamp().unwrap());
+    assert!(!first.cache_hit);
+    v.command(C::Seek {
+        time: Ticks::ZERO,
+        mode: SeekMode::Scrub,
+    })
+    .unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    v.command(C::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Scrub,
+    })
+    .unwrap();
+    assert!(wait_frame(&v, v.stamp().unwrap()).cache_hit);
+    let old = v.stamp().unwrap();
+    let next = Snapshot {
+        revision: s.revision + 1,
+        document: Arc::new(pm_model::Document::new(
+            s.document.to_value(),
+            s.revision + 1,
+        )),
+        ..s.clone()
+    };
+    v.snapshot(next).unwrap();
+    assert!(!wait_frame(&v, v.stamp().unwrap()).cache_hit);
+    assert!(v.snapshot(s).is_err());
+    assert_ne!(old, v.stamp().unwrap());
+    let before = v.stamp().unwrap();
+    v.configure(Output {
+        width: 160,
+        height: 90,
+        display: 2,
+        headroom: 2.,
+        crop: None,
+    })
+    .unwrap();
+    assert_ne!(before.generation, v.stamp().unwrap().generation);
+    wait_frame(&v, v.stamp().unwrap());
+    // Separate content/session at the same revision cannot collide.
+    let b = service.viewer(config(snapshot())).unwrap();
+    b.studio_preview(studio::Preview::Refine).unwrap();
+    assert!(!wait_frame(&b, b.stamp().unwrap()).cache_hit);
+    v.retire();
+    b.retire();
+}
+
+/// A main viewer and a popout share one engine. Drawing one must not drop
+/// the other's cached frames or reinstall definitions: neither pins resources.
+#[test]
+fn two_viewers_keep_each_others_cached_frames() {
+    let service = EngineService::start(pm_gpu::Gpu::new("two-viewers-test").unwrap()).unwrap();
+    let a = service.viewer(config(snapshot())).unwrap();
+    let b = service.viewer(config(snapshot())).unwrap();
+    b.studio_preview(studio::Preview::Refine).unwrap();
+    wait_frame(&a, a.stamp().unwrap());
+    wait_frame(&b, b.stamp().unwrap());
+    let seek = |v: &pm_engine_service::Viewer, seconds| {
+        v.command(C::Seek {
+            time: Ticks::from_whole_seconds(seconds),
+            mode: SeekMode::Scrub,
+        })
+        .unwrap();
+        wait_frame(v, v.stamp().unwrap())
+    };
+    for v in [&a, &b] {
+        assert!(!seek(v, 1).cache_hit);
+        seek(v, 0);
+    }
+    for v in [&a, &b] {
+        assert!(
+            seek(v, 1).cache_hit,
+            "the other viewer's frame cleared this one's cache"
+        );
+    }
+    a.retire();
+    b.retire();
+}
+#[test]
+fn composition_identity_cannot_reuse_other_pixels_at_one_content_revision() {
+    let snapshot = snapshot();
+    let original = snapshot.open_comp().unwrap();
+    let mut project: serde_json::Value = serde_json::from_str(
+        &pm_model::json::to_canonical_string(&snapshot.document.to_value().unwrap()),
+    )
+    .unwrap();
+    let mut alternate = project["comps"][&original].clone();
+    alternate["id"] = serde_json::json!("alternate");
+    for layer in alternate["layers"].as_array_mut().unwrap() {
+        layer["d"]["color"] = serde_json::json!("#00FF00");
+    }
+    project["comps"]["alternate"] = alternate;
+    let document = Arc::new(pm_model::Document::new(
+        Some(pm_model::json::parse(&project.to_string()).unwrap()),
+        1,
+    ));
+    let scene = Scene {
+        doc: document,
+        comp: original,
+        media: Default::default(),
+        content: 1,
+    };
+    let mut h = Headless::new().unwrap();
+    let size = Size::new(64, 36);
+    let red = h
+        .frame(&scene, Ticks::ZERO, size, &Default::default())
+        .unwrap();
+    let green = h
+        .frame(
+            &Scene {
+                comp: "alternate".into(),
+                ..scene.clone()
+            },
+            Ticks::ZERO,
+            size,
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(red.iter().flatten().any(|v| *v > 0.5));
+    let difference = red
+        .iter()
+        .zip(&green)
+        .flat_map(|(a, b)| (0..3).map(move |i| (a[i] - b[i]).abs()))
+        .sum::<f64>()
+        / (red.len() * 3) as f64;
+    assert!(
+        difference > 0.01,
+        "distinct composition pixels differ by {difference}"
+    );
+    assert_eq!(
+        red,
+        h.frame(&scene, Ticks::ZERO, size, &Default::default())
+            .unwrap()
+    );
+}
+#[test]
+fn worker_evaluates_locked_geometry_at_the_rendered_time() {
+    let service = EngineService::start(pm_gpu::Gpu::new("locked-overlay-test").unwrap()).unwrap();
+    let v = service.viewer(config(snapshot())).unwrap();
+    v.locked_overlays(Arc::new(|_doc, _comp, time| {
+        let y = if time.get() == 0 { 0.25 } else { 0.75 };
+        OverlayGeometry::new(vec![OverlayLine {
+            ends: [0., y, 1., y],
+            color: [0., 1., 0., 1.],
+        }])
+    }))
+    .unwrap();
+    v.capture_next().unwrap();
+    let first = wait_frame(&v, v.stamp().unwrap());
+    assert_eq!(first.pixels.unwrap()[45 * 320 + 160], [0., 1., 0.]);
+    v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+    v.capture_next().unwrap();
+    let next = wait_frame(&v, v.stamp().unwrap());
+    assert_eq!(next.pixels.unwrap()[135 * 320 + 160], [0., 1., 0.]);
+}
+
+#[test]
+fn silent_composition_with_audio_enabled_seeks_on_the_host_clock() {
+    let s = snapshot();
+    let mut t = transport::Transport::new(TICKS_PER_SECOND / 30);
+    t.enable_audio(
+        &s.document,
+        s.open_comp().unwrap(),
+        Default::default(),
+        Box::new(|_| {}),
+    )
+    .unwrap();
+    t.command(
+        C::Play {
+            rate: PlaybackRate::NORMAL,
+        },
+        1_000_000,
+    );
+    assert_eq!(t.poll(1_100_000).rate, PlaybackRate::NORMAL);
+    t.command(
+        C::Seek {
+            time: Ticks::from_whole_seconds(1),
+            mode: SeekMode::Exact,
+        },
+        1_200_000,
+    );
+    assert_eq!(t.poll(1_200_000).rate, PlaybackRate::NORMAL);
+    assert!(
+        !t.fallback,
+        "silent seek must not wait for an audio-device timeout"
+    );
+}
+
+#[test]
+fn viewer_shuttle_and_scrub_bursts_keep_the_latest_intent() {
+    let service = EngineService::start(pm_gpu::Gpu::new("input-burst-test").unwrap()).unwrap();
+    let v = service.viewer(config(snapshot())).unwrap();
+    assert!(v.shuttle(L, true).unwrap());
+    assert!(v.shuttle(L, true).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while v.status().clock.is_none_or(|s| s.rate.num != 2) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    for i in 0..100 {
+        v.scrub(Ticks::new(i * TICKS_PER_SECOND / 30).unwrap())
+            .unwrap();
+    }
+    let f = wait_frame(&v, v.stamp().unwrap());
+    assert_eq!(f.time.get(), 99 * TICKS_PER_SECOND / 30);
+    assert!(!v.shuttle(K, false).unwrap());
+    assert!(!v.shuttle(L, false).unwrap());
+}
+
+#[test]
+fn the_scope_tap_settles_on_the_frame_on_screen() {
+    let service = EngineService::start(pm_gpu::Gpu::new("scope-settle-test").unwrap()).unwrap();
+    let v = service.viewer(config(snapshot())).unwrap();
+    let (frames, inbox) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
+    let next = |timeout: Duration| {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(frame) = inbox.try_recv() {
+                return Some(frame.unwrap());
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // A paused picture is shown at once at the drawable's size, then
+    // refined at the composition's: each is analyzed, and the scope ends on
+    // the refinement, the picture that stays on screen.
+    let refined = |frame: &pm_render::scopes::ScopeFrame| frame.pixels == 640 * 360;
+    let settled_on = || loop {
+        let frame = next(Duration::from_secs(20)).expect("the paused picture is analyzed");
+        if refined(&frame) {
+            return frame;
+        }
+    };
+    let (start, end) = (Ticks::ZERO, Ticks::new(2 * TICKS_PER_SECOND).unwrap());
+    v.scrub(end).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    let settled = settled_on();
+    v.scrub(start).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    let first = settled_on();
+    assert_ne!(first, settled, "the two frames must differ");
+    // Back on the first time: whatever was still being analyzed, the scope
+    // ends on that time's picture again, and stays on it.
+    v.scrub(end).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    while settled_on() != settled {}
+    while let Some(later) = next(Duration::from_millis(500)) {
+        assert!(later == settled, "the scope left the picture on screen");
+    }
+    v.scopes(None).unwrap();
+}
+
+#[test]
+fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
+    let service = EngineService::start(pm_gpu::Gpu::new("status-resource-test").unwrap()).unwrap();
+    let rx = service.notifications();
+    let v = service.viewer(config(snapshot())).unwrap();
+    // A paused picture is drawn at the drawable's size, then once more at
+    // the composition's: the service is quiet after the one that stays.
+    loop {
+        let stamp = v.stamp().unwrap();
+        wait_frame(&v, stamp);
+        std::thread::sleep(Duration::from_millis(100));
+        if v.stamp() == Some(stamp) {
+            break;
+        }
+    }
+    while rx.try_recv().is_ok() {}
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(
+        rx.try_recv().is_err(),
+        "paused service generated a periodic wake"
+    );
+    let old = v.stamp().unwrap();
+    // New pins (a contributed definition) retire the cache; a snapshot that
+    // pins the same again (only its generation moved) retires nothing.
+    let mut contributed = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    contributed.id = "ext.invert".into();
+    contributed.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    let pins = |generation| {
+        Arc::new(resources::ResourceSnapshot {
+            generation,
+            definitions: vec![contributed.clone()],
+            ..Default::default()
+        })
+    };
+    v.resources(pins(2)).unwrap();
+    let frame = wait_frame(&v, v.stamp().unwrap());
+    assert!(!frame.cache_hit);
+    assert!(frame.stamp.generation > old.generation);
+    assert!(rx.try_recv().is_ok());
+    let pinned = v.stamp().unwrap();
+    v.resources(pins(3)).unwrap();
+    assert_eq!(v.stamp().unwrap().generation, pinned.generation);
+    assert!(v.resources(Arc::default()).is_err());
+    for i in 0..100 {
+        v.scrub(Ticks::new(i * 1000).unwrap()).unwrap();
+    }
+    wait_frame(&v, v.stamp().unwrap());
+    assert_eq!(rx.len(), 1, "notifications must stay bounded");
+}
+
+#[test]
+fn pending_edit_origin_belongs_to_the_new_revision() {
+    let s = snapshot();
+    let engine = EngineService::start(pm_gpu::Gpu::new("edit-origin-test").unwrap()).unwrap();
+    let v = engine.viewer(config(s.clone())).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    let input = pm_engine_service::trace::now();
+    v.input_event(input);
+    // An old-revision frame may complete while the kernel processes the edit.
+    v.capture_next().unwrap();
+    assert!(
+        wait_frame(&v, v.stamp().unwrap())
+            .input_host_seconds
+            .is_none()
+    );
+    v.snapshot(Snapshot {
+        revision: s.revision + 1,
+        document: Arc::new(pm_model::Document::new(
+            s.document.to_value(),
+            s.revision + 1,
+        )),
+        ..s
+    })
+    .unwrap();
+    assert_eq!(
+        wait_frame(&v, v.stamp().unwrap()).input_host_seconds,
+        Some(input)
+    );
+}
+
+#[test]
+fn telemetry_headroom_does_not_invalidate_identical_pixels() {
+    let engine =
+        EngineService::start(pm_gpu::Gpu::new("headroom-telemetry-test").unwrap()).unwrap();
+    let c = config(snapshot());
+    let output = c.output;
+    let v = engine.viewer(c).unwrap();
+    let stamp = v.stamp().unwrap();
+    v.configure(Output {
+        headroom: 2.,
+        crop: None,
+        ..output
+    })
+    .unwrap();
+    assert_eq!(v.stamp().unwrap(), stamp);
+    v.configure(Output {
+        display: output.display + 1,
+        ..output
+    })
+    .unwrap();
+    assert_ne!(v.stamp().unwrap(), stamp);
+}
+
+#[test]
+fn playback_holds_identical_frames_instead_of_re_presenting_them() {
+    // 30 fps content under 120 Hz ticks: each content frame is submitted once
+    // and held for the remaining ticks; no two consecutive submissions match.
+    let service = EngineService::start(pm_gpu::Gpu::new("held-frame-test").unwrap()).unwrap();
+    let v = service.viewer(config(snapshot())).unwrap();
+    v.command(C::Play {
+        rate: PlaybackRate::NORMAL,
+    })
+    .unwrap();
+    let start = Instant::now();
+    let mut times = Vec::<Ticks>::new();
+    let mut last = None;
+    while start.elapsed() < Duration::from_millis(900) {
+        v.display_tick(trace::now() + 1. / 120., 1. / 120.).unwrap();
+        let status = v.status();
+        assert!(status.error.is_none(), "{:?}", status.error);
+        if let Some(f) = status.frame
+            && f.completion_host_seconds != last
+        {
+            last = f.completion_host_seconds;
+            times.push(f.time);
+        }
+        std::thread::sleep(Duration::from_micros(8_333));
+    }
+    let status = v.status();
+    assert!(status.wants_display);
+    assert!(status.held_frames > 0, "identical ticks must be held");
+    assert!(
+        times.len() >= 10,
+        "content frames keep advancing: {times:?}"
+    );
+    for pair in times.windows(2) {
+        assert_ne!(pair[0], pair[1], "identical frame re-presented: {times:?}");
+    }
+    v.command(C::Pause).unwrap();
+    let start = Instant::now();
+    while v.status().wants_display {
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn safe_areas_persist_across_revisions_and_display_moves() {
+    let s = snapshot();
+    let service = EngineService::start(pm_gpu::Gpu::new("safe-area-test").unwrap()).unwrap();
+    let v = service.viewer(config(s.clone())).unwrap();
+    v.safe_areas(
+        OverlayGeometry::new(vec![OverlayLine {
+            ends: [0., 0.5, 1., 0.5],
+            color: [0., 1., 0., 1.],
+        }])
+        .unwrap(),
+    )
+    .unwrap();
+    let line = |v: &Viewer, row: usize, width: usize| {
+        v.capture_next().unwrap();
+        wait_frame(v, v.stamp().unwrap()).pixels.unwrap()[row * width + width / 2]
+    };
+    assert_eq!(line(&v, 90, 320), [0., 1., 0.]);
+    // An edit publishes a new revision: time-invariant overlays stay drawn.
+    v.snapshot(Snapshot {
+        revision: s.revision + 1,
+        document: Arc::new(pm_model::Document::new(
+            s.document.to_value(),
+            s.revision + 1,
+        )),
+        ..s.clone()
+    })
+    .unwrap();
+    assert_eq!(line(&v, 90, 320), [0., 1., 0.]);
+    // A move to another display/size retires old output; overlays follow the
+    // new drawable. A headroom-only change keeps the generation (telemetry).
+    let before = v.stamp().unwrap().generation;
+    v.configure(Output {
+        width: 160,
+        height: 90,
+        display: 7,
+        headroom: 1.,
+        crop: None,
+    })
+    .unwrap();
+    assert_ne!(v.stamp().unwrap().generation, before);
+    assert_eq!(line(&v, 45, 160), [0., 1., 0.]);
+    let moved = v.stamp().unwrap().generation;
+    v.configure(Output {
+        width: 160,
+        height: 90,
+        display: 7,
+        headroom: 4.,
+        crop: None,
+    })
+    .unwrap();
+    assert_eq!(v.stamp().unwrap().generation, moved);
+    v.retire();
+}
+
+#[test]
+fn viewer_output_switch_modes_encode_distinct_finite_signals() {
+    // The app's SDR / PQ / HLG switch maps to these engine modes. `Viewer::
+    // mastering` also relabels the layer and needs the main thread; the
+    // shared final-pass transform is checked through the headless path.
+    let s = snapshot();
+    let size = Size::new(64, 36);
+    let time = Ticks::from_whole_seconds(1);
+    let mut frames = vec![];
+    for mode in [
+        color::Mastering::LinearP3,
+        color::Mastering::Pq {
+            source_peak: 1000.,
+            target_peak: 1000.,
+        },
+        color::Mastering::Hlg {
+            source_peak: 1000.,
+            target_peak: 1000.,
+        },
+    ] {
+        let mut h = Headless::new().unwrap();
+        h.mastering(mode).unwrap();
+        let px = h
+            .frame(&scene(&s), time, size, &Default::default())
+            .unwrap();
+        assert!(px.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        frames.push(px);
+    }
+    assert_ne!(frames[0], frames[1], "PQ must encode, not relabel");
+    assert_ne!(frames[1], frames[2], "HLG and PQ are different signals");
+    assert!(
+        color::Mastering::Pq {
+            source_peak: 1000.,
+            target_peak: 100.
+        }
+        .params()
+        .is_err(),
+        "peaks below reference white are refused"
+    );
+}
+
+/// A viewer's settled picture is copied out of the engine's pool only at
+/// rest. Frames read from a rendered range are settled while playing and
+/// scrubbing too; none of those is copied (each copy is the whole picture,
+/// taken under the state lock). The frame the playhead rests on is.
+#[test]
+fn a_rendered_range_played_or_scrubbed_copies_no_picture() {
+    let service = EngineService::start(pm_gpu::Gpu::new("settled-copy-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&viewer, viewer.stamp().unwrap());
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let start = Instant::now();
+    while disk
+        .start_fill(1., 1.5, exe, jobs::Activity::default(), |_| {})
+        .is_err()
+    {
+        assert!(start.elapsed() < Duration::from_secs(20), "scene not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while disk.bars().running || disk.bars().done == 0 {
+        assert!(start.elapsed() < Duration::from_secs(120), "{:?}", disk.bars());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(disk.bars().error, None);
+    let second = Ticks::new(TICKS_PER_SECOND).unwrap();
+    let wait = |what: &str, ok: &dyn Fn(&ViewerStatus) -> bool| {
+        let start = Instant::now();
+        loop {
+            let status = viewer.status();
+            if ok(&status) {
+                return status;
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "{what}: {status:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // At rest on 1 s: its picture is copied.
+    viewer
+        .command(C::Seek {
+            time: second,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    let rested = wait("the rested picture copied", &|s| {
+        s.settled_picture.as_ref().is_some_and(|p| p.time == second)
+    })
+    .settled_copies;
+    // Playing through the rendered range: frames from disk, none copied.
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let mut settled_playing = 0;
+    let mut last = None;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(400) {
+        let s = viewer.status();
+        if let Some(f) = s.frame.filter(|f| f.moment == Moment::Playing && f.settled)
+            && last != Some(f.time)
+        {
+            last = Some(f.time);
+            settled_playing += 1;
+        }
+        assert_eq!(s.settled_copies, rested, "copied while playing");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(settled_playing > 0, "no frame was read from disk while playing");
+    viewer.command(C::Pause).unwrap();
+    let rested = wait("stopped and rested", &|s| {
+        s.clock
+            .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Stopped)
+    })
+    .settled_copies;
+    // Scrubbing over it: frames from disk, none copied.
+    let frame = TICKS_PER_SECOND / 30;
+    for step in 1..12 {
+        let time = Ticks::new(TICKS_PER_SECOND + step * frame).unwrap();
+        viewer.scrub_at(time, trace::now()).unwrap();
+        let s = wait("the scrubbed frame", &|s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == time && f.gpu_ok && f.moment == Moment::Scrub)
+        });
+        assert_eq!(s.settled_copies, rested, "copied while scrubbing (step {step})");
+    }
+    viewer.retire();
+}

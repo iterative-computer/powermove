@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "origins": {
+    "app://powermove": {"steps": ["recovery", "browser"], "beforeBytes": 4000, "futureOrigin": {"keep": true}},
+    "http://localhost:5173": {"steps": ["recovery", "browser", "sources", "cleanup"], "beforeBytes": 8000, "freedBytes": 0, "notified": true}
+  },
+  "futureReceipt": {"keep": true}
+}

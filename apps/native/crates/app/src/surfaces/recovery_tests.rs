@@ -1,0 +1,214 @@
+use super::*;
+
+use crate::alert::Key;
+
+fn labels(a: &Alert<Action>) -> Vec<&str> {
+    a.labels()
+}
+fn on_return(a: &Alert<Action>) -> Option<Action> {
+    a.buttons.iter().find(|b| b.default).map(|b| b.action)
+}
+fn on_escape(a: &Alert<Action>) -> Option<Action> {
+    a.buttons
+        .iter()
+        .find(|b| b.key == Key::Escape)
+        .map(|b| b.action)
+}
+#[test]
+fn ask_exact_copy_and_safe_keyboard() {
+    for truncated in [false, true] {
+        let a = ask_recovery("Launch Film", truncated, true, false);
+        assert_eq!(
+            a.message,
+            "Powermove quit unexpectedly while “Launch Film” had unsaved changes."
+        );
+        assert_eq!(
+            a.informative,
+            format!(
+                "Recover opens your latest edits. Open as Copy keeps the saved project unchanged and opens the edits beside it.{}",
+                if truncated {
+                    " The last few seconds of edits may be missing."
+                } else {
+                    ""
+                }
+            )
+        );
+        assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits", "Cancel"]);
+        // Escape cancels the open; it never answers Open as Copy (run 22).
+        assert_eq!(on_escape(&a), Some(Action::Cancel));
+        assert_eq!(on_return(&a), Some(Action::Recover));
+        assert!(a.buttons[2].destructive);
+        assert!(!a.buttons[2].default);
+    }
+}
+#[test]
+fn unarchivable_edits_never_offer_discard() {
+    assert_eq!(
+        labels(&ask_recovery("Synthetic", false, false, false)),
+        ["Recover", "Open as Copy", "Cancel"]
+    );
+}
+#[test]
+fn unrecoverable_preserves_saved_file_and_omits_missing_file_action() {
+    let a = unrecoverable("Launch Film", true, &Default::default());
+    assert_eq!(a.message, "“Launch Film” couldn’t be recovered.");
+    assert_eq!(
+        a.informative,
+        "The saved project is unchanged. Details are in Window ▸ Error Log."
+    );
+    assert_eq!(labels(&a), ["Open Saved Version", "OK"]);
+    assert_eq!(on_return(&a), Some(Action::OpenSavedVersion));
+    let a = unrecoverable("Launch Film", false, &Default::default());
+    assert_eq!(labels(&a), ["OK"]);
+    assert_eq!(on_return(&a), Some(Action::Acknowledge));
+}
+#[test]
+fn kernel_reply_uses_ticket_and_exact_decisions() {
+    let reply = ShellReply::RecoveryRequired {
+        ticket: "synthetic-ticket".into(),
+        recovery: RecoveryResult::Recovered { truncated: true },
+    };
+    let p = PreparedRecovery::from_reply(&reply, "Synthetic", false, true).unwrap();
+    for (action, expected) in [
+        (Action::Recover, RecoveryDecision::Recover),
+        (Action::OpenAsCopy, RecoveryDecision::OpenAsCopy),
+    ] {
+        let Some(ShellCall::DecideRecovery { ticket, decision }) = p.decision(action) else {
+            panic!("missing decision");
+        };
+        assert_eq!(ticket, "synthetic-ticket");
+        assert_eq!(decision, expected);
+    }
+    // Cancel decides nothing: the open it prepared is forgotten instead.
+    assert!(p.decision(Action::Cancel).is_none());
+    assert!(matches!(p.forget(), ShellCall::ForgetRecovery { ticket } if ticket == "synthetic-ticket"));
+    assert!(p.decision(Action::Discard).is_none());
+    let p = PreparedRecovery::from_reply(&reply, "Synthetic", true, true).unwrap();
+    assert!(matches!(
+        p.decision(Action::Discard),
+        Some(ShellCall::DecideRecovery {
+            decision: RecoveryDecision::Discard,
+            ..
+        })
+    ));
+    let none = ShellReply::RecoveryRequired {
+        ticket: "t".into(),
+        recovery: RecoveryResult::None,
+    };
+    assert!(PreparedRecovery::from_reply(&none, "Synthetic", true, true).is_none());
+}
+#[test]
+fn another_files_work_is_offered_by_name_and_left_alone_when_declined() {
+    let reply = ShellReply::RecoveryRequired {
+        ticket: "ticket".into(),
+        recovery: RecoveryResult::FromOtherFile {
+            name: "cut.pmv".into(),
+            truncated: false,
+        },
+    };
+    let p = PreparedRecovery::from_reply(&reply, "cut restored", true, true).unwrap();
+    assert_eq!(
+        p.alert.message,
+        "Recover unsaved changes from “cut.pmv” into “cut restored”?"
+    );
+    assert!(p.alert.informative.contains("they stay with “cut.pmv”"));
+    assert_eq!(labels(&p.alert), ["Recover", "Leave Them"]);
+    assert_eq!(on_return(&p.alert), Some(Action::Recover));
+    assert!(matches!(
+        p.decision(Action::Recover),
+        Some(ShellCall::DecideRecovery {
+            decision: RecoveryDecision::Recover,
+            ..
+        })
+    ));
+    assert!(matches!(
+        p.decision(Action::Leave),
+        Some(ShellCall::DecideRecovery {
+            decision: RecoveryDecision::Discard,
+            ..
+        })
+    ));
+    // Nothing destructive, and no copy, is offered for work that may not be
+    // this file's.
+    assert!(p.decision(Action::Discard).is_none());
+    assert!(p.decision(Action::OpenAsCopy).is_none());
+}
+#[test]
+fn unrecoverable_reply_never_leaks_diagnostics_or_discards() {
+    let p = PreparedRecovery::from_reply(
+        &ShellReply::RecoveryRequired {
+            ticket: "ticket".into(),
+            recovery: RecoveryResult::Unrecoverable {
+                reason: "PRIVATE DIAGNOSTIC SENTINEL".into(),
+                lost: Default::default(),
+            },
+        },
+        "Synthetic",
+        true,
+        true,
+    )
+    .unwrap();
+    assert!(!format!("{:?}", p.alert).contains("SENTINEL"));
+    assert!(matches!(
+        p.decision(Action::OpenSavedVersion),
+        Some(ShellCall::DecideRecovery {
+            decision: RecoveryDecision::OpenSavedVersion,
+            ..
+        })
+    ));
+    assert!(p.decision(Action::Discard).is_none());
+    assert!(p.decision(Action::Recover).is_none());
+}
+#[test]
+fn reopening_after_a_stop_says_so_and_keeps_the_choices() {
+    let a = after_stop(ask_recovery("Launch Film", false, false, false), "Launch Film");
+    assert_eq!(
+        a.message,
+        "“Launch Film” stopped after an internal error with unsaved changes."
+    );
+    assert_eq!(labels(&a), ["Recover", "Open as Copy", "Cancel"]);
+    assert_eq!(on_return(&a), Some(Action::Recover));
+}
+
+#[test]
+fn unrecoverable_says_what_could_not_be_recovered() {
+    let lost = pm_kernel::journal::LostWork {
+        changes: 3,
+        steps: vec!["Rename".into(), "work area".into()],
+        from: Some(1_794_684_909),
+        until: Some(1_794_684_909 + 125),
+    };
+    let a = unrecoverable("Launch Film", true, &lost);
+    assert_eq!(a.message, "“Launch Film” couldn’t be recovered.");
+    assert!(
+        a.informative.starts_with("3 changes made between "),
+        "{}",
+        a.informative
+    );
+    assert!(
+        a.informative.contains(
+            "(“Rename”, “work area”) couldn’t be added to the saved project, which is unchanged."
+        ),
+        "{}",
+        a.informative
+    );
+    assert!(
+        a.informative
+            .contains("They’re kept with Powermove’s recovery data."),
+        "{}",
+        a.informative
+    );
+    assert_eq!(labels(&a), ["Open Saved Version", "OK"]);
+}
+
+/// A quit signal (logout, shutdown, a script) left the work on purpose: the
+/// offer says so plainly, never "unexpectedly"; the buttons are the same.
+#[test]
+fn after_a_quit_signal_the_offer_is_plain() {
+    let a = ask_recovery("Launch Film", false, true, true);
+    assert_eq!(
+        a.message,
+        "Powermove quit before the changes to “Launch Film” were saved."
+    );
+    assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits", "Cancel"]);
+}

@@ -1,0 +1,8 @@
+{
+  "id": "hello-panel",
+  "name": "Hello",
+  "version": "1.0.0",
+  "apiVersion": 4,
+  "entry": "index.tsx",
+  "author": "agent"
+}

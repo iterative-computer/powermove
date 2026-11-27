@@ -1,0 +1,2282 @@
+{
+  "agent-approval-question-stream-host": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-approval-question-stream-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "agent-project-tool-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-project-tool-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "agent-provider-auth-stream-host": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-provider-auth-stream-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "agent-run-thread-coordinator": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-run-thread-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "agent-visual-reply-publication": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-visual-reply-publication integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "cloud-media-download-coordinator": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production cloud-media-download-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat-live-kernel-render-page-binding": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat-live-kernel-render-page-binding integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:animation-evaluator": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:animation-evaluator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:asset-byte-import": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:asset-byte-import integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:complete-canvas-engine-resources": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:complete-canvas-engine-resources integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:ease-query-backend": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:ease-query-backend integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:extension-lifecycle": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:extension-lifecycle integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:group-query-edit": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:group-query-edit integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:history-selection-adapter": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:history-selection-adapter integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:legacy-util-backend": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:legacy-util-backend integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:media-registry": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:media-registry integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:model-constructors": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:model-constructors integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:native-drag-drop": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:native-drag-drop integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:native-host-actions": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:native-host-actions integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:palette-host": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:palette-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:panel-render-mount": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:panel-render-mount integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:project-kernel": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:project-kernel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:remote-dom-controls": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:remote-dom-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:scene3d-backend": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:scene3d-backend integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:selection-kernel": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:selection-kernel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:space3d-backend": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:space3d-backend integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:store-namespaced-events": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:store-namespaced-events integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:structural-mutation-lease-adapter": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:structural-mutation-lease-adapter integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:transport-engine": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:transport-engine integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:ui-state-kernel": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:ui-state-kernel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "compat:workspace-kernel": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat:workspace-kernel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "decoded-source-retiming-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production decoded-source-retiming-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "decoded-source-slip-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production decoded-source-slip-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:archived-web-export-preferences": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production archived-web-export-preferences integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:durable-media-import-coordinator": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production durable-media-import-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:durable-media-relink-replacement": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production durable-media-relink-replacement integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:image-sequence-import-coordinator": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production image-sequence-import-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:native-async-project-open": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-async-project-open integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:native-portable-document-flow": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-portable-document-flow integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-data:project-memory-index-and-tool": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production project-memory-index-and-tool integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-fx:metal-authored-frame-oracles": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "delta-fx:native-audio-mixer-device-meters": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-audio-mixer-device-meters integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-fx:native-effects-matte-controls": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-effects-matte-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-fx:native-embedded-audio-routing": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-embedded-audio-routing integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-fx:native-export-child-codec-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-export-child-codec-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-fx:native-scene3d-editor": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-scene3d-editor integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "delta-fx:native-shader-compiler-editor": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-shader-compiler-editor integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "durable-media-import-coordinator": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production durable-media-import-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "durable-media-relink-replacement": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production durable-media-relink-replacement integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "encoded-fractional-rate-oracle": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production encoded-fractional-rate-oracle integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "engine-media-registry-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production engine-media-registry-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "extension-settings-storage-host": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production extension-settings-storage-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "extension-source-promotion-activation": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production extension-source-promotion-activation integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "external-mcp-application-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production external-mcp-application-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "image-sequence-import-coordinator": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production image-sequence-import-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:agent-approval-question-stream-host": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-approval-question-stream-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:agent-client-config-registration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-client-config-registration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:agent-project-tool-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-project-tool-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:agent-provider-auth-stream-host": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-provider-auth-stream-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:agent-run-thread-coordinator": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-run-thread-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:agent-visual-reply-publication": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-visual-reply-publication integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:claude-auto-permission-classifier": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production claude-auto-permission-classifier integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:cloud-media-download-coordinator": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production cloud-media-download-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:compat-live-kernel-render-page-binding": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat-live-kernel-render-page-binding integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:decoded-source-retiming-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production decoded-source-retiming-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:decoded-source-slip-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production decoded-source-slip-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:durable-media-import-coordinator": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production durable-media-import-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:durable-media-relink-replacement": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production durable-media-relink-replacement integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:encoded-fractional-rate-oracle": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production encoded-fractional-rate-oracle integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:engine-media-registry-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production engine-media-registry-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:extension-rebase-appearance": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production extension-rebase-appearance integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:extension-settings-storage-host": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production extension-settings-storage-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:extension-source-promotion-activation": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production extension-source-promotion-activation integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:external-mcp-application-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production external-mcp-application-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:image-sequence-import-coordinator": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production image-sequence-import-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:main-mcp-host-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production main-mcp-host-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:markdown-local-media-grants": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production markdown-local-media-grants integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:apply_commands": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:capture_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:mcp:check_project": {
+    "dependency": "media/engine",
+    "evidence": "apps/native/crates/acceptance/src/closure_mcp.rs;apps/native/crates/mcp/backends/src/lib.rs;apps/native/crates/mcp/src/session.rs",
+    "reason": "Full live media status/decoder or measured-peak registry is not connected. The retained A513/A539 component checks inject Registry and cannot certify the production service.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:computer_use_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:mcp:create_project": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:delegate_task": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:delegate_task integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:edit_3d": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:edit_3d integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:edit_layer_strips": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:edit_video": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:export_captions": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:export_video": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:export_video integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:finish_session": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:fork_builtin_extension": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:generate_captions": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:generate_captions integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:get_3d_scene": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:get_panel_layout": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:get_panel_state": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:mcp:get_project_state": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:get_project_state integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:get_timeline": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:get_workspace_state": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:mcp:import_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:import_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:import_media_to_timeline": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:import_media_to_timeline integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:inspect_creative_extension": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:inspect_creative_extension integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:inspect_creative_workspace": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:inspect_creative_workspace integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:interact_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:mcp:list_media": {
+    "dependency": "media/engine",
+    "evidence": "apps/native/crates/acceptance/src/closure_mcp.rs;apps/native/crates/mcp/backends/src/lib.rs;apps/native/crates/mcp/src/session.rs",
+    "reason": "Full live media status/decoder or measured-peak registry is not connected. The retained A513/A539 component checks inject Registry and cannot certify the production service.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:list_projects": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:manage_media": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:manage_project": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:media_contact_sheet": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:media_contact_sheet integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:media_waveform": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:media_waveform integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:open_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:mcp:open_project": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:orchestrator_capabilities": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:orchestrator_capabilities integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:probe_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:probe_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:publish_extensions": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:publish_extensions integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:publish_visual_reply": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:publish_visual_reply integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:render_frames": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:render_frames integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:replace_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:replace_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:rollback_changes": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:sample_media_frames": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:sample_media_frames integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:save_project": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:select_layers": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:set_panel_layout": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:set_panel_layout integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:stage_fork_rebase": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:stage_fork_rebase integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:start_session": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:mcp:store_extension": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_extension integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_install": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_install integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_library": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_library integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_publish": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_publish integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_publish_prepare": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_publish_prepare integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_search": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_search integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_source": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_source integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_uninstall": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_uninstall integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:store_update": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_update integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:task_cancel": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:task_cancel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:task_send": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:task_send integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:task_status": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:task_status integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_cancel": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_cancel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_launch": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_launch integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_list": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_list integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_read": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_read integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_send": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_send integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_unwatch": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_unwatch integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:thread_watch": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_watch integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:transcribe_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:transcribe_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:mcp:validate_effect": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "main:metal-authored-frame-oracles": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "main:native-agent-composer-attachments": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-agent-conversation-surface": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-async-project-open": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-async-project-open integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-audio-mixer-device-meters": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-audio-mixer-device-meters integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-caption-editor-and-inference": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-caption-editor-and-inference integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-clip-trim-split-controls": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-clip-trim-split-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-close-quit-coordinator": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-colour-control-sampler": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-composition-settings-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-control-input-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-crash-recovery-coordinator": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-cross-surface-history-clipboard": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-easing-preset-library": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-easing-preset-library integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-effects-matte-controls": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-effects-matte-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-embedded-audio-routing": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-embedded-audio-routing integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-export-child-codec-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-export-child-codec-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-export-queue-snapshots": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-export-queue-snapshots integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-first-run-about": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-font-text-animation-controls": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-font-text-animation-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-graph-editor-and-curve-oracle": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-group-parent-precompose-pixels": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-group-parent-precompose-pixels integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-input-ime-accessibility": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-inspector-property-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-key-command-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-keyboard-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-keyframe-editor": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-launch-open-routing": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-library-live-previews": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-library-live-previews integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-linked-av-editor-integration": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-linked-av-editor-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-marker-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-media-browser-controller": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-menu-command-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-notification-haptic-adapters": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "main:native-palette-dialog-notices": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-panel-popout-lifecycle": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-panel-semantic-surface-host": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-path-mask-editor": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-playback-engine-transport": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-playback-engine-transport integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-portable-document-flow": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-portable-document-flow integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-project-library-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-ripple-gesture-integration": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-ripple-gesture-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-roll-slide-gesture-integration": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-roll-slide-gesture-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-scene3d-editor": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-scene3d-editor integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-settings-service-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-shader-compiler-editor": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-shader-compiler-editor integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-shuttle-command-engine-routing": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-shuttle-command-engine-routing integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-signed-updater": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "main:native-source-monitor-three-point": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-source-monitor-three-point integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-source-preview-controller": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-source-preview-controller integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:native-text-editor-layout": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-theme-host-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-timeline-layer-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-timeline-snapping": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-viewer-navigation": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-viewer-selection-movement": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-viewer-transform-gestures": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-window-tab-routing": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-work-area-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:native-workspace-layout-controller": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "main:owner-browser-host-scope": {
+    "dependency": "owner scope",
+    "evidence": "docs/native/p0-decisions.md;docs/native/acceptance.md",
+    "reason": "Retained historical requirement is superseded or not an authorized native browser-host feature; preserve its row without inventing success or reinstating removed behavior.",
+    "reason_class": "retained-owner-scope"
+  },
+  "main:physical-paired-performance-oracles": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "main:project-memory-index-and-tool": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production project-memory-index-and-tool integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:provider-presets-model-discovery": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production provider-presets-model-discovery integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:provider-review-consent-error-identity": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production provider-review-consent-error-identity integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:publication-panel-generation-fences": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production publication-panel-generation-fences integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:signed-store-helper-admission": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "main:store-account-library-service": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production store-account-library-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:store-remote-install-publish-service": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production store-remote-install-publish-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:transcription-model-inference-service": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production transcription-model-inference-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "main:visual-reply-thread-persistence": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production visual-reply-thread-persistence integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:capture_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "mcp:computer_use_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "mcp:edit_3d": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:edit_3d integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:export_video": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:export_video integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:generate_captions": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:generate_captions integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:get_panel_state": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "mcp:get_workspace_state": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "mcp:import_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:import_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:import_media_to_timeline": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:import_media_to_timeline integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:inspect_creative_extension": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:inspect_creative_extension integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:inspect_creative_workspace": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:inspect_creative_workspace integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:interact_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "mcp:media_contact_sheet": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:media_contact_sheet integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:media_waveform": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:media_waveform integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:open_panel": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "mcp:probe_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:probe_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:publish_extensions": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:publish_extensions integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:publish_visual_reply": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:publish_visual_reply integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:render_frames": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:render_frames integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:replace_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:replace_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:sample_media_frames": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:sample_media_frames integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:save_project": {
+    "dependency": "acceptance",
+    "evidence": "apps/native/crates/acceptance/src/headless.rs",
+    "reason": "Connected production MCP/kernel or source service; execute the exact assertion, including refusal/lifecycle and persistence. A measured defect remains fail.",
+    "reason_class": "portable-probe"
+  },
+  "mcp:set_panel_layout": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:set_panel_layout integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:stage_fork_rebase": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:stage_fork_rebase integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_extension": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_extension integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_install": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_install integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_library": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_library integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_publish": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_publish integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_publish_prepare": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_publish_prepare integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_search": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_search integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_source": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_source integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_uninstall": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_uninstall integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:store_update": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:store_update integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:task_send": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:task_send integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_cancel": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_cancel integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_launch": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_launch integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_list": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_list integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_read": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_read integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_send": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_send integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_unwatch": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_unwatch integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:thread_watch": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:thread_watch integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "mcp:transcribe_media": {
+    "dependency": "kernel/MCP",
+    "evidence": "apps/native/crates/mcp/src/session.rs;apps/native/crates/mcp/src/catalog.rs",
+    "reason": "Missing complete production mcp:transcribe_media integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "memory-post-tag-requirement": {
+    "dependency": "owner scope",
+    "evidence": "docs/native/p0-decisions.md;docs/native/acceptance.md",
+    "reason": "Retained historical requirement is superseded or not an authorized native browser-host feature; preserve its row without inventing success or reinstating removed behavior.",
+    "reason_class": "retained-owner-scope"
+  },
+  "metal-authored-frame-oracles": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "native-agent-composer-attachments": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-agent-conversation-surface": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:agent-approval-question-stream-host": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-approval-question-stream-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:agent-project-tool-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-project-tool-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:agent-provider-auth-stream-host": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-provider-auth-stream-host integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:agent-run-thread-coordinator": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-run-thread-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:agent-visual-reply-publication": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production agent-visual-reply-publication integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:cloud-media-download-coordinator": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production cloud-media-download-coordinator integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:compat-live-kernel-render-page-binding": {
+    "dependency": "compat runtime",
+    "evidence": "apps/native/crates/compat-runner/src/kernel.rs;apps/native/crates/compat-runner/src/bootstrap.js",
+    "reason": "Missing complete production compat-live-kernel-render-page-binding integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:decoded-source-retiming-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production decoded-source-retiming-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:engine-media-registry-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production engine-media-registry-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:extension-source-promotion-activation": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production extension-source-promotion-activation integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:external-mcp-application-integration": {
+    "dependency": "agent host",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production external-mcp-application-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-agent-composer-attachments": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-agent-conversation-surface": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-caption-editor-and-inference": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-caption-editor-and-inference integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-close-quit-coordinator": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-colour-control-sampler": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-composition-settings-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-control-input-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-crash-recovery-coordinator": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-cross-surface-history-clipboard": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-easing-preset-library": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-easing-preset-library integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-first-run-about": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-font-text-animation-controls": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-font-text-animation-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-graph-editor-and-curve-oracle": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-group-parent-precompose-pixels": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-group-parent-precompose-pixels integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-input-ime-accessibility": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-inspector-property-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-key-command-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-keyframe-editor": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-launch-open-routing": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-library-live-previews": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-library-live-previews integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-marker-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-media-browser-controller": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-notification-haptic-adapters": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "native-app:native-palette-dialog-notices": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-panel-popout-lifecycle": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-panel-semantic-surface-host": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-path-mask-editor": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-playback-engine-transport": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-playback-engine-transport integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-project-library-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-settings-service-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-source-preview-controller": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-source-preview-controller integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:native-text-editor-layout": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-theme-host-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-timeline-layer-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-timeline-snapping": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-viewer-navigation": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-viewer-selection-movement": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-viewer-transform-gestures": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-window-tab-routing": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:native-workspace-layout-controller": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-app:physical-paired-performance-oracles": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "native-app:signed-store-helper-admission": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "native-app:store-remote-install-publish-service": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production store-remote-install-publish-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-app:transcription-model-inference-service": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production transcription-model-inference-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-async-project-open": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-async-project-open integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-audio-mixer-device-meters": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-audio-mixer-device-meters integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-caption-editor-and-inference": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-caption-editor-and-inference integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-clip-trim-split-controls": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-clip-trim-split-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-close-quit-coordinator": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-colour-control-sampler": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-composition-settings-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-control-input-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-crash-recovery-coordinator": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-cross-surface-history-clipboard": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-easing-preset-library": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-easing-preset-library integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-effects-matte-controls": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-effects-matte-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-embedded-audio-routing": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-embedded-audio-routing integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-export-child-codec-integration": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-export-child-codec-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-export-queue-snapshots": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-export-queue-snapshots integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-first-run-about": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-font-text-animation-controls": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-font-text-animation-controls integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-graph-editor-and-curve-oracle": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-group-parent-precompose-pixels": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-group-parent-precompose-pixels integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-input-ime-accessibility": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-inspector-property-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-key-command-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-keyframe-editor": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-launch-open-routing": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-library-live-previews": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-library-live-previews integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-linked-av-editor-integration": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-linked-av-editor-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-marker-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-media-browser-controller": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-menu-command-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-notification-haptic-adapters": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "native-palette-dialog-notices": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-panel-popout-lifecycle": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-panel-semantic-surface-host": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-path-mask-editor": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-playback-engine-transport": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-playback-engine-transport integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-portable-document-flow": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-portable-document-flow integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-project-library-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-ripple-gesture-integration": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-ripple-gesture-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-roll-slide-gesture-integration": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-roll-slide-gesture-integration integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-scene3d-editor": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-scene3d-editor integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-settings-service-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-shader-compiler-editor": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-shader-compiler-editor integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-shuttle-command-engine-routing": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-shuttle-command-engine-routing integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-signed-updater": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "native-source-monitor-three-point": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-source-monitor-three-point integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-source-preview-controller": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production native-source-preview-controller integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "native-text-editor-layout": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-theme-host-bindings": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-timeline-layer-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-timeline-snapping": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-viewer-navigation": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-viewer-selection-movement": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-viewer-transform-gestures": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-window-tab-routing": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-work-area-controls": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "native-workspace-layout-controller": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "owner-browser-host-scope": {
+    "dependency": "owner scope",
+    "evidence": "docs/native/p0-decisions.md;docs/native/acceptance.md",
+    "reason": "Retained historical requirement is superseded or not an authorized native browser-host feature; preserve its row without inventing success or reinstating removed behavior.",
+    "reason_class": "retained-owner-scope"
+  },
+  "owner-web-animation-export-scope": {
+    "dependency": "owner scope",
+    "evidence": "docs/native/p0-decisions.md;docs/native/acceptance.md",
+    "reason": "Retained historical requirement is superseded or not an authorized native browser-host feature; preserve its row without inventing success or reinstating removed behavior.",
+    "reason_class": "retained-owner-scope"
+  },
+  "physical-paired-performance-oracles": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "real-keyboard-dispatch": {
+    "dependency": "macOS application",
+    "evidence": "docs/native/surfaces.md;docs/native/int2-fixes.md",
+    "reason": "Full assertion requires real native window/input/focus/IME/AX or presented panel evidence; headless resolver/model success is insufficient.",
+    "reason_class": "macos-screen"
+  },
+  "signed-store-helper-admission": {
+    "dependency": "macOS engine/platform",
+    "evidence": "docs/native/HANDOFF.md;docs/native/engine-service.md",
+    "reason": "Requires supported Mac GPU/device/presentation, signed platform boundary or paired physical measurement; Linux/doubles cannot certify it.",
+    "reason_class": "macos-platform"
+  },
+  "store-account-library-service": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production store-account-library-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "store-remote-install-publish-service": {
+    "dependency": "application/services",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production store-remote-install-publish-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  },
+  "transcription-model-inference-service": {
+    "dependency": "media/engine",
+    "evidence": "docs/native/surfaces.md;docs/native/HANDOFF.md",
+    "reason": "Missing complete production transcription-model-inference-service integration; existing component/trait/registry probes do not supply this assertion. See exact baseline requirement.",
+    "reason_class": "unfinished-lane"
+  }
+}

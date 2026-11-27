@@ -1,0 +1,375 @@
+//! Reusable, direct-to-frame readback for export's float working targets.
+//!
+//! The general `read_f32` path copies the mapped bytes into a raw `Vec`,
+//! decodes into another `Vec<f32>`, then the export copies that into its frame.
+//! An export already owns the destination, so decode mapped rows into it and
+//! keep one staging buffer for successive bands and frames.
+
+#[cfg(not(target_arch = "aarch64"))]
+use std::sync::OnceLock;
+
+use pm_gpu::readback::{Readback, ReadbackError, half_to_f32};
+
+/// One export's serial staging buffer. Keep this across frames, on the render
+/// thread; a device restart creates a new renderer and a new readback.
+#[derive(Default)]
+pub(crate) struct ExportReadback {
+    staging: Readback,
+}
+
+impl ExportReadback {
+    /// Decode an RGBA8 (8-bit project depth), RGBA16F or RGBA32F target
+    /// into an existing top-down band.
+    /// `destination` has exactly `width * height * 4` samples.
+    pub(crate) fn read_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        destination: &mut [f32],
+    ) -> Result<(), ReadbackError> {
+        let format = texture.format();
+        if !matches!(
+            format,
+            wgpu::TextureFormat::Rgba8Unorm
+                | wgpu::TextureFormat::Rgba16Float
+                | wgpu::TextureFormat::Rgba32Float
+        ) {
+            return Err(ReadbackError::Format(format));
+        }
+        assert_eq!(
+            destination.len(),
+            texture.width() as usize * texture.height() as usize * 4,
+            "the export readback destination must match the texture"
+        );
+        self.staging
+            .with_mapped_rows(device, queue, texture, |data, row, padded, height| {
+                decode_mapped_rows(format, data, row, padded, height, destination);
+            })
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn half_table() -> &'static [f32; 1 << 16] {
+    static TABLE: OnceLock<Box<[f32; 1 << 16]>> = OnceLock::new();
+    TABLE.get_or_init(build_half_table)
+}
+
+/// The table, built straight on the heap. `Box::new(array::from_fn(..))`
+/// builds the 256 KiB array on the caller's stack first (more than once in a
+/// debug build): the first colour-picker readback on the viewer's worker
+/// thread (2 MiB stack) overflowed it.
+#[cfg(any(test, not(target_arch = "aarch64")))]
+fn build_half_table() -> Box<[f32; 1 << 16]> {
+    (0..=u16::MAX)
+        .map(half_to_f32)
+        .collect::<Box<[f32]>>()
+        .try_into()
+        .expect("one entry per binary16 code")
+}
+
+/// `data` is valid only while mapped. The caller owns the destination, so
+/// there is no raw-byte or decoded-frame allocation in this hot path.
+/// Mapped rows of a frame `format` texture into working floats; refuses a
+/// format exports never render.
+pub(crate) fn decode_rows(
+    format: wgpu::TextureFormat,
+    data: &[u8],
+    row: usize,
+    padded: usize,
+    height: usize,
+    destination: &mut [f32],
+) -> Result<(), ReadbackError> {
+    if !matches!(
+        format,
+        wgpu::TextureFormat::Rgba8Unorm
+            | wgpu::TextureFormat::Rgba16Float
+            | wgpu::TextureFormat::Rgba32Float
+    ) {
+        return Err(ReadbackError::Format(format));
+    }
+    decode_mapped_rows(format, data, row, padded, height, destination);
+    Ok(())
+}
+
+fn decode_mapped_rows(
+    format: wgpu::TextureFormat,
+    data: &[u8],
+    row: usize,
+    padded: usize,
+    height: usize,
+    destination: &mut [f32],
+) {
+    let bytes_per_sample = match format {
+        wgpu::TextureFormat::Rgba8Unorm => 1,
+        wgpu::TextureFormat::Rgba16Float => 2,
+        wgpu::TextureFormat::Rgba32Float => 4,
+        _ => unreachable!("read_into checked the texture format"),
+    };
+    // Checked in release too: the decoders below trust this layout.
+    assert_eq!(row % bytes_per_sample, 0, "a partial sample per row");
+    assert!(
+        padded >= row
+            && padded
+                .checked_mul(height)
+                .is_some_and(|bytes| data.len() >= bytes),
+        "mapped rows shorter than their layout"
+    );
+    let samples_per_row = row / bytes_per_sample;
+    assert_eq!(
+        Some(destination.len()),
+        samples_per_row.checked_mul(height),
+        "the destination must hold exactly the mapped rows"
+    );
+    match format {
+        // The unorm decode `pm_gpu::readback::read_f32` uses.
+        wgpu::TextureFormat::Rgba8Unorm => {
+            crate::par::rows(destination, samples_per_row, |y, output| {
+                let start = y * padded;
+                for (sample, &byte) in output.iter_mut().zip(&data[start..start + row]) {
+                    *sample = f32::from(byte) / 255.0;
+                }
+            });
+        }
+        wgpu::TextureFormat::Rgba16Float => {
+            crate::par::rows(destination, samples_per_row, |y, output| {
+                let start = y * padded;
+                decode_half_row(&data[start..start + row], output);
+            });
+        }
+        wgpu::TextureFormat::Rgba32Float => {
+            crate::par::rows(destination, samples_per_row, |y, output| {
+                let start = y * padded;
+                let input = &data[start..start + row];
+                #[cfg(target_endian = "little")]
+                // SAFETY: every 4-byte sequence is a valid f32 representation,
+                // and the byte view is exactly the destination row (the
+                // copy checks the source has as many bytes).
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output.as_mut_ptr().cast::<u8>(),
+                        std::mem::size_of_val(output),
+                    )
+                    .copy_from_slice(input);
+                }
+                #[cfg(not(target_endian = "little"))]
+                for (sample, bytes) in output.iter_mut().zip(input.chunks_exact(4)) {
+                    *sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                }
+            });
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn decode_half_row(input: &[u8], output: &mut [f32]) {
+    let table = half_table();
+    for (sample, bytes) in output.iter_mut().zip(input.chunks_exact(2)) {
+        *sample = table[u16::from_le_bytes([bytes[0], bytes[1]]) as usize];
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn decode_half_row(input: &[u8], output: &mut [f32]) {
+    use std::arch::aarch64::*;
+
+    // Decode the same IEEE bits as half_to_f32 in four lanes at a time.
+    // Integer construction keeps signed zero and even signaling NaN payloads.
+    fn expand(bits: uint32x4_t) -> float32x4_t {
+        // SAFETY: Advanced SIMD is available on all arm64 Macs.
+        unsafe {
+            let sign = vshlq_n_u32::<16>(vandq_u32(bits, vdupq_n_u32(0x8000)));
+            let exponent = vandq_u32(vshrq_n_u32::<10>(bits), vdupq_n_u32(31));
+            let fraction = vandq_u32(bits, vdupq_n_u32(0x3ff));
+            let biased = vaddq_u32(exponent, vdupq_n_u32(112));
+            let biased = vbslq_u32(
+                vceqq_u32(exponent, vdupq_n_u32(31)),
+                vdupq_n_u32(255),
+                biased,
+            );
+            let normal = vorrq_u32(vshlq_n_u32::<23>(biased), vshlq_n_u32::<13>(fraction));
+            let small = vmulq_n_f32(vcvtq_f32_u32(fraction), f32::from_bits(103 << 23));
+            let magnitude = vbslq_u32(
+                vceqq_u32(exponent, vdupq_n_u32(0)),
+                vreinterpretq_u32_f32(small),
+                normal,
+            );
+            vreinterpretq_f32_u32(vorrq_u32(magnitude, sign))
+        }
+    }
+
+    let mut src = input.chunks_exact(16);
+    let mut dst = output.chunks_exact_mut(8);
+    for (bytes, pixels) in src.by_ref().zip(dst.by_ref()) {
+        // SAFETY: a 16-byte unaligned input load and two four-float stores.
+        unsafe {
+            let packed = vld1q_u16(bytes.as_ptr().cast::<u16>());
+            vst1q_f32(pixels.as_mut_ptr(), expand(vmovl_u16(vget_low_u16(packed))));
+            vst1q_f32(pixels.as_mut_ptr().add(4), expand(vmovl_high_u16(packed)));
+        }
+    }
+    for (sample, bytes) in dst
+        .into_remainder()
+        .iter_mut()
+        .zip(src.remainder().chunks_exact(2))
+    {
+        *sample = half_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The f16 table is built on the heap: a thread with a 64 KiB stack
+    /// builds it, and every entry is its code's value.
+    #[test]
+    fn the_half_table_builds_on_a_small_stack() {
+        let table = std::thread::Builder::new()
+            .stack_size(64 << 10)
+            .spawn(build_half_table)
+            .unwrap()
+            .join()
+            .unwrap();
+        for bits in 0..=u16::MAX {
+            assert_eq!(
+                table[usize::from(bits)].to_bits(),
+                half_to_f32(bits).to_bits(),
+                "{bits:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn half_rows_preserve_every_bit_pattern_with_padding() {
+        // Every binary16 code, including signed zero, subnormals, infinities,
+        // and NaN payloads, takes the same conversion as `read_f32`.
+        let (width, height) = (3usize, 1usize << 16);
+        let row = width * 4 * 2;
+        let padded = 32;
+        let mut bytes = vec![0xa5; padded * height];
+        for i in 0..width * height * 4 {
+            let bits = (i & 0xffff) as u16;
+            let y = i / (width * 4);
+            let x = i % (width * 4);
+            bytes[y * padded + x * 2..y * padded + x * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+        }
+        let mut decoded = vec![0.0; width * height * 4];
+        decode_mapped_rows(
+            wgpu::TextureFormat::Rgba16Float,
+            &bytes,
+            row,
+            padded,
+            height,
+            &mut decoded,
+        );
+        for (i, sample) in decoded.iter().enumerate() {
+            assert_eq!(
+                sample.to_bits(),
+                half_to_f32((i & 0xffff) as u16).to_bits(),
+                "binary16 code at sample {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn float_rows_preserve_bits_and_skip_padding() {
+        let (width, height) = (3usize, 35usize);
+        let row = width * 4 * 4;
+        let padded = 64;
+        let values = [
+            0x0000_0000u32,
+            0x8000_0000,
+            0x3f00_0000,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc1_2345,
+            0xffc1_2345,
+            0x0000_0001,
+        ];
+        let mut bytes = vec![0xa5; padded * height];
+        for i in 0..width * height * 4 {
+            let y = i / (width * 4);
+            let x = i % (width * 4);
+            bytes[y * padded + x * 4..y * padded + x * 4 + 4]
+                .copy_from_slice(&values[i % values.len()].to_le_bytes());
+        }
+        let mut decoded = vec![0.0; width * height * 4];
+        decode_mapped_rows(
+            wgpu::TextureFormat::Rgba32Float,
+            &bytes,
+            row,
+            padded,
+            height,
+            &mut decoded,
+        );
+        for (i, sample) in decoded.iter().enumerate() {
+            assert_eq!(sample.to_bits(), values[i % values.len()], "sample {i}");
+        }
+    }
+
+    #[test]
+    fn gpu_readback_matches_existing_decoder_across_reused_staging() {
+        let gpu = pm_gpu::Gpu::new("export readback equivalence").unwrap();
+        let mut readback = ExportReadback::default();
+        for format in [
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
+        ] {
+            let bytes_per_sample = match format {
+                wgpu::TextureFormat::Rgba8Unorm => 1,
+                wgpu::TextureFormat::Rgba16Float => 2,
+                _ => 4,
+            };
+            let (width, height) = (32u32, 20u32);
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("export readback equivalence"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let samples = width as usize * height as usize * 4;
+            let mut bytes = Vec::with_capacity(samples * bytes_per_sample);
+            for i in 0..samples {
+                let value = ((i * 73) % 1009) as f32 / 1009.0;
+                if bytes_per_sample == 1 {
+                    bytes.push((value * 255.0).round() as u8);
+                } else if bytes_per_sample == 2 {
+                    bytes.extend_from_slice(&pm_gpu::readback::f32_to_half(value).to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            gpu.queue.write_texture(
+                texture.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4 * bytes_per_sample as u32),
+                    rows_per_image: Some(height),
+                },
+                texture.size(),
+            );
+            let mut actual = vec![0.0; samples];
+            readback
+                .read_into(&gpu.device, &gpu.queue, &texture, &mut actual)
+                .unwrap();
+            let expected = pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &texture).unwrap();
+            assert_eq!(
+                actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+}

@@ -1,0 +1,1840 @@
+//! Native delivery lifecycle. One reservation spans picker, startup, worker and
+//! reaping. The snapshot/options/playhead stay frozen across an in-place retry.
+use crate::session::Controller;
+use gpui::Context;
+use pm_promedia::{
+    export_panel::{Format, Options},
+    tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec},
+};
+use pm_protocol::{
+    common::SessionId,
+    priority::{JobSpec, JobState},
+};
+use serde_json::{Value, json};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
+};
+/// A draft destination belongs to one document and format. NSSavePanel's
+/// replacement consent is consumed by the next delivery, never reused.
+#[derive(Clone)]
+pub struct Destination {
+    document: u64,
+    format: Format,
+    path: PathBuf,
+    replace_confirmed: bool,
+}
+#[derive(Clone)]
+pub struct Frozen {
+    publication: Arc<pm_kernel::Published>,
+    queue: Option<u64>,
+    options: Options,
+    media: pm_engine_service::MediaCatalog,
+    resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
+    extensions: Arc<pm_mcp::project_extensions::Bundle>,
+    playhead: f64,
+    pub destination: PathBuf,
+    /// The person said Replace: the files there are replaced once the export
+    /// succeeded, the old ones archived. A retry keeps the answer.
+    replace: bool,
+    /// The person chose Export Without Them: offline clips are left out.
+    without_offline: bool,
+}
+#[derive(Default)]
+pub struct Run {
+    pub handle: Mutex<Option<pm_engine_service::jobs::ExportHandle>>,
+    pub cancel: AtomicBool,
+    progress: AtomicU8,
+    #[cfg(test)]
+    child_started: OnceLock<std::time::Instant>,
+}
+pub type Job = Arc<Run>;
+
+impl Run {
+    pub fn status(&self) -> Option<String> {
+        match self.progress.load(Ordering::Acquire) {
+            0 => None,
+            1 => Some("Preparing export…".into()),
+            percent => Some(format!("Exporting · {}%", percent - 2)),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct QueuedRun {
+    store: crate::render_queue::Store,
+    id: Arc<OnceLock<u64>>,
+}
+
+impl QueuedRun {
+    async fn check_cancel(&self, job: &Run) {
+        if let Some(&id) = self.id.get()
+            && self.store.run(move |queue| Ok(queue.cancelled(id))).await == Ok(true)
+        {
+            job.cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn publish_queue(queue: &crate::render_queue::Queue, runtime: &pm_builtins::Builtins) {
+    let _ = runtime.observe_render_queue(queue.projection());
+}
+
+/// Every export of this process, the person's and agents', in one list: every
+/// window's Background Tasks shows them all.
+pub fn tasks() -> Arc<Mutex<BackgroundTasks>> {
+    static TASKS: std::sync::OnceLock<Arc<Mutex<BackgroundTasks>>> = std::sync::OnceLock::new();
+    TASKS.get_or_init(Arc::default).clone()
+}
+/// How to stop a running export: an agent's flag, or a window's job.
+enum Canceller {
+    Flag(Arc<AtomicBool>),
+    Run(std::sync::Weak<Run>),
+}
+/// Every running export's canceller, by task: Cancel reaches exactly that export,
+/// whichever window started it or shows the list.
+fn cancellers() -> &'static Mutex<std::collections::HashMap<u64, Canceller>> {
+    static CANCELS: std::sync::OnceLock<Mutex<std::collections::HashMap<u64, Canceller>>> =
+        std::sync::OnceLock::new();
+    CANCELS.get_or_init(Default::default)
+}
+/// A running job can own export inputs before its encoder starts.
+pub(crate) fn holding_export_inputs() -> bool {
+    !cancellers().lock().unwrap().is_empty()
+}
+
+/// Background Tasks ▸ Cancel. False if no running export has that task.
+pub fn cancel_export(id: pm_promedia::tasks::TaskId) -> bool {
+    match cancellers().lock().unwrap().get(&id.0) {
+        Some(Canceller::Flag(flag)) => flag.store(true, Ordering::Release),
+        Some(Canceller::Run(run)) => match run.upgrade() {
+            Some(run) => run.cancel.store(true, Ordering::Release),
+            None => return false,
+        },
+        None => return false,
+    }
+    true
+}
+/// An agent's export as a Background Task: listed beside the person's, with its
+/// progress, and cancellable there.
+pub struct AgentExport {
+    ticket: pm_promedia::tasks::Ticket,
+    pub cancel: Arc<AtomicBool>,
+}
+impl AgentExport {
+    #[cfg(test)]
+    pub fn start(title: &str, project: &str, frames: u64) -> Result<Self, String> {
+        Self::start_with_cancel(title, project, frames, Arc::default())
+    }
+    pub fn start_with_cancel(
+        title: &str,
+        project: &str,
+        frames: u64,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::begin_with_cancel(
+            TaskSpec {
+                title: format!("{title} (Agent)"),
+                kind: TaskKind::Export,
+                unit: ProgressUnit::Frames,
+                priority: 0,
+                total: frames,
+            },
+            project,
+            cancel,
+        )
+    }
+    /// Any cancellable row run off main (Generate Captions too).
+    pub fn begin(spec: TaskSpec, project: &str) -> Result<Self, String> {
+        Self::begin_with_cancel(spec, project, Arc::default())
+    }
+    fn begin_with_cancel(spec: TaskSpec, project: &str, cancel: Arc<AtomicBool>) -> Result<Self, String> {
+        let tasks = tasks();
+        let mut tasks = tasks.lock().unwrap();
+        let id = tasks
+            .enqueue(project.into(), project.into(), spec)
+            .map_err(|e| format!("{e:?}"))?;
+        // Enqueued and started under one lock: no other export waits queued.
+        let ticket = tasks
+            .start_next()
+            .filter(|t| t.id == id)
+            .ok_or("Export task did not start")?;
+        cancellers()
+            .lock()
+            .unwrap()
+            .insert(id.0, Canceller::Flag(cancel.clone()));
+        Ok(Self { ticket, cancel })
+    }
+    pub fn progress(&self, frames: u64, total: u64) {
+        let tasks = tasks();
+        let mut tasks = tasks.lock().unwrap();
+        let done = tasks.get(self.ticket.id).map_or(0, |t| t.completed);
+        let _ = tasks.progress(self.ticket, frames.max(done).min(total), total);
+    }
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
+    }
+    /// The row's task, as Background Tasks ▸ Cancel names it (`cancel_export`).
+    #[cfg(test)]
+    pub fn id(&self) -> pm_promedia::tasks::TaskId {
+        self.ticket.id
+    }
+    /// Settles the row: completed, failed with its reason, or cancelled.
+    pub fn finish(self, result: Result<(), String>) {
+        cancellers().lock().unwrap().remove(&self.ticket.id.0);
+        let tasks = tasks();
+        let mut tasks = tasks.lock().unwrap();
+        if self.cancel.load(Ordering::Acquire) {
+            let _ = tasks
+                .cancel(self.ticket.id)
+                .and_then(|_| tasks.settle_control(self.ticket));
+        } else {
+            let _ = tasks.finish(self.ticket, result.map_err(|e| e.into()));
+        }
+    }
+}
+impl Controller {
+    pub fn choose_builtin_export_destination(&mut self, options: Value, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else { return; };
+        let Some(p) = self.published.clone() else { return; };
+        let typed = match pm_builtins::delivery::options(&options) {
+            Ok(options) if self.builtins.export_job.is_none() => options,
+            _ => { let _ = runtime.observe_export_destination(Value::Null); return; }
+        };
+        let document = p.snapshot.doc_id;
+        let filename = format!("{}.{}", p.snapshot.root().and_then(|r| r.get("name"))
+            .and_then(crate::node_string).unwrap_or("Untitled"), typed.format.extension());
+        let profile = self.profile.clone();
+        let project_path = self.path.clone();
+        let project = p.project.clone();
+        let last_export = crate::platform::last_export_folder();
+        cx.spawn(async move |this, cx| {
+            let folder = cx.background_executor().spawn(async move {
+                let key = crate::document_paths::export_key(&project, project_path.as_deref());
+                crate::document_paths::export_folder(&profile, &key, project_path.as_deref(), last_export.as_deref())
+            }).await;
+            let picker = this.update(cx, |v, _| crate::platform::export_destination_in(
+                &v.host.borrow().window, typed.format == Format::Png, &filename, Some(&folder),
+            ));
+            let path = match picker {
+                Ok(picker) => picker.recv().await.ok().flatten(),
+                Err(_) => return,
+            };
+            let _ = this.update(cx, |v, cx| {
+                if !v.published.as_ref().is_some_and(|p| p.snapshot.doc_id == document)
+                    || !v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime)) { return; }
+                let selection = path.map(|path| {
+                    let replace_confirmed = typed.format != Format::Png
+                        && !crate::platform::reviewing_saves() && path.exists();
+                    let selection = json!({"path":path.to_string_lossy(),"format":typed.format});
+                    v.builtins.export_destination = Some(Destination {
+                        document, format: typed.format, path, replace_confirmed,
+                    });
+                    selection
+                }).unwrap_or(Value::Null);
+                let _ = runtime.observe_export_destination(selection);
+                cx.notify();
+            });
+        }).detach();
+    }
+    /// `without`: the person chose Export Without Them after a refusal naming
+    /// offline clips; the same frozen export runs again, leaving them out.
+    pub fn begin_builtin_export(
+        &mut self,
+        options: Value,
+        retry: bool,
+        without: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_export_mode(options, retry, without, false, cx);
+    }
+    pub fn begin_export_mode(&mut self, options: Value, retry: bool, without: bool, enqueue: bool, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        if self.builtins.export_job.is_some() {
+            // Preserve the actual in-flight run and its terminal ownership.
+            return;
+        }
+        // Trying again (or without the offline clips): the line that said
+        // why the last one failed no longer stands.
+        if retry {
+            self.message.clear();
+        }
+        let saved = if retry {
+            self.builtins.export_retry.clone().map(|mut frozen| {
+                frozen.without_offline |= without;
+                frozen
+            })
+        } else {
+            None
+        };
+        let remember_destination = saved.is_none();
+        let queue_id = saved.as_ref().and_then(|f| f.queue);
+        let queue_store = crate::render_queue::store(&self.profile);
+        let (p, typed, media, playhead) = if let Some(frozen) = &saved {
+            (
+                frozen.publication.clone(),
+                frozen.options.clone(),
+                frozen.media.clone(),
+                frozen.playhead,
+            )
+        } else {
+            let Some(p) = self.published.clone() else {
+                return;
+            };
+            let typed = match pm_builtins::delivery::options(&options) {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = runtime.observe_export(json!({"phase":"failed","message":e}));
+                    return;
+                }
+            };
+            (p, typed, self.media.clone(), self.time())
+        };
+        // Export Without Them is asked once per project in a session.
+        if without {
+            self.builtins
+                .export_without_offline
+                .insert(p.project.clone());
+        }
+        let without_offline = saved.as_ref().is_some_and(|f| f.without_offline)
+            || self.builtins.export_without_offline.contains(&p.project);
+        let filename = format!(
+            "{}.{}",
+            p.snapshot
+                .root()
+                .and_then(|r| r.get("name"))
+                .and_then(crate::node_string)
+                .unwrap_or("Untitled"),
+            typed.format.extension()
+        );
+        let chosen = if saved.is_none() {
+            self.builtins.export_destination.as_mut()
+                .filter(|d| d.document == p.snapshot.doc_id && d.format == typed.format)
+                .map(|d| { let consent = d.replace_confirmed; d.replace_confirmed = false; (d.path.clone(), consent) })
+        } else { None };
+        // A cached path only carries replacement consent once. If a file
+        // appeared since Choose, ask before replacing it.
+        let panel_asks = chosen.as_ref().map_or(
+            typed.format != Format::Png && !crate::platform::reviewing_saves(), |d| d.1);
+        let profile = self.profile.clone();
+        let project_path = self.path.clone();
+        let last_export = crate::platform::last_export_folder();
+        let job = Arc::new(Run::default());
+        self.builtins.export_job = Some(job.clone());
+        let activity = self.engine.export_activity();
+        let tasks = self.builtins.export_tasks.clone();
+        let resources = saved.as_ref().map_or_else(
+            || self.extensions.resources.clone(),
+            |frozen| frozen.resources.clone(),
+        );
+        let retry_extensions = saved.as_ref().map(|frozen| frozen.extensions.clone());
+        cx.spawn(async move |this, cx| {
+            let needs_picker = saved.is_none() && chosen.is_none();
+            let (folder, export_key) = if saved.is_none() {
+                let folder_profile = profile.clone();
+                let id = p.project.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let key = crate::document_paths::export_key(&id, project_path.as_deref());
+                        let folder = needs_picker.then(|| crate::document_paths::export_folder(
+                            &folder_profile, &key, project_path.as_deref(), last_export.as_deref(),
+                        ));
+                        (folder, key)
+                    })
+                    .await
+            } else {
+                (None, String::new())
+            };
+            let picker = if needs_picker && !job.cancel.load(Ordering::Acquire) {
+                this.update(cx, |v, _| {
+                    crate::platform::export_destination_in(
+                        &v.host.borrow().window,
+                        typed.format == Format::Png,
+                        &filename,
+                        folder.as_deref(),
+                    )
+                })
+                .ok()
+            } else {
+                None
+            };
+            let destination = if let Some(frozen) = saved {
+                Some((frozen.destination, frozen.replace))
+            } else if let Some(destination) = match chosen {
+                Some((path, _)) => Some(path),
+                None => match picker { Some(picker) => picker.recv().await.ok().flatten(), None => None },
+            } {
+                crate::platform::exported_to(&destination);
+                let profile = profile.clone();
+                let id = export_key;
+                let chosen = destination.clone();
+                let publication = p.clone();
+                let options = typed.clone();
+                // The save panel only confirms replacing the video. Check
+                // it and the captions together before asking about any others.
+                let existing = cx.background_executor()
+                    .spawn(async move {
+                        let files = sidecar_format(&options)
+                            .map(|format| sidecar_files(&publication, &options.range, format, &chosen))
+                            .unwrap_or_default();
+                        existing_outputs(&chosen, &files)
+                    })
+                    .await;
+                let remembered = destination.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::document_paths::remember(&profile, Some(&id), &remembered);
+                    })
+                    .detach();
+                if existing.is_empty() {
+                    Some((destination, false))
+                } else if existing == [destination.clone()] && panel_asks {
+                    Some((destination, true))
+                } else {
+                    // On the Export sheet when it is up: a window shows one
+                    // sheet at a time, and a question queued behind the
+                    // sheet that waits for its answer would never show.
+                    let asked = this.update(cx, |v, _| {
+                        let host = v.host.borrow();
+                        match host.window.attachedSheet() {
+                            Some(sheet) => replace_question(&existing).sheet(&sheet),
+                            None => replace_question(&existing).sheet(&host.window),
+                        }
+                    });
+                    match asked {
+                        Ok(rx) if rx.recv().await == Ok(Some(true)) => Some((destination, true)),
+                        _ => None,
+                    }
+                }
+            } else {
+                None
+            };
+            let Some((destination, replace)) = destination else {
+                let _ = runtime.observe_export(json!({"phase":"idle"}));
+                let _ = this.update(cx, |v, cx| {
+                    if v.builtins
+                        .export_job
+                        .as_ref()
+                        .is_some_and(|j| Arc::ptr_eq(j, &job))
+                    {
+                        v.builtins.export_job = None;
+                    }
+                    cx.notify();
+                });
+                return;
+            };
+            if !enqueue {
+                job.progress.store(1, Ordering::Release);
+                let _ = this.update(cx, |v, cx| {
+                    if v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &job)) {
+                        if queue_id.is_none() {
+                            v.close_export_sheet(cx);
+                        }
+                        cx.notify();
+                    }
+                });
+                let _ = runtime.observe_export(json!({"phase":"preparing"}));
+                let owner = this.clone();
+                let watched = job.clone();
+                cx.spawn(async move |cx| {
+                    let mut last = 1;
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                        let progress = watched.progress.load(Ordering::Acquire);
+                        let current = owner.update(cx, |v, cx| {
+                            let running = v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &watched));
+                            if running && progress != last {
+                                cx.notify();
+                            }
+                            running
+                        });
+                        if !matches!(current, Ok(true)) {
+                            break;
+                        }
+                        last = progress;
+                    }
+                }).detach();
+            }
+            if remember_destination {
+                let _ = this.update(cx, |v, _| {
+                    if v.published.as_ref().is_some_and(|now| now.snapshot.doc_id == p.snapshot.doc_id)
+                        && v.builtins.runtime.as_ref().is_some_and(|now| Arc::ptr_eq(now, &runtime)) {
+                        v.builtins.export_destination = Some(Destination {
+                            document: p.snapshot.doc_id, format: typed.format,
+                            path: destination.clone(), replace_confirmed: false,
+                        });
+                        let _ = runtime.observe_export_destination(json!({"path":destination.to_string_lossy(),"format":typed.format}));
+                    }
+                });
+            }
+            // A delivery started while the window's extensions load waits for
+            // them: an effect still loading is never refused as not installed.
+            // The status line says who it waits for; Cancel still cancels.
+            let mut resources = resources;
+            let mut shown = String::new();
+            if enqueue && resources.pending {
+                // The destination is chosen: the panel shows the export as
+                // preparing, the phase whose Cancel it sends (while it chose
+                // the destination its Cancel was off, and a wait left in
+                // that phase could not be cancelled from the panel).
+                observe(&runtime, json!({"phase":"preparing"})).await;
+            }
+            while resources.pending && !job.cancel.load(Ordering::Acquire) {
+                if let Some(id) = queue_id
+                    && queue_store.run(move |queue| Ok(queue.cancelled(id))).await == Ok(true)
+                {
+                    job.cancel.store(true, Ordering::Release);
+                    break;
+                }
+                let text = crate::extensions::starts_once_loaded("Export", &resources);
+                let _ = this.update(cx, |v, cx| {
+                    if (shown.is_empty() || v.message == shown) && v.message != text {
+                        v.message = text.clone();
+                        cx.notify();
+                    }
+                });
+                shown = text;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                match this.update(cx, |v, _| v.extensions.resources.clone()) {
+                    Ok(now) => resources = now,
+                    Err(_) => return,
+                }
+            }
+            if !shown.is_empty() {
+                let _ = this.update(cx, |v, cx| {
+                    if v.message == shown {
+                        v.message.clear();
+                        cx.notify();
+                    }
+                });
+            }
+            let extensions = if let Some(bundle) = retry_extensions {
+                bundle
+            } else if typed.format == Format::Json {
+                let inventory = this
+                    .update(cx, |v, _| {
+                        crate::project_extensions::Inventory::new(v, &p.snapshot)
+                    })
+                    .unwrap_or_default();
+                let snapshot = p.snapshot.clone();
+                let include = typed
+                    .opaque
+                    .get("includeExtensions")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                Arc::new(
+                    cx.background_executor()
+                        .spawn(async move { inventory.collect(&snapshot, include) })
+                        .await,
+                )
+            } else {
+                Arc::default()
+            };
+            let frozen = Frozen {
+                queue: queue_id,
+                publication: p,
+                options: typed,
+                media,
+                resources,
+                extensions,
+                playhead,
+                destination,
+                replace,
+                without_offline,
+            };
+            if enqueue {
+                let queue_runtime = runtime.clone();
+                let added = queue_store.run(move |queue| {
+                    let result = frozen.record().and_then(|input| queue.add(input));
+                    publish_queue(queue, &queue_runtime);
+                    result
+                }).await;
+                let _ = this.update(cx, |v, cx| {
+                    if v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &job)) {
+                        v.builtins.export_job = None;
+                        if let Err(error) = added { v.message = error; }
+                        cx.notify();
+                    }
+                });
+                observe(&runtime, json!({"phase":"idle"})).await;
+                return;
+            }
+            // The window's extensions as the job starts answer its overrides.
+            let (current, overrides) = this
+                .update(cx, |v, _| {
+                    let current = v
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| Arc::ptr_eq(r, &runtime));
+                    if current {
+                        let mut retry = frozen.clone();
+                        retry.queue = None;
+                        v.builtins.export_retry = Some(retry);
+                    }
+                    (current, v.extensions.overrides.as_ref().map(|o| o.jobs()))
+                })
+                .unwrap_or((false, None));
+            if !current {
+                job.cancel.store(true, Ordering::Release);
+            }
+            let began = std::time::Instant::now();
+            let (result, history) = start_tracked_export(
+                cx.background_executor(), frozen, job.clone(),
+                EngineJob {
+                    activity,
+                    overrides,
+                    #[cfg(test)]
+                    executable: None,
+                }, runtime.clone(), tasks, queue_store.clone(),
+            );
+            let result = result.await;
+            let history_id = match history {
+                Some(receipt) => receipt.recv().await.unwrap_or_else(|_| Err("Render queue worker stopped".into())).map(Some),
+                None => Ok(queue_id),
+            };
+            let settled = match history_id {
+                Ok(Some(id)) => {
+                    let outcome = if job.cancel.load(Ordering::Acquire) { "Cancelled" }
+                        else if result.is_ok() { "Done" } else { "Failed" };
+                    let error = result.as_ref().err().cloned().unwrap_or_default();
+                    let queue_runtime = runtime.clone();
+                    queue_store.run(move |queue| {
+                        let result = queue.finish(id, outcome, error);
+                        publish_queue(queue, &queue_runtime);
+                        result
+                    }).await
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                if v.builtins
+                    .export_job
+                    .as_ref()
+                    .is_some_and(|j| Arc::ptr_eq(j, &job))
+                {
+                    v.builtins.export_job = None;
+                    if result.is_ok() || job.cancel.load(Ordering::Acquire) {
+                        v.builtins.export_retry = None;
+                    }
+                    match &result {
+                        Err(error)
+                            if !(job.cancel.load(Ordering::Acquire) && error == "cancelled") =>
+                        {
+                            crate::notifications::export_finished(false, error, cx);
+                            v.message = error.clone();
+                        }
+                        Ok(finished) => {
+                            let line = finished.line();
+                            crate::notifications::export_finished(true, &line, cx);
+                            // A long export ends while the user is
+                            // elsewhere, and a file with something to say
+                            // (its sound clipped) is worth reading: the line
+                            // stays until something replaces it, and the
+                            // Dock icon asks once.
+                            if began.elapsed() > std::time::Duration::from_secs(30) {
+                                v.message = line;
+                                crate::platform::request_attention();
+                            } else if !finished.notes.is_empty() {
+                                v.message = line;
+                            } else {
+                                v.note(line, cx);
+                            }
+                        }
+                        Err(_) if queue_id.is_none() => {
+                            v.close_export_sheet(cx);
+                            // As v1 said it.
+                            v.note("Export cancelled".into(), cx);
+                        }
+                        Err(_) => {},
+                    }
+                }
+                if let Err(error) = settled {
+                    if result.is_ok() {
+                        v.message = error;
+                    }
+                }
+                if queue_id.is_some() {
+                    v.render_pending(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+async fn observe(runtime: &pm_builtins::Builtins, run: Value) {
+    if let Ok(ticket) = runtime.observe_export(run) {
+        let _ = ticket.await;
+    }
+}
+fn start_tracked_export(
+    executor: &gpui::BackgroundExecutor,
+    frozen: Frozen,
+    job: Job,
+    engine: EngineJob,
+    runtime: Arc<pm_builtins::Builtins>,
+    tasks: Arc<Mutex<BackgroundTasks>>,
+    store: crate::render_queue::Store,
+) -> (gpui::Task<Result<Finished, String>>, Option<crate::render_queue::Reply<u64>>) {
+    let running = QueuedRun {
+        store: store.clone(),
+        id: Arc::new(frozen.queue.map_or_else(OnceLock::new, OnceLock::from)),
+    };
+    // Submit the frozen input to the queue worker without waiting for it
+    // before scheduling the delivery task.
+    let history = frozen.queue.is_none().then(|| {
+        let frozen = frozen.clone();
+        let id = running.id.clone();
+        let runtime = runtime.clone();
+        store.submit(move |queue| {
+            let result = frozen.record().and_then(|input| queue.add_rendering(input));
+            if let Ok(value) = result.as_ref() {
+                let _ = id.set(*value);
+            }
+            publish_queue(queue, &runtime);
+            result
+        })
+    });
+    let worker = executor.clone();
+    let task = executor.spawn(execute(frozen, job, engine, runtime, worker, tasks, running));
+    (task, history)
+}
+
+async fn execute(
+    frozen: Frozen,
+    job: Job,
+    engine: EngineJob,
+    runtime: Arc<pm_builtins::Builtins>,
+    executor: gpui::BackgroundExecutor,
+    tasks: Arc<Mutex<BackgroundTasks>>,
+    queue: QueuedRun,
+) -> Result<Finished, String> {
+    let planned = pm_builtins::delivery::plan(
+        &frozen.publication.snapshot,
+        &frozen.options,
+        frozen.playhead,
+    );
+    let telemetry =
+        crate::telemetry::export_started(&frozen.options, planned.as_ref().ok().map(|p| p.frames));
+    let mut ticket = None;
+    let mut result: Result<Finished, Failure> = match planned {
+        Err(error) => Err(error.into()),
+        Ok(planned) => {
+            let title = frozen
+                .publication
+                .snapshot
+                .root()
+                .and_then(|r| r.get("name"))
+                .and_then(crate::node_string)
+                .unwrap_or("Untitled");
+            let queued = {
+                let mut tasks = tasks.lock().unwrap();
+                tasks
+                    .enqueue(
+                        frozen.publication.project.clone(),
+                        frozen.publication.project.clone(),
+                        TaskSpec {
+                            title: title.into(),
+                            kind: TaskKind::Export,
+                            unit: if frozen.options.format == Format::Json {
+                                ProgressUnit::Items
+                            } else {
+                                ProgressUnit::Frames
+                            },
+                            priority: 0,
+                            total: planned.frames,
+                        },
+                    )
+                    .map_err(|e| format!("{e:?}"))
+                    .and_then(|_| tasks.start_next().ok_or("Export task did not start".into()))
+            };
+            match queued {
+                Err(error) => Err(error.into()),
+                Ok(started) => {
+                    ticket = Some(started);
+                    cancellers()
+                        .lock()
+                        .unwrap()
+                        .insert(started.id.0, Canceller::Run(Arc::downgrade(&job)));
+                    execute_inner(
+                        &frozen,
+                        &job,
+                        engine,
+                        &runtime,
+                        &executor,
+                        TaskAdmission {
+                            tasks: &tasks,
+                            ticket: started,
+                        },
+                        &planned,
+                        &queue,
+                    )
+                    .await
+                }
+            }
+        }
+    };
+    // Always release/reap on this worker before publishing a terminal task/run.
+    let cleanup = job.handle.lock().unwrap().take();
+    if let Some(handle) = cleanup {
+        handle.cancel();
+        if let Err(error) = handle.wait() {
+            let failed = result.err().map(|f| f.message).unwrap_or_default();
+            result = Err(format!("{failed}; export cleanup failed: {error}").into());
+        }
+    }
+    if let Some(ticket) = ticket {
+        cancellers().lock().unwrap().remove(&ticket.id.0);
+        let settled = {
+            let mut tasks = tasks.lock().unwrap();
+            if result.as_ref().is_err_and(|e| e.message == "cancelled") {
+                tasks
+                    .cancel(ticket.id)
+                    .and_then(|_| tasks.settle_control(ticket))
+            } else {
+                tasks.finish(
+                    ticket,
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e| e.message.clone().into()),
+                )
+            }
+        };
+        if let Err(error) = settled {
+            result = Err(format!("Export task could not settle: {error:?}").into());
+        }
+    }
+    match &result {
+        Err(error) if job.cancel.load(Ordering::Acquire) && error.message == "cancelled" => {
+            observe(&runtime, json!({"phase":if frozen.queue.is_some() { "idle" } else { "cancelled" }})).await
+        }
+        Err(error) => {
+            let offline = !error.offline.is_empty();
+            observe(
+                &runtime,
+                json!({"phase":"failed","message":plain_failure(&error.message),"offline":offline}),
+            )
+            .await
+        }
+        Ok(finished) => {
+            observe(
+                &runtime,
+                json!({"phase":"done","path":finished.path,"notes":finished.notes}),
+            )
+            .await
+        }
+    }
+    if let Some(telemetry) = telemetry {
+        let (outcome, kind) = match &result {
+            Err(error) if job.cancel.load(Ordering::Acquire) && error.message == "cancelled" => {
+                (pm_telemetry::Outcome::Cancelled, None)
+            }
+            Err(error) if !error.offline.is_empty() => {
+                (pm_telemetry::Outcome::Failed, Some("media_offline"))
+            }
+            Err(_) => (pm_telemetry::Outcome::Failed, Some("render_failed")),
+            Ok(_) => (pm_telemetry::Outcome::Ok, None),
+        };
+        crate::telemetry::export_finished(telemetry, outcome, kind);
+    }
+    result.map_err(|f| f.message)
+}
+/// A finished export: its file, and what the person is told with it (the
+/// sound clipped; fine detail the data rate did not keep).
+struct Finished {
+    path: String,
+    notes: Vec<String>,
+}
+impl Finished {
+    /// "Exported Film.mov", or "Exported Film.mov." with each note after it.
+    fn line(&self) -> String {
+        let name = std::path::Path::new(&self.path)
+            .file_name()
+            .map_or_else(|| self.path.clone(), |n| n.to_string_lossy().into_owned());
+        if self.notes.is_empty() {
+            return format!("Exported {name}");
+        }
+        std::iter::once(format!("Exported {name}."))
+            .chain(self.notes.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+/// Why an export ended without a file: what the sheet says, and the offline
+/// media it refused to export without (the sheet then offers Export Without
+/// Them).
+struct Failure {
+    message: String,
+    offline: Vec<pm_protocol::common::AssetId>,
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            offline: vec![],
+        }
+    }
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl From<pm_protocol::error::EngineError> for Failure {
+    fn from(error: pm_protocol::error::EngineError) -> Self {
+        use pm_protocol::error::{ErrorCode, ErrorDetail};
+        let offline = match error.detail {
+            Some(ErrorDetail::Offline { assets }) if error.code == ErrorCode::MediaOffline => {
+                assets
+            }
+            _ => vec![],
+        };
+        Self {
+            message: error.message,
+            offline,
+        }
+    }
+}
+/// What the window lends its export's job: the viewer's activity, which
+/// keeps precedence on the GPU, and its extensions, which answer the job's
+/// raster overrides.
+struct EngineJob {
+    activity: pm_engine_service::jobs::Activity,
+    overrides: Option<crate::raster_overrides::JobOverrides>,
+    #[cfg(test)]
+    executable: Option<PathBuf>,
+}
+struct TaskAdmission<'a> {
+    tasks: &'a Arc<Mutex<BackgroundTasks>>,
+    ticket: pm_promedia::tasks::Ticket,
+}
+
+/// Caption files beside the exported video (today's delivery sidecars):
+/// "Film.mp4" gets "Film.srt", or "Film.en.srt", "Film.fr.srt" with several
+/// captions layers, in times from the start of the exported range. Each
+/// path with its text; none when the project has no captions.
+pub(crate) fn sidecar_files(
+    publication: &pm_kernel::Published,
+    exported_range: &str,
+    format: pm_captions::CaptionFormat,
+    video: &Path,
+) -> Vec<(PathBuf, String)> {
+    let Some(doc) = crate::captions_panel::read(publication) else {
+        return vec![];
+    };
+    let range = match doc.work.filter(|_| exported_range == "work") {
+        Some(work) => work,
+        None => [0., doc.duration],
+    };
+    let extension = if format == pm_captions::CaptionFormat::Vtt {
+        "vtt"
+    } else {
+        "srt"
+    };
+    let base = video
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::captions_panel::sidecars(&doc, format, range)
+        .into_iter()
+        .map(|(suffix, text)| {
+            let name = match suffix {
+                Some(tag) => format!("{base}.{tag}.{extension}"),
+                None => format!("{base}.{extension}"),
+            };
+            (video.with_file_name(name), text)
+        })
+        .collect()
+}
+/// The caption format the sheet's options write beside a video, if any.
+fn sidecar_format(options: &Options) -> Option<pm_captions::CaptionFormat> {
+    match options.captions_sidecar.as_str() {
+        "srt" if options.format.video() => Some(pm_captions::CaptionFormat::Srt),
+        "vtt" if options.format.video() => Some(pm_captions::CaptionFormat::Vtt),
+        _ => None,
+    }
+}
+/// What an export to `video` would replace: the video, then its caption
+/// files, those that are already there.
+pub(crate) fn existing_outputs(video: &Path, sidecars: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    std::iter::once(video)
+        .chain(sidecars.iter().map(|(path, _)| path.as_path()))
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .map(Path::to_path_buf)
+        .collect()
+}
+/// The file's name, as a question or a refusal names it.
+pub(crate) fn shown_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+/// Publishes the caption files as the video is: each through a temporary
+/// beside it, never over a file the export was not told to replace (one
+/// that appeared meanwhile included); a replaced file is kept in the export
+/// archive.
+pub(crate) fn write_sidecars(files: &[(PathBuf, String)], replace: bool) -> Result<(), String> {
+    let overwrite = if replace {
+        pm_export::Overwrite::Replace
+    } else {
+        pm_export::Overwrite::Fail
+    };
+    for (path, text) in files {
+        let refused = |e: pm_export::Error| match e {
+            pm_export::Error::Exists(_) => format!(
+                "The video was exported, but “{}” is already there, so its captions weren’t written over it.",
+                shown_name(path)
+            ),
+            _ => "The video was exported, but its caption file couldn’t be written.".to_owned(),
+        };
+        let output =
+            pm_export::atomic::AtomicOutput::new(path, overwrite, None).map_err(refused)?;
+        std::fs::write(output.temp_path(), text.as_bytes())
+            .map_err(|e| refused(pm_export::Error::Io(e.to_string())))?;
+        output.commit().map_err(refused)?;
+    }
+    Ok(())
+}
+/// One question for every file an export would replace, the video and its
+/// caption files together; Cancel is the default.
+fn replace_question(existing: &[PathBuf]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let names: Vec<String> = existing
+        .iter()
+        .map(|p| format!("“{}”", shown_name(p)))
+        .collect();
+    let (title, list) = match names.as_slice() {
+        [one] => (format!("Replace {one}?"), format!("{one} already exists.")),
+        [rest @ .., last] => (
+            format!("Replace {} files?", names.len()),
+            format!("{} and {last} already exist.", rest.join(", ")),
+        ),
+        [] => (String::new(), String::new()),
+    };
+    Alert::new(
+        title,
+        format!("{list} The ones replaced are kept in the folder’s export archive."),
+        vec![
+            Button::new("Cancel", false).default().cancel(),
+            Button::new("Replace", true).destructive(),
+        ],
+    )
+}
+async fn execute_inner(
+    frozen: &Frozen,
+    job: &Job,
+    engine: EngineJob,
+    runtime: &Arc<pm_builtins::Builtins>,
+    executor: &gpui::BackgroundExecutor,
+    task: TaskAdmission<'_>,
+    planned: &pm_builtins::delivery::Plan,
+    queue: &QueuedRun,
+) -> Result<Finished, Failure> {
+    let TaskAdmission { tasks, ticket } = task;
+    queue.check_cancel(job).await;
+    if job.cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    let intent = frozen.options.intent(planned.has_audio, planned.captions)?;
+    let sidecar = match intent.sidecar.as_str() {
+        "srt" => Some(pm_captions::CaptionFormat::Srt),
+        "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+        _ => None,
+    };
+    // Progress publication may rebuild the Export panel for a large project.
+    // The delivery worker can start while that update is in flight.
+    let _ = runtime.observe_export(json!({"phase":"preparing"}));
+    if frozen.options.format == Format::Json {
+        let path = pm_builtins::delivery::portable_with_extensions(
+            &frozen.publication.snapshot,
+            &frozen.media.originals,
+            &frozen.destination,
+            frozen.replace,
+            &job.cancel,
+            |plan| frozen.extensions.add_to(plan),
+        )?;
+        return Ok(Finished {
+            path: path.to_string_lossy().into(),
+            notes: vec![],
+        });
+    }
+    let document = frozen.publication.snapshot.doc_id;
+    #[cfg(test)]
+    let request_began = std::time::Instant::now();
+    let mut request = pm_engine_service::jobs::ExportRequest::new(
+        pm_kernel::new_id("export").as_str().into(),
+        &frozen.publication.snapshot,
+        JobSpec::Export {
+            session: SessionId::new(document).map_err(|e| e.to_string())?,
+            composition: frozen.publication.snapshot.render_comp().as_str().into(),
+            settings: planned.settings.clone().ok_or("Missing render settings")?,
+        },
+        frozen.media.clone(),
+        frozen.destination.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    let request_took = request_began.elapsed();
+    request.resources = (*frozen.resources).clone();
+    request.without_offline = frozen.without_offline;
+    // Going without offline clips is said only while there are some (a
+    // remembered answer outlives a relink).
+    let without_offline = frozen.without_offline
+        && planned.settings.as_ref().is_some_and(|settings| {
+            !pm_export::render::offline_media_with_audio(
+                &frozen.publication.snapshot.document,
+                frozen.publication.snapshot.render_comp().as_str(),
+                &frozen.media.export_paths(settings.draft_from_proxies),
+                settings.audio,
+            )
+            .is_empty()
+        });
+    request.replace = frozen.replace;
+    // The sheet's per-export 3D quality; the composition's saved one otherwise.
+    request.studio_quality = frozen
+        .options
+        .opaque
+        .get("studioQuality")
+        .filter(|q| q.as_str().is_some_and(|q| q != "composition"))
+        .cloned();
+    request.studio_render_scale = frozen
+        .options
+        .opaque
+        .get("studioReducedSize")
+        .and_then(serde_json::Value::as_bool)
+        .filter(|v| *v)
+        .map(|_| 0.75);
+    let mut session = pm_engine_service::jobs::JobSession::new(request);
+    // Its raster overrides answer from this publication, whatever is edited
+    // meanwhile; while their extensions are slow, the sheet says what for.
+    let waiting = engine
+        .overrides
+        .map(|overrides| overrides.pin(&mut session, &frozen.publication, false));
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    let test_engine = engine.executable.is_some();
+    #[cfg(test)]
+    let executable = engine.executable.unwrap_or(executable);
+    #[cfg(test)]
+    let start_began = std::time::Instant::now();
+    let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
+        &executable, session, engine.activity,
+    )
+    .map_err(|e| e.to_string())?;
+    *job.handle.lock().unwrap() = Some(handle);
+    #[cfg(test)]
+    let _ = job.child_started.set(std::time::Instant::now());
+    #[cfg(test)]
+    if test_engine {
+        eprintln!("Export request built in {request_took:?}, engine start took {:?}", start_began.elapsed());
+    }
+    let started = std::time::Instant::now();
+    let mut pace = Pace::default();
+    let mut shown = Preview::default();
+    let mut cancellation_sent = false;
+    let mut queue_foreground = None;
+    loop {
+        if frozen.queue.is_some() {
+            let foreground = objc2_app_kit::NSRunningApplication::currentApplication().isActive();
+            if queue_foreground != Some(foreground) {
+                if let Some(handle) = job.handle.lock().unwrap().as_ref() { handle.queue_foreground(foreground); }
+                queue_foreground = Some(foreground);
+            }
+        }
+        queue.check_cancel(job).await;
+        if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
+            cancellation_sent = true;
+            job.handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or("Export worker lost")?
+                .cancel();
+        }
+        let status = job
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("Export worker lost")?
+            .status();
+        if matches!(
+            status.state,
+            JobState::Done | JobState::Failed | JobState::Cancelled
+        ) {
+            let handle = job
+                .handle
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or("Export worker lost")?;
+            let final_status = handle.wait().map_err(|e| e.to_string())?;
+            return match final_status.state {
+                JobState::Done => {
+                    let path = final_status
+                        .path
+                        .ok_or("Export completed without an output path")?;
+                    if let Some(format) = sidecar {
+                        let files = sidecar_files(
+                            &frozen.publication,
+                            &frozen.options.range,
+                            format,
+                            Path::new(&path),
+                        );
+                        write_sidecars(&files, frozen.replace)?;
+                    }
+                    Ok(Finished {
+                        path,
+                        notes: final_status.notes,
+                    })
+                }
+                JobState::Cancelled => Err("cancelled".into()),
+                _ => Err(final_status.error.map_or_else(
+                    || "Powermove lost contact with the export engine. Try again.".into(),
+                    Failure::from,
+                )),
+            };
+        }
+        let frame = (status.progress * planned.frames as f64).round() as u64;
+        tasks
+            .lock()
+            .unwrap()
+            .progress(ticket, frame, planned.frames)
+            .map_err(|e| format!("{e:?}"))?;
+        let run = if job.cancel.load(Ordering::Acquire) {
+            json!({"phase":"cancelling"})
+        } else if status.state == JobState::Running
+            && let Some(checked) = status.checking
+        {
+            // Every frame is encoded: the written file is being checked.
+            let checked = (checked * planned.frames as f64).round() as u64;
+            let mut run = json!({"phase":"checking","frame":checked,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()});
+            // The last frame encoded stays in view while the file is checked.
+            if let Some(key) = shown.show(None) {
+                run["preview"] = json!(key);
+            }
+            run
+        } else if status.state == JobState::Running {
+            let elapsed = started.elapsed().as_secs_f64();
+            let mut run =
+                json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
+            // What the person chose is said for the whole export: it goes
+            // without the offline clips (the file's notes name them).
+            let without = without_offline.then_some("without the offline clips");
+            let waiting = waiting.as_ref().and_then(|w| w.lock().unwrap().clone());
+            let extra = [waiting.as_deref(), without]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let mut extra = extra.chars();
+            if let Some(first) = extra.next() {
+                run["extra"] = json!(first.to_uppercase().chain(extra).collect::<String>());
+            }
+            // The sheet says "About N min left" from the measured pace.
+            if let Some(eta) = pace.left(frame, planned.frames, std::time::Instant::now()) {
+                run["eta"] = json!(eta);
+            }
+            // The frame last encoded, as the sheet shows it.
+            if let Some(key) = shown.show(status.preview.as_ref()) {
+                run["preview"] = json!(key);
+            }
+            run
+        } else {
+            json!({"phase":"preparing"})
+        };
+        let percent = (status.progress.clamp(0., 1.) * 100.).round() as u8;
+        job.progress.store(percent + 2, Ordering::Release);
+        if let Some(&id) = queue.id.get() {
+            let progress = status.progress;
+            let queue_runtime = runtime.clone();
+            let _ = queue.store.run(move |queue| {
+                queue.progress(id, progress);
+                publish_queue(queue, &queue_runtime);
+                Ok(())
+            }).await;
+        }
+        observe(runtime, run).await;
+        executor.timer(std::time::Duration::from_millis(50)).await;
+    }
+}
+/// The progress sheet's picture of the frame last encoded: each preview the
+/// worker sends is written once to its own file (images are cached by path)
+/// under a key the sheet draws; the last one goes with the export.
+#[derive(Default)]
+struct Preview {
+    file: Option<(u32, String, std::path::PathBuf)>,
+}
+impl Preview {
+    /// The key of the picture of `preview` (written if it is new), or of the
+    /// last one when the worker sent none this time.
+    fn show(&mut self, preview: Option<&pm_protocol::priority::JobPreview>) -> Option<&str> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if let Some(p) = preview
+            && self.file.as_ref().is_none_or(|(frame, ..)| *frame != p.frame)
+        {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join("powermove-export-previews");
+            let path = dir.join(format!("{}-{n}.jpg", std::process::id()));
+            if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &p.jpeg.0).is_ok() {
+                let key = format!("export-preview/{n}");
+                crate::media_thumbs::register(&key, path.clone());
+                self.clear();
+                self.file = Some((p.frame, key, path));
+            }
+        }
+        self.file.as_ref().map(|(_, key, _)| key.as_str())
+    }
+    fn clear(&mut self) {
+        if let Some((_, key, path)) = self.file.take() {
+            crate::media_thumbs::forget(&key);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+/// The time an export has left, from the pace it has kept: frames finished
+/// over time since its first frame landed, once a few have. The start (the
+/// export's extensions starting, the first frame's media opening) is not a
+/// frame's cost: counted in, a 9 s export was "About 59 min left" at frame 14.
+#[derive(Default)]
+struct Pace {
+    /// When the first frame was seen done, and how many were.
+    first: Option<(std::time::Instant, u64)>,
+    last: u64,
+}
+/// Frames measured before the pace is trusted, and for at least this long.
+const PACE_FRAMES: u64 = 8;
+const PACE_TIME: std::time::Duration = std::time::Duration::from_millis(500);
+impl Pace {
+    fn left(&mut self, frame: u64, total: u64, now: std::time::Instant) -> Option<f64> {
+        if frame < self.last {
+            self.first = None;
+        }
+        self.last = frame;
+        if frame == 0 || frame >= total {
+            return None;
+        }
+        let (at, from) = *self.first.get_or_insert((now, frame));
+        let done = frame.checked_sub(from)?;
+        let took = now.duration_since(at);
+        (done >= PACE_FRAMES && took >= PACE_TIME)
+            .then(|| took.as_secs_f64() / done as f64 * (total - frame) as f64)
+    }
+}
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+    /// A slow start is not the pace: 20 frames in after 60 s of starting, at
+    /// 30 frames a second since, a 270-frame export has seconds left, not an hour.
+    #[test]
+    fn time_left_comes_from_the_pace_since_the_first_frame() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(60_000 + ms);
+        let mut pace = Pace::default();
+        assert_eq!(pace.left(0, 270, at(0)), None, "nothing done yet");
+        assert_eq!(pace.left(1, 270, at(0)), None, "the first frame starts the clock");
+        assert_eq!(pace.left(5, 270, at(133)), None, "too few frames to trust");
+        assert_eq!(pace.left(14, 270, at(433)), None, "measured too briefly");
+        let left = pace.left(20, 270, at(633)).unwrap();
+        assert!((left - 8.33).abs() < 0.05, "about 8.3 s left: {left}");
+        assert_eq!(pace.left(270, 270, at(9_000)), None, "done");
+    }
+}
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn a_finished_export_line_carries_what_the_person_is_told() {
+        let plain = Finished {
+            path: "/out/Film.mov".into(),
+            notes: vec![],
+        };
+        assert_eq!(plain.line(), "Exported Film.mov");
+        let clipped = Finished {
+            path: "/out/Film.mov".into(),
+            notes: vec!["Audio clipped: 1,204 samples over full scale, peak +2.1 dB.".into()],
+        };
+        assert_eq!(
+            clipped.line(),
+            "Exported Film.mov. Audio clipped: 1,204 samples over full scale, peak +2.1 dB."
+        );
+    }
+    /// The archived copies of `name` in `folder`'s export archive.
+    fn archived(folder: &Path, name: &str) -> Vec<String> {
+        std::fs::read_dir(folder.join(".powermove-export-archive"))
+            .map(|entries| {
+                entries
+                    .map(|e| e.unwrap().path())
+                    .filter(|p| p.to_string_lossy().ends_with(name))
+                    .map(|p| std::fs::read_to_string(p).unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// A hand-corrected Film.srt beside the export is never written over
+    /// unless the person said Replace; then the old one is archived.
+    #[test]
+    fn caption_files_replace_nothing_they_were_not_told_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let (video, srt) = (dir.path().join("Film.mp4"), dir.path().join("Film.srt"));
+        let fresh = dir.path().join("Film.en.srt");
+        std::fs::write(&srt, "1\nhand corrected\n").unwrap();
+        let files = vec![
+            (fresh.clone(), "1\nnew en\n".to_owned()),
+            (srt.clone(), "1\nnew\n".to_owned()),
+        ];
+        assert_eq!(existing_outputs(&video, &files), vec![srt.clone()]);
+        let refused = write_sidecars(&files, false).unwrap_err();
+        assert!(refused.contains("“Film.srt” is already there"), "{refused}");
+        assert_eq!(
+            std::fs::read_to_string(&srt).unwrap(),
+            "1\nhand corrected\n"
+        );
+        assert!(archived(dir.path(), "Film.srt").is_empty());
+        write_sidecars(&files, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&srt).unwrap(), "1\nnew\n");
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "1\nnew en\n");
+        assert_eq!(
+            archived(dir.path(), "Film.srt"),
+            vec!["1\nhand corrected\n"]
+        );
+        // Nothing but the files and the archive is left beside them.
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [".powermove-export-archive", "Film.en.srt", "Film.srt"]
+        );
+    }
+    /// The video and its caption files are one question; Cancel is the default.
+    #[test]
+    fn one_question_names_every_file_an_export_would_replace() {
+        let files = [PathBuf::from("/d/Film.mp4"), PathBuf::from("/d/Film.srt")];
+        let alert = replace_question(&files);
+        assert_eq!(alert.message, "Replace 2 files?");
+        assert!(
+            alert
+                .informative
+                .starts_with("“Film.mp4” and “Film.srt” already exist."),
+            "{}",
+            alert.informative
+        );
+        let one = replace_question(&files[1..]);
+        assert_eq!(one.message, "Replace “Film.srt”?");
+        let default = one.buttons.iter().find(|b| b.default);
+        assert_eq!(
+            default.map(|b| (b.label.as_ref(), b.action)),
+            Some(("Cancel", false))
+        );
+        let replace = one.buttons.iter().find(|b| b.action);
+        assert!(replace.is_some_and(|b| b.destructive && !b.default));
+    }
+    use pm_promedia::tasks::TaskState;
+
+    fn row(project: &str) -> pm_promedia::tasks::Task {
+        tasks()
+            .lock()
+            .unwrap()
+            .all()
+            .into_iter()
+            .rev()
+            .find(|t| t.project == project)
+            .expect("listed")
+    }
+    #[test]
+    fn an_agent_export_is_a_background_task_the_person_can_cancel() {
+        let export = AgentExport::start("Promo", "agent-test-cancel", 120).unwrap();
+        let listed = row("agent-test-cancel");
+        assert_eq!(listed.title, "Promo (Agent)");
+        assert_eq!(listed.kind, TaskKind::Export);
+        assert_eq!(listed.state, TaskState::Running);
+        export.progress(30, 120);
+        assert_eq!(row("agent-test-cancel").completed, 30);
+        // Background Tasks ▸ Cancel reaches the agent's job, not the person's.
+        assert!(cancel_export(listed.id));
+        assert!(export.cancelled());
+        export.finish(Err("cancelled".into()));
+        assert_eq!(row("agent-test-cancel").state, TaskState::Cancelled);
+        assert!(!cancel_export(listed.id), "a settled export has no cancel");
+    }
+    /// Two windows' exports run at once: Cancel on one row stops that export only.
+    #[test]
+    fn cancel_reaches_exactly_the_export_on_its_row() {
+        let run = || Arc::new(Run::default());
+        let (first, second) = (run(), run());
+        for (id, job) in [(9_001, &first), (9_002, &second)] {
+            cancellers()
+                .lock()
+                .unwrap()
+                .insert(id, Canceller::Run(Arc::downgrade(job)));
+        }
+        assert!(cancel_export(pm_promedia::tasks::TaskId(9_002)));
+        assert!(second.cancel.load(Ordering::Acquire));
+        assert!(!first.cancel.load(Ordering::Acquire));
+        drop(second);
+        assert!(
+            !cancel_export(pm_promedia::tasks::TaskId(9_002)),
+            "a finished job"
+        );
+        cancellers().lock().unwrap().retain(|id, _| *id < 9_000);
+    }
+    /// Export Without Them follows the job's typed refusal, never its words.
+    #[test]
+    fn only_an_offline_refusal_offers_export_without_them() {
+        use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope};
+        let job = ErrorScope::Job { job: "j".into() };
+        let refused = EngineError::new(ErrorCode::MediaOffline, job.clone(), "Any words")
+            .with_detail(ErrorDetail::Offline {
+                assets: vec!["gone".into()],
+            });
+        let failure = Failure::from(refused);
+        assert_eq!(failure.message, "Any words");
+        assert_eq!(failure.offline, vec!["gone".into()]);
+        let worded = EngineError::new(
+            ErrorCode::ExportFailed,
+            job,
+            "1 clip is offline: a.mov. Relink the originals, or export without them.",
+        );
+        assert!(Failure::from(worded).offline.is_empty());
+    }
+    #[test]
+    fn an_agent_export_settles_as_done_or_failed() {
+        let export = AgentExport::start("Done", "agent-test-done", 10).unwrap();
+        export.finish(Ok(()));
+        let done = row("agent-test-done");
+        assert_eq!((done.state, done.completed), (TaskState::Completed, 10));
+        let export = AgentExport::start("Failed", "agent-test-failed", 10).unwrap();
+        export.finish(Err("Missing media: clip.mov".into()));
+        assert_eq!(row("agent-test-failed").state, TaskState::Failed);
+    }
+}
+
+/// The sheet says what happened in words; the engine's own wording stays in
+/// the log. A render worker that dies (crash, out of memory, killed) reports
+/// only that it ended without a result.
+fn plain_failure(message: &str) -> String {
+    if message.contains("without a terminal status") {
+        eprintln!("Export: {message}");
+        return "The renderer stopped unexpectedly. Try again; if it stops again, \
+                use a lower 3D Quality or a smaller size."
+            .into();
+    }
+    message.into()
+}
+
+impl Frozen {
+    fn record(&self) -> Result<Value, String> {
+        let root = self.publication.snapshot.root().ok_or("Missing queued composition")?;
+        let comp = pm_kernel::model::comp_node(root, self.publication.snapshot.open_comp().as_deref());
+        let name = comp.and_then(|c| c.get("name")).or_else(|| root.get("name")).and_then(crate::node_string).unwrap_or("Untitled");
+        Ok(json!({"name":name,
+            "project": self.publication.project, "document": pm_model::json::to_canonical_string(root),
+            "options": self.options, "originals": self.media.originals, "proxies":self.media.proxies,
+            "resources":self.resources, "extensionBundle":self.extensions.queued(),
+            "playhead":self.playhead, "destination":self.destination,
+            "replace": self.replace, "withoutOffline":self.without_offline}))
+    }
+    fn restore(record: &Value, template: &pm_kernel::Published, id: u64) -> Result<Self, String> {
+        let mut publication = template.clone();
+        let document = pm_model::json::parse(record["document"].as_str().ok_or("Missing queued composition")?).map_err(|e|e.to_string())?;
+        publication.snapshot.document = Arc::new(pm_model::Document::from_root(Some(pm_model::Node::from_value(document, 0)), 0));
+        publication.snapshot.revision = 0;
+        publication.project = record["project"].as_str().unwrap_or_default().into();
+        Ok(Self { publication: Arc::new(publication), queue:Some(id),
+            options:serde_json::from_value(record["options"].clone()).map_err(|e|e.to_string())?,
+            media:pm_engine_service::MediaCatalog { originals:serde_json::from_value(record["originals"].clone()).map_err(|e|e.to_string())?,
+                proxies:serde_json::from_value(record["proxies"].clone()).map_err(|e|e.to_string())?, ..Default::default() },
+            resources: Arc::new(serde_json::from_value(record["resources"].clone()).map_err(|e|e.to_string())?),
+            extensions: Arc::new(pm_mcp::project_extensions::Bundle::from_queue(&record["extensionBundle"])?),
+            playhead: record["playhead"].as_f64().unwrap_or(0.), destination:serde_json::from_value(record["destination"].clone()).map_err(|e|e.to_string())?,
+            replace:record["replace"] == true, without_offline:record["withoutOffline"] == true })
+    }
+}
+impl Controller {
+    pub fn publish_render_queue(&self) {
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            let store = crate::render_queue::store(&self.profile);
+            store.submit(move |queue| {
+                publish_queue(queue, &runtime);
+                Ok(())
+            });
+        }
+    }
+
+    pub fn render_pending(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.export_job.is_some() {
+            return;
+        }
+        let (Some(template), Some(runtime)) = (self.published.clone(), self.builtins.runtime.clone()) else {
+            return;
+        };
+        let reservation = Arc::new(Run::default());
+        self.builtins.export_job = Some(reservation.clone());
+        let store = crate::render_queue::store(&self.profile);
+        cx.spawn(async move |this, cx| {
+            let queue_runtime = runtime.clone();
+            let taken = store.run(move |queue| {
+                let result = (|| {
+                    let Some((id, record)) = queue.take_pending()? else {
+                        return Ok(None);
+                    };
+                    match Frozen::restore(&record, &template, id) {
+                        Ok(frozen) => Ok(Some((id, frozen))),
+                        Err(error) => {
+                            queue.finish(id, "Failed", error.clone())?;
+                            Err(error)
+                        }
+                    }
+                })();
+                publish_queue(queue, &queue_runtime);
+                result
+            }).await;
+            let id = taken.as_ref().ok().and_then(|job| job.as_ref().map(|(id, _)| *id));
+            let started = this.update(cx, |v, cx| {
+                if !v.builtins.export_job.as_ref().is_some_and(|job| Arc::ptr_eq(job, &reservation)) {
+                    return false;
+                }
+                v.builtins.export_job = None;
+                match taken {
+                    Ok(Some((_, frozen))) if !reservation.cancel.load(Ordering::Acquire) => {
+                        v.builtins.export_retry = Some(frozen);
+                        v.begin_builtin_export(Value::Null, true, false, cx);
+                        return true;
+                    }
+                    Err(error) => v.message = error,
+                    _ => {}
+                }
+                cx.notify();
+                false
+            }).unwrap_or(false);
+            if !started && let Some(id) = id {
+                let _ = store.run(move |queue| {
+                    let result = queue.finish(id, "Cancelled", String::new());
+                    publish_queue(queue, &runtime);
+                    result
+                }).await;
+            }
+        }).detach();
+    }
+}
+
+#[cfg(test)]
+mod frozen_queue_tests {
+    use super::*;
+    #[gpui::test]
+    #[ignore = "requires a launch-video copy and the headless engine executable"]
+    fn export_launch_video_starts_while_the_queue_worker_is_busy(cx: &mut gpui::TestAppContext) {
+        use crate::v4_view_tests::{PROJECT, publication, rig_source, window};
+        use gpui::{Modifiers, px, size};
+        use std::time::{Duration, Instant};
+
+        let project = PathBuf::from(std::env::var_os("PM_EXPORT_HANG_FIXTURE").unwrap());
+        let engine = PathBuf::from(std::env::var_os("PM_EXPORT_HANG_ENGINE").unwrap());
+        let opened = pm_kernel::open_project(&project, Default::default()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut media = pm_engine_service::MediaCatalog::default();
+        for (index, item) in opened.file.media.iter().enumerate() {
+            if matches!(&item.source, pm_kernel::project_io::MediaSource::Embedded { .. }) {
+                let path = directory.path().join(format!("launch-audio-{index}.mp3"));
+                item.copy_to(&path).unwrap();
+                media.originals.insert(item.id.to_string(), path);
+            }
+        }
+        assert!(!media.originals.is_empty(), "Launch fixture lost its embedded audio");
+        let rig = rig_source("export", pm_kernel::OpenSource::File(opened));
+        rig.runtime.update_media(media.originals.clone(), Default::default());
+        let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Some(result) = ticket.try_take() {
+                    result.unwrap();
+                    break;
+                }
+                assert!(Instant::now() < deadline, "Export panel did not respond");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait(rig.runtime.show("export").unwrap());
+        let (view, mut visual) = window(cx, &rig, publication(&rig), Default::default());
+        visual.simulate_resize(size(px(600.), px(640.)));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(Ok(ticket)) = rig.runtime.publish_finished_checks() {
+                wait(ticket);
+            }
+            for publication in rig.runtime.take_publications() {
+                view.update(&mut visual, |view, cx| view.publish(publication, cx));
+            }
+            visual.run_until_parked();
+            for request in rig.runtime.take_platform_requests() {
+                rig.runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            // Add to Queue shares Export's readiness, including the finished
+            // plan. Time the click after the sheet is ready for either action.
+            let (ready, summary) = view.read_with(&visual, |view, _| {
+                let nodes = view.publication.surface.nodes();
+                let find = |id| {
+                    nodes.values().find(|node| node.props.get("id").and_then(Value::as_str) == Some(id))
+                };
+                let ready = find("export.queue.add").is_some_and(|node| {
+                    node.props.get("disabled").and_then(Value::as_bool) != Some(true)
+                });
+                let summary = find("export.summary").and_then(|node| node.props.get("label").cloned());
+                (ready, summary)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Export did not become ready: {summary:?}; errors: {:?}",
+                rig.runtime.take_errors()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let store = crate::render_queue::store(directory.path());
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        let queue_guard = store.submit(move |_| {
+            entered.send(()).unwrap();
+            let _ = barrier.recv_timeout(Duration::from_secs(10));
+            Ok(())
+        });
+        blocked.recv_timeout(Duration::from_secs(3)).unwrap();
+        let button = crate::v4_view_tests::bounds(&mut visual, "export.start");
+        let clicked = Instant::now();
+        visual.simulate_click(button.center(), Modifiers::none());
+        let request = 'click: loop {
+            for publication in rig.runtime.take_publications() {
+                view.update(&mut visual, |view, cx| view.publish(publication, cx));
+            }
+            visual.run_until_parked();
+            for request in rig.runtime.take_platform_requests() {
+                rig.runtime.platform_reply(request.id, Ok(Value::Null));
+                if request.operation == "export.begin" {
+                    break 'click request;
+                }
+            }
+            assert!(
+                clicked.elapsed() < Duration::from_secs(1),
+                "Export click was not handled: {:?}",
+                rig.runtime.take_errors()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let request_time = clicked.elapsed();
+
+        let frozen = Frozen {
+            publication: rig.kernel.published(PROJECT).unwrap(),
+            queue: None,
+            options: pm_builtins::delivery::options(&request.input).unwrap(),
+            media,
+            resources: Arc::default(),
+            extensions: Arc::default(),
+            playhead: 0.,
+            destination: directory.path().join("launch-video.mp4"),
+            replace: false,
+            without_offline: false,
+        };
+        let run = Arc::new(Run::default());
+        let (result, history) = start_tracked_export(
+            &cx.executor(), frozen, run.clone(),
+            EngineJob { activity: Default::default(), overrides: None, executable: Some(engine) },
+            rig.runtime.clone(), Arc::default(), store.clone(),
+        );
+        // An independent UI action must complete while the disk worker is
+        // still held behind the watchdog barrier.
+        let resized = size(px(610.), px(640.));
+        visual.simulate_resize(resized);
+        visual.run_until_parked();
+        assert_eq!(visual.update(|window, _| window.viewport_size()), resized);
+        while run.child_started.get().is_none() && clicked.elapsed() < Duration::from_secs(1) {
+            visual.run_until_parked();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let handoff = run.child_started.get().map(|started| started.duration_since(clicked));
+        let history = history.unwrap();
+        assert!(history.is_empty(), "Queue write finished before release");
+        run.cancel.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        queue_guard.recv_blocking().unwrap().unwrap();
+        let history_id = history.recv_blocking().unwrap().unwrap();
+        let stop = Instant::now() + Duration::from_secs(10);
+        while !result.is_ready() && Instant::now() < stop {
+            cx.executor().advance_clock(Duration::from_millis(50));
+            visual.run_until_parked();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(result.is_ready(), "The headless export did not stop");
+        let outcome = cx.foreground_executor().block_on(result);
+        store.submit(move |queue| queue.finish(history_id, "Cancelled", String::new()))
+            .recv_blocking().unwrap().unwrap();
+        assert!(
+            handoff.is_some_and(|elapsed| elapsed < Duration::from_secs(1)),
+            "Delivery worker did not start within one second (command {request_time:?}, handoff {handoff:?}, error {:?})",
+            outcome.err()
+        );
+        eprintln!("Launch video: Export click to headless engine handoff {:?} (command {request_time:?})", handoff.unwrap());
+    }
+
+    #[test]
+    fn queued_input_restores_its_own_composition_options_media_and_destination() {
+        let rig = crate::v4_view_tests::rig("export", 2);
+        let publication = rig.kernel.published(crate::v4_view_tests::PROJECT).unwrap();
+        let mut options = Options::new(640, 360, 30.);
+        options.format = Format::Json;
+        let mut media = pm_engine_service::MediaCatalog::default();
+        media.originals.insert("clip".into(), PathBuf::from("/media/clip.mov"));
+        let mut extensions = pm_mcp::project_extensions::Bundle::default();
+        extensions.entries.push(pm_mcp::project_extensions::Entry {
+            id: "test-effect".into(),
+            name: "Test Effect".into(),
+            version: "1.0".into(),
+            author: "Test".into(),
+            source: "local".into(),
+            store_id: None,
+            hash: None,
+            bytes: 0,
+            items: vec![],
+            status: pm_mcp::project_extensions::Status::Excluded,
+        });
+        let frozen = Frozen { publication:publication.clone(), queue:None, options,
+            media, resources:Arc::default(), extensions:Arc::new(extensions),
+            playhead:1.25, destination:PathBuf::from("/exports/Film.pmv"),
+            replace:false, without_offline:false };
+        let record = frozen.record().unwrap();
+        let mut changed = (*publication).clone();
+        changed.snapshot.document = Arc::new(pm_model::Document::new(Some(pm_model::json::parse(r#"{"name":"Other project","layers":[]}"#).unwrap()), 99));
+        let restored = Frozen::restore(&record, &changed, 42).unwrap();
+        assert_eq!(restored.publication.snapshot.document.to_value(), publication.snapshot.document.to_value());
+        assert_eq!(restored.options.format, Format::Json);
+        assert_eq!(restored.media.originals, frozen.media.originals);
+        assert_eq!(restored.destination, frozen.destination);
+        assert_eq!(restored.playhead, 1.25);
+        assert_eq!(restored.queue, Some(42));
+        assert_eq!(restored.extensions.entries, frozen.extensions.entries);
+        let mut legacy = record;
+        legacy.as_object_mut().unwrap().remove("extensionBundle");
+        assert!(Frozen::restore(&legacy, &changed, 43).unwrap().extensions.entries.is_empty());
+    }
+}

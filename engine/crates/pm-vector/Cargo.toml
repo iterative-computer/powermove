@@ -1,0 +1,42 @@
+[package]
+name = "pm-vector"
+description = "Shape, path, and mask geometry (sections 10 and 31): ports of today's Canvas2D geometry onto kurbo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Deterministic geometry digest over generated cases, used to check that
+# native and wasm32 builds produce bit-identical output (see tests/wasm/).
+conformance = []
+# The rendering side (docs/engine/vector.md): coverage scenes
+# and SVG through usvg with filters through resvg. Off for pm-eval and
+# pm-wasm, which need geometry only.
+render = ["dep:i_overlay", "usvg/text", "usvg/system-fonts", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
+
+[dependencies]
+kurbo = "0.13.1"
+libm.workspace = true
+ryu-js.workspace = true
+usvg = { version = "0.48.1", default-features = false, optional = true }
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"], optional = true }
+tiny-skia = { version = "0.12", optional = true }
+# Resolves overlapping outline pieces (stroke joins, self-intersecting
+# fills) into disjoint contours before area coverage.
+i_overlay = { version = "9.1", optional = true }
+
+[dev-dependencies]
+png = "0.18"
+# Exact float parsing for the bit-for-bit vector comparisons.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[[example]]
+name = "digest"
+required-features = ["conformance"]
+
+[[example]]
+name = "digest_wasm"
+crate-type = ["cdylib"]
+required-features = ["conformance"]

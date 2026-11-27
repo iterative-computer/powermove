@@ -1,0 +1,2408 @@
+//! Text and captions (plan sections 10 and 12, amendments 10 and 19).
+//! Design notes: `docs/engine/text-render.md`.
+//!
+//! Level 1 text and captions retain their Blink-compatible layout, Canvas
+//! glyph masks and local source pixel grid. Level 2 keeps its Parley layout
+//! and exact device-space coverage. Both retain ordered paint and working-domain
+//! image filtering. The ordered scene retains only its ink crop. A 2.5D layer
+//! instead paints at its plane density and projects through that plane.
+//! The explicit raster API still paints into its requested canvas.
+//!
+//! Layout is `pm-text`'s level 1 (`compat`) through the host's
+//! [`TextFonts`]; word states, animator poses, raster boxes, and font
+//! anchors are `pm-eval`'s.
+
+pub mod gpu;
+pub mod host;
+pub mod served;
+
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use kurbo::{Affine, PathEl};
+use pm_eval::captions::CaptionFrame;
+use pm_eval::text_geom::{TextMeasure, TextRaster, text_content, text_geometry};
+use pm_eval::transform::Mat2d;
+use pm_eval::{Content, JsResult, JsValue, Scope};
+use pm_model::{JsString, Node};
+use pm_text::compat::{GlyphRun, LineRuns, TextContent};
+use pm_text::font::{FaceId, FaceInfo, FontResolver};
+use pm_text::render::bitmap::Bitmaps;
+use pm_text::render::color::{self, Rgba};
+use pm_text::render::outline::Outlines;
+use pm_text::render::scene::{
+    CanvasRows, ImagePixels, ItemContent, Painter, PathStyle, TextScene, fill_path, rounded_rect,
+};
+
+/// The fonts a renderer lays text out with: `pm-text`'s level 1 layout
+/// over the host's font registry (full font files, so outlines are
+/// available). The interactive and job engines answer it from their font
+/// service; tests use the CoreText registry.
+pub trait TextFonts: Send {
+    /// The measuring canvas `pm-eval` uses for geometry, word layout, and
+    /// glyph units.
+    fn measure(&mut self) -> &mut dyn TextMeasure;
+    /// `rasterText`'s glyphs for `d` (wrapped lines, `fillText` per line).
+    fn line_runs(&mut self, d: &TextContent) -> Vec<LineRuns>;
+    /// `fillText(text, 0, 0)` with `textAlign = 'left'` and `letterSpacing
+    /// = tracking px`.
+    fn text_runs(&mut self, d: &TextContent, text: &str, tracking: f64) -> Vec<GlyphRun>;
+    /// The face the runs name.
+    fn face(&mut self, id: FaceId) -> &FaceInfo;
+    /// CoreText's advance of a full-em glyph of an `sbix` face at `size`
+    /// (`FontResolver::em_advance`): the size color bitmap glyphs draw at.
+    fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
+        let _ = (face, size);
+        None
+    }
+    /// Changes whenever the registry's fonts change (project fonts, sources);
+    /// cached rasters of an older generation are dropped.
+    fn generation(&self) -> u64 {
+        0
+    }
+    /// Called before each text or captions layer is laid out: fonts whose
+    /// registry changed start over here (never in the middle of a layer,
+    /// whose runs name the current faces).
+    fn sync(&mut self) {}
+    /// Names the measurer [`TextFonts::measure`] answers with now: equal
+    /// values mean the same measurer with nothing asked of the registry in
+    /// between, so the same content measures the same. `None` (the
+    /// default): unknown, and nothing measured before a
+    /// [`TextFonts::sync`] is reused after it.
+    fn measurer(&mut self) -> Option<u64> {
+        None
+    }
+    /// Registry questions left unanswered since the last call (a served
+    /// registry that did not answer): the layer that met them is refused,
+    /// never drawn with another font.
+    fn take_failures(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Asks the registry for these queries' answers ahead, in one round
+    /// trip, keeping them for the layouts that ask (a served registry).
+    fn prefetch(&mut self, queries: &[pm_text::answers::Query]) {
+        let _ = queries;
+    }
+    /// What the next layers are laid out for (the window whose font cache
+    /// seeds they measure with); applied at the next [`TextFonts::sync`].
+    fn set_seed_scope(&mut self, scope: served::SeedScope) {
+        let _ = scope;
+    }
+    /// Optional eager collection for standalone layout/reference consumers.
+    /// Production text uses `TextMeasure::level2` over the served registry.
+    fn level2(&mut self) -> Option<&mut Level2Fonts> {
+        None
+    }
+}
+
+/// Level 2 layout (Parley, `pm_text::level2`) over full fonts the host
+/// added: the engine lays out and draws from the same bytes.
+pub struct Level2Fonts {
+    pub engine: pm_text::level2::Level2,
+    faces: std::collections::HashMap<String, pm_text::font::FontBytes>,
+}
+
+impl Default for Level2Fonts {
+    fn default() -> Self {
+        Level2Fonts {
+            engine: pm_text::level2::Level2::new(),
+            faces: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl Level2Fonts {
+    /// Adds one face (a single-face font file) under `key` for `family`.
+    pub fn add_font(&mut self, key: &str, data: pm_text::font::FontBytes, family: &str) -> usize {
+        let n = self.engine.add_font(key, data.clone(), family);
+        self.faces.insert(key.to_owned(), data);
+        n
+    }
+
+    pub fn set_manifest(&mut self, manifest: &pm_text::registry::FallbackManifest) {
+        self.engine.set_manifest(manifest);
+    }
+
+    pub fn face(&self, key: &str) -> Option<&pm_text::font::FontBytes> {
+        self.faces.get(key)
+    }
+}
+
+impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<R> {
+    fn measure(&mut self) -> &mut dyn TextMeasure {
+        self
+    }
+
+    fn line_runs(&mut self, d: &TextContent) -> Vec<LineRuns> {
+        self.compat().line_runs(d)
+    }
+
+    fn text_runs(&mut self, d: &TextContent, text: &str, tracking: f64) -> Vec<GlyphRun> {
+        self.compat().text_runs(d, text, tracking).0
+    }
+
+    fn face(&mut self, id: FaceId) -> &FaceInfo {
+        self.compat().resolver().face(id)
+    }
+
+    fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
+        self.compat().resolver_mut().em_advance(face, size)
+    }
+}
+
+/// The registry queries the canvas fonts of `root`'s text layers ask first
+/// (the open composition's and every nested one's), each once.
+fn document_font_queries(root: &Node) -> Vec<pm_text::answers::Query> {
+    use pm_text::answers::Query;
+    use pm_text::blink::measure::{Family, generic_family};
+    let mut queries: Vec<Query> = Vec::new();
+    let mut add = |q: Query| {
+        if !queries.contains(&q) {
+            queries.push(q);
+        }
+    };
+    // The open composition (at the top level in the stored form) and every
+    // composition of `comps` (a map in the canonical form).
+    let comps: Vec<&Node> = match pm_eval::node::member(Some(root), "comps").map(Node::kind) {
+        Some(pm_model::NodeKind::Object(map)) => map.values().collect(),
+        Some(pm_model::NodeKind::Array(items)) => items.iter().collect(),
+        _ => Vec::new(),
+    };
+    let lists = std::iter::once(root)
+        .chain(comps)
+        .filter_map(|c| pm_eval::node::array(pm_eval::node::member(Some(c), "layers")));
+    for layer in lists.flatten() {
+        if pm_eval::node::string(pm_eval::node::member(Some(layer), "type")).map(|t| t.as_bytes())
+            != Some(b"text".as_slice())
+        {
+            continue;
+        }
+        let Some(d) = pm_eval::node::member(Some(layer), "d") else {
+            continue;
+        };
+        let content = TextContent::from_json(&node_json(d));
+        let font = pm_text::compat::canvas::canvas_font(&content, None);
+        for family in &font.families {
+            match family {
+                Family::Named(name) => add(Query::family(name, &font.desc)),
+                Family::Generic(g) => add(Query::family(generic_family(g), &font.desc)),
+                Family::Custom { .. } => {}
+            }
+        }
+        add(Query::standard(&font.desc));
+    }
+    queries
+}
+
+/// A node as JSON.
+fn node_json(node: &Node) -> serde_json::Value {
+    use pm_model::NodeKind;
+    match node.kind() {
+        NodeKind::Null => serde_json::Value::Null,
+        NodeKind::Bool(b) => (*b).into(),
+        NodeKind::Number(n) => {
+            serde_json::Number::from_f64(*n).map_or(serde_json::Value::Null, Into::into)
+        }
+        NodeKind::String(s) => s.to_string_lossy().into(),
+        NodeKind::Array(items) => items.iter().map(node_json).collect(),
+        NodeKind::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.to_string_lossy(), node_json(v)))
+            .collect(),
+    }
+}
+
+/// Everything text rendering keeps across frames.
+pub struct TextContext {
+    pub(crate) fonts: Option<Box<dyn TextFonts>>,
+    outlines: Outlines,
+    bitmaps: Bitmaps,
+    generation: u64,
+    /// The fonts' own generation when last synced.
+    fonts_generation: u64,
+    captions_hidden: bool,
+    unsupported: Vec<String>,
+    /// The document edition whose text fonts were asked for ahead
+    /// ([`TextContext::prefetch_fonts`]).
+    prefetched: Option<u64>,
+    /// Each plain level 1 layer's last device plan, by node address:
+    /// reused while its inputs are equal.
+    level1_plans: std::collections::HashMap<usize, Level1Plan>,
+    /// How heavy text draws.
+    smoothing: TextWeight,
+}
+
+/// How heavy text draws (TEXT-SMOOTH-1, docs/engine/text-render.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextWeight {
+    /// Today's macOS look, in the viewer and in exports: level 1 text and
+    /// captions as Canvas2D drew them, level 2 as CoreText with font
+    /// smoothing draws (`pm_text::render::smoothing`).
+    #[default]
+    Smoothed,
+    /// Plain outline coverage: the glyphs as designed (the raster gates'
+    /// reference arithmetic).
+    Exact,
+}
+
+impl TextWeight {
+    fn level1(self) -> pm_text::render::smoothing::Smoothing {
+        use pm_text::render::smoothing::Smoothing;
+        match self {
+            TextWeight::Smoothed => Smoothing::Canvas2d,
+            TextWeight::Exact => Smoothing::Exact,
+        }
+    }
+    fn level2(self) -> pm_text::render::smoothing::Smoothing {
+        use pm_text::render::smoothing::Smoothing;
+        match self {
+            TextWeight::Smoothed => Smoothing::CoreText,
+            TextWeight::Exact => Smoothing::Exact,
+        }
+    }
+}
+
+/// A plain level 1 text layer's device plan and what it was made from:
+/// the scene is a function of these alone.
+struct Level1Plan {
+    content: Content,
+    raster: Option<TextRaster>,
+    matrix: [u64; 6],
+    target: (u32, u32),
+    generation: u64,
+    layout: Arc<Level1Layout>,
+    plan: Option<TextPlan>,
+    /// What painting the plan reported unsupported, reported again on reuse.
+    unsupported: Vec<String>,
+}
+
+type Level1Faces = Vec<Vec<(FaceInfo, Option<f32>)>>;
+
+struct QueuedLevel1 {
+    slot: usize,
+    id: usize,
+    cache: Level1Plan,
+    faces: Level1Faces,
+}
+
+#[derive(Default)]
+pub(crate) struct Level1PaintRun {
+    queued: Vec<QueuedLevel1>,
+    scenes: Vec<(CanvasRows, TextScene)>,
+    reserved_mask_bytes: usize,
+    pub(crate) completed: Vec<(usize, Option<TextPlan>)>,
+}
+
+impl Level1PaintRun {
+    pub(crate) fn is_queued(&self, slot: usize) -> bool {
+        self.queued.last().is_some_and(|entry| entry.slot == slot)
+    }
+
+    pub(crate) fn flush(&mut self, text: &mut TextContext) {
+        if self.queued.is_empty() {
+            return;
+        }
+        self.reserved_mask_bytes = 0;
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
+        let admitted = CanvasRows::resolve_wave(&mut text.bitmaps, &mut self.scenes, |n, run| {
+            crate::parallel::map(n, run)
+        });
+        for (entry, (_, scene)) in self.queued.drain(..).zip(self.scenes.drain(..)) {
+            let scene = if admitted {
+                scene
+            } else {
+                // The original row-by-row cache behavior runs at a possible
+                // eviction. The broker already resolved these exact faces.
+                text.paint_level1_faces(&entry.cache, &entry.faces, None)
+            };
+            self.completed
+                .push((entry.slot, text.admit_level1(entry.id, entry.cache, scene)));
+        }
+    }
+}
+
+/// A plain level 1 layer's lines: each line's glyph runs and pen origin.
+struct Level1Layout {
+    lines: Vec<(Vec<GlyphRun>, (f64, f64))>,
+    fill: Rgba,
+    /// What laying out reported unsupported (the fill color).
+    unsupported: Vec<String>,
+}
+
+/// A plain level 1 layer's resolved content and `PM.raster` placement
+/// ([`Scope::text_raster`]), measured once and handed to the layer's later
+/// steps in the same frame instead of measured again. It is used only for
+/// the same layer at the same time, with the same fonts and the same
+/// measurer ([`TextContext::still_measured`]); anything else measures
+/// afresh, as before.
+pub(crate) struct Level1Measured {
+    layer: usize,
+    time: u64,
+    generation: u64,
+    measurer: Option<u64>,
+    content: Content,
+    raster: TextRaster,
+}
+
+/// A device plan's content key from what its scene is made of. Equal keys
+/// paint equal rasters, as [`scene_key`]'s do (a domain tag keeps the two
+/// apart).
+fn level1_key(
+    layout: &Level1Layout,
+    matrix: [u64; 6],
+    target: (u32, u32),
+    generation: u64,
+    crop: [u32; 4],
+) -> [u64; 2] {
+    let mut h = KeyBytes(Vec::with_capacity(1024));
+    (b"level1 layout", generation, target, crop, matrix).hash(&mut h);
+    for c in layout.fill {
+        c.to_bits().hash(&mut h);
+    }
+    for (runs, (x, y)) in &layout.lines {
+        (x.to_bits(), y.to_bits(), runs.len()).hash(&mut h);
+        for r in runs {
+            (r.face, r.size.to_bits()).hash(&mut h);
+            (r.synthetic_bold, r.synthetic_italic).hash(&mut h);
+            r.coords.len().hash(&mut h);
+            for (tag, value) in &r.coords {
+                (tag, value.to_bits()).hash(&mut h);
+            }
+            r.glyphs.len().hash(&mut h);
+            for g in &r.glyphs {
+                (g.id, g.x.to_bits(), g.y.to_bits()).hash(&mut h);
+            }
+        }
+    }
+    digest_key(&h.0)
+}
+
+fn digest_key(bytes: &[u8]) -> [u64; 2] {
+    let digest = blake3::hash(bytes);
+    let bytes = digest.as_bytes();
+    [
+        u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes")),
+        u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
+    ]
+}
+
+/// Plans kept for reuse; past this the map starts over.
+const LEVEL1_PLANS: usize = 4096;
+
+impl Default for TextContext {
+    fn default() -> Self {
+        TextContext {
+            fonts: None,
+            outlines: Outlines::new(),
+            bitmaps: Bitmaps::new(),
+            generation: 0,
+            fonts_generation: 0,
+            captions_hidden: false,
+            unsupported: Vec::new(),
+            prefetched: None,
+            level1_plans: Default::default(),
+            smoothing: TextWeight::default(),
+        }
+    }
+}
+
+impl TextContext {
+    pub(crate) fn measure(&mut self) -> Option<&mut dyn TextMeasure> {
+        self.sync_fonts();
+        self.fonts.as_deref_mut().map(|fonts| fonts.measure())
+    }
+
+    /// Asks the registry ahead, in one round trip, for the faces every text
+    /// layer of `document` lays out with (each family of its canvas font,
+    /// and the standard font, at its weight, slope, and size), once per
+    /// document edition. A face first met in a frame costs that frame a
+    /// round trip, and the font service makes its fallback cascade only
+    /// once it has handed the face out (`FontService::warm_fallbacks`):
+    /// asked for at rest, a face is ready before a seek shows its text.
+    pub fn prefetch_fonts(&mut self, document: &pm_model::Document) {
+        if self.fonts.is_none() || self.prefetched == Some(document.edition()) {
+            return;
+        }
+        self.prefetched = Some(document.edition());
+        let queries = document
+            .root()
+            .map(document_font_queries)
+            .unwrap_or_default();
+        if queries.is_empty() {
+            return;
+        }
+        // The answers are the current fonts' (as before a layer).
+        self.sync_fonts();
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            let earlier = fonts.take_failures();
+            fonts.prefetch(&queries);
+            // Asking ahead is advice: a query it could not answer stays
+            // unanswered, and the layer that needs it asks and reports
+            // itself. Never left for the next layer built to be refused for.
+            drop(fonts.take_failures());
+            self.unsupported.extend(earlier);
+        }
+    }
+
+    pub fn set_fonts(&mut self, fonts: Option<Box<dyn TextFonts>>) {
+        self.fonts = fonts;
+        self.prefetched = None;
+        self.forget_glyphs();
+        self.generation += 1;
+        self.fonts_generation = self.fonts.as_ref().map_or(0, |f| f.generation());
+    }
+
+    /// Before a layer: the fonts catch up with their registry, and a new
+    /// font generation makes every later raster key new (cached rasters of
+    /// the old fonts are never reused).
+    pub(crate) fn reuse_generation(&mut self) -> u64 {
+        self.sync_fonts();
+        self.generation
+    }
+
+    fn sync_fonts(&mut self) {
+        self.sync_fonts_before_reset(|_| {});
+    }
+
+    fn sync_fonts_before_reset(&mut self, before_reset: impl FnOnce(&mut Self)) {
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            fonts.sync();
+            let g = fonts.generation();
+            if g != self.fonts_generation {
+                before_reset(self);
+                self.fonts_generation = g;
+                self.generation += 1;
+                self.forget_glyphs();
+            }
+        }
+    }
+
+    /// Drops glyph outlines, color bitmaps and native font providers after
+    /// font changes, on idle, or under pressure. Glyph caches key on
+    /// `FontBytes::id`, which is never reused, so a replaced font can never
+    /// hit an old entry; this releases the old entries.
+    pub(crate) fn forget_glyphs(&mut self) {
+        self.outlines.clear();
+        self.bitmaps.clear();
+    }
+
+    pub fn has_fonts(&self) -> bool {
+        self.fonts.is_some()
+    }
+
+    /// How heavy text draws; a change makes every later raster key new.
+    pub fn set_weight(&mut self, weight: TextWeight) {
+        if self.smoothing != weight {
+            self.smoothing = weight;
+            self.generation += 1;
+        }
+    }
+
+    pub fn weight(&self) -> TextWeight {
+        self.smoothing
+    }
+
+    /// `PM.captionsHidden`: an export without burned-in captions draws no
+    /// captions layer.
+    pub fn set_captions_hidden(&mut self, hidden: bool) {
+        self.captions_hidden = hidden;
+    }
+
+    pub fn captions_hidden(&self) -> bool {
+        self.captions_hidden
+    }
+
+    /// What the last layer built could not draw.
+    pub(crate) fn take_unsupported(&mut self) -> Vec<String> {
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            self.unsupported.extend(fonts.take_failures());
+        }
+        std::mem::take(&mut self.unsupported)
+    }
+}
+
+/// One text raster in the plan: the scene of a canvas, and the part of it
+/// the texture holds (`crop`, whole device pixels of the canvas).
+#[derive(Debug, Clone)]
+pub struct TextPlan {
+    pub scene: Arc<TextScene>,
+    pub crop: [u32; 4],
+    /// Content key of the painted pixels (scene, crop, and the font
+    /// generation): equal keys paint equal rasters.
+    pub key: [u64; 2],
+}
+
+impl PartialEq for TextPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl TextPlan {
+    /// A plan of a whole scene (no crop).
+    pub fn whole(scene: TextScene) -> TextPlan {
+        let crop = [0, 0, scene.width.max(1), scene.height.max(1)];
+        let key = scene_key(&scene, crop, u64::MAX);
+        TextPlan {
+            scene: Arc::new(scene),
+            crop,
+            key,
+        }
+    }
+
+    pub(crate) fn retain_rect(&mut self, r: pm_vector::render::scene::PixelRect) {
+        let crop = [
+            r.x as u32,
+            r.y as u32,
+            r.x as u32 + r.width,
+            r.y as u32 + r.height,
+        ];
+        if crop != self.crop {
+            // The parent key includes font generation. Retaining it in the
+            // new digest prevents a font replacement reusing old raster pixels.
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.key.hash(&mut h);
+            crop.hash(&mut h);
+            let a = h.finish();
+            0x726f695f74657874u64.hash(&mut h);
+            self.key = [a, h.finish()];
+            self.crop = crop;
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.crop[2] - self.crop[0]
+    }
+
+    pub fn height(&self) -> u32 {
+        self.crop[3] - self.crop[1]
+    }
+}
+
+/// A text layer's quad: the plan and its placement in layer pixels.
+pub(crate) struct TextQuad {
+    pub plan: TextPlan,
+    pub w: f64,
+    pub h: f64,
+    pub ax: f64,
+    pub ay: f64,
+}
+
+/// `continuousRasterScale(matrix)` (`legacy/gl/compositor.ts`): the layer's
+/// largest singular value, in quarter steps, within 0.25 to 32.
+pub fn continuous_raster_scale(m: &Mat2d) -> f64 {
+    let bounded = bounded_raster_scale(m);
+    libm::ceil(bounded * 4.0 - 1e-9) / 4.0
+}
+
+pub(crate) fn playback_raster_scale(m: &Mat2d) -> f64 {
+    crate::space25d::local::playback_density(bounded_raster_scale(m))
+}
+
+fn bounded_raster_scale(m: &Mat2d) -> f64 {
+    let or0 = |v: f64| if v.is_nan() { 0.0 } else { v };
+    let (m0, m1, m2, m3) = (or0(m[0]), or0(m[1]), or0(m[2]), or0(m[3]));
+    let aa = m0 * m0 + m1 * m1;
+    let bb = m0 * m2 + m1 * m3;
+    let cc = m2 * m2 + m3 * m3;
+    let disc = libm::sqrt(js_max(0.0, (aa - cc) * (aa - cc) + 4.0 * bb * bb));
+    let largest = libm::sqrt(js_max(0.0, (aa + cc + disc) / 2.0));
+    let requested = largest * 1.0;
+    js_max(0.25, js_min(32.0, requested))
+}
+
+fn js_max(a: f64, b: f64) -> f64 {
+    crate::js::max(a, b)
+}
+
+fn js_min(a: f64, b: f64) -> f64 {
+    crate::js::min(a, b)
+}
+
+fn affine_max_scale(m: Affine) -> f64 {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let xx = a * a + b * b;
+    let xy = a * c + b * d;
+    let yy = c * c + d * d;
+    ((xx + yy + ((xx - yy).powi(2) + 4.0 * xy * xy).sqrt()) * 0.5).sqrt()
+}
+
+fn get<'c>(d: &'c Content, key: &str) -> &'c JsValue {
+    static UNDEFINED: JsValue = JsValue::Undefined;
+    d.get(&JsString::from(key)).unwrap_or(&UNDEFINED)
+}
+
+/// Canvas size for a box at a density: `max(1, ceil(n × density))`.
+fn canvas_px(n: f64, density: f64) -> u32 {
+    let v = libm::ceil(n * density);
+    if v.is_finite() && v >= 1.0 {
+        v.min(f64::from(u32::MAX)) as u32
+    } else {
+        1
+    }
+}
+
+/// `c.fillStyle = value` on a context whose style is `previous`. A string
+/// the setter rejects keeps `previous`; a CSS color the parser does not
+/// reproduce is recorded in `unsupported` (the layer is refused).
+fn fill_style(value: &JsValue, previous: Rgba, unsupported: &mut Vec<String>) -> Rgba {
+    // Canvas stringifies non-strings (`undefined`, `null` and numbers never
+    // parse as colors).
+    let s = match value {
+        JsValue::String(s) => s.to_string_lossy(),
+        other => other.to_js_string().to_string_lossy(),
+    };
+    css_color(&s, previous, unsupported)
+}
+
+/// [`color::classify`] as a canvas setter on a context whose style is
+/// `previous`.
+fn css_color(s: &str, previous: Rgba, unsupported: &mut Vec<String>) -> Rgba {
+    match color::classify(s) {
+        Ok(c) => c,
+        Err(color::Rejected::Invalid) => previous,
+        Err(color::Rejected::Unsupported) => {
+            let what = format!("text color {s:?}");
+            if !unsupported.contains(&what) {
+                unsupported.push(what);
+            }
+            previous
+        }
+    }
+}
+
+/// `hexToRgba(hex, opacity)` of `captions/render.ts` as the canvas setter
+/// takes the `rgba(...)` string it builds: `None` when the string holds a
+/// `NaN` (a short or non-hex code) and the setter keeps its previous style.
+fn hex_to_rgba(hex: &str, opacity: f64) -> Option<Rgba> {
+    // `hex.replace('#', '')` (the first `#`), sliced in UTF-16 units.
+    let value: Vec<u16> = hex.replacen('#', "", 1).encode_utf16().collect();
+    let part = |a: usize, b: usize| -> f64 {
+        let s = String::from_utf16_lossy(value.get(a..b.min(value.len())).unwrap_or(&[]));
+        pm_eval::js_sem::parse_int(&JsString::from(s.as_str()), 16)
+    };
+    let (r, g, b) = (part(0, 2), part(2, 4), part(4, 6));
+    let a = if value.len() >= 8 {
+        part(6, 8) / 255.0
+    } else {
+        1.0
+    };
+    let alpha = libm::round(a * opacity * 1000.0) / 1000.0;
+    // `rgba(NaN,...)` and `Infinity` are not CSS numbers; the integer
+    // channels and the alpha clamp to their ranges.
+    if ![r, g, b, alpha].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let ch = |v: f64| v.clamp(0.0, 255.0) / 255.0;
+    Some([ch(r), ch(g), ch(b), alpha.clamp(0.0, 1.0)])
+}
+
+/// Hashes the scene into a 128-bit content key.
+/// Collects what a key hashes, for one blake3 pass (two SipHash passes
+/// over every glyph path element were 2% of a text-heavy frame).
+struct KeyBytes(Vec<u8>);
+
+impl Hasher for KeyBytes {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        unreachable!("read through blake3")
+    }
+}
+
+fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
+    let mut h = KeyBytes(Vec::with_capacity(4096));
+    {
+        (generation, scene.width, scene.height, crop).hash(&mut h);
+        for item in &scene.items {
+            for c in item.color {
+                c.to_bits().hash(&mut h);
+            }
+            item.opacity.to_bits().hash(&mut h);
+            item.blur.to_bits().hash(&mut h);
+            for c in item.curve {
+                c.to_bits().hash(&mut h);
+            }
+            match &item.content {
+                ItemContent::Coverage { paths } => {
+                    0u8.hash(&mut h);
+                    for p in paths {
+                        for c in p.transform.as_coeffs() {
+                            c.to_bits().hash(&mut h);
+                        }
+                        match &p.style {
+                            PathStyle::Fill => 0u8.hash(&mut h),
+                            PathStyle::Stroke(s) => {
+                                1u8.hash(&mut h);
+                                s.width.to_bits().hash(&mut h);
+                                s.miter_limit.to_bits().hash(&mut h);
+                            }
+                        }
+                        for el in p.path.elements() {
+                            let pts: &[kurbo::Point] = match el {
+                                PathEl::MoveTo(p) => {
+                                    1u8.hash(&mut h);
+                                    std::slice::from_ref(p)
+                                }
+                                PathEl::LineTo(p) => {
+                                    2u8.hash(&mut h);
+                                    std::slice::from_ref(p)
+                                }
+                                PathEl::QuadTo(a, b) => {
+                                    3u8.hash(&mut h);
+                                    for q in [a, b] {
+                                        q.x.to_bits().hash(&mut h);
+                                        q.y.to_bits().hash(&mut h);
+                                    }
+                                    &[]
+                                }
+                                PathEl::CurveTo(a, b, c) => {
+                                    4u8.hash(&mut h);
+                                    for q in [a, b, c] {
+                                        q.x.to_bits().hash(&mut h);
+                                        q.y.to_bits().hash(&mut h);
+                                    }
+                                    &[]
+                                }
+                                PathEl::ClosePath => {
+                                    5u8.hash(&mut h);
+                                    &[]
+                                }
+                            };
+                            for q in pts {
+                                q.x.to_bits().hash(&mut h);
+                                q.y.to_bits().hash(&mut h);
+                            }
+                        }
+                    }
+                }
+                ItemContent::Image { image, transform } => {
+                    1u8.hash(&mut h);
+                    match image {
+                        ImagePixels::Rgba8(i) => {
+                            0u8.hash(&mut h);
+                            (i.width, i.height).hash(&mut h);
+                            i.data.hash(&mut h);
+                        }
+                        ImagePixels::WorkingF32(i) => {
+                            1u8.hash(&mut h);
+                            (i.width, i.height).hash(&mut h);
+                            for v in &i.data {
+                                v.to_bits().hash(&mut h);
+                            }
+                        }
+                        ImagePixels::Colr(program) => {
+                            2u8.hash(&mut h);
+                            program.content_key().hash(&mut h);
+                        }
+                    }
+                    for c in transform.as_coeffs() {
+                        c.to_bits().hash(&mut h);
+                    }
+                }
+            }
+        }
+    }
+    digest_key(&h.0)
+}
+
+/// Whether a level 1 layer has character animators or styles (laid out
+/// glyph by glyph).
+fn level1_animated(layer: &Node) -> bool {
+    let stored = pm_eval::node::member(Some(layer), "d");
+    let has = |key: &str| {
+        pm_eval::node::member(stored, key)
+            .map(|n| pm_eval::node::get(n, b"length").truthy())
+            .unwrap_or(false)
+    };
+    has("animators") || has("styles")
+}
+
+/// Text whose geometry depends only on its resolved content and fonts.
+pub(crate) fn plain_level1(layer: &Node) -> bool {
+    !pm_eval::text_level2::is_level2(layer)
+        && !level1_animated(layer)
+        && pm_eval::anchor::BoundsValues::of(pm_eval::node::member(
+            pm_eval::node::member(Some(layer), "d"),
+            "fontAnchorBounds",
+        ))
+        .is_none()
+}
+
+impl TextContext {
+    /// Filled glyph contours in anchored layer pixels, from the same full-face
+    /// layout, style ranges and character animators used by the flat renderer.
+    /// Color bitmap glyphs fail explicitly: their rectangular image is not an
+    /// outline. Native hosts supply their existing render-thread font broker.
+    pub fn extrusion_outlines<'d>(&mut self,scope:&mut Scope<'_, 'd>,layer:&'d Node,time:f64,tolerance:f64)->Result<Vec<pm_geom3d::extrusion::Outline>,String>{
+        if !self.has_fonts(){return Err("Text extrusion needs the native font service".into());}
+        let quad=self.text_layer(scope,layer,time,1.).map_err(|e|e.message)?;
+        let failures=self.take_unsupported();
+        if !failures.is_empty(){return Err(failures.join("; "));}
+        let Some(quad)=quad else{return Ok(vec![])};
+        let crop=quad.plan.crop;
+        let sx=quad.w/f64::from(crop[2]-crop[0]);let sy=quad.h/f64::from(crop[3]-crop[1]);
+        let transform=Affine::translate((-quad.ax-f64::from(crop[0])*sx,-quad.ay-f64::from(crop[1])*sy))*Affine::scale_non_uniform(sx,sy);
+        let mut outlines=vec![];
+        for item in &quad.plan.scene.items {
+            if item.opacity<=0. || item.color[3]<=0. {continue;}
+            let ItemContent::Coverage{paths}=&item.content else{return Err("Bitmap/color image glyphs have no extrusion outline".into())};
+            // The geometry has no raster shadow/blur surface.
+            if item.blur>0. {continue;}
+            let mut color=item.color.map(|x|x as f32);color[3]*=item.opacity as f32;
+            for path in paths {
+                for mut shape in pm_text::render::scene::filled_contours(path,transform,tolerance) {
+                    if shape.is_empty(){continue;}
+                    outlines.push(pm_geom3d::extrusion::Outline{outer:shape.remove(0),holes:shape,color});
+                }
+            }
+        }
+        Ok(outlines)
+    }
+    fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
+        let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+        (
+            Painter {
+                outlines: &mut self.outlines,
+                bitmaps: &mut self.bitmaps,
+                unsupported: Vec::new(),
+                // Level 1 text and captions: today's Canvas2D weight.
+                smoothing: self.smoothing.level1(),
+            },
+            fonts,
+            &mut self.unsupported,
+        )
+    }
+
+    /// The scene's retained canvas and content key, or `None` without ink.
+    fn finish(&self, scene: TextScene) -> Option<TextPlan> {
+        let crop = scene.ink()?;
+        let key = scene_key(&scene, crop, self.generation);
+        Some(TextPlan {
+            scene: Arc::new(scene),
+            crop,
+            key,
+        })
+    }
+
+    /// The quad of a canvas of `canvas_w` × `canvas_h` px standing for a
+    /// `w` × `h` layer-px box anchored at `(ax, ay)`, cropped to `plan`.
+    fn quad(plan: TextPlan, w: f64, h: f64, ax: f64, ay: f64) -> TextQuad {
+        let (cw, ch) = (f64::from(plan.scene.width), f64::from(plan.scene.height));
+        // A canvas pixel spans w / canvas_w layer px (the canvas is
+        // stretched over the box, as the compositor's quad stretches it).
+        let (sx, sy) = (w / cw, h / ch);
+        let [x0, y0, x1, y1] = plan.crop.map(f64::from);
+        TextQuad {
+            plan,
+            w: (x1 - x0) * sx,
+            h: (y1 - y0) * sy,
+            ax: ax - x0 * sx,
+            ay: ay - y0 * sy,
+        }
+    }
+
+    /// A text layer at `time` drawn at raster scale `scale`
+    /// (`continuousRasterScale` of its scaled world matrix).
+    pub(crate) fn text_layer<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        scale: f64,
+    ) -> JsResult<Option<TextQuad>> {
+        self.text_layer_measured(scope, layer, time, scale, None)
+    }
+
+    /// [`Self::text_layer`] with what an earlier step of this layer
+    /// measured ([`Self::level1_raster`]), if anything.
+    pub(crate) fn text_layer_measured<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        scale: f64,
+        measured: Option<Level1Measured>,
+    ) -> JsResult<Option<TextQuad>> {
+        if pm_eval::text_level2::is_level2(layer) {
+            self.sync_fonts();
+            let raster = {
+                let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+                scope.text_raster(layer, time, fonts.measure())?
+            };
+            // The compatibility raster API still works for new text. Its
+            // pixels come from the same output-resolution painter, with
+            // the existing transparent ink margin.
+            let (w, h) = (raster.w + 8.0, raster.h + 8.0);
+            let (ax, ay) = (raster.anchor_x + 4.0, raster.anchor_y + 4.0);
+            let density = js_min(js_min(scale, 8192.0 / w), 8192.0 / h);
+            let target = (canvas_px(w, density), canvas_px(h, density));
+            let m = Affine::scale(density) * Affine::translate((ax, ay));
+            return self
+                .text_layer_level2(scope, layer, time, m, target)
+                .map(|p| p.map(|p| Self::quad(p, w, h, ax, ay)));
+        }
+        let (plan, raster) = self.level1_local(scope, layer, time, scale, measured, None)?;
+        Ok(plan.map(|plan| Self::local_quad(plan, raster)))
+    }
+
+    pub(crate) fn local_quad(plan: TextPlan, raster: TextRaster) -> TextQuad {
+        Self::quad(plan, raster.w, raster.h, raster.anchor_x, raster.anchor_y)
+    }
+
+    pub(crate) fn level1_local<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        scale: f64,
+        measured: Option<Level1Measured>,
+        mut defer: Option<(&mut Level1PaintRun, usize)>,
+    ) -> JsResult<(Option<TextPlan>, TextRaster)> {
+        self.sync_fonts_before_reset(|text| {
+            if let Some((run, _)) = defer.as_mut() {
+                run.flush(text);
+            }
+        });
+        let (raster, measured) = match self.still_measured(measured, layer, time) {
+            Some(m) => (m.raster, Some(m)),
+            None => self.level1_raster(scope, layer, time)?,
+        };
+        let density = js_min(js_min(scale, 8192.0 / raster.w), 8192.0 / raster.h);
+        let target = (canvas_px(raster.w, density), canvas_px(raster.h, density));
+        let world = Affine::scale(density) * Affine::translate((raster.anchor_x, raster.anchor_y));
+        let plan = self.level1_device(scope, layer, time, world, target, measured, defer)?;
+        Ok((plan, raster))
+    }
+
+    /// `scope.text_raster(layer, time, ..)` of a level 1 layer, measured
+    /// with the current measurer (fonts are not synced here), and, for a
+    /// plain layer (no animators, styles, or typography anchoring), what it
+    /// was measured from, for the layer's later steps to reuse. For a plain
+    /// layer `text_raster` is `text_geometry` of the resolved content, which
+    /// is what this computes; any other layer is `text_raster` itself.
+    pub(crate) fn level1_raster<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+    ) -> JsResult<(TextRaster, Option<Level1Measured>)> {
+        let generation = self.generation;
+        let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+        if !plain_level1(layer) {
+            return Ok((scope.text_raster(layer, time, fonts.measure())?, None));
+        }
+        let layer_id = std::ptr::from_ref(layer) as usize;
+        let before = fonts.measurer();
+        let content = scope.resolved_text_content(layer, time)?;
+        let cached = self
+            .level1_plans
+            .get(&layer_id)
+            .filter(|plan| plan.generation == generation && plan.content == content)
+            .and_then(|plan| plan.raster);
+        let raster = cached.unwrap_or_else(|| {
+            let g = text_geometry(&content, fonts.measure());
+            TextRaster {
+                w: g.w,
+                h: g.h,
+                anchor_x: g.anchor_x,
+                anchor_y: g.anchor_y,
+                selection: g.selection,
+                anchor_box: g.anchor_box,
+            }
+        });
+        // A measurement that asked the registry is not handed on: an ask
+        // that failed is asked again by the next measurement.
+        let measurer = fonts.measurer().filter(|now| before == Some(*now));
+        Ok((
+            raster,
+            Some(Level1Measured {
+                layer: layer_id,
+                time: time.to_bits(),
+                generation,
+                measurer,
+                content,
+                raster,
+            }),
+        ))
+    }
+
+    /// `measured` when it was measured for `layer` at `time` with the fonts
+    /// and the measurer the layer is measured with now.
+    fn still_measured(
+        &mut self,
+        measured: Option<Level1Measured>,
+        layer: &Node,
+        time: f64,
+    ) -> Option<Level1Measured> {
+        let measured = measured?;
+        let now = self.fonts.as_deref_mut()?.measurer()?;
+        (measured.layer == std::ptr::from_ref(layer) as usize
+            && measured.time == time.to_bits()
+            && measured.generation == self.generation
+            && measured.measurer == Some(now))
+        .then_some(measured)
+    }
+
+    /// Level 1 layout at its unchanged Canvas coordinates, painted through
+    /// the exact world matrix into output pixels.
+    pub(crate) fn text_layer_level1_device<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        self.text_layer_level1_device_measured(scope, layer, time, world, target, None)
+    }
+
+    /// [`Self::text_layer_level1_device`] with what an earlier step of this
+    /// layer measured ([`Self::level1_raster`]), if anything. A plain layer
+    /// resolves its content and measures its raster once here (or not at
+    /// all, given a measurement that still holds).
+    pub(crate) fn text_layer_level1_device_measured<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+        measured: Option<Level1Measured>,
+    ) -> JsResult<Option<TextPlan>> {
+        self.level1_device(scope, layer, time, world, target, measured, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn level1_device<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+        measured: Option<Level1Measured>,
+        mut defer: Option<(&mut Level1PaintRun, usize)>,
+    ) -> JsResult<Option<TextPlan>> {
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
+        self.sync_fonts_before_reset(|text| {
+            if let Some((run, _)) = defer.as_mut() {
+                run.flush(text);
+            }
+        });
+        if level1_animated(layer) {
+            if let Some((run, _)) = defer {
+                run.flush(self);
+            }
+            let raster = {
+                let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+                scope.text_raster(layer, time, fonts.measure())?
+            };
+            let m = world * Affine::translate((-raster.anchor_x, -raster.anchor_y));
+            let scene = self.text_scene_level1(scope, layer, time, m, target)?;
+            return Ok(self.finish(scene));
+        }
+        let (raster, d, cacheable_raster) = match self.still_measured(measured, layer, time) {
+            Some(m) => (m.raster, m.content, m.measurer.is_some()),
+            None => match self.level1_raster(scope, layer, time)? {
+                (raster, Some(m)) => (raster, m.content, m.measurer.is_some()),
+                // Typography anchoring (or level 2): resolved again, as
+                // before.
+                (raster, None) => (raster, scope.resolved_text_content(layer, time)?, false),
+            },
+        };
+        let m = world * Affine::translate((-raster.anchor_x, -raster.anchor_y));
+        // A layer whose content stays is laid out once; one that also stays
+        // in place is not painted or keyed again either.
+        let id = std::ptr::from_ref(layer) as usize;
+        if let Some((run, _)) = defer.as_mut()
+            && (self.level1_plans.len() + run.queued.len() >= LEVEL1_PLANS
+                || run.queued.iter().any(|entry| entry.id == id))
+        {
+            run.flush(self);
+        }
+        let matrix = m.as_coeffs().map(f64::to_bits);
+        let kept = self
+            .level1_plans
+            .get(&id)
+            .filter(|k| k.generation == self.generation && k.content == d);
+        if kept.is_some_and(|k| k.matrix == matrix && k.target == target) {
+            let k = self.level1_plans.get_mut(&id).expect("kept plan");
+            if cacheable_raster {
+                k.raster = Some(raster);
+            }
+            self.unsupported.extend_from_slice(&k.layout.unsupported);
+            self.unsupported.extend_from_slice(&k.unsupported);
+            return Ok(k.plan.clone());
+        }
+        let layout = match kept {
+            Some(k) => k.layout.clone(),
+            None => Arc::new(self.layout_level1(&d)),
+        };
+        self.unsupported.extend_from_slice(&layout.unsupported);
+        let mut cache = Level1Plan {
+            content: d,
+            raster: cacheable_raster.then_some(raster),
+            matrix,
+            target,
+            generation: self.generation,
+            layout,
+            plan: None,
+            unsupported: Vec::new(),
+        };
+        if let Some((run, slot)) = defer {
+            let [a, b, c, d, _, _] = m.as_coeffs();
+            if CanvasRows::available()
+                && self.smoothing.level1() == pm_text::render::smoothing::Smoothing::Canvas2d
+                && b == 0.0
+                && c == 0.0
+                && a > 0.0
+                && (a - d).abs() < 1e-9
+                && !cache
+                    .layout
+                    .lines
+                    .iter()
+                    .any(|(runs, _)| runs.iter().any(|r| r.synthetic_bold))
+            {
+                let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+                let faces: Level1Faces = cache
+                    .layout
+                    .lines
+                    .iter()
+                    .map(|(runs, _)| run_faces(fonts, runs, m))
+                    .collect();
+                let plain = faces.iter().flatten().all(|(face, _)| {
+                    !face.facts.has_color_table
+                        && !pm_text::render::bitmap::has_bitmaps(
+                            pm_text::render::outline::FaceRef::of(face),
+                        )
+                });
+                if plain {
+                    let mut rows = CanvasRows::default();
+                    let scene = self.paint_level1_faces(&cache, &faces, Some(&mut rows));
+                    let reserved = rows
+                        .reserve_bytes()
+                        .and_then(|bytes| run.reserved_mask_bytes.checked_add(bytes));
+                    if let Some(bytes) =
+                        reserved.filter(|&bytes| CanvasRows::fits_mask_cache(&self.bitmaps, bytes))
+                    {
+                        run.reserved_mask_bytes = bytes;
+                        run.queued.push(QueuedLevel1 {
+                            slot,
+                            id,
+                            cache,
+                            faces,
+                        });
+                        run.scenes.push((rows, scene));
+                        return Ok(None);
+                    }
+                }
+                run.flush(self);
+                let reported = self.unsupported.len();
+                let scene = self.paint_level1_faces(&cache, &faces, None);
+                cache.unsupported = self.unsupported[reported..].to_vec();
+                return Ok(self.admit_level1(id, cache, scene));
+            }
+            run.flush(self);
+        }
+        let reported = self.unsupported.len();
+        let scene = self.paint_level1(&cache.layout, m, target);
+        cache.unsupported = self.unsupported[reported..].to_vec();
+        Ok(self.admit_level1(id, cache, scene))
+    }
+
+    fn admit_level1(
+        &mut self,
+        id: usize,
+        mut cache: Level1Plan,
+        scene: TextScene,
+    ) -> Option<TextPlan> {
+        // The scene key follows the layout and target, preserving the
+        // existing cache identity regardless of how the masks were drawn.
+        let plan = scene.ink().map(|crop| TextPlan {
+            key: level1_key(
+                &cache.layout,
+                cache.matrix,
+                cache.target,
+                cache.generation,
+                crop,
+            ),
+            scene: Arc::new(scene),
+            crop,
+        });
+        if self.level1_plans.len() >= LEVEL1_PLANS {
+            self.level1_plans.clear();
+        }
+        cache.plan = plan.clone();
+        self.level1_plans.insert(id, cache);
+        plan
+    }
+
+    fn paint_level1_faces(
+        &mut self,
+        cache: &Level1Plan,
+        faces: &Level1Faces,
+        mut deferred: Option<&mut CanvasRows>,
+    ) -> TextScene {
+        let m = Affine::new(cache.matrix.map(f64::from_bits));
+        let mut scene = TextScene {
+            width: cache.target.0,
+            height: cache.target.1,
+            items: Vec::new(),
+        };
+        let (mut painter, _, unsupported) = self.painter();
+        for ((runs, origin), faces) in cache.layout.lines.iter().zip(faces) {
+            let refs = run_refs(runs, faces);
+            if let Some(rows) = deferred.as_deref_mut() {
+                painter.prepare_canvas_fill(
+                    &mut scene.items,
+                    &refs,
+                    *origin,
+                    m,
+                    cache.layout.fill,
+                    rows,
+                );
+            } else {
+                painter.fill_text(
+                    &mut scene.items,
+                    &refs,
+                    *origin,
+                    m,
+                    cache.layout.fill,
+                    1.0,
+                    0.0,
+                );
+            }
+        }
+        unsupported.append(&mut painter.unsupported);
+        scene
+    }
+
+    fn text_scene_level1<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        m: Affine,
+        target: (u32, u32),
+    ) -> JsResult<TextScene> {
+        let d = scope.resolved_text_content(layer, time)?;
+        if level1_animated(layer) {
+            let tc = text_content(&d);
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            let layout = fonts.measure().glyph_layout(&tc);
+            let state = scope.text_animation_state(layer, time, &layout)?;
+            let animated = scope.animated_raster_glyphs(&d, &layout, &state, fonts.measure());
+            if let Some(a) = animated {
+                let mut scene = TextScene {
+                    width: target.0,
+                    height: target.1,
+                    items: Vec::new(),
+                };
+                let (mut painter, fonts, unsupported) = self.painter();
+                for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
+                    if g.opacity.is_nan() || g.opacity <= 0.0 {
+                        continue;
+                    }
+                    let glyph_m = animated_canvas_matrix(
+                        m * Affine::translate((-a.x0, -a.y0)),
+                        (g.unit.x, *baseline),
+                        Affine::new(g.matrix),
+                    );
+                    let fill = match &g.color {
+                        Some(c) => JsValue::String(c.clone()),
+                        None => get(&g.style, "color").clone(),
+                    };
+                    // Each glyph draws between `save()` and `restore()`: a
+                    // rejected color leaves the canvas default, black.
+                    let style_color = fill_style(&fill, color::BLACK, &mut painter.unsupported);
+                    let blur = if g.blur > 0.01 {
+                        g.blur * affine_max_scale(m)
+                    } else {
+                        0.0
+                    };
+                    let style = text_content(&g.style);
+                    let runs = fonts.text_runs(&style, &g.unit.text, 0.0);
+                    let faces = run_faces(fonts, &runs, glyph_m);
+                    let refs = run_refs(&runs, &faces);
+                    painter.fill_text(
+                        &mut scene.items,
+                        &refs,
+                        (0.0, 0.0),
+                        glyph_m,
+                        style_color,
+                        g.opacity,
+                        blur,
+                    );
+                }
+                unsupported.append(&mut painter.unsupported);
+                return Ok(scene);
+            }
+        }
+        Ok(self.plain_scene_level1(&d, m, target))
+    }
+
+    /// A level 1 layer without animators or styles, laid out from its
+    /// resolved content `d` and painted through `m`.
+    fn plain_scene_level1(&mut self, d: &Content, m: Affine, target: (u32, u32)) -> TextScene {
+        let layout = self.layout_level1(d);
+        self.unsupported.extend_from_slice(&layout.unsupported);
+        self.paint_level1(&layout, m, target)
+    }
+
+    /// A plain level 1 layer's lines laid out from its resolved content:
+    /// everything its scene needs except the matrix and the target.
+    fn layout_level1(&mut self, d: &Content) -> Level1Layout {
+        let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+        let g = text_geometry(d, fonts.measure());
+        let tc = text_content(d);
+        let fill = {
+            let c = get(d, "color");
+            if c.truthy() {
+                c.clone()
+            } else {
+                JsValue::from("#fff")
+            }
+        };
+        let mut unsupported = Vec::new();
+        let fill = fill_style(&fill, color::BLACK, &mut unsupported);
+        let lines = fonts
+            .line_runs(&tc)
+            .iter()
+            .enumerate()
+            .map(|(row, line)| {
+                // These f32 casts belong to Blink's layout-origin contract;
+                // glyph paths and the world transform stay in f64.
+                let runs = fonts.text_runs(&tc, &line.text, tc.tracking.unwrap_or(0.0));
+                let origin = (
+                    f64::from((f64::from(g.x as f32) + line.x) as f32),
+                    f64::from(((g.pad + row as f64 * tc.line_height()) + tc.size() * 0.82) as f32),
+                );
+                (runs, origin)
+            })
+            .collect();
+        Level1Layout {
+            lines,
+            fill,
+            unsupported,
+        }
+    }
+
+    /// `layout` painted through `m` into a `target`-sized scene.
+    fn paint_level1(&mut self, layout: &Level1Layout, m: Affine, target: (u32, u32)) -> TextScene {
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        let (mut painter, fonts, unsupported) = self.painter();
+        for (runs, origin) in &layout.lines {
+            let faces = run_faces(fonts, runs, m);
+            let refs = run_refs(runs, &faces);
+            painter.fill_text(&mut scene.items, &refs, *origin, m, layout.fill, 1.0, 0.0);
+        }
+        unsupported.append(&mut painter.unsupported);
+        scene
+    }
+
+    /// A `compat` level 2 text layer at output resolution: level 2 layout
+    /// (Parley) drawn with exact outlines at its positions through
+    /// `m` (layer pixels to target pixels, size anchor included) into a
+    /// `target`-sized scene, cropped to its ink.
+    pub(crate) fn text_layer_level2<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        m: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
+        self.sync_fonts();
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.level2_text(layer, time, fonts.measure(), true, true)?
+        };
+        let m = m * Affine::translate((frame.offset.x, frame.offset.y));
+        let [a, b, c, d, _, _] = m.as_coeffs();
+        let aa = a * a + b * b;
+        let cc = c * c + d * d;
+        let bb = a * c + b * d;
+        let scale = ((aa + cc + ((aa - cc) * (aa - cc) + 4.0 * bb * bb).sqrt()) / 2.0).sqrt();
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        let mut painter = Painter {
+            outlines: &mut self.outlines,
+            bitmaps: &mut self.bitmaps,
+            unsupported: Vec::new(),
+            // Level 2: the macOS look (CoreText with font smoothing).
+            smoothing: self.smoothing.level2(),
+        };
+        for draw in &frame.draws {
+            if !draw.opacity.is_finite() || draw.opacity <= 0.0 {
+                continue;
+            }
+            let run = &draw.run;
+            let face = pm_text::render::outline::FaceRef {
+                data: draw.data.as_slice(),
+                index: 0,
+                id: draw.data.id(),
+            };
+            let refs = [pm_text::render::scene::Run {
+                face,
+                size: run.size,
+                coords: pm_text::render::outline::Coords::Normalized(&run.coords),
+                synthetic_bold: run.synthetic_bold,
+                synthetic_italic: false,
+                oblique: f64::from(run.skew),
+                glyphs: &run.glyphs,
+                bitmap_size: None,
+            }];
+            let fill = fill_style(&draw.color, color::BLACK, &mut painter.unsupported);
+            painter.fill_text(
+                &mut scene.items,
+                &refs,
+                (0.0, 0.0),
+                m * Affine::new(draw.matrix),
+                fill,
+                draw.opacity,
+                draw.blur * scale,
+            );
+        }
+        self.unsupported.append(&mut painter.unsupported);
+        Ok(self.finish(scene))
+    }
+
+    /// A `compat` level 2 captions layer at output resolution: the same
+    /// frame (layout, word states, box) drawn with exact outlines at
+    /// exact positions through `m` (layer pixels to target pixels).
+    pub(crate) fn captions_layer_level2<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        m: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.caption_frame(layer, time, fonts.measure())?
+        };
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        let base = m * Affine::translate((frame.block.x0, frame.block.y0));
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        self.caption_items(&frame, base, &mut scene);
+        Ok(self.finish(scene))
+    }
+
+    pub(crate) fn captions_layer_level1_device<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.caption_frame(layer, time, fonts.measure())?
+        };
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        self.caption_items(
+            &frame,
+            world * Affine::translate((frame.block.x0, frame.block.y0)),
+            &mut scene,
+        );
+        Ok(self.finish(scene))
+    }
+
+    /// A captions layer at `time` drawn at raster scale `scale`.
+    pub(crate) fn captions_layer<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        scale: f64,
+    ) -> JsResult<Option<TextQuad>> {
+        self.sync_fonts();
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.caption_frame(layer, time, fonts.measure())?
+        };
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        let (scene, w, h, ax, ay) = self.caption_scene(&frame, scale);
+        Ok(self.finish(scene).map(|p| Self::quad(p, w, h, ax, ay)))
+    }
+
+    /// The captions rasterizer's `draw(frame, scale)` as a scene, with the
+    /// raster box and anchor.
+    pub fn caption_scene(
+        &mut self,
+        f: &CaptionFrame,
+        scale: f64,
+    ) -> (TextScene, f64, f64, f64, f64) {
+        let block = f.block;
+        let margin = f.margin;
+        let w = block.x1 - block.x0 + margin * 2.0;
+        let h = block.y1 - block.y0 + margin * 2.0;
+        let density = js_max(0.05, js_min(js_min(scale, 8192.0 / w), 8192.0 / h));
+        let mut scene = TextScene {
+            width: canvas_px(w, density),
+            height: canvas_px(h, density),
+            items: Vec::new(),
+        };
+        let m0 = Affine::scale(density) * Affine::translate((margin, margin));
+        self.caption_items(f, m0, &mut scene);
+        (scene, w, h, margin - block.x0, margin - block.y0)
+    }
+
+    /// The captions rasterizer's draws of frame `f` through `m0` (block
+    /// pixels, origin at the block's top-left corner, to device pixels).
+    fn caption_items(&mut self, f: &CaptionFrame, m0: Affine, scene: &mut TextScene) {
+        let style = &f.style;
+        let layout = &f.layout;
+        let block = f.block;
+        let pad = if style.boxed { style.box_padding } else { 0.0 };
+        // The style each word's `save()` restores: the box fill once the box
+        // is drawn, else the canvas default, black.
+        let mut restored = color::BLACK;
+        if style.boxed && style.box_opacity > 0.0 {
+            // A rejected box color fills with the canvas default, black.
+            let fill = hex_to_rgba(
+                &style.box_color.to_string_lossy(),
+                style.box_opacity / 100.0,
+            )
+            .unwrap_or(color::BLACK);
+            restored = fill;
+            let path = rounded_rect(
+                0.0,
+                0.0,
+                block.x1 - block.x0,
+                block.y1 - block.y0,
+                style.box_radius,
+            );
+            let item = fill_path(path, m0, fill, 1.0);
+            if let Some(item) = item {
+                scene.items.push(item);
+            }
+        }
+        let content = pm_eval::captions::measure_content(style, layout.size);
+        let tracking = content.tracking.unwrap_or(0.0);
+        let ascent = layout.size * 0.82 + (layout.line_height - layout.size) / 2.0;
+        let stroke = if style.stroke > 0.0 {
+            style.stroke * layout.size / style.size
+        } else {
+            0.0
+        };
+        // `strokeStyle` is set inside each word's `save()`; a rejected color
+        // keeps the canvas default, black.
+        let stroke_color =
+            hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0).unwrap_or(color::BLACK);
+        let (mut painter, fonts, unsupported) = self.painter();
+        for line in &layout.lines {
+            for word in &line.words {
+                let state =
+                    f.states
+                        .get(word.index)
+                        .copied()
+                        .unwrap_or(pm_eval::captions::WordState {
+                            alpha: 1.0,
+                            scale: 1.0,
+                            highlighted: false,
+                        });
+                if state.alpha <= 0.0 {
+                    continue;
+                }
+                let x = pad + word.x;
+                let y = pad + line.y + ascent;
+                let mut m = m0;
+                if state.scale != 1.0 {
+                    let cx = x + word.width / 2.0;
+                    let cy = pad + line.y + layout.line_height / 2.0;
+                    m = m
+                        * Affine::translate((cx, cy))
+                        * Affine::scale(state.scale)
+                        * Affine::translate((-cx, -cy));
+                }
+                let text = word.text.to_string_lossy();
+                let runs = fonts.text_runs(&content, &text, tracking);
+                let faces = run_faces(fonts, &runs, m);
+                let refs = run_refs(&runs, &faces);
+                if stroke > 0.0 {
+                    painter.stroke_text(
+                        &mut scene.items,
+                        &refs,
+                        (x, y),
+                        m,
+                        stroke * 2.0,
+                        stroke_color,
+                        state.alpha,
+                    );
+                }
+                let fill = if state.highlighted {
+                    &style.highlight_color
+                } else {
+                    &style.fill
+                };
+                let fill = css_color(&fill.to_string_lossy(), restored, &mut painter.unsupported);
+                painter.fill_text(&mut scene.items, &refs, (x, y), m, fill, state.alpha, 0.0);
+            }
+        }
+        unsupported.append(&mut painter.unsupported);
+    }
+}
+
+/// The faces of `runs` and, for color bitmap faces, the size their glyphs
+/// draw at under the device transform `m`.
+fn run_faces(
+    fonts: &mut dyn TextFonts,
+    runs: &[GlyphRun],
+    m: Affine,
+) -> Vec<(FaceInfo, Option<f32>)> {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let scale = (a * d - b * c).abs().sqrt();
+    runs.iter()
+        .map(|r| {
+            let info = fonts.face(r.face).clone();
+            let bitmap = if info.facts.has_sbix {
+                fonts.em_advance(r.face, (f64::from(r.size) * scale) as f32)
+            } else {
+                None
+            };
+            (info, bitmap)
+        })
+        .collect()
+}
+
+fn run_refs<'a>(
+    runs: &'a [GlyphRun],
+    faces: &'a [(FaceInfo, Option<f32>)],
+) -> Vec<pm_text::render::scene::Run<'a>> {
+    runs.iter()
+        .zip(faces)
+        .map(|(r, (f, bitmap))| pm_text::render::scene::Run {
+            face: pm_text::render::outline::FaceRef::of(f),
+            size: r.size,
+            coords: pm_text::render::outline::Coords::User(&r.coords),
+            synthetic_bold: r.synthetic_bold,
+            synthetic_italic: r.synthetic_italic,
+            oblique: 0.0,
+            glyphs: &r.glyphs,
+            bitmap_size: *bitmap,
+        })
+        .collect()
+}
+
+/// `rasterAnimatedText` calls Canvas `setTransform`, `translate`, then
+/// `transform`. Blink clamps each API's arguments to float and SkCanvas
+/// concatenates float matrices. Keeping the whole chain in f64 until glyph
+/// snapping can put a half-pixel baseline on the other side of its pixel.
+fn animated_canvas_matrix(canvas: Affine, origin: (f64, f64), pose: Affine) -> Affine {
+    fn scalar(v: f64) -> f32 {
+        v.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
+    }
+    fn concat(lhs: Affine, rhs: Affine) -> Affine {
+        let [a, b, c, d, e, f] = lhs.as_coeffs().map(scalar);
+        let [g, h, i, j, k, l] = rhs.as_coeffs().map(scalar);
+        Affine::new(
+            [
+                a * g + c * h,
+                b * g + d * h,
+                a * i + c * j,
+                b * i + d * j,
+                (a * k + c * l) + e,
+                (b * k + d * l) + f,
+            ]
+            .map(f64::from),
+        )
+    }
+    let canvas = Affine::new(canvas.as_coeffs().map(|v| f64::from(scalar(v))));
+    concat(concat(canvas, Affine::translate(origin)), pose)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn animated_canvas_calls_keep_float_rounding_before_glyph_snapping() {
+        // Synthetic 42px text with a fractional animator displacement.
+        // Canvas's float translate/concat produces the float immediately
+        // below 34.5; collapsing the calls in double produces exactly 34.5.
+        // Those snap to different rows even though the layout is identical.
+        let baseline = 42.0 * 0.82;
+        let shift = 1.0 / 137.0;
+        let top = baseline - 42.0 + shift - 4.0;
+        let canvas = Affine::new([0.75, 0.0, 0.0, 0.75, 0.0, -top * 0.75]);
+        let pose = Affine::translate((0.0, shift));
+        let actual = animated_canvas_matrix(canvas, (0.0, baseline), pose);
+        let double = canvas * Affine::translate((0.0, baseline)) * pose;
+        assert_eq!(actual.as_coeffs()[5], 34.499_996_185_302_734);
+        assert_eq!((actual.as_coeffs()[5] + 0.5).floor(), 34.0);
+        assert_eq!((double.as_coeffs()[5] + 0.5).floor(), 35.0);
+    }
+
+    /// The faces a document's text lays out with are asked for once per
+    /// edition, in one round trip: every family of each text layer's canvas
+    /// font and the standard font at its description, nested compositions'
+    /// layers included, each query once.
+    #[test]
+    fn a_documents_text_fonts_are_asked_for_ahead_once_per_edition() {
+        use pm_text::answers::Query;
+        use pm_text::font::FontDesc;
+        use pm_text::served::{FontServer, Served};
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Asked(Mutex<Vec<Vec<Query>>>);
+        impl FontServer for Asked {
+            fn serve(&self, queries: &[Query]) -> Result<Served, String> {
+                self.0.lock().unwrap().push(queries.to_vec());
+                Err("no registry".into())
+            }
+            fn generation(&self) -> u64 {
+                0
+            }
+        }
+        let asked = Arc::new(Asked::default());
+        let mut cx = TextContext::default();
+        cx.set_fonts(Some(Box::new(served::ServedFonts::new(
+            asked.clone(),
+            Arc::new(served::NoSeeds),
+        ))));
+        let doc = |edition: u64| {
+            pm_model::Document::new(
+                Some(
+                    pm_model::json::parse(
+                        r#"{"compId":"C1","comps":{
+                            "C1":{"layers":[
+                              {"type":"text","d":{"text":"a ✓","font":"Avenir","weight":600,"italic":true,"size":40}},
+                              {"type":"shape","d":{"font":"Ignored"}},
+                              {"type":"text","d":{"text":"b","font":"Avenir","weight":600,"italic":true,"size":40}}]},
+                            "C2":{"layers":[{"type":"text","d":{"text":"c","size":20.5}}]}}}"#,
+                    )
+                    .unwrap(),
+                ),
+                edition,
+            )
+        };
+        let first = doc(1);
+        cx.prefetch_fonts(&first);
+        cx.prefetch_fonts(&first);
+        let asked_once = asked.0.lock().unwrap().clone();
+        assert_eq!(asked_once.len(), 1, "one round trip");
+        // The registry did not answer: no layer built next is refused for it.
+        assert_eq!(cx.take_unsupported(), Vec::<String>::new());
+        let queries = &asked_once[0];
+        let avenir = FontDesc {
+            weight: 600.0,
+            italic: true,
+            size: 40.0,
+        };
+        let nested = FontDesc {
+            weight: 500.0,
+            italic: false,
+            size: 20.5,
+        };
+        for want in [
+            Query::family("Avenir", &avenir),
+            Query::family("SF Pro Display", &avenir),
+            Query::family("-apple-system", &avenir),
+            Query::family(
+                pm_text::blink::measure::generic_family("sans-serif"),
+                &avenir,
+            ),
+            Query::standard(&avenir),
+            Query::family("SF Pro Display", &nested),
+            Query::standard(&nested),
+        ] {
+            assert!(queries.contains(&want), "{want:?} in {queries:?}");
+        }
+        assert!(
+            !queries
+                .iter()
+                .any(|q| matches!(q, Query::Family { name, .. } if name == "Ignored"))
+        );
+        let unique: std::collections::HashSet<String> =
+            queries.iter().map(|q| format!("{q:?}")).collect();
+        assert_eq!(unique.len(), queries.len(), "each query once");
+        // Another edition asks again.
+        cx.prefetch_fonts(&doc(2));
+        assert_eq!(asked.0.lock().unwrap().len(), 2);
+        // The stored form keeps the open composition's layers at the top.
+        let stored = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r#"{"layers":[{"type":"text","d":{"font":"Avenir","size":12}}]}"#,
+                )
+                .unwrap(),
+            ),
+            1,
+        );
+        let queries = document_font_queries(stored.root().unwrap());
+        assert!(
+            queries
+                .iter()
+                .any(|q| matches!(q, Query::Family { name, .. } if name == "Avenir"))
+        );
+    }
+
+    #[test]
+    fn rasters_keep_only_their_ink_through_the_same_layer_rectangle() {
+        use kurbo::Shape;
+        let scene = TextScene {
+            width: 244,
+            height: 128,
+            items: vec![
+                fill_path(
+                    kurbo::Rect::new(27.0, 48.0, 208.0, 82.0).to_path(0.1),
+                    Affine::IDENTITY,
+                    color::BLACK,
+                    1.0,
+                )
+                .unwrap(),
+            ],
+        };
+        let cx = TextContext::default();
+        {
+            let plan = cx.finish(scene.clone()).unwrap();
+            let [x0, y0, x1, y1] = plan.crop;
+            assert_eq!(Some(plan.crop), scene.ink());
+            assert!(x1 - x0 < scene.width && y1 - y0 < scene.height);
+            // A 488 × 256 layer box over the 244 × 128 canvas: 2 layer px
+            // per canvas px, anchored at (54, 128).
+            let quad = TextContext::quad(plan, 488.0, 256.0, 54.0, 128.0);
+            assert_eq!(
+                (quad.w, quad.h, quad.ax, quad.ay),
+                (
+                    f64::from(x1 - x0) * 2.0,
+                    f64::from(y1 - y0) * 2.0,
+                    54.0 - f64::from(x0) * 2.0,
+                    128.0 - f64::from(y0) * 2.0
+                )
+            );
+        }
+        let empty = TextScene {
+            width: 244,
+            height: 128,
+            items: Vec::new(),
+        };
+        assert!(cx.finish(empty).is_none());
+    }
+
+    #[test]
+    fn raster_scale_matches_the_compositor() {
+        assert_eq!(
+            continuous_raster_scale(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            1.0
+        );
+        assert_eq!(
+            continuous_raster_scale(&[0.5, 0.0, 0.0, 0.5, 9.0, 9.0]),
+            0.5
+        );
+        assert_eq!(
+            continuous_raster_scale(&[1.1, 0.0, 0.0, 1.1, 0.0, 0.0]),
+            1.25
+        );
+        assert_eq!(
+            continuous_raster_scale(&[0.01, 0.0, 0.0, 0.01, 0.0, 0.0]),
+            0.25
+        );
+        assert_eq!(
+            continuous_raster_scale(&[100.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            32.0
+        );
+        let r = std::f64::consts::FRAC_PI_4;
+        let m = [2.0 * r.cos(), 2.0 * r.sin(), -r.sin(), r.cos(), 0.0, 0.0];
+        assert_eq!(continuous_raster_scale(&m), 2.0);
+        assert_eq!(
+            continuous_raster_scale(&[f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            1.0
+        );
+    }
+
+    #[test]
+    fn caption_colors_follow_hex_to_rgba() {
+        assert_eq!(hex_to_rgba("#000000", 0.72), Some([0.0, 0.0, 0.0, 0.72]));
+        assert_eq!(hex_to_rgba("#00000099", 1.0), Some([0.0, 0.0, 0.0, 0.6]));
+        assert_eq!(hex_to_rgba("#FFFFFF", 0.94), Some([1.0, 1.0, 1.0, 0.94]));
+        assert_eq!(hex_to_rgba("FF0000", 2.0), Some([1.0, 0.0, 0.0, 1.0]));
+        // `rgba(255,15,NaN,1)`, `rgba(NaN,...)` and `rgba(...,NaN)`: the
+        // canvas rejects them.
+        assert_eq!(hex_to_rgba("#fff", 1.0), None);
+        assert_eq!(hex_to_rgba("red", 1.0), None);
+        assert_eq!(hex_to_rgba("#000000zz", 1.0), None);
+        assert_eq!(hex_to_rgba("#000000", f64::NAN), None);
+        // `parseInt` takes a hex prefix: `1g` is 1.
+        assert_eq!(
+            hex_to_rgba("#1g0000", 1.0),
+            Some([1.0 / 255.0, 0.0, 0.0, 1.0])
+        );
+    }
+
+    /// A font change (a new generation from the registry, or new fonts)
+    /// drops glyph caches and makes later raster keys new.
+    #[test]
+    fn font_changes_drop_glyph_caches() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        struct Fonts(Arc<AtomicU64>);
+        impl TextFonts for Fonts {
+            fn measure(&mut self) -> &mut dyn TextMeasure {
+                unreachable!("not laid out")
+            }
+            fn line_runs(&mut self, _: &TextContent) -> Vec<LineRuns> {
+                unreachable!("not laid out")
+            }
+            fn text_runs(&mut self, _: &TextContent, _: &str, _: f64) -> Vec<GlyphRun> {
+                unreachable!("not laid out")
+            }
+            fn face(&mut self, _: FaceId) -> &FaceInfo {
+                unreachable!("not laid out")
+            }
+            fn generation(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        let generation = Arc::new(AtomicU64::new(1));
+        let mut cx = TextContext::default();
+        cx.set_fonts(Some(Box::new(Fonts(generation.clone()))));
+        let key = cx.generation;
+        cx.sync_fonts();
+        assert_eq!(cx.generation, key);
+        generation.store(2, Ordering::SeqCst);
+        cx.sync_fonts();
+        assert_ne!(cx.generation, key, "and re-keys rasters");
+        let key = cx.generation;
+        cx.sync_fonts();
+        assert_eq!(cx.generation, key);
+    }
+
+    /// One text layer's measurement in a frame (OPT-T3): a fake measurer
+    /// that counts `measure_lines` (each `text_geometry`, so each
+    /// `text_raster` of a plain layer), sizes lines from their text, and
+    /// lays out no glyph runs (nothing to paint, so no platform fonts).
+    mod measured_once {
+        use super::*;
+        use pm_eval::text_geom::MeasuredLine;
+        use pm_text::compat::GlyphLayout;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        #[derive(Clone, Default)]
+        struct Probe {
+            /// `measure_lines` calls.
+            lines: Arc<AtomicUsize>,
+            /// What [`TextFonts::measurer`] answers.
+            token: Arc<AtomicU64>,
+            /// Each measurement moves the token (a registry round trip).
+            asks: bool,
+            /// [`TextFonts::measurer`] is unknown.
+            unknown: bool,
+        }
+
+        impl Probe {
+            fn lines(&self) -> usize {
+                self.lines.load(Ordering::SeqCst)
+            }
+        }
+
+        impl TextMeasure for Probe {
+            fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine> {
+                self.lines.fetch_add(1, Ordering::SeqCst);
+                if self.asks {
+                    self.token.fetch_add(1, Ordering::SeqCst);
+                }
+                let size = d.size();
+                d.text
+                    .split('\n')
+                    .map(|t| {
+                        let width = t.chars().count() as f64 * size * 0.55;
+                        let ink = [0.5, -size * 0.71, width - 0.25, size * 0.19];
+                        MeasuredLine {
+                            text: t.to_owned(),
+                            width,
+                            ink,
+                            anchor_ink: ink,
+                        }
+                    })
+                    .collect()
+            }
+            fn plain_width(&mut self, d: &TextContent, text: &str) -> f64 {
+                text.chars().count() as f64 * d.size() * 0.55
+            }
+            fn glyph_layout(&mut self, _: &TextContent) -> GlyphLayout {
+                GlyphLayout::default()
+            }
+            fn spaced_width(&mut self, d: &TextContent, text: &str) -> f64 {
+                self.plain_width(d, text)
+            }
+        }
+
+        impl TextFonts for Probe {
+            fn measure(&mut self) -> &mut dyn TextMeasure {
+                self
+            }
+            fn line_runs(&mut self, _: &TextContent) -> Vec<LineRuns> {
+                Vec::new()
+            }
+            fn text_runs(&mut self, _: &TextContent, _: &str, _: f64) -> Vec<GlyphRun> {
+                Vec::new()
+            }
+            fn face(&mut self, _: FaceId) -> &FaceInfo {
+                unreachable!("no glyph runs")
+            }
+            fn measurer(&mut self) -> Option<u64> {
+                (!self.unknown).then(|| self.token.load(Ordering::SeqCst))
+            }
+        }
+
+        fn context(probe: &Probe) -> TextContext {
+            let mut cx = TextContext::default();
+            cx.set_fonts(Some(Box::new(probe.clone())));
+            cx
+        }
+
+        fn layer(id: &str, d: &str) -> String {
+            let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+            let p = [
+                ("anchor.x", 0.0),
+                ("anchor.y", 0.0),
+                ("x", 160.0),
+                ("y", 90.0),
+                ("scale.x", 25.0),
+                ("scale.y", 25.0),
+                ("rotation", 0.0),
+                ("opacity", 100.0),
+            ]
+            .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+            .join(",");
+            format!(
+                r#"{{"id":"{id}","type":"text","name":"{id}","from":0,"dur":10,"on":true,
+                    "lock":false,"shy":false,"threeD":false,"solo":false,"blend":"normal",
+                    "mblur":false,"parent":null,"group":null,"matteSource":null,"masks":[],
+                    "fx":[],"transitionIn":null,"transitionOut":null,"p":{{{p}}},"d":{d}}}"#
+            )
+        }
+
+        /// Plain `a` and `b`, and `a` with typography anchoring (measured
+        /// through `text_raster` itself).
+        fn document() -> pm_model::Document {
+            let layers = [
+                layer(
+                    "a",
+                    r##"{"text":"Hello","size":40,"align":"center","color":"#ffffff"}"##,
+                ),
+                layer(
+                    "b",
+                    r#"{"text":"Two\nlines here","size":25.9,"weight":550}"#,
+                ),
+                layer(
+                    "anchored",
+                    r#"{"text":"Hello","size":40,"fontAnchorBounds":{"x0":1,"y0":-30,"x1":90,"y1":9}}"#,
+                ),
+            ];
+            let root = pm_model::json::parse(&format!(
+                r#"{{"id":"p","compId":"c","w":320,"h":180,"fps":30,"dur":10,"comps":{{}},"layers":[{}]}}"#,
+                layers.join(",")
+            ))
+            .unwrap();
+            pm_model::Document::new(Some(pm_model::canonical::canonical_project(root)), 1)
+        }
+
+        fn find<'d>(scope: &Scope<'_, 'd>, id: &str) -> &'d Node {
+            scope
+                .layers()
+                .iter()
+                .find(|l| crate::js::layer_id(l) == id)
+                .expect("layer")
+        }
+
+        /// Every bit of a placement.
+        fn bits(r: &TextRaster) -> [u64; 16] {
+            let (s, a) = (r.selection, r.anchor_box);
+            [
+                r.w, r.h, r.anchor_x, r.anchor_y, s.x0, s.y0, s.x1, s.y1, s.w, s.h, a.x0, a.y0,
+                a.x1, a.y1, a.w, a.h,
+            ]
+            .map(f64::to_bits)
+        }
+
+        /// `scope.text_raster`, what every step measured before OPT-T3.
+        fn reference<'d>(
+            cx: &mut TextContext,
+            scope: &mut Scope<'_, 'd>,
+            layer: &'d Node,
+            time: f64,
+        ) -> TextRaster {
+            let fonts = cx.fonts.as_deref_mut().unwrap();
+            scope.text_raster(layer, time, fonts.measure()).unwrap()
+        }
+
+        /// The layer's kept device plan inputs: (content, matrix bits, target).
+        fn kept(cx: &TextContext, layer: &Node) -> (Content, [u64; 6], (u32, u32)) {
+            let k = &cx.level1_plans[&(std::ptr::from_ref(layer) as usize)];
+            (k.content.clone(), k.matrix, k.target)
+        }
+
+        /// The device matrix and target the steps before OPT-T3 used.
+        fn device_inputs(world: Affine, r: &TextRaster) -> [u64; 6] {
+            (world * Affine::translate((-r.anchor_x, -r.anchor_y)))
+                .as_coeffs()
+                .map(f64::to_bits)
+        }
+
+        #[test]
+        fn a_plain_layers_placement_and_content_are_text_rasters_bit_for_bit() {
+            let doc = document();
+            let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+            let mut ev = pm_eval::Evaluator::new();
+            let mut scope = Scope::new(&mut ev, &comp, &comp);
+            let probe = Probe::default();
+            let mut cx = context(&probe);
+            for id in ["a", "b", "anchored"] {
+                let layer = find(&scope, id);
+                for time in [0.0, 0.5, 1.25] {
+                    let want = reference(&mut cx, &mut scope, layer, time);
+                    let (got, measured) = cx.level1_raster(&mut scope, layer, time).unwrap();
+                    assert_eq!(bits(&got), bits(&want), "{id} at {time}");
+                    match id {
+                        "a" | "b" => {
+                            let m = measured.expect("a plain layer hands its measurement on");
+                            assert_eq!(bits(&m.raster), bits(&want));
+                            assert!(m.content == scope.resolved_text_content(layer, time).unwrap());
+                        }
+                        _ => assert!(measured.is_none(), "{id}: measured by text_raster"),
+                    }
+                }
+            }
+        }
+
+        /// Preview crop, device paint, and local paint share the same plain
+        /// geometry across frames, keeping the exact device inputs.
+        #[test]
+        fn plain_geometry_is_reused_across_frames() {
+            let doc = document();
+            let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+            let mut ev = pm_eval::Evaluator::new();
+            let mut scope = Scope::new(&mut ev, &comp, &comp);
+            let probe = Probe::default();
+            let mut cx = context(&probe);
+            let layer = find(&scope, "a");
+            let world = |f: f64| Affine::new([0.25 * f, 0.0, 0.0, 0.25 * f, 960.5, 540.25]);
+            let target = (1920, 1080);
+            // The first frame also lays the layer out (one more measurement).
+            let (_, measured) = cx.level1_raster(&mut scope, layer, 0.0).unwrap();
+            cx.text_layer_level1_device_measured(
+                &mut scope,
+                layer,
+                0.0,
+                world(1.0),
+                target,
+                measured,
+            )
+            .unwrap();
+            assert_eq!(probe.lines(), 2);
+            for (frame, f) in [1.05, 1.01, 0.97, 0.93].into_iter().enumerate() {
+                let time = 0.5 + frame as f64 / 30.0;
+                let want = reference(&mut cx, &mut scope, layer, time);
+                let before = probe.lines();
+                // `preview_crop`, then `text_quad`'s device path.
+                let (_, measured) = cx.level1_raster(&mut scope, layer, time).unwrap();
+                cx.text_layer_level1_device_measured(
+                    &mut scope,
+                    layer,
+                    time,
+                    world(f),
+                    target,
+                    measured,
+                )
+                .unwrap();
+                assert_eq!(probe.lines(), before, "frame {frame}: reused geometry");
+                let (content, matrix, kept_target) = kept(&cx, layer);
+                assert_eq!(matrix, device_inputs(world(f), &want));
+                assert_eq!(kept_target, target);
+                assert!(content == scope.resolved_text_content(layer, time).unwrap());
+                // The device path also reuses geometry without a preview crop.
+                let before = probe.lines();
+                cx.text_layer_level1_device(&mut scope, layer, time, world(f), target)
+                    .unwrap();
+                assert_eq!(probe.lines(), before);
+                assert_eq!(kept(&cx, layer).1, device_inputs(world(f), &want));
+                // Local paint uses the same geometry at its own density.
+                for measured in [None, cx.level1_raster(&mut scope, layer, time).unwrap().1] {
+                    let before = probe.lines();
+                    cx.text_layer_measured(&mut scope, layer, time, f, measured)
+                        .unwrap();
+                    assert_eq!(probe.lines(), before);
+                    let density = js_min(js_min(f, 8192.0 / want.w), 8192.0 / want.h);
+                    let at_rest =
+                        Affine::scale(density) * Affine::translate((want.anchor_x, want.anchor_y));
+                    let (_, matrix, kept_target) = kept(&cx, layer);
+                    assert_eq!(matrix, device_inputs(at_rest, &want));
+                    assert_eq!(
+                        kept_target,
+                        (canvas_px(want.w, density), canvas_px(want.h, density))
+                    );
+                }
+            }
+        }
+
+        /// A measurement handed over by a caller is valid for its own inputs.
+        /// Other layers and times can use their own cached geometry.
+        #[test]
+        fn a_measurement_holds_only_for_its_own_inputs() {
+            let doc = document();
+            let comp = pm_eval::Comp::resolve(&doc, "c").unwrap();
+            let mut ev = pm_eval::Evaluator::new();
+            let mut scope = Scope::new(&mut ev, &comp, &comp);
+            let probe = Probe::default();
+            let mut cx = context(&probe);
+            let (a, b) = (find(&scope, "a"), find(&scope, "b"));
+            // Lay both out first, so a reuse costs no measurement.
+            for layer in [a, b] {
+                cx.text_layer_level1_device(&mut scope, layer, 0.5, WORLD, TARGET)
+                    .unwrap();
+            }
+            // Its own inputs: reused.
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            assert!(!afresh(&probe, &mut cx, &mut scope, a, 0.5, m));
+            // Another layer, at the same time.
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            assert!(cx.still_measured(m, b, 0.5).is_none());
+            assert!(!afresh(&probe, &mut cx, &mut scope, b, 0.5, None));
+            let want = reference(&mut cx, &mut scope, b, 0.5);
+            assert_eq!(
+                kept(&cx, b).1,
+                device_inputs(WORLD, &want),
+                "b's own placement"
+            );
+            // Another time (the same content).
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            let later = 0.5 + 1.0 / 30.0;
+            assert!(cx.still_measured(m, a, later).is_none());
+            assert!(!afresh(&probe, &mut cx, &mut scope, a, later, None));
+            // Other fonts (a new generation).
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            cx.set_weight(TextWeight::Exact);
+            assert!(afresh(&probe, &mut cx, &mut scope, a, 0.5, m));
+            // Another measurer.
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            probe.token.fetch_add(1, Ordering::SeqCst);
+            assert!(cx.still_measured(m, a, 0.5).is_none());
+            // A measurement that asked the registry.
+            let asking = Probe {
+                asks: true,
+                ..Probe::default()
+            };
+            let mut cx = context(&asking);
+            cx.text_layer_level1_device(&mut scope, a, 0.5, WORLD, TARGET)
+                .unwrap();
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            assert_eq!(m.as_ref().map(|m| m.measurer), Some(None));
+            assert!(afresh(&asking, &mut cx, &mut scope, a, 0.5, m));
+            // A measurer that cannot say it stayed the same.
+            let unknown = Probe {
+                unknown: true,
+                ..Probe::default()
+            };
+            let mut cx = context(&unknown);
+            cx.text_layer_level1_device(&mut scope, a, 0.5, WORLD, TARGET)
+                .unwrap();
+            let m = cx.level1_raster(&mut scope, a, 0.5).unwrap().1;
+            assert!(afresh(&unknown, &mut cx, &mut scope, a, 0.5, m));
+        }
+
+        const WORLD: Affine = Affine::new([0.3, 0.0, 0.0, 0.3, 100.0, 50.0]);
+        const TARGET: (u32, u32) = (320, 180);
+
+        /// The device plan of `layer` at `time`, handed `measured`, measured
+        /// the layer again (once, or twice when it is also laid out again).
+        fn afresh<'d>(
+            probe: &Probe,
+            cx: &mut TextContext,
+            scope: &mut Scope<'_, 'd>,
+            layer: &'d Node,
+            time: f64,
+            measured: Option<Level1Measured>,
+        ) -> bool {
+            let before = probe.lines();
+            cx.text_layer_level1_device_measured(scope, layer, time, WORLD, TARGET, measured)
+                .unwrap();
+            probe.lines() != before
+        }
+
+        /// A served measurer's value moves past every earlier one when it
+        /// asks the registry or `sync` replaces it.
+        #[test]
+        fn a_served_measurer_moves_on_every_ask_and_replacement() {
+            use pm_text::answers::Query;
+            use pm_text::font::FontDesc;
+            use pm_text::served::{FontServer, Served};
+            struct Server(AtomicU64);
+            impl FontServer for Server {
+                fn serve(&self, _: &[Query]) -> Result<Served, String> {
+                    Err("no registry".into())
+                }
+                fn generation(&self) -> u64 {
+                    self.0.load(Ordering::SeqCst)
+                }
+            }
+            /// Port 7's window has its own font cache seeds.
+            struct PerPort;
+            impl served::SeedSource for PerPort {
+                fn seeds(&self, scope: served::SeedScope) -> Vec<pm_text::compat::FontCacheSeed> {
+                    if scope.port == Some(7) {
+                        pm_text::compat::app_ui_font_cache_seeds(&[2.0])
+                    } else {
+                        Vec::new()
+                    }
+                }
+            }
+            assert!(!pm_text::compat::app_ui_font_cache_seeds(&[2.0]).is_empty());
+            let server = Arc::new(Server(AtomicU64::new(0)));
+            let mut fonts = served::ServedFonts::new(server.clone(), Arc::new(PerPort));
+            let desc = FontDesc {
+                weight: 400.0,
+                italic: false,
+                size: 12.0,
+            };
+            let mut seen = vec![fonts.measurer().unwrap()];
+            fonts.sync();
+            assert_eq!(fonts.measurer(), seen.last().copied(), "nothing changed");
+            // An ask (here one that failed, so the next one asks again).
+            TextFonts::prefetch(&mut fonts, &[Query::standard(&desc)]);
+            seen.push(fonts.measurer().unwrap());
+            // A new server generation: a new measurer.
+            server.0.store(1, Ordering::SeqCst);
+            fonts.sync();
+            seen.push(fonts.measurer().unwrap());
+            TextFonts::prefetch(&mut fonts, &[Query::standard(&desc)]);
+            seen.push(fonts.measurer().unwrap());
+            // Another window's seeds (another measurer).
+            fonts.set_seed_scope(served::SeedScope::port(7));
+            fonts.sync();
+            seen.push(fonts.measurer().unwrap());
+            assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
+        }
+    }
+}

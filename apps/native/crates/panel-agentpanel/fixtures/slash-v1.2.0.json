@@ -1,0 +1,934 @@
+{
+  "baseline": "v1.2.0",
+  "baselineCommit": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "sourceSha256": "76fc7b44614331e5c50a1206ecf88a9f38999bbce401849f5bbc8f8f595b0e74",
+  "source": "apps/desktop/src/renderer/src/panels/agent/slash-commands.ts:11-45",
+  "cases": [
+    {
+      "draft": "/",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "new",
+          "action": "new"
+        },
+        {
+          "id": "model",
+          "action": "model"
+        },
+        {
+          "id": "effort",
+          "action": "effort"
+        },
+        {
+          "id": "provider",
+          "action": "provider"
+        },
+        {
+          "id": "attach",
+          "action": "attach"
+        },
+        {
+          "id": "settings",
+          "action": "settings"
+        }
+      ]
+    },
+    {
+      "draft": "/n",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "new",
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "draft": "/model",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        }
+      ]
+    },
+    {
+      "draft": "/model ",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        },
+        {
+          "id": "model-claude-sonnet",
+          "action": "model",
+          "value": "claude-sonnet"
+        }
+      ]
+    },
+    {
+      "draft": "/model SOL",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-new-v1",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-claude-new-v1",
+          "action": "model",
+          "value": "claude-new-v1"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-a_b",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/provider cla",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "provider-claude",
+          "action": "provider",
+          "value": "claude"
+        }
+      ]
+    },
+    {
+      "draft": "/effort extra",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/effort    high",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "effort-high",
+          "action": "effort",
+          "value": "high"
+        },
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/  model",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": " /",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/model\nsol",
+      "legacyPhase": "idle",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        },
+        {
+          "id": "effort",
+          "action": "effort"
+        },
+        {
+          "id": "provider",
+          "action": "provider"
+        },
+        {
+          "id": "attach",
+          "action": "attach"
+        },
+        {
+          "id": "settings",
+          "action": "settings"
+        }
+      ]
+    },
+    {
+      "draft": "/n",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/model",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        }
+      ]
+    },
+    {
+      "draft": "/model ",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        },
+        {
+          "id": "model-claude-sonnet",
+          "action": "model",
+          "value": "claude-sonnet"
+        }
+      ]
+    },
+    {
+      "draft": "/model SOL",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-new-v1",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-claude-new-v1",
+          "action": "model",
+          "value": "claude-new-v1"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-a_b",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/provider cla",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "provider-claude",
+          "action": "provider",
+          "value": "claude"
+        }
+      ]
+    },
+    {
+      "draft": "/effort extra",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/effort    high",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "effort-high",
+          "action": "effort",
+          "value": "high"
+        },
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/  model",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": " /",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/model\nsol",
+      "legacyPhase": "idle",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "new",
+          "action": "new"
+        },
+        {
+          "id": "model",
+          "action": "model"
+        },
+        {
+          "id": "effort",
+          "action": "effort"
+        },
+        {
+          "id": "provider",
+          "action": "provider"
+        },
+        {
+          "id": "attach",
+          "action": "attach"
+        },
+        {
+          "id": "settings",
+          "action": "settings"
+        },
+        {
+          "id": "stop",
+          "action": "stop"
+        }
+      ]
+    },
+    {
+      "draft": "/n",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "new",
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "draft": "/model",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        }
+      ]
+    },
+    {
+      "draft": "/model ",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        },
+        {
+          "id": "model-claude-sonnet",
+          "action": "model",
+          "value": "claude-sonnet"
+        }
+      ]
+    },
+    {
+      "draft": "/model SOL",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-new-v1",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-claude-new-v1",
+          "action": "model",
+          "value": "claude-new-v1"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-a_b",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/provider cla",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "provider-claude",
+          "action": "provider",
+          "value": "claude"
+        }
+      ]
+    },
+    {
+      "draft": "/effort extra",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/effort    high",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "effort-high",
+          "action": "effort",
+          "value": "high"
+        },
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/  model",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": " /",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/model\nsol",
+      "legacyPhase": "working",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        },
+        {
+          "id": "effort",
+          "action": "effort"
+        },
+        {
+          "id": "provider",
+          "action": "provider"
+        },
+        {
+          "id": "attach",
+          "action": "attach"
+        },
+        {
+          "id": "settings",
+          "action": "settings"
+        },
+        {
+          "id": "stop",
+          "action": "stop"
+        }
+      ]
+    },
+    {
+      "draft": "/n",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/model",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        }
+      ]
+    },
+    {
+      "draft": "/model ",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        },
+        {
+          "id": "model-claude-sonnet",
+          "action": "model",
+          "value": "claude-sonnet"
+        }
+      ]
+    },
+    {
+      "draft": "/model SOL",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-new-v1",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-claude-new-v1",
+          "action": "model",
+          "value": "claude-new-v1"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-a_b",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/provider cla",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "provider-claude",
+          "action": "provider",
+          "value": "claude"
+        }
+      ]
+    },
+    {
+      "draft": "/effort extra",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/effort    high",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "effort-high",
+          "action": "effort",
+          "value": "high"
+        },
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/  model",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": " /",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/model\nsol",
+      "legacyPhase": "working",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        },
+        {
+          "id": "effort",
+          "action": "effort"
+        },
+        {
+          "id": "provider",
+          "action": "provider"
+        },
+        {
+          "id": "attach",
+          "action": "attach"
+        },
+        {
+          "id": "settings",
+          "action": "settings"
+        }
+      ]
+    },
+    {
+      "draft": "/n",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/model",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        }
+      ]
+    },
+    {
+      "draft": "/model ",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        },
+        {
+          "id": "model-claude-sonnet",
+          "action": "model",
+          "value": "claude-sonnet"
+        }
+      ]
+    },
+    {
+      "draft": "/model SOL",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-new-v1",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "model-claude-new-v1",
+          "action": "model",
+          "value": "claude-new-v1"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-a_b",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/provider cla",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "provider-claude",
+          "action": "provider",
+          "value": "claude"
+        }
+      ]
+    },
+    {
+      "draft": "/effort extra",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/effort    high",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": [
+        {
+          "id": "effort-high",
+          "action": "effort",
+          "value": "high"
+        },
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/  model",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": " /",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/model\nsol",
+      "legacyPhase": "applying",
+      "blocked": false,
+      "choices": []
+    },
+    {
+      "draft": "/",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        },
+        {
+          "id": "effort",
+          "action": "effort"
+        },
+        {
+          "id": "provider",
+          "action": "provider"
+        },
+        {
+          "id": "attach",
+          "action": "attach"
+        },
+        {
+          "id": "settings",
+          "action": "settings"
+        }
+      ]
+    },
+    {
+      "draft": "/n",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/model",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model",
+          "action": "model"
+        }
+      ]
+    },
+    {
+      "draft": "/model ",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        },
+        {
+          "id": "model-claude-sonnet",
+          "action": "model",
+          "value": "claude-sonnet"
+        }
+      ]
+    },
+    {
+      "draft": "/model SOL",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-sol",
+          "action": "model",
+          "value": "sol"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-new-v1",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "model-claude-new-v1",
+          "action": "model",
+          "value": "claude-new-v1"
+        }
+      ]
+    },
+    {
+      "draft": "/model claude-a_b",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/provider cla",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "provider-claude",
+          "action": "provider",
+          "value": "claude"
+        }
+      ]
+    },
+    {
+      "draft": "/effort extra",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/effort    high",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": [
+        {
+          "id": "effort-high",
+          "action": "effort",
+          "value": "high"
+        },
+        {
+          "id": "effort-xhigh",
+          "action": "effort",
+          "value": "xhigh"
+        }
+      ]
+    },
+    {
+      "draft": "/  model",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": " /",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": []
+    },
+    {
+      "draft": "/model\nsol",
+      "legacyPhase": "applying",
+      "blocked": true,
+      "choices": []
+    }
+  ]
+}

@@ -1,0 +1,757 @@
+//! Render targets and their pool (plan section 8, "Working encoding and
+//! precision").
+//!
+//! Working storage is `rgba8unorm` at 8-bit, `rgba16float` by default,
+//! and `rgba32float` at 32-bit
+//! precision. Targets are pooled by size, format, and usage: a frame's
+//! intermediates are taken and returned as the graph walks, so a
+//! steady-state frame allocates nothing. The pool counts its bytes for the
+//! GPU lease (contract 8).
+
+use pm_protocol::color::Precision;
+
+/// The working format for a precision.
+pub const fn working_format(precision: Precision) -> wgpu::TextureFormat {
+    match precision {
+        Precision::Unorm8 => wgpu::TextureFormat::Rgba8Unorm,
+        Precision::Float16 => wgpu::TextureFormat::Rgba16Float,
+        Precision::Float32 => wgpu::TextureFormat::Rgba32Float,
+    }
+}
+
+/// Usages every working target gets: drawn into, sampled, copied out
+/// (readback, presentation), and written by compute passes.
+pub fn working_usage() -> wgpu::TextureUsages {
+    wgpu::TextureUsages::RENDER_ATTACHMENT
+        | wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_SRC
+        | wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::STORAGE_BINDING
+}
+
+/// A texture with its default view.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+}
+
+impl Target {
+    pub fn new(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Target {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Target { texture, view }
+    }
+
+    /// A target with its full mip chain in the same texture; `view` reads
+    /// and writes level 0 only (the levels below are filled separately).
+    pub fn with_mips(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Target {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: width.max(height).max(1).ilog2() + 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        Target { texture, view }
+    }
+
+    /// A target over an existing texture (the presenter's working texture,
+    /// an export buffer), with its default view.
+    pub fn wrap(texture: wgpu::Texture) -> Target {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Target { texture, view }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.texture.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.texture.height()
+    }
+
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.texture.format()
+    }
+
+    /// Bytes of texel storage, every mip level included.
+    pub fn bytes(&self) -> u64 {
+        let bpp = u64::from(self.format().block_copy_size(None).unwrap_or(16));
+        (0..self.texture.mip_level_count())
+            .map(|l| u64::from((self.width() >> l).max(1)) * u64::from((self.height() >> l).max(1)))
+            .sum::<u64>()
+            * bpp
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct Key {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+}
+
+#[derive(Default)]
+struct KeyUse {
+    frame: u64,
+    frames: u32,
+    takes: u64,
+    misses: u64,
+    outstanding: usize,
+    peak: usize,
+}
+
+type Fence = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+fn complete(fence: &Option<Fence>) -> bool {
+    fence
+        .as_ref()
+        .is_some_and(|done| done.load(std::sync::atomic::Ordering::Acquire))
+}
+
+/// Reusable targets.
+pub struct TargetPool {
+    free: Vec<(Key, Target, u64)>,
+    free_bytes: u64,
+    frame: u64,
+    free_budget: u64,
+    playback_budget: u64,
+    usage: std::collections::HashMap<Key, KeyUse>,
+    // Loan-backed storage that moved out of the idle list can still be
+    // sampled by the submitted frame. A new generation still charges it.
+    retained: std::collections::HashMap<wgpu::Texture, (u64, Option<Fence>)>,
+    retired: Vec<(u64, Option<Fence>)>,
+    eviction_bytes: u64,
+    aged_out_bytes: u64,
+    playback_high_water: u64,
+    /// Bytes held by targets in the pool and taken from it.
+    live_bytes: u64,
+    created: u64,
+}
+
+impl Default for TargetPool {
+    fn default() -> Self {
+        Self {
+            free: Vec::new(),
+            free_bytes: 0,
+            frame: 0,
+            free_budget: Self::FREE_BUDGET,
+            playback_budget: 0,
+            usage: Default::default(),
+            retained: Default::default(),
+            retired: Vec::new(),
+            eviction_bytes: 0,
+            aged_out_bytes: 0,
+            playback_high_water: 0,
+            live_bytes: 0,
+            created: 0,
+        }
+    }
+}
+
+impl TargetPool {
+    pub fn set_free_budget(&mut self, bytes: u64) {
+        self.free_budget = bytes.min(Self::FREE_BUDGET);
+        self.evict_over(self.retention_budget());
+    }
+    /// The total pool ceiling for visible playback, including the base
+    /// pool. This grant can exceed the ordinary free budget.
+    pub fn set_playback_budget(&mut self, bytes: u64) {
+        self.playback_budget = bytes;
+        self.evict_over(self.retention_budget());
+    }
+
+    pub fn playback_retention(&self) -> bool {
+        self.playback_budget > 0
+    }
+
+    fn retention_budget(&self) -> u64 {
+        if !self.playback_retention() {
+            return self.free_budget;
+        }
+        let retired = self
+            .retired
+            .iter()
+            .filter(|(_, done)| !complete(done))
+            .map(|(bytes, _)| *bytes)
+            .sum::<u64>();
+        let checked_out = self
+            .retained
+            .iter()
+            .filter(|(texture, _)| !self.free.iter().any(|(_, t, _)| &t.texture == *texture))
+            .map(|(_, (bytes, _))| *bytes)
+            .sum::<u64>();
+        self.playback_budget.saturating_sub(retired + checked_out)
+    }
+
+    pub const FREE_BUDGET: u64 = 48 << 20;
+    const MAX_IDLE_FRAMES: u64 = 30;
+    /// Idle targets kept at most, at any time.
+    const MAX_FREE: usize = 128;
+
+    /// Retire sizes animation has stopped using. Exact dimensions preserve
+    /// textureDimensions/UV semantics in every existing shader and export.
+    pub fn begin_frame(&mut self) {
+        // A frame that never reached [`Self::end_frame`] (an early return)
+        // still starts within the free budget.
+        self.retired.retain(|(_, done)| !complete(done));
+        self.evict_over(self.retention_budget());
+        self.frame = self.frame.wrapping_add(1);
+        self.usage
+            .retain(|_, usage| self.frame.wrapping_sub(usage.frame) <= Self::MAX_IDLE_FRAMES);
+        let mut i = 0;
+        while i < self.free.len() {
+            if self.frame.wrapping_sub(self.free[i].2) > Self::MAX_IDLE_FRAMES {
+                self.aged_out_bytes += self.free[i].1.bytes();
+                self.evict(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    pub fn new() -> TargetPool {
+        TargetPool::default()
+    }
+
+    /// A target of this size and format: a free one when the pool has it.
+    pub fn take(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Target {
+        let key = Key {
+            width,
+            height,
+            format,
+            usage,
+        };
+        let found = self.free.iter().position(|(k, _, _)| *k == key);
+        if self.playback_retention()
+            && (self.usage.len() < Self::MAX_FREE || self.usage.contains_key(&key))
+        {
+            let usage = self.usage.entry(key).or_default();
+            if usage.frames == 0 || usage.frame != self.frame {
+                usage.frame = self.frame;
+                usage.frames += 1;
+                usage.outstanding = 0;
+            }
+            usage.takes += 1;
+            usage.misses += u64::from(found.is_none());
+            usage.outstanding += 1;
+            usage.peak = usage.peak.max(usage.outstanding);
+        }
+        if let Some(i) = found {
+            pm_perf::bump(pm_perf::Counter::TargetPoolHits);
+            let target = self.free.swap_remove(i).1;
+            self.free_bytes -= target.bytes();
+            if let Some((_, done)) = self.retained.get_mut(&target.texture) {
+                *done = None;
+            }
+            return target;
+        }
+        pm_perf::bump(pm_perf::Counter::TargetPoolMisses);
+        let target = Target::new(device, "pm working target", width, height, format, usage);
+        self.live_bytes += target.bytes();
+        self.created += 1;
+        target
+    }
+
+    /// A working target at `precision`.
+    pub fn take_working(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        precision: Precision,
+    ) -> Target {
+        self.take(
+            device,
+            width,
+            height,
+            working_format(precision),
+            working_usage(),
+        )
+    }
+
+    /// Returns a target for reuse. The caller must not use it afterwards
+    /// except through commands already recorded (GPU order keeps those
+    /// correct).
+    pub fn give(&mut self, target: Target) {
+        self.push_free(target);
+        self.evict_over(self.retention_budget());
+    }
+
+    /// Returns a target whose last read in the frame being recorded is
+    /// recorded, for that frame's later takes. Unlike [`Self::give`], the
+    /// free budget waits for [`Self::end_frame`]: one full-frame working
+    /// target can exceed the whole budget (37.3 MB at 2880×1620 in half
+    /// float, against at most 48 MiB), so `give` would destroy the second
+    /// target a frame returns, and every later node would create its targets
+    /// again. Keeping it costs no memory: a dropped target that recorded
+    /// commands still use stays alive until they finish, so the frame held
+    /// it anyway. The caller must not use it afterwards except through
+    /// commands already recorded, and every later use must overwrite what it
+    /// reads (commands run in the order they are recorded).
+    pub fn recycle(&mut self, target: Target) {
+        self.push_free(target);
+        self.evict_over(u64::MAX);
+    }
+
+    /// The frame's commands are submitted: idle targets go down to the free
+    /// budget (what [`Self::recycle`] kept for the frame included).
+    pub fn end_frame(&mut self) {
+        self.evict_over(self.retention_budget());
+    }
+
+    /// Batches returned targets and fences the identities kept for future frames.
+    pub fn end_submitted_frame(
+        &mut self,
+        queue: &wgpu::Queue,
+        returned: impl IntoIterator<Item = Target>,
+    ) {
+        for target in returned {
+            self.push_free(target);
+        }
+        self.end_frame();
+        if self.playback_retention() {
+            for (_, target, _) in &self.free {
+                self.retained
+                    .entry(target.texture.clone())
+                    .or_insert_with(|| (target.bytes(), None));
+            }
+        }
+        self.playback_high_water = self.playback_high_water.max(self.playback_charged());
+        if self.retained.is_empty() && self.retired.iter().all(|(_, done)| done.is_some()) {
+            return;
+        }
+        let done = Fence::default();
+        let signal = done.clone();
+        queue.on_submitted_work_done(move || {
+            signal.store(true, std::sync::atomic::Ordering::Release)
+        });
+        // A checked-out target may be read from a kept prefix without
+        // another pool take. Fence it with every submission until returned.
+        for (_, fence) in self.retained.values_mut() {
+            *fence = Some(done.clone());
+        }
+        for (_, fence) in &mut self.retired {
+            if fence.is_none() {
+                *fence = Some(done.clone());
+            }
+        }
+    }
+
+    pub fn retired_bytes(&self) -> u64 {
+        self.retired
+            .iter()
+            .filter(|(_, done)| !complete(done))
+            .map(|(bytes, _)| *bytes)
+            .sum()
+    }
+
+    fn playback_charged(&self) -> u64 {
+        self.retained.values().map(|(bytes, _)| *bytes).sum::<u64>() + self.retired_bytes()
+    }
+
+    /// Assigned, charged, high-water, evicted and aged-out nominal pool bytes.
+    pub fn playback_stats(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.playback_budget,
+            self.playback_charged(),
+            self.playback_high_water,
+            self.eviction_bytes,
+            self.aged_out_bytes,
+        )
+    }
+
+    fn push_free(&mut self, target: Target) {
+        let key = Key {
+            width: target.width(),
+            height: target.height(),
+            format: target.format(),
+            usage: target.texture.usage(),
+        };
+        if let Some(usage) = self.usage.get_mut(&key) {
+            usage.outstanding = usage.outstanding.saturating_sub(1);
+        }
+        self.free_bytes += target.bytes();
+        self.free.push((key, target, self.frame));
+    }
+
+    /// Frees the idle targets unused longest until at most `budget` bytes
+    /// and [`Self::MAX_FREE`] targets are idle.
+    fn evict_over(&mut self, budget: u64) {
+        // Retaining one more old generation can lower the remaining budget.
+        while self.free_bytes > budget.min(self.retention_budget_or_unbounded(budget))
+            || self.free.len() > Self::MAX_FREE
+        {
+            let oldest = self
+                .free
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (key, _, at))| {
+                    let heat = self
+                        .playback_retention()
+                        .then(|| self.usage.get(key))
+                        .flatten()
+                        .filter(|use_| use_.frames >= 2 && self.frame.wrapping_sub(use_.frame) <= 1)
+                        .map_or((0, 0), |use_| (use_.peak.min(4), use_.takes));
+                    (heat, *at)
+                })
+                .map(|(index, _)| index)
+                .expect("over budget");
+            self.evict(oldest);
+        }
+    }
+
+    fn retention_budget_or_unbounded(&self, budget: u64) -> u64 {
+        if budget == u64::MAX {
+            budget
+        } else {
+            self.retention_budget()
+        }
+    }
+
+    fn evict(&mut self, index: usize) {
+        pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
+        let (_, target, _) = self.free.swap_remove(index);
+        let bytes = target.bytes();
+        self.free_bytes -= bytes;
+        self.live_bytes -= bytes;
+        self.eviction_bytes += bytes;
+        self.retire_loan(&target);
+    }
+
+    fn retire_loan(&mut self, target: &Target) {
+        if let Some((bytes, done)) = self.retained.remove(&target.texture)
+            && !complete(&done)
+        {
+            self.retired.push((bytes, done));
+        }
+    }
+
+    /// Discards a target owned by this pool without calling Texture::destroy.
+    /// Recorded command buffers or retained views may still refer to it;
+    /// dropping this handle lets wgpu release its storage when those uses end.
+    pub fn release(&mut self, target: Target) {
+        self.live_bytes = self
+            .live_bytes
+            .checked_sub(target.bytes())
+            .expect("released target was not accounted for by this pool");
+        self.retire_loan(&target);
+    }
+
+    /// Frees idle targets until the pool holds at most `bytes`.
+    pub fn trim(&mut self, bytes: u64) {
+        let taken = self.live_bytes.saturating_sub(self.free_bytes);
+        self.evict_over(bytes.saturating_sub(taken));
+    }
+
+    /// Bytes of every target this pool created and has not freed.
+    pub fn bytes(&self) -> u64 {
+        self.live_bytes
+    }
+
+    /// Idle targets.
+    pub fn idle(&self) -> usize {
+        self.free.len()
+    }
+
+    /// Targets created so far (a steady state stops creating).
+    pub fn created(&self) -> u64 {
+        self.created
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn animated_sizes_stay_bounded_and_age_out_without_changing_dimensions() {
+        let gpu = crate::device::Gpu::new("target budget test").unwrap();
+        let mut pool = TargetPool::new();
+        for width in 900..1000 {
+            pool.begin_frame();
+            let target = pool.take_working(&gpu.device, width, 1024, Precision::Float16);
+            assert_eq!(target.width(), width);
+            pool.give(target);
+            assert!(pool.bytes() <= TargetPool::FREE_BUDGET);
+            assert!(pool.idle() < 10);
+        }
+        for _ in 0..=TargetPool::MAX_IDLE_FRAMES {
+            pool.begin_frame();
+        }
+        assert_eq!(pool.bytes(), 0);
+        assert_eq!(pool.idle(), 0);
+    }
+
+    /// One working target's bytes at `side`² in half float.
+    fn half_bytes(side: u32) -> u64 {
+        u64::from(side) * u64::from(side) * 8
+    }
+
+    #[test]
+    fn a_target_given_back_mid_frame_is_reused_even_past_the_free_budget() {
+        let gpu = crate::device::Gpu::new("target recycle test").unwrap();
+        let side = 256;
+        // Room for one idle target, as 48 MiB is for one 2880×1620 target.
+        let budget = half_bytes(side) + half_bytes(side) / 2;
+        let take =
+            |pool: &mut TargetPool| pool.take_working(&gpu.device, side, side, Precision::Float16);
+
+        // `give` keeps the free budget: the second target is destroyed.
+        let mut given = TargetPool::new();
+        given.set_free_budget(budget);
+        given.begin_frame();
+        let (a, b) = (take(&mut given), take(&mut given));
+        given.give(a);
+        given.give(b);
+        assert_eq!(given.idle(), 1);
+        let _ = (take(&mut given), take(&mut given));
+        assert_eq!(
+            given.created(),
+            3,
+            "a given target past the budget is made again"
+        );
+
+        // `recycle` keeps both for the frame's later takes.
+        let mut pool = TargetPool::new();
+        pool.set_free_budget(budget);
+        pool.begin_frame();
+        let (a, b) = (take(&mut pool), take(&mut pool));
+        pool.recycle(a);
+        pool.recycle(b);
+        assert_eq!(pool.idle(), 2);
+        let (c, d) = (take(&mut pool), take(&mut pool));
+        assert_eq!(pool.created(), 2, "both came back from the pool");
+        assert_eq!(
+            (c.width(), c.height(), d.format()),
+            (side, side, wgpu::TextureFormat::Rgba16Float)
+        );
+        assert_ne!(c.texture, d.texture, "two live takes never share a texture");
+        pool.recycle(c);
+        pool.recycle(d);
+        // After the frame, idle memory is back within the free budget.
+        pool.end_frame();
+        assert_eq!(pool.idle(), 1);
+        assert!(pool.bytes() <= budget);
+    }
+
+    #[test]
+    fn a_frame_of_many_nodes_creates_only_its_working_set() {
+        let gpu = crate::device::Gpu::new("target working set test").unwrap();
+        let side = 128;
+        let budget = half_bytes(side);
+        let mut pool = TargetPool::new();
+        pool.set_free_budget(budget);
+        for frame in 0..3 {
+            pool.begin_frame();
+            let accumulator = pool.take_working(&gpu.device, side, side, Precision::Float16);
+            // ~170 nodes: content, a two-pass effect, and the image, each
+            // given back once the pass reading it is recorded.
+            for _ in 0..170 {
+                let content = pool.take_working(&gpu.device, side, side, Precision::Float16);
+                let pass0 = pool.take_working(&gpu.device, side, side, Precision::Float16);
+                let pass1 = pool.take_working(&gpu.device, side, side, Precision::Float16);
+                pool.recycle(pass0);
+                pool.recycle(content);
+                // The image (pass1) is drawn into the accumulator, then given back.
+                pool.recycle(pass1);
+            }
+            pool.recycle(accumulator);
+            pool.end_frame();
+            assert!(
+                pool.bytes() <= budget,
+                "frame {frame}: idle within the budget"
+            );
+        }
+        // The first frame creates its 4 live targets; each later frame
+        // creates again only what the budget did not keep (3).
+        assert_eq!(pool.created(), 4 + 3 + 3);
+    }
+
+    #[test]
+    fn a_frame_that_skipped_end_frame_starts_within_the_budget() {
+        let gpu = crate::device::Gpu::new("target begin trim test").unwrap();
+        let mut pool = TargetPool::new();
+        pool.set_free_budget(half_bytes(64));
+        pool.begin_frame();
+        let targets: Vec<_> = (0..4)
+            .map(|_| pool.take_working(&gpu.device, 64, 64, Precision::Float16))
+            .collect();
+        for t in targets {
+            pool.recycle(t);
+        }
+        assert_eq!(pool.idle(), 4);
+        pool.begin_frame();
+        assert_eq!(pool.idle(), 1);
+        assert!(pool.bytes() <= half_bytes(64));
+    }
+
+    #[test]
+    fn playback_batch_prefers_the_recurring_targets_and_shrinks_on_pause() {
+        let gpu = crate::device::Gpu::new("playback retention test").unwrap();
+        let mut pool = TargetPool::new();
+        let bytes = half_bytes(64);
+        pool.set_free_budget(bytes);
+        pool.set_playback_budget(bytes * 3);
+        let take = |pool: &mut TargetPool, side| {
+            pool.take_working(&gpu.device, side, side, Precision::Float16)
+        };
+        for frame in 0..3 {
+            pool.begin_frame();
+            let hot = (0..3).map(|_| take(&mut pool, 64)).collect::<Vec<_>>();
+            let cold = (frame == 2).then(|| take(&mut pool, 65));
+            gpu.queue.submit([]);
+            pool.end_submitted_frame(&gpu.queue, hot.into_iter().chain(cold));
+            assert_eq!(pool.idle(), 3);
+            assert_eq!(pool.created(), if frame == 2 { 4 } else { 3 });
+        }
+        pool.set_playback_budget(0);
+        assert_eq!(pool.idle(), 1);
+        assert_eq!(pool.bytes(), bytes);
+    }
+
+    #[test]
+    fn playback_keeps_a_working_set_larger_than_the_ordinary_free_budget() {
+        let gpu = crate::device::Gpu::new("large playback working set").unwrap();
+        let mut pool = TargetPool::new();
+        let side = 1536;
+        let working_set = 4 * half_bytes(side);
+        pool.set_playback_budget(working_set);
+        assert_eq!(pool.retention_budget(), 72 << 20);
+        for _ in 0..3 {
+            pool.begin_frame();
+            let targets = (0..4)
+                .map(|_| pool.take_working(&gpu.device, side, side, Precision::Float16))
+                .collect::<Vec<_>>();
+            gpu.queue.submit([]);
+            pool.end_submitted_frame(&gpu.queue, targets);
+            assert_eq!(pool.bytes(), working_set);
+            assert_eq!(pool.created(), 4);
+            assert_eq!(pool.eviction_bytes, 0);
+        }
+        pool.set_playback_budget(0);
+        assert!(pool.bytes() <= TargetPool::FREE_BUDGET);
+    }
+
+    #[test]
+    fn release_accounts_for_a_target_still_used_by_recorded_commands() {
+        let gpu = crate::device::Gpu::new("target pool release test").unwrap();
+        let mut pool = TargetPool::new();
+        let target = pool.take(
+            &gpu.device,
+            2,
+            2,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        assert_eq!(pool.bytes(), 16);
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("released target readback"),
+            size: 512,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 1.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        encoder.copy_texture_to_buffer(
+            target.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(2),
+                },
+            },
+            wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+        );
+        pool.release(target);
+        assert_eq!(pool.bytes(), 0);
+        let submission = gpu.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = slice.get_mapped_range().unwrap();
+        assert_eq!(&data[..8], &[0, 255, 0, 255, 0, 255, 0, 255]);
+        drop(data);
+        buffer.unmap();
+    }
+}

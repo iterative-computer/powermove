@@ -1,0 +1,61 @@
+{
+  "tools": [
+    {
+      "name": "start_session",
+      "description": "Start a project or app tool session, pinned to the currently open project. Returns available workspace paths and harness instructions, including hand-editing guidance for composition edits. Request includeExtensionStaging to get the extension staging and authoring paths. Planning access only exposes inspection tools. Filesystem paths refer to this host. Only one session per connection is active.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200000
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "project",
+              "editor"
+            ]
+          },
+          "context": {
+            "type": "string",
+            "enum": [
+              "project",
+              "app"
+            ]
+          },
+          "includeExtensionStaging": {
+            "type": "boolean",
+            "description": "Request stagingDirectory, apiPackDirectory and extensionGuide to inspect installed extensions or author an extension."
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    },
+    {
+      "name": "fork_builtin_extension",
+      "description": "Copy a shipped built-in extension into this run's isolated staging directory as a user fork and retain a pristine merge base. Edit the returned directory, then use publish_extensions with the fork ID and action created to load it.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+          },
+          "forkId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    }
+  ]
+}

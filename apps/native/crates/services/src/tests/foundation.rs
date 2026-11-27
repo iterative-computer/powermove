@@ -1,0 +1,181 @@
+use super::test_storage;
+use crate::storage::{self, ServiceStorage};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::{self, Read},
+};
+
+#[test]
+fn settings_survive_reopen_with_unknown_fields() {
+    let (temp, mut store) = test_storage();
+    let value = json!({"future":[null,{"unknown":"日本語"}],"restoreWindows":false});
+    store.set("ext.synthetic", value.clone()).unwrap();
+    drop(store);
+    let store = ServiceStorage::open(temp.path().join("services")).unwrap();
+    assert_eq!(store.setting("ext.synthetic").unwrap(), Some(value));
+}
+#[test]
+fn settings_null_is_distinct_from_absent() {
+    let (_temp, mut store) = test_storage();
+    assert_eq!(store.setting("value").unwrap(), None);
+    store.set("value", Value::Null).unwrap();
+    assert_eq!(store.setting("value").unwrap(), Some(Value::Null));
+    store.archive_setting("value").unwrap();
+    assert_eq!(store.setting("value").unwrap(), None);
+}
+#[test]
+fn deletion_and_replacement_retain_all_generations() {
+    let (_temp, mut store) = test_storage();
+    store.set("preference", json!(1)).unwrap();
+    store.set("preference", json!(2)).unwrap();
+    store.archive_setting("preference").unwrap();
+    let dir = store.directory("settings", "preference").unwrap();
+    let versions = storage::generations(&dir).unwrap();
+    assert_eq!(versions.len(), 3);
+    let first: Value = serde_json::from_slice(&fs::read(&versions[0].1).unwrap()).unwrap();
+    assert_eq!(first["value"], 1);
+}
+#[test]
+fn key_paths_cannot_escape_storage() {
+    let (temp, mut store) = test_storage();
+    store.set("../../escape", json!(true)).unwrap();
+    assert!(!temp.path().join("escape").exists());
+    assert!(store.set("bad\nkey", Value::Null).is_err());
+    assert!(store.backup("../escape", &b"bytes"[..]).is_err());
+}
+#[test]
+fn second_writer_is_refused_and_lock_releases_on_drop() {
+    let (temp, store) = test_storage();
+    let root = temp.path().join("services");
+    assert!(ServiceStorage::open(&root).is_err());
+    drop(store);
+    assert!(ServiceStorage::open(root).is_ok());
+}
+#[test]
+fn foreign_directory_and_relative_root_are_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("authored"), b"kept").unwrap();
+    assert!(ServiceStorage::open(temp.path()).is_err());
+    assert!(ServiceStorage::open("relative").is_err());
+    assert_eq!(fs::read(temp.path().join("authored")).unwrap(), b"kept");
+}
+#[cfg(unix)]
+#[test]
+fn symlink_roots_and_generation_files_are_refused() {
+    use std::os::unix::fs::symlink;
+    let (temp, mut store) = test_storage();
+    let alias = temp.path().join("alias");
+    symlink(temp.path().join("services"), &alias).unwrap();
+    assert!(ServiceStorage::open(alias).is_err());
+    store.set("key", json!("before")).unwrap();
+    let dir = store.directory("settings", "key").unwrap();
+    let external = temp.path().join("external");
+    fs::write(&external, b"do not read").unwrap();
+    symlink(external, dir.join("00000000000000000002.data")).unwrap();
+    assert!(store.setting("key").is_err());
+}
+#[cfg(unix)]
+#[test]
+fn storage_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temp, mut store) = test_storage();
+    store.set("private", json!(1)).unwrap();
+    assert_eq!(
+        fs::metadata(temp.path().join("services"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let entries = storage::generations(&store.directory("settings", "private").unwrap()).unwrap();
+    assert_eq!(
+        fs::metadata(&entries[0].1).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+#[test]
+fn corruption_is_explicit_and_cannot_be_covered_by_new_setting() {
+    let (_temp, mut store) = test_storage();
+    store.set("key", json!("before")).unwrap();
+    let dir = store.directory("settings", "key").unwrap();
+    fs::write(dir.join("00000000000000000002.data"), b"interrupted JSON").unwrap();
+    assert!(store.setting("key").is_err());
+    assert!(store.set("key", json!("after")).is_err());
+    assert_eq!(storage::generations(&dir).unwrap().len(), 2);
+}
+#[test]
+fn settings_reject_oversize_without_losing_value() {
+    let (_temp, mut store) = test_storage();
+    store.set("key", json!(1)).unwrap();
+    assert!(
+        store
+            .set("key", Value::String("x".repeat(storage::MAX_SETTING_BYTES)))
+            .is_err()
+    );
+    assert_eq!(store.setting("key").unwrap(), Some(json!(1)));
+}
+struct Interrupted(bool);
+impl Read for Interrupted {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.0 {
+            return Err(io::Error::other("synthetic interrupted source"));
+        }
+        self.0 = true;
+        buffer[..4].copy_from_slice(b"part");
+        Ok(4)
+    }
+}
+#[test]
+fn interrupted_backup_keeps_previous_and_partial_then_retries() {
+    let (_temp, mut store) = test_storage();
+    let first = store.backup("project", &b"original"[..]).unwrap();
+    assert!(store.backup("project", Interrupted(false)).is_err());
+    assert_eq!(store.backups("project").unwrap(), vec![first.clone()]);
+    let third = store.backup("project", &b"next"[..]).unwrap();
+    assert_eq!(third.generation, 3);
+    assert_eq!(fs::read(&first.path).unwrap(), b"original");
+    assert!(
+        first
+            .path
+            .parent()
+            .unwrap()
+            .join("00000000000000000002.pending")
+            .exists()
+    );
+}
+#[test]
+fn backups_stream_and_never_prune_sixth_generation() {
+    let (_temp, mut store) = test_storage();
+    let bytes = vec![7; 2 * 1024 * 1024];
+    for _ in 0..6 {
+        store.backup("project", bytes.as_slice()).unwrap();
+    }
+    let all = store.backups("project").unwrap();
+    assert_eq!(all.len(), 6);
+    assert_eq!(all[0].generation, 6);
+    assert!(all.iter().all(
+        |backup| backup.bytes == bytes.len() as u64 && backup.sha256 == storage::digest(&bytes)
+    ));
+}
+
+#[test]
+fn backup_inventory_detects_corruption_against_publication_receipt() {
+    let (_temp, mut store) = test_storage();
+    let backup = store.backup("project", &b"original"[..]).unwrap();
+    fs::write(&backup.path, b"modified").unwrap();
+    assert!(store.backups("project").is_err());
+}
+
+#[test]
+fn valid_json_corruption_is_not_accepted_as_a_new_setting_value() {
+    let (_temp, mut store) = test_storage();
+    store.set("key", json!("before")).unwrap();
+    let entries = storage::generations(&store.directory("settings", "key").unwrap()).unwrap();
+    let mut value: Value = serde_json::from_slice(&fs::read(&entries[0].1).unwrap()).unwrap();
+    value["value"] = json!("after");
+    fs::write(&entries[0].1, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(store.setting("key").is_err());
+    assert!(store.set("key", json!("next")).is_err());
+}

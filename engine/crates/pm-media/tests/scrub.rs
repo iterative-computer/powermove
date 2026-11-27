@@ -1,0 +1,378 @@
+//! The viewer's decode worker (docs/engine/scrub.md): exact requests equal
+//! the sequential decode; scrub requests answer at once with the nearest
+//! decoded frame and land the exact one; superseded targets are dropped;
+//! look-ahead fills the cache in the direction of motion; long-GOP seeks
+//! that leave out unreferenced pictures stay exact.
+
+mod common;
+
+use common::*;
+use pm_media::decode::scrub::{ViewerDecode, Want};
+use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
+use pm_media::vt::DecodePurpose;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+fn service() -> Arc<DecodeService> {
+    Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 256 << 20,
+        ..Default::default()
+    }))
+}
+
+/// MD5 of every presented frame, decoded in order by a plain session.
+fn sequential(src: &Arc<MediaSource>) -> Vec<String> {
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    });
+    let mut s = svc.session(src, 99, DecodePurpose::Display).unwrap();
+    s.set_skip_disposable(false);
+    (0..src.pts.len())
+        .map(|n| s.frame(n).unwrap().md5_hex().unwrap())
+        .collect()
+}
+
+/// Waits until `f` holds (the worker runs on its own thread).
+fn eventually(what: &str, mut f: impl FnMut() -> bool) {
+    let t = Instant::now();
+    while !f() {
+        assert!(t.elapsed() < Duration::from_secs(20), "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn exact_requests_equal_the_sequential_decode(path: &Path) {
+    let src = MediaSource::open(path).unwrap();
+    let want = sequential(&src);
+    let viewer = ViewerDecode::new(service());
+    let n = src.pts.len();
+    for k in [n / 2, 0, n - 1, n / 3, n / 3 + 1, 1, n / 2 - 1] {
+        let f = viewer.fetch(&src, 1, k, Want::Exact).unwrap();
+        assert!(f.exact);
+        assert_eq!(f.shown, k);
+        assert_eq!(f.frame.md5_hex().unwrap(), want[k], "frame {k}");
+    }
+}
+
+#[test]
+fn exact_requests_wait_for_their_frame() {
+    exact_requests_equal_the_sequential_decode(&fixtures_dir().join("h264-aac.mp4"));
+}
+
+#[test]
+fn source_export_worker_is_exact_and_warms_neighbours_after_a_jump() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let expected = {
+        let svc = DecodeService::new(ServiceConfig {
+            cache_bytes: 0,
+            ..Default::default()
+        });
+        let mut session = svc.session(&src, 99, DecodePurpose::Export).unwrap();
+        [7, 28, 9, 28].map(|n| session.frame(n).unwrap().md5_hex().unwrap())
+    };
+    let svc = service();
+    let viewer = ViewerDecode::with_purpose(svc.clone(), DecodePurpose::Export);
+    let first_gop = src.index.sync_for(src.index.frames[7].sample);
+    let gop_end = (8..src.index.frames.len())
+        .find(|&n| src.index.sync_for(src.index.frames[n].sample) != first_gop)
+        .unwrap_or(src.index.frames.len());
+    let warmed = (gop_end - 1).min(7 + 64);
+    let first = viewer.fetch(&src, 1, 7, Want::Exact).unwrap();
+    assert!(first.exact);
+    eventually("bounded source GOP is cached", || {
+        svc.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[warmed].sample,
+            purpose: DecodePurpose::Export,
+        })
+    });
+    if gop_end < src.index.frames.len() {
+        assert!(!svc.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[gop_end].sample,
+            purpose: DecodePurpose::Export,
+        }));
+    }
+    for (index, n) in [7, 28, 9, 28].into_iter().enumerate() {
+        let frame = viewer.fetch(&src, 1, n, Want::Exact).unwrap();
+        assert!(frame.exact);
+        assert_eq!(frame.shown, n);
+        assert_eq!(frame.frame.md5_hex().unwrap(), expected[index]);
+    }
+    assert_eq!(viewer.stats().workers, 1);
+    assert_eq!(viewer.stats().stand_ins, 0);
+    eventually("source neighbours are cached", || viewer.stats().ahead > 0);
+    assert!(
+        !svc.cache()
+            .samples_of(src.id, DecodePurpose::Export)
+            .is_empty()
+    );
+}
+
+#[test]
+fn scrub_requests_show_the_nearest_decoded_frame_then_land_the_exact_one() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let want = sequential(&src);
+    let viewer = ViewerDecode::new(service());
+    // Nothing decoded yet: the first scrub request waits for its frame.
+    let first = viewer.fetch(&src, 1, 5, Want::Scrub).unwrap();
+    assert!(first.exact);
+    assert_eq!(first.frame.md5_hex().unwrap(), want[5]);
+    // Far away, in the other GOP: a stand-in now (the nearest decoded frame,
+    // which the worker's look-ahead may have moved on from frame 5).
+    let landed = viewer.landed();
+    let far = 50;
+    let got = viewer.fetch(&src, 1, far, Want::Scrub).unwrap();
+    if !got.exact {
+        assert!(
+            got.shown < 20,
+            "a frame near 5 stands in, got {}",
+            got.shown
+        );
+        assert_eq!(got.frame.md5_hex().unwrap(), want[got.shown]);
+        eventually("the scrub target lands", || viewer.landed() != landed);
+    }
+    let exact = viewer.fetch(&src, 1, far, Want::Scrub).unwrap();
+    assert!(exact.exact);
+    assert_eq!(exact.frame.md5_hex().unwrap(), want[far]);
+    let stats = viewer.stats();
+    assert_eq!(stats.errors, 0);
+    assert!(stats.decoded >= 2, "{stats:?}");
+}
+
+#[test]
+fn superseded_scrub_targets_are_dropped_and_the_newest_lands() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let want = sequential(&src);
+    let viewer = ViewerDecode::new(service());
+    viewer.fetch(&src, 1, 0, Want::Exact).unwrap();
+    // A fast drag backwards and forwards across both GOPs.
+    let targets = [55, 12, 48, 3, 41, 27, 58];
+    for &k in &targets {
+        let f = viewer.fetch(&src, 1, k, Want::Scrub).unwrap();
+        assert_eq!(
+            f.frame.md5_hex().unwrap(),
+            want[f.shown],
+            "frame shown for {k}"
+        );
+    }
+    let last = *targets.last().unwrap();
+    eventually("the newest target lands", || {
+        viewer.fetch(&src, 1, last, Want::Scrub).unwrap().exact
+    });
+    let f = viewer.fetch(&src, 1, last, Want::Scrub).unwrap();
+    assert_eq!(f.frame.md5_hex().unwrap(), want[last]);
+    let stats = viewer.stats();
+    assert!(
+        stats.decoded < targets.len() as u64 + 1,
+        "superseded targets were not all decoded: {stats:?}"
+    );
+    assert_eq!(stats.errors, 0);
+}
+
+#[test]
+fn look_ahead_follows_the_direction_of_motion() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = service();
+    let viewer = ViewerDecode::new(svc.clone());
+    let key = |n: usize| pm_media::cache::FrameKey {
+        source: src.id,
+        sample: src.index.frames[n].sample,
+        purpose: DecodePurpose::Display,
+    };
+    viewer.fetch(&src, 1, 10, Want::Exact).unwrap();
+    viewer.fetch(&src, 1, 11, Want::Exact).unwrap();
+    // Moving forward: frames after 11 decode ahead into the cache.
+    eventually("frames ahead are cached", || {
+        (12..16).all(|n| svc.cache().contains(&key(n)))
+    });
+    assert!(viewer.stats().ahead > 0);
+    // A forward drag through them is served from the cache.
+    let before = viewer.stats().cached;
+    for n in 12..16 {
+        assert!(viewer.fetch(&src, 1, n, Want::Scrub).unwrap().exact);
+    }
+    assert_eq!(viewer.stats().cached, before + 4);
+}
+
+#[test]
+fn released_sources_stop_their_workers() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let viewer = ViewerDecode::new(service());
+    viewer.fetch(&src, 1, 3, Want::Exact).unwrap();
+    viewer.fetch(&src, 2, 3, Want::Exact).unwrap();
+    assert_eq!(viewer.stats().workers, 2);
+    // Two running workers share the frame cache's look-ahead room.
+    assert_eq!(viewer.live_workers(), 2);
+    viewer.release(Some(src.id));
+    assert_eq!(viewer.live_workers(), 0);
+    // A new request starts a new worker.
+    viewer.fetch(&src, 1, 4, Want::Exact).unwrap();
+    assert_eq!(viewer.stats().workers, 3);
+    assert_eq!(viewer.live_workers(), 1);
+    assert!(!viewer.pending());
+}
+
+/// Workers that exit idle while requests arrive: every request is
+/// answered (an exact one with its frame, a scrub one lands), never with
+/// "the decode worker stopped" or a target nobody decodes.
+#[test]
+fn requests_racing_an_idle_exit_are_answered() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let want = sequential(&src);
+    let viewer = ViewerDecode::new(service()).with_idle_exit(Duration::ZERO);
+    let n = src.pts.len();
+    for i in 0..300usize {
+        // Pauses around the idle timeout, so requests meet workers that
+        // are exiting.
+        std::thread::sleep(Duration::from_micros(((i * 37) % 200) as u64));
+        let k = (i * 7) % n;
+        if i % 3 == 0 {
+            let landed = viewer.landed();
+            let f = viewer.fetch(&src, 1, k, Want::Scrub).unwrap();
+            if !f.exact {
+                eventually("the scrub target landed", || viewer.landed() != landed);
+            }
+        } else {
+            let f = viewer.fetch(&src, 1, k, Want::Exact).unwrap();
+            assert!(f.exact);
+            assert_eq!(f.frame.md5_hex().unwrap(), want[k], "frame {k}");
+        }
+    }
+    assert!(viewer.stats().workers > 1, "{:?}", viewer.stats());
+    assert_eq!(viewer.stats().errors, 0);
+}
+
+/// Long GOP with a B pyramid (the generated corpus): exact and scrub
+/// requests in a drag stay equal to the sequential decode with
+/// unreferenced pictures left out of every seek.
+#[test]
+#[ignore]
+fn long_gop_corpus() {
+    for name in ["h264-bpyramid.mp4", "hevc-opengop.mp4", "h264-opengop.mov"] {
+        let path = corpus_dir().join(name);
+        exact_requests_equal_the_sequential_decode(&path);
+        let src = MediaSource::open(&path).unwrap();
+        let want = sequential(&src);
+        let viewer = ViewerDecode::new(service());
+        let n = src.pts.len();
+        viewer.fetch(&src, 1, n - 1, Want::Exact).unwrap();
+        // A reverse drag, then a forward one, two frames per request.
+        let mut shown = 0;
+        let mut asked = 0;
+        for k in (0..n).rev().step_by(2).chain((0..n).step_by(2)) {
+            let f = viewer.fetch(&src, 1, k, Want::Scrub).unwrap();
+            assert_eq!(
+                f.frame.md5_hex().unwrap(),
+                want[f.shown],
+                "{name} frame {}",
+                f.shown
+            );
+            shown += usize::from(f.exact);
+            asked += 1;
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        let stats = viewer.stats();
+        eprintln!("{name}: {shown} exact of {asked} requests; {stats:?}");
+        assert_eq!(stats.errors, 0);
+    }
+}
+
+/// w84 review P0-1: 60 fps footage on a 24 fps timeline steps the source by
+/// +3 and +2 in turn. With a one-picture session window and no room in the
+/// shared cache, a speculative decode ahead must never discard the next
+/// requested frame: every playback request lands exactly.
+#[test]
+fn alternating_playback_cadence_with_no_cache_room_lands_every_frame() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let want = sequential(&src);
+    let svc = Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        session_window: 1,
+        ..Default::default()
+    }));
+    let viewer = ViewerDecode::new(svc);
+    let n = src.pts.len();
+    let mut k = 1;
+    let mut asked = Vec::new();
+    let mut shown = Vec::new();
+    for step in [3, 2].into_iter().cycle() {
+        if k >= n {
+            break;
+        }
+        let f = viewer
+            .fetch(&src, 1, k, Want::Playback(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(f.frame.md5_hex().unwrap(), want[f.shown], "frame {}", f.shown);
+        asked.push(k);
+        shown.push((f.shown, f.exact));
+        k += step;
+        // A frame's time passes before the next request: the look-ahead
+        // the worker chose is decoded by then.
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let expected: Vec<_> = asked.iter().map(|&k| (k, true)).collect();
+    assert_eq!(shown, expected, "every requested frame, exactly");
+    // No cache room and a stride above one: nothing is decoded ahead that
+    // could pass over the next request.
+    assert_eq!(viewer.stats().ahead, 0, "{:?}", viewer.stats());
+
+    // Stride one keeps its single frame ahead in the worker's own slot.
+    let svc = Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        session_window: 1,
+        ..Default::default()
+    }));
+    let viewer = ViewerDecode::new(svc);
+    for k in 1..12 {
+        let f = viewer
+            .fetch(&src, 1, k, Want::Playback(Duration::from_secs(10)))
+            .unwrap();
+        assert!(f.exact && f.shown == k, "frame {k}");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert!(viewer.stats().ahead > 0, "{:?}", viewer.stats());
+}
+
+/// w84 review P1-2: many layer instances of one source that stays in use.
+/// Instances that go idle give back their frames when their workers exit,
+/// and upkeep forgets the finished workers, so worker entries and decoded
+/// bytes settle at what the instance still playing keeps.
+#[test]
+fn idle_instances_of_a_busy_source_keep_no_decoded_frames() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = Arc::new(DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    }));
+    let viewer = ViewerDecode::new(svc).with_idle_exit(Duration::from_millis(30));
+    let play = |instance, k| {
+        let f = viewer
+            .fetch(&src, instance, k, Want::Playback(Duration::from_secs(10)))
+            .unwrap();
+        assert!(f.exact);
+        f.frame.bytes()
+    };
+    let frame = play(1, 0);
+    for instance in 2..26 {
+        play(instance, (instance as usize) % 20);
+    }
+    assert!(viewer.retained().0 >= 20, "{:?}", viewer.retained());
+    // Instance 1 keeps playing while the others sit idle.
+    let mut k = 1;
+    eventually("idle workers exit", || {
+        play(1, k);
+        k += 1;
+        std::thread::sleep(Duration::from_millis(5));
+        viewer.live_workers() == 1
+    });
+    // Exited workers still in the map keep no frames.
+    let (_, bytes) = viewer.retained();
+    assert!(bytes <= 2 * frame, "{bytes} bytes kept before upkeep, one frame is {frame}");
+    viewer.prune();
+    let (entries, bytes) = viewer.retained();
+    assert_eq!(entries, 1, "only the playing instance's worker stays");
+    assert!(bytes <= 2 * frame, "{bytes} bytes kept, one frame is {frame}");
+}

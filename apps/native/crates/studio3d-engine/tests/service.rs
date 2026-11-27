@@ -1,0 +1,896 @@
+use pm_studio3d_engine::SceneExt;
+mod common;
+use pm_studio3d_engine::extract::{MeshInstance, SceneInput, SceneRequest, SceneSource, Transform};
+use pm_studio3d_engine::{
+    math::{Vec3, v3},
+    mesh,
+    scene::{Camera, Material, Softbox, preset},
+    service::{Denoise, StudioService, Tier},
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+
+struct Source {
+    mesh: Arc<mesh::Mesh>,
+    changed: AtomicU32,
+}
+impl Source {
+    fn new() -> Self {
+        Self {
+            mesh: Arc::new(mesh::sphere(Vec3::ZERO, 0.7, 12, 24)),
+            changed: AtomicU32::new(0),
+        }
+    }
+}
+impl SceneSource for Source {
+    fn scene(&self, _request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut scene = preset("hero", "space-gray", 0.).unwrap();
+        scene.objects.clear();
+        scene.materials = vec![Material::metal(
+            if self.changed.load(Ordering::SeqCst) == 0 {
+                v3(0.8, 0.2, 0.1)
+            } else {
+                v3(0.1, 0.2, 0.8)
+            },
+            0.3,
+        )];
+        scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 32., 0.);
+        scene.environment = (Vec3::splat(0.3), Vec3::splat(0.1));
+        scene.shadow_catcher = false;
+        scene.lights = vec![Softbox::aimed(
+            Vec3::ZERO,
+            -30.,
+            40.,
+            8.,
+            4.,
+            4.,
+            Vec3::splat(4.),
+        )];
+        let instances = ["left", "right"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let mut world = Transform::default();
+                world.0[12] = if i == 0 { -0.8 } else { 0.8 };
+                MeshInstance {
+                    layer: (*id).into(),
+                    mesh: self.mesh.clone(),
+                    material: 0,
+                    material_palette: None,
+                    attributes: None,
+                    primary_visible: true,
+                    world,
+                }
+            })
+            .collect();
+        Ok(SceneInput {
+            scene,
+            instances,
+            materials: None,
+            maps: None,
+            view: Default::default(),
+        })
+    }
+}
+fn request() -> SceneRequest {
+    SceneRequest {
+        composition: "comp".into(),
+        revision: 1,
+        ticks: 0,
+        width: 64,
+        height: 48,
+    }
+}
+fn pixels(
+    service: &StudioService,
+    rendered: &pm_studio3d_engine::service::RenderedScene,
+) -> Vec<Vec<u8>> {
+    rendered
+        .layers
+        .iter()
+        .map(|l| {
+            common::read(
+                service.device().unwrap(),
+                service.queue().unwrap(),
+                &l.texture,
+            )
+        })
+        .collect()
+}
+#[test]
+fn provider_ids_layers_progress_and_resource_invalidation() {
+    let source = Source::new();
+    let mut service = StudioService::default();
+    let final_tier = Tier::Final {
+        samples: 4,
+        salt: 1,
+        denoise: Denoise::Guided,
+    };
+    let frame = service.render(&source, request(), final_tier).unwrap();
+    assert_eq!(
+        frame
+            .layers
+            .iter()
+            .map(|l| l.layer.as_str())
+            .collect::<Vec<_>>(),
+        ["left", "right"]
+    );
+    assert!(
+        frame.hardware_rt
+            == (service
+                .device()
+                .unwrap()
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                && std::env::var_os("STUDIO_NO_RT").is_none()),
+        "instances use hardware traversal when the device supports it"
+    );
+    assert_eq!(service.blas_builds(), 1);
+    let first = pixels(&service, &frame);
+    for layer in &first {
+        assert!(layer.chunks_exact(4).filter(|p| p[3] > 0).count() > 20);
+    }
+    assert!(
+        first[0]
+            .chunks_exact(4)
+            .zip(first[1].chunks_exact(4))
+            .all(|(a, b)| a[3] == 0 || b[3] == 0)
+    );
+    let frame = service.render(&source, request(), final_tier).unwrap();
+    assert_eq!(first, pixels(&service, &frame));
+    assert_eq!(service.geometry_uploads(), 1);
+    assert_eq!(service.scene_updates(), 1);
+    source.changed.store(1, Ordering::SeqCst); // Same revision: resources still invalidate.
+    let frame = service.render(&source, request(), final_tier).unwrap();
+    assert_ne!(first, pixels(&service, &frame));
+    assert_eq!(service.blas_builds(), 1);
+    let refine = Tier::QualityRefine { samples: 2 };
+    assert_eq!(
+        service.render(&source, request(), refine).unwrap().samples,
+        2
+    );
+    assert_eq!(
+        service.render(&source, request(), refine).unwrap().samples,
+        4
+    );
+    let mut moved = request();
+    moved.ticks = 29_400_000;
+    assert_eq!(service.render(&source, moved, refine).unwrap().samples, 2);
+    assert_eq!(
+        service.render(&source, request(), refine).unwrap().samples,
+        2
+    );
+    let live = service
+        .render(&source, request(), Tier::QualityLive)
+        .unwrap();
+    assert_eq!(
+        (
+            live.layers[0].texture.width(),
+            live.layers[0].texture.height()
+        ),
+        (64, 48)
+    );
+    assert_eq!(live.samples, 1);
+    assert_eq!(
+        service.render(&source, request(), refine).unwrap().samples,
+        2
+    );
+    let builds = service.blas_builds();
+    for _ in 0..2 {
+        let fast = service.render(&source, request(), Tier::Fast).unwrap();
+        assert_eq!(fast.samples, 1, "paused Fast must not accumulate or refine");
+        assert_eq!(fast.layers.len(), 2);
+        assert!(pixels(&service, &fast).iter().flatten().any(|p| *p > 0));
+    }
+    assert_eq!(service.blas_builds(), builds, "Fast must not build a tracing BVH");
+}
+trait ErrorText {
+    fn unwrap_err_text(self) -> String;
+}
+impl<T> ErrorText for Result<T, String> {
+    fn unwrap_err_text(self) -> String {
+        match self {
+            Err(e) => e,
+            Ok(_) => panic!("expected an explicit failure"),
+        }
+    }
+}
+
+#[test]
+fn unsupported_or_zero_sample_final_never_claims_success() {
+    let mut service = StudioService::default();
+    let source = Source::new();
+    assert!(
+        service
+            .render(
+                &source,
+                request(),
+                Tier::Final {
+                    samples: 0,
+                    salt: 0,
+                    denoise: Denoise::None
+                }
+            )
+            .is_err()
+    );
+    assert!(service.device().is_none());
+}
+
+/// A build without Open Image Denoise cleans what would have gone to it with
+/// the engine's own guided filter, rather than refusing the frame.
+#[cfg(not(feature = "oidn"))]
+#[test]
+fn without_the_denoiser_its_frames_use_the_guided_filter() {
+    assert!(!pm_studio3d_engine::OIDN);
+    let mut service = StudioService::default();
+    let source = Source::new();
+    let tier = |denoise| Tier::Final { samples: 4, salt: 1, denoise };
+    let frame = service.render(&source, request(), tier(Denoise::Guided)).unwrap();
+    let guided = pixels(&service, &frame);
+    let frame = service.render(&source, request(), tier(Denoise::Oidn)).unwrap();
+    assert_eq!(guided, pixels(&service, &frame));
+    let frame = service.render(&source, request(), tier(Denoise::None)).unwrap();
+    assert_ne!(guided, pixels(&service, &frame), "the guided filter ran");
+    let frame = service
+        .render(&source, request(), Tier::QualityRefine { samples: 2 })
+        .unwrap();
+    assert!(pixels(&service, &frame).iter().all(|image| image.chunks_exact(4).any(|p| p[3] > 0)));
+}
+
+struct Screens {
+    source: Source,
+    swapped: std::sync::atomic::AtomicBool,
+}
+impl SceneSource for Screens {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.lights.clear();
+        input.scene.extra_lights.clear();
+        input.scene.environment = (Vec3::ZERO, Vec3::ZERO);
+        let mut display = Material::dielectric(Vec3::ZERO, 1.);
+        display.emission = Vec3::splat(0.5);
+        display.specular = 0.;
+        input.scene.materials = vec![display, display];
+        let mut materials = input.scene.gpu_materials();
+        materials[0].maps[1] = 0.;
+        materials[1].maps[1] = 1.;
+        input.materials = Some(materials);
+        input.instances[1].material = 1;
+        let mut layers = vec![Arc::new(vec![255, 0, 0, 255]), Arc::new(vec![0, 0, 255, 255])];
+        if self.swapped.load(Ordering::SeqCst) {
+            layers.swap(0, 1);
+        }
+        input.maps = Some(pm_studio3d_engine::extract::TextureMaps {
+            width: 1,
+            height: 1,
+            layers,
+        });
+        Ok(input)
+    }
+}
+#[test]
+fn multiple_live_screens_update_at_the_same_document_revision() {
+    let source = Screens {
+        source: Source::new(),
+        swapped: std::sync::atomic::AtomicBool::new(false),
+    };
+    let mut service = StudioService::default();
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 19,
+        denoise: Denoise::None,
+    };
+    let frame = service.render(&source, request(), tier).unwrap();
+    let before = pixels(&service, &frame);
+    assert!(before[0].chunks_exact(4).filter(|p| p[0] > p[2]).count() > 20);
+    assert!(before[1].chunks_exact(4).filter(|p| p[2] > p[0]).count() > 20);
+    source.swapped.store(true, Ordering::SeqCst);
+    let frame = service.render(&source, request(), tier).unwrap();
+    let after = pixels(&service, &frame);
+    assert!(after[0].chunks_exact(4).filter(|p| p[2] > p[0]).count() > 20);
+    assert!(after[1].chunks_exact(4).filter(|p| p[0] > p[2]).count() > 20);
+    assert_eq!(service.geometry_uploads(), 1);
+}
+
+#[cfg(feature = "oidn")]
+#[test]
+fn final_can_use_the_optional_oidn_device() {
+    let mut service = StudioService::default();
+    let source = Source::new();
+    let frame = service
+        .render(
+            &source,
+            request(),
+            Tier::Final {
+                samples: 4,
+                salt: 1,
+                denoise: Denoise::Oidn,
+            },
+        )
+        .unwrap();
+    let images = pixels(&service, &frame);
+    assert_eq!(images.len(), 2);
+    assert!(
+        images
+            .iter()
+            .all(|image| image.chunks_exact(4).any(|p| p[3] > 0 && p[0] > 0))
+    );
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 1,
+        denoise: Denoise::Oidn,
+    };
+    let repeated = service.render(&source, request(), tier).unwrap();
+    assert!(repeated.timings.oidn_reused);
+    assert_eq!(images, pixels(&service, &repeated));
+    let mut resized = request();
+    resized.width = 80;
+    service
+        .render(&source, resized, Tier::QualityRefine { samples: 2 })
+        .unwrap();
+    let restored = service.render(&source, request(), tier).unwrap();
+    assert!(restored.timings.oidn_reused);
+    assert_eq!(
+        images,
+        pixels(&service, &restored),
+        "cached filters survive size and guide-quality changes"
+    );
+}
+
+struct GreyScreen {
+    source: Source,
+    textured: bool,
+}
+impl SceneSource for GreyScreen {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.lights.clear();
+        input.scene.extra_lights.clear();
+        input.scene.environment = (Vec3::ZERO, Vec3::ZERO);
+        // Independent sRGB EOTF for the authored 8-bit mid-grey source.
+        let linear = ((128f32 / 255. + 0.055) / 1.055).powf(2.4);
+        let mut display = Material::dielectric(Vec3::ZERO, 1.);
+        display.specular = 0.;
+        display.emission = Vec3::splat(if self.textured { 0.5 } else { 0.5 * linear });
+        input.scene.materials = vec![display];
+        if self.textured {
+            let mut materials = input.scene.gpu_materials();
+            materials[0].maps[1] = 0.;
+            input.materials = Some(materials);
+            input.maps = Some(pm_studio3d_engine::extract::TextureMaps {
+                width: 1,
+                height: 1,
+                layers: vec![Arc::new(vec![128, 128, 128, 255])],
+            });
+        }
+        Ok(input)
+    }
+}
+#[test]
+fn srgb_screens_are_decoded_exactly_once() {
+    let mut service = StudioService::default();
+    for tier in [Tier::Final {
+        samples: 4,
+        salt: 29,
+        denoise: Denoise::None,
+    }, Tier::Fast] {
+    let encoded = GreyScreen {
+        source: Source::new(),
+        textured: true,
+    };
+    let linear = GreyScreen {
+        source: Source::new(),
+        textured: false,
+    };
+    let frame = service.render(&encoded, request(), tier).unwrap();
+    let textured = pixels(&service, &frame);
+    let frame = service.render(&linear, request(), tier).unwrap();
+    let explicit = pixels(&service, &frame);
+    assert!(
+        explicit
+            .iter()
+            .all(|p| p.chunks_exact(4).any(|p| p[0] > 20 && p[3] > 0))
+    );
+    for (layer, (actual, expected)) in textured.iter().zip(&explicit).enumerate() {
+        for (pixel, (actual, expected)) in actual
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+        {
+            assert_eq!(
+                actual, expected,
+                "mapped sRGB must match explicitly decoded emission: layer {layer}, pixel {pixel}"
+            );
+        }
+    }
+    }
+}
+
+#[test]
+fn changing_instance_capacity_reallocates_gpu_buffers_safely() {
+    struct Growing {
+        source: Source,
+        count: AtomicU32,
+    }
+    impl SceneSource for Growing {
+        fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+            let mut input = self.source.scene(request)?;
+            for i in 2..self.count.load(Ordering::SeqCst) {
+                input.instances.push(MeshInstance {
+                    layer: format!("copy-{i}"),
+                    mesh: self.source.mesh.clone(),
+                    material: 0,
+                    material_palette: None,
+                    attributes: None,
+                    primary_visible: true,
+                    world: Transform::default(),
+                });
+            }
+            Ok(input)
+        }
+    }
+    let source = Growing {
+        source: Source::new(),
+        count: AtomicU32::new(2),
+    };
+    let mut service = StudioService::default();
+    for count in [2, 12, 3, 2] {
+        source.count.store(count, Ordering::SeqCst);
+        let frame = service
+            .render(
+                &source,
+                request(),
+                Tier::Final {
+                    samples: 4,
+                    salt: 0,
+                    denoise: Denoise::None,
+                },
+            )
+            .unwrap();
+        assert_eq!(frame.layers.len(), count as usize);
+        assert!(pixels(&service, &frame).iter().flatten().any(|p| *p > 0));
+    }
+}
+
+struct MovingCamera {
+    source: Source,
+    mode: AtomicU32,
+}
+impl SceneSource for MovingCamera {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        match self.mode.load(Ordering::SeqCst) {
+            1 => input.scene.camera.position.x = 2.,
+            2 => input.scene.meters_per_unit = 1.,
+            _ => {}
+        }
+        Ok(input)
+    }
+}
+#[test]
+fn camera_motion_changes_pixels_without_scene_or_geometry_uploads() {
+    let source = MovingCamera {
+        source: Source::new(),
+        mode: AtomicU32::new(0),
+    };
+    let mut service = StudioService::default();
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 7,
+        denoise: Denoise::None,
+    };
+    let first = service.render(&source, request(), tier).unwrap();
+    let before = pixels(&service, &first);
+    source.mode.store(1, Ordering::SeqCst);
+    let moved = service.render(&source, request(), tier).unwrap();
+    assert_ne!(before, pixels(&service, &moved));
+    assert_eq!(service.geometry_uploads(), 1);
+    assert_eq!(
+        service.scene_updates(),
+        1,
+        "camera motion must not rebuild the RT scene"
+    );
+}
+struct MappedMotion {
+    source: Source,
+    image: AtomicU32,
+}
+impl SceneSource for MappedMotion {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.materials = vec![Material::dielectric(Vec3::splat(0.8),0.7)];
+        let mut materials = input.scene.gpu_materials();
+        let image = self.image.load(Ordering::SeqCst);
+        if image < 2 {
+            materials[0].maps[0] = 0.;
+            input.maps = Some(pm_studio3d_engine::extract::TextureMaps {
+                width: 1, height: 1,
+                layers: vec![Arc::new(if image == 0 {vec![255,0,0,255]} else {vec![0,0,255,255]})],
+            });
+        }
+        input.materials = Some(materials);
+        for instance in &mut input.instances {
+            instance.world.0[13] += request.ticks as f32 * 0.25;
+        }
+        Ok(input)
+    }
+}
+#[test]
+fn moving_instances_retain_images_and_same_revision_image_edits_still_land() {
+    let source = MappedMotion { source: Source::new(), image: AtomicU32::new(0) };
+    let mut service = StudioService::default();
+    let tier = Tier::Final { samples: 8, salt: 0, denoise: Denoise::None };
+    let mut request = request();
+    let first = service.render(&source, request.clone(), tier).unwrap();
+    let before = pixels(&service, &first);
+    request.ticks = 1;
+    let moved = service.render(&source, request.clone(), tier).unwrap();
+    let red = pixels(&service, &moved);
+    assert_ne!(before, red, "motion must still update the scene");
+    assert_eq!(service.geometry_uploads(), 1);
+    assert_eq!(service.texture_uploads(), 1, "moving an instance must retain its image allocation");
+    source.image.store(1, Ordering::SeqCst);
+    let edited = service.render(&source, request.clone(), tier).unwrap();
+    assert_ne!(red, pixels(&service, &edited), "same-size pixel changes must replace the image");
+    assert_eq!(service.texture_uploads(), 2);
+    source.image.store(2, Ordering::SeqCst);
+    let removed = service.render(&source, request.clone(), tier).unwrap();
+    assert_ne!(red, pixels(&service, &removed));
+    assert_eq!(service.texture_uploads(), 3);
+    source.image.store(0, Ordering::SeqCst);
+    let restored = service.render(&source, request.clone(), tier).unwrap();
+    assert_eq!(red, pixels(&service, &restored));
+    assert_eq!(service.texture_uploads(), 4);
+    request.width *= 2;request.height *= 2;
+    let resized = service.render(&source, request, tier).unwrap();
+    assert!(pixels(&service, &resized)[0].chunks_exact(4).any(|p|p[3]>0));
+    assert_eq!(service.texture_uploads(), 4, "resolution changes retain source images");
+}
+#[test]
+fn aperture_units_reset_refine_accumulation_at_the_same_revision() {
+    let source = MovingCamera {
+        source: Source::new(),
+        mode: AtomicU32::new(0),
+    };
+    let mut service = StudioService::default();
+    let tier = Tier::QualityRefine { samples: 2 };
+    assert_eq!(service.render(&source, request(), tier).unwrap().samples, 2);
+    assert_eq!(service.render(&source, request(), tier).unwrap().samples, 4);
+    source.mode.store(2, Ordering::SeqCst);
+    assert_eq!(service.render(&source, request(), tier).unwrap().samples, 2);
+    assert_eq!(service.scene_updates(), 1);
+}
+#[test]
+fn surface_queries_share_rendered_layers_world_geometry_and_refine_accumulation() {
+    let source=Source::new();
+    let mut service=StudioService::default();
+    let req=request();
+    let tier=Tier::QualityRefine {samples:4};
+    // A query is useful before the first frame and does not trace samples.
+    let left=service.pick_surface(&source,req.clone(),tier,0.29,0.5).unwrap().unwrap();
+    assert_eq!(left.layer,"left");
+    assert!((left.point[0]+0.8).abs()<0.2 && left.point[2]>0.5);
+    assert!((left.normal.iter().map(|n|n*n).sum::<f32>()-1.).abs()<0.001);
+    assert!(left.normal[2]>0.8);
+    assert!(service.pick_surface(&source,req.clone(),tier,0.5,0.02).unwrap().is_none());
+    assert!(service.pick_surface(&source,req.clone(),tier,f32::NAN,0.5).is_err());
+    assert!(service.pick_surface(&source,req.clone(),tier,1.1,0.5).is_err());
+    assert_eq!(service.render(&source,req.clone(),tier).unwrap().samples,4);
+    let right=service.pick_surface(&source,req.clone(),tier,0.71,0.5).unwrap().unwrap();
+    assert_eq!(right.layer,"right");
+    assert!(right.point[0]>0.6);
+    assert_eq!(service.render(&source,req,tier).unwrap().samples,8,"hover must retain refinement");
+    assert_eq!(service.geometry_uploads(),1);
+    assert_eq!(service.texture_uploads(),1);
+}
+
+struct BackdropSource {
+    source: Source,
+    owners: Vec<String>,
+}
+impl SceneSource for BackdropSource {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.backdrop = v3(0.25, 0.5, 0.75);
+        input.view.backdrop_opaque = Some(true);
+        Ok(input)
+    }
+    fn auxiliary_layers(
+        &self,
+        _request: &SceneRequest,
+    ) -> Result<Vec<pm_studio3d_engine::extract::AuxiliaryLayer>, String> {
+        Ok(self
+            .owners
+            .iter()
+            .map(|id| pm_studio3d_engine::extract::AuxiliaryLayer {
+                id: id.clone(),
+                include_void: true,
+            })
+            .collect())
+    }
+}
+#[test]
+fn one_surface_output_can_own_the_backdrop_and_duplicate_owners_are_rejected() {
+    let mut source = BackdropSource {
+        source: Source::new(),
+        owners: vec!["right".into()],
+    };
+    let mut service = StudioService::default();
+    let frame = service
+        .render(
+            &source,
+            request(),
+            Tier::Final {
+                samples: 4,
+                salt: 1,
+                denoise: Denoise::None,
+            },
+        )
+        .unwrap();
+    let output = pixels(&service, &frame);
+    for (layer, pixels) in frame.layers.iter().zip(output) {
+        let corner = &pixels[..4];
+        if layer.layer == "right" {
+            assert!(corner[3] > 250);
+            for (actual, expected) in corner[..3].iter().zip([64, 128, 191]) {
+                assert!((*actual as i32 - expected).abs() <= 2, "{corner:?}");
+            }
+        } else {
+            assert_eq!(corner[3], 0);
+        }
+    }
+    source.owners.push("left".into());
+    assert!(
+        service
+            .render(&source, request(), Tier::QualityLive)
+            .err()
+            .unwrap()
+            .contains("multiple output owners")
+    );
+}
+#[test]
+fn immutable_geometry_reuses_identical_replacement_but_never_hides_copy_on_write_edits() {
+    let mut source=Source::new();
+    let mut service=StudioService::default();
+    let tier=Tier::Final{samples:8,salt:0,denoise:Denoise::None};
+    let first=service.render(&source,request(),tier).unwrap();let before=pixels(&service,&first);
+    assert_eq!(service.geometry_uploads(),1);
+    source.mesh=Arc::new((*source.mesh).clone());
+    let same=service.render(&source,request(),tier).unwrap();
+    assert_eq!(service.geometry_uploads(),1,"byte-identical replacement rebuilt geometry");
+    assert_eq!(pixels(&service,&same),before);
+    // The service retains a strong identity; make_mut must separate the edited
+    // allocation even when the client still holds the same Arc variable.
+    for position in &mut Arc::make_mut(&mut source.mesh).positions{*position = *position * 0.5;}
+    let edited=service.render(&source,request(),tier).unwrap();
+    assert_eq!(service.geometry_uploads(),2,"copy-on-write edit reused stale geometry");
+    assert_ne!(pixels(&service,&edited),before);
+    let edited_pixels=pixels(&service,&edited);
+    source.changed.store(1,Ordering::SeqCst);
+    let material=service.render(&source,request(),tier).unwrap();
+    assert_eq!(service.geometry_uploads(),2,"material-only edit rebuilt geometry");
+    assert_ne!(pixels(&service,&material),edited_pixels,"material edit reused stale output");
+}
+
+/// The preview uses exactly the frozen scene consumed by final rendering.
+/// Compare per-layer masks: this catches both camera errors and depth ownership.
+#[test]
+fn fast_preserves_framing_depth_and_final_bytes() {
+    struct Overlap(Source, bool);
+    impl SceneSource for Overlap {
+        fn scene(&self, r: &SceneRequest) -> Result<SceneInput, String> {
+            let mut input = self.0.scene(r)?;
+            input.instances[0].world.0[12] = -0.25;
+            input.instances[1].world.0[12] = 0.25;
+            input.instances[1].world.0[14] = -0.5;
+            input.scene.camera.position.y = 0.35;
+            input.view.clip_planes = Some([0.1, 100.]);
+            if self.1 {
+                input.view.orthographic_span = Some(1.8);
+            }
+            Ok(input)
+        }
+    }
+    for orthographic in [false, true] {
+        let source = Overlap(Source::new(), orthographic);
+        let mut r = request();
+        r.width = 512;
+        r.height = 384;
+        let mut service = StudioService::default();
+        let final_tier = Tier::Final {
+            samples: 4,
+            salt: 11,
+            denoise: Denoise::None,
+        };
+        let before = service.render(&source, r.clone(), final_tier).unwrap();
+        let full = pixels(&service, &before);
+        let fast = service.render(&source, r.clone(), Tier::Fast).unwrap();
+        assert_eq!(fast.samples, 1);
+        assert!(!fast.hardware_rt);
+        let preview = pixels(&service, &fast);
+        assert_eq!(full.len(), preview.len());
+        // Opt-in synthetic evidence, kept outside the repository by the runner.
+        if let Some(dir) = std::env::var_os("PM_FAST_PROOF_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (index, (a, b)) in full.iter().zip(&preview).enumerate() {
+                for (mode, pixels) in [("full", a), ("fast", b)] {
+                    pm_studio3d_engine::gpu::write_png(
+                        &dir.join(format!("{mode}-ortho-{orthographic}-layer-{index}.png")),
+                        r.width,
+                        r.height,
+                        pixels,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        // Full's display mask uses the nearest hit across its jittered film
+        // footprint (Blackman-Harris support +/-1.5 pixels), not the centre
+        // ray's ID. At an overlap that can assign an entire pixel to a front
+        // object although its centre sees the rear. Do not make Fast imitate
+        // that reconstruction bias. Exclude ONLY those internal overlap pixels
+        // for which Full's own deterministic centre-ray query agrees with Fast,
+        // and the other object's raster coverage is within that footprint.
+        // Outer silhouette differences and unconfirmed ownership differences
+        // remain in the >=0.98 IoU gate; neither its size nor threshold changes.
+        let pixel_count = (r.width * r.height) as usize;
+        let owners = |layers: &[Vec<u8>]| -> Vec<Option<usize>> {
+            (0..pixel_count)
+                .map(|pixel| layers.iter().position(|p| p[pixel * 4 + 3] >= 128))
+                .collect()
+        };
+        let full_owner = owners(&full);
+        let fast_owner = owners(&preview);
+        let mut overlap = vec![false; pixel_count];
+        let mut candidates = 0;
+        for pixel in 0..pixel_count {
+            let (Some(a), Some(b)) = (full_owner[pixel], fast_owner[pixel]) else {
+                continue;
+            };
+            if a == b {
+                continue;
+            }
+            let x = (pixel as u32 % r.width) as i32;
+            let y = (pixel as u32 / r.width) as i32;
+            let neighboring_front = (-2..=2).any(|dy| {
+                (-2..=2).any(|dx| {
+                    let (nx, ny) = (x + dx, y + dy);
+                    nx >= 0
+                        && ny >= 0
+                        && nx < r.width as i32
+                        && ny < r.height as i32
+                        && fast_owner[ny as usize * r.width as usize + nx as usize] == Some(a)
+                })
+            });
+            if !neighboring_front {
+                continue;
+            }
+            candidates += 1;
+            let hit = service
+                .pick_surface(
+                    &source,
+                    r.clone(),
+                    Tier::QualityLive,
+                    (x as f32 + 0.5) / r.width as f32,
+                    (y as f32 + 0.5) / r.height as f32,
+                )
+                .unwrap();
+            overlap[pixel] = hit
+                .as_ref()
+                .is_some_and(|h| h.layer == before.layers[b].layer);
+            if std::env::var_os("PM_FAST_PROOF_DIR").is_some() && candidates <= 12 {
+                eprintln!(
+                    "overlap diagnostic pixel=({x},{y}) FullMask={} FastCentre={} FullCentre={hit:?} confirmed={}",
+                    before.layers[a].layer, before.layers[b].layer, overlap[pixel]
+                );
+            }
+        }
+        let confirmed = overlap.iter().filter(|&&v| v).count();
+        eprintln!(
+            "orthographic={orthographic} overlap candidates={candidates}, centre-ray confirmed exclusions={confirmed}"
+        );
+        for (full, fast) in full.iter().zip(&preview) {
+            let (mut intersection, mut union, mut raw_intersection, mut raw_union) = (0, 0, 0, 0);
+            for (pixel, (a, b)) in full.chunks_exact(4).zip(fast.chunks_exact(4)).enumerate() {
+                let (a, b) = (a[3] >= 128, b[3] >= 128);
+                raw_intersection += usize::from(a && b);
+                raw_union += usize::from(a || b);
+                if overlap[pixel] {
+                    continue;
+                }
+                intersection += usize::from(a && b);
+                union += usize::from(a || b);
+            }
+            let iou = intersection as f64 / union as f64;
+            eprintln!(
+                "Fast/Full orthographic={orthographic} raw IoU={:.6}, confirmed-centre silhouette+occlusion IoU={iou:.6}",
+                raw_intersection as f64 / raw_union as f64
+            );
+            assert!(
+                iou >= 0.98,
+                "Fast/Full silhouette and depth ownership IoU {iou}"
+            );
+        }
+        let bottom_up = service
+            .render_bottom_up(&source, r.clone(), Tier::Fast)
+            .unwrap();
+        for (top, bottom) in preview.iter().zip(pixels(&service, &bottom_up)) {
+            let expected: Vec<_> = top
+                .chunks_exact(r.width as usize * 4)
+                .rev()
+                .flatten()
+                .copied()
+                .collect();
+            assert!(
+                expected
+                    .iter()
+                    .zip(&bottom)
+                    .all(|(a, b)| a.abs_diff(*b) <= 1),
+                "compositor row orientation must not change framing or light direction"
+            );
+        }
+        let after = service.render(&source, r, final_tier).unwrap();
+        assert_eq!(
+            full,
+            pixels(&service, &after),
+            "viewer tier must not affect final frame bytes"
+        );
+        assert_eq!(source.0.changed.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn fast_matches_full_sun_exposure() {
+    struct Sun(Source);
+    impl SceneSource for Sun {
+        fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+            let mut input = self.0.scene(request)?;
+            input.instances.truncate(1);
+            input.instances[0].world = Transform::default();
+            input.scene.world = Default::default();
+            input.scene.materials = vec![Material::dielectric(Vec3::splat(0.32), 0.8)];
+            input.scene.lights.clear();
+            input.scene.environment = (Vec3::ZERO, Vec3::ZERO);
+            let solar_radius = 1.5_f32.to_radians();
+            let solid_angle = std::f32::consts::TAU * (1. - solar_radius.cos());
+            input.scene.extra_lights = vec![pm_studio3d_engine::scene::GpuLight::sun(
+                v3(0., 0., 1.),
+                solar_radius,
+                Vec3::splat(2. / solid_angle),
+            )];
+            Ok(input)
+        }
+    }
+    let source = Sun(Source::new());
+    let mut service = StudioService::default();
+    let render = |service: &mut StudioService, tier| {
+        let frame = service.render(&source, request(), tier).unwrap();
+        let layer = &frame.layers[0];
+        let width = layer.texture.width() as usize;
+        let height = layer.texture.height() as usize;
+        let image = pixels(service, &frame);
+        let center = &image[0][((height / 2) * width + width / 2) * 4..][..4];
+        assert_eq!(center[3], 255, "the center of the lit sphere is opaque");
+        center[0]
+    };
+    let full = render(
+        &mut service,
+        Tier::Final {
+            samples: 16,
+            salt: 17,
+            denoise: Denoise::None,
+        },
+    );
+    let fast = render(&mut service, Tier::Fast);
+    assert!(
+        (40..220).contains(&full),
+        "full reference has midtones: {full}"
+    );
+    assert!(
+        fast.abs_diff(full) < 26,
+        "sunlit display codes: Fast={fast}, Full={full}"
+    );
+}

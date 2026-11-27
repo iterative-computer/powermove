@@ -1,0 +1,213 @@
+[
+  {
+    "id": "corner-pin-snap.fx",
+    "origin": "local",
+    "kind": "effect",
+    "version": 0,
+    "renderer": null,
+    "glsl": {
+      "source": "#version 300 es\nprecision highp float;\nprecision highp int;\nin vec2 v_st;\nout vec4 o;\nuniform sampler2D u_tex;\nuniform mat3 u_layerUV, u_ownerFromUV;\nuniform vec2 u_res, u_layerRes;\nuniform float u_frame, u_ownerValid;\nuniform float u_amount;\nuniform float u_every;\nuniform float u_sharpness;\nuniform float u_hold;\nuniform float u_seed;\nuniform float u_seedOffset;\nuniform float u_perspective;\nuniform float u_tlX;\nuniform float u_tlY;\nuniform float u_trX;\nuniform float u_trY;\nuniform float u_brX;\nuniform float u_brY;\nuniform float u_blX;\nuniform float u_blY;\nuniform float u_padding;\n// All points are top-origin owner UV. Limits are measured in physical pixels.\nstruct Quad { vec2 a; vec2 b; vec2 c; vec2 d; };\nfloat randomPin(uint seed, uint index) {\n  uint x = index ^ seed;\n  x = (x ^ (x >> 16u))*2246822519u;\n  x = (x ^ (x >> 13u))*3266489917u;\n  return float(x ^ (x >> 16u))/4294967295.0;\n}\nQuad identityQuad() { return Quad(vec2(0),vec2(1,0),vec2(1),vec2(0,1)); }\nQuad blendQuad(Quad p, Quad q, float t) {\n  return Quad(mix(p.a,q.a,t),mix(p.b,q.b,t),mix(p.c,q.c,t),mix(p.d,q.d,t));\n}\nfloat crossPin(vec2 a, vec2 b) { return a.x*b.y-a.y*b.x; }\nbool readableQuad(Quad q, vec2 size) {\n  vec2 edges[4] = vec2[4]((q.b-q.a)*size,(q.c-q.b)*size,(q.d-q.c)*size,(q.a-q.d)*size);\n  for(int i=0;i<4;i++) {\n    vec2 e=edges[i], n=edges[(i+1)%4];\n    float lengthE=length(e), lengthN=length(n);\n    float original=(i%2==0)?size.x:size.y;\n    if(lengthE < 0.45*original || lengthE > 1.8*original) return false;\n    if(crossPin(e,n) <= 0.0001*lengthE*lengthN) return false;\n    // Interior angles 35..145 degrees, without acos precision loss.\n    if(abs(dot(-e,n)) > 0.8191520443*lengthE*lengthN) return false;\n  }\n  return true;\n}\nQuad randomQuad(uint seed, float pose, float perspective, vec2 size) {\n  Quad base=identityQuad();\n  // Rejection consumes a deterministic, disjoint slice of the seed stream.\n  for(uint attempt=0u;attempt<32u;attempt++) {\n    uint key=uint(max(0.0,pose))*4096u+attempt*32u;\n    float direction=floor(randomPin(seed,key)*4.0);\n    float taper=mix(0.12,0.48,perspective)*randomPin(seed,key+1u);\n    vec2 points[4]=vec2[4](base.a,base.b,base.c,base.d);\n    for(int i=0;i<4;i++) {\n      vec2 p=points[i];\n      vec2 inset=vec2(randomPin(seed,key+2u+uint(i)*2u),randomPin(seed,key+3u+uint(i)*2u))*0.06;\n      p=mix(p,vec2(0.5),inset);\n      if(direction < 2.0) {\n        float edge=direction<1.0 ? 1.0-p.x : p.x;\n        p.y=mix(p.y,0.5,edge*taper);\n      } else {\n        float edge=direction<3.0 ? 1.0-p.y : p.y;\n        p.x=mix(p.x,0.5,edge*taper);\n      }\n      points[i]=p;\n    }\n    Quad candidate=Quad(points[0],points[1],points[2],points[3]);\n    if(readableQuad(candidate,size)) return candidate;\n  }\n  return base;\n}\nQuad generatedQuad(uint seed, float frame, float interval, float sharpness, float amount, float perspective, vec2 size) {\n  float pose=floor(frame/interval), easeFrames=2.0*(1.0-sharpness);\n  float blend=easeFrames<0.001 || pose<1.0 ? 1.0 : smoothstep(0.0,easeFrames,mod(frame,interval));\n  Quad target=blendQuad(randomQuad(seed,max(0.0,pose-1.0),perspective,size),randomQuad(seed,pose,perspective,size),blend);\n  // Interpolating two valid quads need not preserve every metric. Bound the\n  // actual eased/Amount result too; deterministic contraction always terminates.\n  for(int i=0;i<12;i++) {\n    Quad result=blendQuad(identityQuad(),target,amount);\n    if(readableQuad(result,size)) return result;\n    amount*=0.5;\n  }\n  return identityQuad();\n}\nmat3 quadMatrix(Quad q) {\n  vec2 delta=q.a-q.b+q.c-q.d,e=q.b-q.c,f=q.d-q.c;\n  float det=crossPin(e,f);\n  vec2 projective=vec2(crossPin(delta,f),crossPin(e,delta))/det;\n  return mat3(vec3(q.b-q.a+projective.x*q.b,projective.x),vec3(q.d-q.a+projective.y*q.d,projective.y),vec3(q.a,1));\n}\nvoid main() {\n  if(u_ownerValid < 0.5) { o=texture(u_tex,v_st); return; }\n  float frame = u_hold > 0.5 ? 0.0 : max(0.0,u_frame);\n  float interval = max(1.0,floor(u_every+0.5));\n  uint seed=uint(max(0.0,floor(u_seed+0.5)))+uint(max(0.0,floor(u_seedOffset+0.5)))*747796405u;\n  Quad generated=generatedQuad(seed,frame,interval,clamp(u_sharpness/100.0,0.0,1.0),clamp(u_amount/100.0,0.0,1.0),clamp(u_perspective/100.0,0.0,1.0),u_layerRes);\n  // Manual pins define the outer projective frame. All generated points lie\n  // inside the unit rectangle, so a valid manual quad cannot fold them.\n  Quad manual=Quad(vec2(u_tlX,u_tlY)/100.0,vec2(1,0)+vec2(u_trX,u_trY)/100.0,vec2(1)+vec2(u_brX,u_brY)/100.0,vec2(0,1)+vec2(u_blX,u_blY)/100.0);\n  mat3 forward=quadMatrix(manual)*quadMatrix(generated);\n  // Texture UV is bottom-origin; owner transforms use top-origin pixels.\n  vec2 outputPixel = vec2(v_st.x,1.0-v_st.y)*u_res;\n  vec3 local = u_layerUV*vec3(outputPixel,1);\n  if(abs(local.z)<1e-7) { o=vec4(0); return; }\n  vec3 source = inverse(forward)*vec3(local.xy/local.z,1);\n  if(abs(source.z)<1e-7) { o=vec4(0); return; }\n  vec2 uv = source.xy/source.z;\n  vec2 edgeWidth = max(0.5*fwidth(uv),vec2(1e-6));\n  vec2 coverage = smoothstep(-edgeWidth,edgeWidth,uv)*(1.0-smoothstep(1.0-edgeWidth,1.0+edgeWidth,uv));\n  vec3 pixel = u_ownerFromUV*vec3(uv,1);\n  if(abs(pixel.z)<1e-7) { o=vec4(0); return; }\n  vec2 texUV = pixel.xy/pixel.z/u_res;\n  texUV.y = 1.0-texUV.y;\n  o=texture(u_tex,texUV)*(coverage.x*coverage.y);\n}",
+      "bodyLineOffset": 0,
+      "bodyUtf16Len": 5289,
+      "bodyUtf8Len": 5289
+    },
+    "params": [
+      {
+        "type": "number",
+        "key": "amount",
+        "default": 60,
+        "min": 0,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "every",
+        "default": 12,
+        "min": 1,
+        "max": 120,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "sharpness",
+        "default": 100,
+        "min": 0,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "toggle",
+        "key": "hold",
+        "default": false
+      },
+      {
+        "type": "number",
+        "key": "seed",
+        "default": 1,
+        "min": 0,
+        "max": 65535,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "seedOffset",
+        "default": 0,
+        "min": 0,
+        "max": 65535,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "perspective",
+        "default": 70,
+        "min": 0,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "tlX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "tlY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "trX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "trY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "brX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "brY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "blX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "blY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "padding",
+        "default": 512,
+        "min": 0,
+        "max": 4096,
+        "step": null
+      }
+    ],
+    "flags": {
+      "passes": 1,
+      "keepOrig": false,
+      "backdrop": false,
+      "rawShader": true,
+      "viewportSafe": false,
+      "viewportPadding": [
+        "padding"
+      ],
+      "clamp": false,
+      "convexQuad": [
+        "tlX",
+        "tlY",
+        "trX",
+        "trY",
+        "brX",
+        "brY",
+        "blX",
+        "blY"
+      ]
+    }
+  },
+  {
+    "id": "gradient-tint.effect",
+    "origin": "local",
+    "kind": "effect",
+    "version": 0,
+    "renderer": null,
+    "glsl": {
+      "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;     // full composition pixel size for cropped effects\nuniform vec2 u_pxOrigin;     // cropped viewport origin in composition pixels\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n\nuniform vec3 u_startColor;\nuniform vec3 u_endColor;\nuniform float u_angle;\nuniform float u_amount;\nuniform int u_pass;\n#define u_c0 u_startColor\n#define u_c1 u_endColor\n#define u_p2 u_angle\n#define u_p3 u_amount\nvoid main(){\n\n    vec4 source = texture(u_tex, v_st);\n    float angle = radians(u_angle);\n    vec2 direction = vec2(cos(angle), sin(angle));\n    float position = clamp(dot(v_st - 0.5, direction) + 0.5, 0.0, 1.0);\n    vec3 tint = mix(u_startColor, u_endColor, position);\n    o = vec4(mix(source.rgb, tint * source.a, u_amount), source.a);\n  \n}\n",
+      "bodyLineOffset": 38,
+      "bodyUtf16Len": 327,
+      "bodyUtf8Len": 327
+    },
+    "params": [
+      {
+        "type": "color",
+        "key": "startColor",
+        "default": "#ff3366"
+      },
+      {
+        "type": "color",
+        "key": "endColor",
+        "default": "#3366ff"
+      },
+      {
+        "type": "number",
+        "key": "angle",
+        "default": 0,
+        "min": -180,
+        "max": 180,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "amount",
+        "default": 1,
+        "min": 0,
+        "max": 1,
+        "step": 0.01
+      }
+    ],
+    "flags": {
+      "passes": 1,
+      "keepOrig": false,
+      "backdrop": false,
+      "rawShader": false,
+      "viewportSafe": false,
+      "viewportPadding": [],
+      "clamp": false
+    }
+  }
+]

@@ -1,0 +1,419 @@
+#![cfg(target_os = "macos")]
+//! Shell 3 (design review must-fixes): drop zones, tab-menu state, empty
+//! states, Workspace vocabulary, theme patches, document subtitle and SF Symbols.
+use gpui::{AppContext, HeadlessAppContext, px, size};
+use pm_design::{Accessibility, Scheme, Tokens};
+use pm_shell::{layout::*, menu, symbol, theme};
+use std::sync::Arc;
+
+fn tokens() -> Tokens {
+    Tokens::new(Scheme::Dark, Accessibility::default())
+}
+const BOUNDS: Rect = Rect {
+    x: 6.,
+    y: 58.,
+    w: 1428.,
+    h: 810.,
+};
+
+#[test]
+fn drop_previews_cover_only_the_drop_zone() {
+    let l = Layout::preset("design");
+    let t = tokens();
+    let g = l.geometry(BOUNDS, &t);
+    // Edges (where no dock stands): the outer quarter of the docking area,
+    // never a whole dock.
+    let full = l;
+    let mut l = full.clone();
+    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline", "easing"] {
+        l.close_panel(id).unwrap();
+    }
+    let g = l.geometry(BOUNDS, &t);
+    let left = l
+        .drop_target(&g, BOUNDS, BOUNDS.x - 2., BOUNDS.y + 300., &t)
+        .unwrap();
+    assert_eq!(left.target, DropTarget::Edge(Edge::Left));
+    assert_eq!(
+        left.rect,
+        Rect {
+            w: BOUNDS.w * EDGE_ZONE,
+            ..BOUNDS
+        }
+    );
+    let right = l
+        .drop_target(&g, BOUNDS, BOUNDS.x + BOUNDS.w + 2., BOUNDS.y + 300., &t)
+        .unwrap();
+    assert_eq!(right.target, DropTarget::Edge(Edge::Right));
+    assert_eq!(right.rect.x + right.rect.w, BOUNDS.x + BOUNDS.w);
+    assert_eq!(right.rect.w, BOUNDS.w * EDGE_ZONE);
+    let bottom = l
+        .drop_target(&g, BOUNDS, 600., BOUNDS.y + BOUNDS.h + 2., &t)
+        .unwrap();
+    assert_eq!(bottom.target, DropTarget::Edge(Edge::Bottom));
+    assert_eq!(bottom.rect.h, BOUNDS.h * EDGE_ZONE);
+    assert_eq!(bottom.rect.y + bottom.rect.h, BOUNDS.y + BOUNDS.h);
+    // Every preview stays inside the docking area and is smaller than it.
+    for p in [left, right, bottom] {
+        assert!(p.rect.w * p.rect.h < BOUNDS.w * BOUNDS.h * 0.3);
+    }
+    // Viewer offers only above/below; no tab target.
+    let l = full;
+    let g = l.geometry(BOUNDS, &t);
+    let viewer = g
+        .panels
+        .iter()
+        .find(|p| l.docks[p.dock].groups[p.group].active() == "viewer")
+        .unwrap()
+        .rect;
+    let tab = l
+        // On its header, below the window's top-edge zone.
+        .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + t.metrics.dock_gap + 4., &t)
+        .unwrap();
+    assert!(matches!(tab.target, DropTarget::Split { .. }));
+    assert!(tab.rect.h < viewer.h / 2.);
+    let half = l
+        .drop_target(
+            &g,
+            BOUNDS,
+            viewer.x + viewer.w / 2.,
+            viewer.y + viewer.h * 0.9,
+            &t,
+        )
+        .unwrap();
+    assert!(matches!(half.target, DropTarget::Split { .. }));
+    assert!(half.rect.h < viewer.h / 2. + 0.5);
+    // Near its side: never a new column (the original app), below it here.
+    let side = l
+        .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + viewer.h * 0.6, &t)
+        .unwrap();
+    assert!(matches!(side.target, DropTarget::Split { .. }));
+    assert!(side.rect.h < viewer.h / 2. + 0.5);
+}
+
+#[test]
+fn tab_menu_checks_the_current_dock_and_says_workspace() {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || None,
+    );
+    let t = tokens();
+    let window = cx
+        .open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| {
+                let mut v = pm_shell::view::Editor::new(t, None, cx);
+                v.layout = Layout::preset("design");
+                v
+            })
+        })
+        .unwrap();
+    window
+        .update(&mut cx, |v, _, cx| {
+            // The original app's panel menu, then this app's Dock moves in
+            // one submenu whose current edge carries the checkmark.
+            let dock_checked = |entries: &[pm_shell::MenuEntry]| -> Vec<String> {
+                entries
+                    .iter()
+                    .filter(|e| e.label == "Dock")
+                    .flat_map(|e| e.children.iter())
+                    .filter(|e| e.checked)
+                    .map(|e| e.label.clone())
+                    .collect()
+            };
+            let entries = v.tab_menu_entries("inspector", cx);
+            let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+            assert_eq!(labels[0], "Maximize Panel");
+            assert!(labels.contains(&"Add Panel as Tab"));
+            assert!(labels.contains(&"Close Panel"));
+            assert_eq!(dock_checked(&entries), ["Right Edge"]);
+            assert!(entries.iter().all(|e| !e.label.contains("Workspace")));
+            // Moving the panel moves the checkmark.
+            assert!(v.run_shell_command("panel:dock:inspector:left", cx));
+            let entries = v.tab_menu_entries("inspector", cx);
+            assert_eq!(dock_checked(&entries), ["Left Edge"]);
+            // The viewer cannot be closed and takes no tabs.
+            let viewer = v.tab_menu_entries("viewer", cx);
+            assert!(viewer.iter().all(|e| !e.label.starts_with("Close")));
+            assert!(viewer.iter().all(|e| e.label != "Add Panel as Tab"));
+            // It sits in the centre column, which is not a dock choice.
+            assert!(dock_checked(&viewer).is_empty());
+        })
+        .unwrap();
+}
+
+#[test]
+fn empty_states_are_user_language_never_panel_ids() {
+    for id in PANELS {
+        let (heading, line, action) = empty_state(id);
+        for text in [heading, line] {
+            for word in [
+                "TEMPORARY",
+                "PHASE",
+                "fxbrowser",
+                "layer-effects",
+                "gradient-controls",
+                "assets",
+                "perf",
+                "isolated",
+                "placeholder",
+            ] {
+                assert!(!text.contains(word), "{id}: {text}");
+            }
+            assert_ne!(text, text.to_uppercase(), "no all-caps");
+        }
+        // Heading in Title Case, one sentence ending with a full stop.
+        assert!(
+            heading
+                .split(' ')
+                .all(|w| w.chars().next().unwrap().is_uppercase()),
+            "{heading}"
+        );
+        assert!(line.ends_with('.'), "{line}");
+        if let Some((label, command)) = action {
+            assert!(label.ends_with('…'), "{label} asks for more input");
+            assert!(!command.is_empty());
+        }
+    }
+    assert_eq!(empty_state("assets").0, "No Media");
+    assert_eq!(empty_state("inspector").0, "No Selection");
+}
+
+#[test]
+fn one_workspace_vocabulary_in_menus_and_errors() {
+    let labels: Vec<String> = menu::menus()
+        .into_iter()
+        .flat_map(|(_, items)| items)
+        .map(|i| i.label)
+        .collect();
+    assert!(labels.iter().any(|l| l == "Workspace"));
+    assert!(labels.iter().all(|l| !l.contains("Layout")), "{labels:?}");
+    assert!(!menu::SUBMENUS.contains(&"layouts"));
+    for bad in ["", "   ", &"x".repeat(LAYOUT_NAME_MAX + 1), "a\u{7}b"] {
+        let e = layout_name(bad).unwrap_err().to_string();
+        assert!(e.contains("orkspace"), "{e}");
+    }
+}
+
+#[test]
+fn theme_patch_applies_on_every_token_build_and_keeps_contrast_floors() {
+    let patch =
+        theme::parse(r#"{"nativePatch":{"colors.accent":1193046,"metrics.gap":4}}"#).unwrap();
+    assert_eq!(patch.len(), 2);
+    assert_eq!(
+        theme::parse(r#"{"colors.accent":1193046}"#).unwrap().len(),
+        1
+    );
+    assert!(theme::parse(r#"{"nativePatch":{"colors.accent":"orange"}}"#).is_err());
+    assert!(theme::parse("[1]").is_err());
+    theme::set(patch).unwrap();
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = theme::tokens(scheme, Accessibility::default());
+        assert_eq!(t.colors.accent, 0x123456);
+        assert_eq!(t.metrics.gap, 4.);
+    }
+    // Increase Contrast is re-applied after the theme.
+    let hc = Accessibility {
+        increase_contrast: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        theme::tokens(Scheme::Dark, hc).metrics.border,
+        Tokens::new(Scheme::Dark, hc).metrics.border
+    );
+    // A rejected patch leaves the current theme in place.
+    assert!(theme::set(vec![("colors.nope".into(), 1.)]).is_err());
+    assert_eq!(
+        theme::tokens(Scheme::Dark, Accessibility::default())
+            .colors
+            .accent,
+        0x123456
+    );
+    // environment.nativeTokens lists every patchable field with its value.
+    let t = theme::tokens(Scheme::Dark, Accessibility::default());
+    let env = theme::native_tokens(&t);
+    assert_eq!(env.len(), Tokens::PATCHABLE.len());
+    assert_eq!(env["metrics.gap"], serde_json::json!(4.0));
+    // A v1–3 theme has a patch per appearance: switching needs no new theme.
+    theme::set_schemes(
+        vec![("colors.accent".into(), 0x111111 as f64)],
+        vec![("colors.accent".into(), 0xeeeeee as f64)],
+    )
+    .unwrap();
+    assert_eq!(
+        theme::tokens(Scheme::Dark, Accessibility::default())
+            .colors
+            .accent,
+        0x111111
+    );
+    assert_eq!(
+        theme::tokens(Scheme::Light, Accessibility::default())
+            .colors
+            .accent,
+        0xeeeeee
+    );
+    theme::clear();
+    assert_eq!(
+        theme::tokens(Scheme::Dark, Accessibility::default()),
+        tokens()
+    );
+}
+
+#[test]
+fn document_subtitle_shows_saving_then_edited_then_nothing() {
+    assert_eq!(pm_shell::document_subtitle(true, true), "Saving…");
+    assert_eq!(pm_shell::document_subtitle(false, true), "Saving…");
+    assert_eq!(pm_shell::document_subtitle(true, false), "Edited");
+    assert_eq!(pm_shell::document_subtitle(false, false), "");
+}
+
+#[test]
+fn sf_symbols_rasterize_tinted_for_every_kind_and_header_glyph() {
+    objc2::rc::autoreleasepool(|_| {
+        let red = 0xff2000;
+        let image = symbol::rasterize("plus", 13., symbol::Weight::Medium, red, 2.).unwrap();
+        let size = image.size(0);
+        assert_eq!((size.width.0, size.height.0), (26, 26));
+        let bytes = image.as_bytes(0).unwrap();
+        // BGRA, straight alpha: opaque pixels carry the token colour.
+        let opaque: Vec<_> = bytes.chunks_exact(4).filter(|p| p[3] == 255).collect();
+        assert!(!opaque.is_empty(), "plus drew nothing");
+        assert!(
+            opaque
+                .iter()
+                .all(|p| p[2] > 0xf0 && p[1] < 0x30 && p[0] < 0x10),
+            "{:?}",
+            opaque[0]
+        );
+        // Cached: the same request returns the same image.
+        let again = symbol::rasterize("plus", 13., symbol::Weight::Medium, red, 2.).unwrap();
+        assert!(Arc::ptr_eq(&image, &again));
+        for kind in [
+            "text",
+            "shape",
+            "video",
+            "image",
+            "sequence",
+            "audio",
+            "adjustment",
+            "null",
+            "camera",
+            "group",
+            "precomp",
+            "solid",
+            "light",
+            "unknown",
+        ] {
+            let name = symbol::kind_symbol(kind);
+            assert!(
+                symbol::rasterize(name, 11., symbol::Weight::Regular, 0xffffff, 2.).is_some(),
+                "{kind} → {name} is not an SF Symbol"
+            );
+        }
+        for name in [
+            "xmark",
+            "chevron.up.chevron.down",
+            "play.fill",
+            "pause.fill",
+        ] {
+            assert!(
+                symbol::rasterize(name, 11., symbol::Weight::Medium, 0, 2.).is_some(),
+                "{name}"
+            );
+        }
+        assert!(symbol::rasterize("no.such.symbol", 11., symbol::Weight::Regular, 0, 2.).is_none());
+    });
+}
+
+#[test]
+fn panel_headers_share_the_38_pt_header_metric() {
+    assert_eq!(tokens().metrics.header, 38.);
+    assert_eq!(
+        Tokens::new(Scheme::Light, Accessibility::default())
+            .metrics
+            .header,
+        38.
+    );
+}
+
+/// An extension asks its panel back before it has registered it (launch):
+/// no "Unknown panel" in the status bar; once the extensions are ready a
+/// panel that still is not there stays away quietly.
+#[test]
+fn a_panel_asked_back_before_it_registers_is_never_an_error() {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || None,
+    );
+    let t = tokens();
+    let window = cx
+        .open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| {
+                let mut v = pm_shell::view::Editor::new(t, None, cx);
+                v.layout = Layout::preset("design");
+                v
+            })
+        })
+        .unwrap();
+    window
+        .update(&mut cx, |v, _, cx| {
+            assert!(v.run_shell_command("panels:waiting", cx));
+            assert!(v.run_shell_command("panel:restore:extension.not-yet", cx));
+            assert_eq!(v.status, "", "a restore waits for its panel");
+            assert!(v.layout.find("extension.not-yet").is_none());
+            assert!(v.run_shell_command("panels:ready", cx));
+            assert_eq!(v.status, "", "one that never came stays away quietly");
+            assert!(v.layout.find("extension.not-yet").is_none());
+            // A known panel still comes back as before.
+            assert!(v.run_shell_command("panel:park:inspector", cx));
+            assert!(v.run_shell_command("panel:restore:inspector", cx));
+            assert!(v.layout.find("inspector").is_some());
+        })
+        .unwrap();
+}
+#[test]
+fn a_parked_panel_comes_back_where_it_was() {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || None,
+    );
+    let t = tokens();
+    let window = cx
+        .open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| {
+                let mut v = pm_shell::view::Editor::new(t, None, cx);
+                v.layout = Layout::preset("design");
+                v
+            })
+        })
+        .unwrap();
+    window
+        .update(&mut cx, |v, _, cx| {
+            // An extension reloading leaves its saved area as a placeholder.
+            assert!(v.run_shell_command("panel:dock:inspector:left", cx));
+            let place = v.layout.find("inspector").unwrap();
+            assert!(v.run_shell_command("panel:park:inspector", cx));
+            assert_eq!(v.layout.find("inspector"), Some(place), "the placeholder keeps its group");
+            assert!(v.run_shell_command("panel:show:inspector", cx));
+            assert_eq!(v.layout.find("inspector"), Some(place));
+            // A tab among others returns to its index in that stack.
+            let shared = v.layout.find("layer-effects").unwrap();
+            assert!(v.layout.docks[shared.0].groups[shared.1].tabs.len() > 1);
+            assert!(v.run_shell_command("panel:park:layer-effects", cx));
+            assert!(v.run_shell_command("panel:show:layer-effects", cx));
+            assert_eq!(v.layout.find("layer-effects"), Some(shared));
+            // A plain close forgets the place: show uses the panel's home.
+            assert!(v.run_shell_command("panel:park:inspector", cx));
+            assert!(v.run_shell_command("panel:close:inspector", cx));
+            assert!(v.run_shell_command("panel:show:inspector", cx));
+            assert_ne!(v.layout.find("inspector").map(|p| p.0), Some(place.0));
+        })
+        .unwrap();
+}

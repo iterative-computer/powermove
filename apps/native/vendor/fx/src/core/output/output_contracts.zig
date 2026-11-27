@@ -1,0 +1,4874 @@
+const std = @import("std");
+const build_options = @import("build_options");
+const profile_paths = @import("../shared/profile_paths.zig");
+const auth_runtime = @import("../auth/auth_runtime.zig");
+const credentials = @import("../auth/credentials.zig");
+const doctor_runtime = @import("../cli/doctor_runtime.zig");
+const io_mod = @import("../shared/io.zig");
+const model_capabilities = @import("../config/model_capabilities.zig");
+const model_provider = @import("../config/model_provider.zig");
+const mcp_contract = @import("../mcp/mcp_contract.zig");
+const mcp_health = @import("../mcp/health.zig");
+const mode_contract = @import("../modes/mode_contract.zig");
+const provider_catalog = @import("../auth/provider_catalog.zig");
+const permissions = @import("../permissions/permissions.zig");
+const session_codec = @import("../session/session_codec.zig");
+const session_display_metadata = @import("../session/session_display_metadata.zig");
+const session_json = @import("../session/session_json.zig");
+const compactor = @import("../compactor/compactor.zig");
+const session_store = @import("../session/session_store.zig");
+const session_list_text = @import("session_list_text.zig");
+const usage = @import("../../usage/usage.zig");
+const local_time = @import("../shared/local_time.zig");
+const text_utils = @import("../shared/text_utils.zig");
+const display_width = @import("../shared/display_width.zig");
+const types = @import("../shared/types.zig");
+const update_notes = @import("../upgrade/update_notes.zig");
+const update_target = @import("../upgrade/update_target.zig");
+const workspace_access = @import("../workspace/workspace_access.zig");
+const workspace_commands = @import("../workspace/workspace_commands.zig");
+const settings_entries = @import("../config/settings_entries.zig");
+const settings_keys = @import("../config/settings_keys.zig");
+
+const Allocator = std.mem.Allocator;
+
+fn providerDisplayName(provider: *const model_provider.ProviderId) []const u8 {
+    return if (provider.* == .configured) provider.label() else provider_catalog.label(provider.*);
+}
+
+fn permissionModeLabel(mode: types.PermissionMode) []const u8 {
+    return permissions.permissionModeLabel(mode);
+}
+
+pub const OutputFormat = enum {
+    text,
+    json,
+};
+
+/// Process exit status when the command line itself is wrong: an unknown
+/// command, an unknown or invalid flag, or a missing or bad argument. Work
+/// that fails after the command line is accepted exits 1.
+pub const usage_exit_code: u8 = 2;
+
+pub const CommandFailureSnapshot = struct {
+    kind: []const u8,
+    message: []const u8,
+    code: []const u8,
+
+    pub fn renderJson(self: CommandFailureSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("{\"kind\":");
+        try std.json.Stringify.value(self.kind, .{}, &out.writer);
+        try out.writer.writeAll(",\"error\":");
+        try std.json.Stringify.value(self.message, .{}, &out.writer);
+        try out.writer.writeAll(",\"code\":");
+        try std.json.Stringify.value(self.code, .{}, &out.writer);
+        try out.writer.writeByte('}');
+        return try out.toOwnedSlice();
+    }
+};
+
+pub const UsageSnapshot = struct {
+    snapshot: *const usage.Snapshot,
+    /// The period the totals and model rows cover.
+    period: usage.Period = .month,
+
+    pub fn render(
+        self: UsageSnapshot,
+        alloc: Allocator,
+        format: OutputFormat,
+    ) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: UsageSnapshot, alloc: Allocator) ![]u8 {
+        const s = self.snapshot;
+        if (s.scope == .codex) return self.renderCodexText(alloc);
+        if (s.scope == .grok) return self.renderGrokText(alloc);
+        const v = s.of(self.period);
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        // The period stays in UTC days, the days AI Gateway reports by.
+        try out.writer.print("Usage ({s}, UTC) from AI Gateway", .{v.period.label()});
+        if (v.fetched_at_ms) |ms| try writeLocalClock(&out.writer, ", updated ", ms);
+        try out.writer.writeByte('\n');
+        switch (s.status) {
+            .ready, .fetching => {},
+            .failed => |f| try writeUsageFailure(&out.writer, f, "AI Gateway"),
+            .unavailable => |u| try out.writer.print("{s}\n", .{switch (u) {
+                .no_gateway_sign_in => "Usage needs an AI Gateway sign-in: run fx login or set an API key.",
+                .no_team => "Usage needs a team: run fx login and pick one.",
+                .unsupported_provider => "Usage isn't shown for this provider yet; it reads AI Gateway.",
+                .refresh_needed => "The sign-in needs a refresh: send a message in fx, then run fx usage again.",
+            }}),
+        }
+        if (v.budget) |b| {
+            try out.writer.print("Budget        ${d:.2} of ${d:.2}{s}\n", .{ b.spent, b.limit, switch (b.period) {
+                .daily => " today",
+                .weekly => " this week",
+                .monthly => " this month",
+                .none => "",
+            } });
+        }
+        const t = v.totals;
+        try out.writer.print("Spend         ${d:.4}\nRequests      {d}\n", .{ t.total_cost, t.request_count });
+        try out.writer.print(
+            "Tokens        {d} (input {d} · output {d} · cache read {d} · cache write {d} · reasoning {d})\n",
+            .{ t.totalTokens(), t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_write_tokens, t.reasoning_tokens },
+        );
+        if (v.models.len > 0) {
+            try out.writer.writeAll("\nBy model\n");
+            for (v.models) |model| {
+                try out.writer.writeAll("- ");
+                try writeTerminalSafe(&out.writer, alloc, model.model);
+                try out.writer.print("  ${d:.4}  {d} requests  {d} tokens\n", .{
+                    model.totals.total_cost,
+                    model.totals.request_count,
+                    model.totals.totalTokens(),
+                });
+            }
+        }
+        return try out.toOwnedSlice();
+    }
+
+    /// A ChatGPT plan through Codex: the plan, credits and each limit window.
+    fn renderCodexText(self: UsageSnapshot, alloc: Allocator) ![]u8 {
+        const s = self.snapshot;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const profile: ?usage.codex.Profile = if (s.codex_usage) |u| u.profile else null;
+        try out.writer.writeAll("Codex usage from ChatGPT");
+        if (profile) |p| if (p.name) |name| {
+            try out.writer.writeAll(" for ");
+            try writeTerminalSafe(&out.writer, alloc, name);
+        };
+        if (s.fetchedAtMs()) |ms| try writeLocalClock(&out.writer, ", updated ", ms);
+        try out.writer.writeByte('\n');
+        switch (s.status) {
+            .ready => {},
+            .fetching => if (s.codex_usage == null) try out.writer.writeAll("Fetching usage from ChatGPT.\n"),
+            .failed => |f| try writeUsageFailure(&out.writer, f, "ChatGPT"),
+            .unavailable => {},
+        }
+        const u = s.codex_usage orelse return try out.toOwnedSlice();
+        if (profile) |p| try writeCodexProfileText(&out.writer, alloc, s, p);
+        if (s.codexBreakdown() != null) try writeCodexSharesText(&out.writer, alloc, s, self.period);
+        try out.writer.writeAll("Plan          ");
+        try writeTerminalSafe(&out.writer, alloc, u.plan);
+        try out.writer.writeAll("\nCredits       ");
+        if (u.credits) |c| {
+            if (c.unlimited) {
+                try out.writer.writeAll("unlimited");
+            } else if (c.balance) |b| {
+                try writeTerminalSafe(&out.writer, alloc, b);
+            } else {
+                try out.writer.writeAll(if (c.has_credits) "yes" else "none");
+            }
+        } else try out.writer.writeAll("-");
+        try out.writer.print("\nSpend limit   {s}\n", .{if (u.spend_limit_reached) "reached" else "not reached"});
+        if (!u.hasWindows()) {
+            try out.writer.writeAll("Limits        none on this plan\n");
+            return try out.toOwnedSlice();
+        }
+        try out.writer.writeAll("\nLimits\n");
+        for (u.limits) |limit| {
+            for ([_]?usage.codex.Window{ limit.primary, limit.secondary }) |maybe| {
+                const w = maybe orelse continue;
+                try out.writer.writeAll("- ");
+                try writeTerminalSafe(&out.writer, alloc, limit.name);
+                try out.writer.print(" ({d}h window): {d:.0}% used", .{ @divFloor(w.window_seconds, 3600), w.used_percent });
+                if (w.resets_at_ms) |at| try writeLocalClock(&out.writer, ", resets ", at);
+                try out.writer.writeByte('\n');
+            }
+        }
+        return try out.toOwnedSlice();
+    }
+
+    /// A Grok plan: its allowance this period, by product, and its credits.
+    fn renderGrokText(self: UsageSnapshot, alloc: Allocator) ![]u8 {
+        const s = self.snapshot;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("Grok usage from xAI");
+        if (s.fetchedAtMs()) |ms| try writeLocalClock(&out.writer, ", updated ", ms);
+        try out.writer.writeByte('\n');
+        switch (s.status) {
+            .ready => {},
+            .fetching => if (s.grok_usage == null) try out.writer.writeAll("Fetching usage from Grok.\n"),
+            .failed => |f| try writeUsageFailure(&out.writer, f, "Grok"),
+            .unavailable => {},
+        }
+        const u = s.grok_usage orelse return try out.toOwnedSlice();
+        try out.writer.writeAll("Plan          ");
+        if (u.plan()) |plan| try writeTerminalSafe(&out.writer, alloc, plan) else try out.writer.writeAll("-");
+        try out.writer.writeByte('\n');
+        if (u.settings) |settings| if (settings.usage_url) |url| {
+            try out.writer.writeAll("Usage page    ");
+            try writeTerminalSafe(&out.writer, alloc, url);
+            try out.writer.writeAll(" (managed by your team)\n");
+        };
+        if (!u.hasBilling()) {
+            try out.writer.writeAll("Billing       none reported for this plan\n");
+            return try out.toOwnedSlice();
+        }
+        if (u.used_percent) |used| {
+            try out.writer.print("Used          {d:.0}% of the {s} allowance", .{ @floor(used), if (u.period) |p| @tagName(p) else "plan's" });
+            if (u.resets_at_ms) |at| {
+                try out.writer.writeAll(", resets ");
+                if (local_time.local(at)) |reading| {
+                    var date_buf: [24]u8 = undefined;
+                    try out.writer.print("{s} ", .{formatDate(&date_buf, &reading)});
+                    try writeClock(&out.writer, &reading);
+                } else try out.writer.writeAll("unknown");
+            }
+            try out.writer.writeByte('\n');
+        }
+        for (u.products, 0..) |product, i| {
+            try out.writer.writeAll(if (i == 0) "By product    " else ", ");
+            try writeTerminalSafe(&out.writer, alloc, product.name);
+            try out.writer.print(" {d:.1}%", .{product.used_percent});
+        }
+        if (u.products.len > 0) try out.writer.writeByte('\n');
+        try out.writer.writeAll("Credits       ");
+        if ((u.prepaid_cents orelse 1) == 0) try out.writer.writeAll("none") else try writeOptionalCents(&out.writer, u.prepaid_cents);
+        try out.writer.writeAll("\nPay as you go ");
+        const turned_off = if (u.settings) |settings| (if (settings.on_demand_enabled) |on| !on else false) else false;
+        if (turned_off or (u.on_demand_cap_cents orelse 0) == 0) {
+            try out.writer.writeAll("off");
+        } else {
+            try writeOptionalCents(&out.writer, u.on_demand_used_cents orelse 0);
+            try out.writer.writeAll(" of ");
+            try writeOptionalCents(&out.writer, u.on_demand_cap_cents);
+            try out.writer.writeAll(" this month");
+        }
+        try out.writer.writeByte('\n');
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: UsageSnapshot, alloc: Allocator) ![]u8 {
+        const s = self.snapshot;
+        const v = s.of(self.period);
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.print("{{\"kind\":\"usage\",\"schema_version\":2,\"source\":\"{s}\",\"period\":", .{switch (s.scope orelse .member) {
+            .codex => "chatgpt",
+            .grok => "grok",
+            .member, .api_key => "ai_gateway",
+        }});
+        try std.json.Stringify.value(v.period.label(), .{}, &out.writer);
+        try out.writer.writeAll(",\"status\":");
+        try std.json.Stringify.value(@tagName(s.status), .{}, &out.writer);
+        try out.writer.writeAll(",\"reason\":");
+        switch (s.status) {
+            .failed => |f| try std.json.Stringify.value(@tagName(f), .{}, &out.writer),
+            .unavailable => |u| try std.json.Stringify.value(@tagName(u), .{}, &out.writer),
+            .ready, .fetching => try out.writer.writeAll("null"),
+        }
+        try out.writer.writeAll(",\"fetched_at_ms\":");
+        if (s.fetchedAtMs()) |ms| try out.writer.print("{d}", .{ms}) else try out.writer.writeAll("null");
+        try out.writer.writeAll(",\"budget\":");
+        if (v.budget) |b| {
+            try out.writer.print("{{\"limit\":{d},\"spent\":{d},\"period\":", .{ b.limit, b.spent });
+            try std.json.Stringify.value(@tagName(b.period), .{}, &out.writer);
+            try out.writer.writeByte('}');
+        } else try out.writer.writeAll("null");
+        try out.writer.writeAll(",\"totals\":");
+        try writeUsageTotalsJson(&out.writer, v.totals);
+        try out.writer.writeAll(",\"models\":[");
+        for (v.models, 0..) |model, index| {
+            if (index > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"model\":");
+            try std.json.Stringify.value(model.model, .{}, &out.writer);
+            try out.writer.writeAll(",\"totals\":");
+            try writeUsageTotalsJson(&out.writer, model.totals);
+            try out.writer.writeByte('}');
+        }
+        try out.writer.writeAll("],\"codex\":");
+        try std.json.Stringify.value(s.codex_usage, .{}, &out.writer);
+        try out.writer.writeAll(",\"grok\":");
+        try std.json.Stringify.value(s.grok_usage, .{}, &out.writer);
+        try out.writer.writeByte('}');
+        return try out.toOwnedSlice();
+    }
+};
+
+/// Tokens by period, then records, habits and the most used plugins and
+/// skills. Missing numbers read `-`.
+fn writeCodexProfileText(writer: *std.Io.Writer, alloc: Allocator, s: *const usage.Snapshot, p: usage.codex.Profile) !void {
+    try writer.writeAll("Tokens        ");
+    const periods = [_]struct { value: ?u64, label: []const u8 }{
+        .{ .value = s.codexTokens(.today), .label = "today" },
+        .{ .value = s.codexTokens(.days_7), .label = "7d" },
+        .{ .value = s.codexTokens(.month), .label = "month" },
+        .{ .value = p.lifetime_tokens, .label = "lifetime" },
+    };
+    for (periods, 0..) |period, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeOptionalCount(writer, period.value);
+        try writer.print(" {s}", .{period.label});
+    }
+    try writer.writeAll("\nRecord        peak day ");
+    try writeOptionalCount(writer, p.peak_day_tokens);
+    try writer.writeAll(" tokens, longest chat ");
+    if (p.longest_turn_seconds) |sec| try writer.print("{d}h {d}m", .{ sec / 3600, sec % 3600 / 60 }) else try writer.writeAll("-");
+    try writer.writeAll(", streak ");
+    try writeOptionalCount(writer, p.streak_days);
+    try writer.writeAll(" days (best ");
+    try writeOptionalCount(writer, p.best_streak_days);
+    try writer.writeAll("), ");
+    try writeOptionalCount(writer, p.chats);
+    try writer.writeAll(" chats\nHabits        fast mode ");
+    if (p.fast_mode_percent) |pct| try writer.print("{d:.0}%", .{pct}) else try writer.writeAll("-");
+    try writer.writeAll(", reasoning ");
+    if (p.reasoning) |r| try writeTerminalSafe(writer, alloc, r) else try writer.writeAll("-");
+    if (p.reasoning_percent) |pct| try writer.print(" ({d:.0}%)", .{pct});
+    try writer.writeByte('\n');
+}
+
+/// Each model's and surface's share of `period`, largest first.
+fn writeCodexSharesText(writer: *std.Io.Writer, alloc: Allocator, s: *const usage.Snapshot, period: usage.Period) !void {
+    var buf: [usage.codex.max_shares]usage.codex.Share = undefined;
+    inline for (.{ "model", "surface" }) |what| {
+        const shares = if (comptime std.mem.eql(u8, what, "model")) s.codexModelShares(period, &buf) else s.codexSurfaceShares(period, &buf);
+        try writer.print("Share by {s} ({s}): ", .{ what, period.label() });
+        if (shares.len == 0) try writer.writeAll("none");
+        for (shares, 0..) |share, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeTerminalSafe(writer, alloc, share.name);
+            if (share.speed.len > 0) {
+                try writer.writeByte(' ');
+                try writeTerminalSafe(writer, alloc, share.speed);
+            }
+            var share_buf: [8]u8 = undefined;
+            try writer.print(" {s}", .{usage.codex.formatShare(&share_buf, share.percent)});
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+fn writeOptionalCount(writer: *std.Io.Writer, value: ?u64) !void {
+    if (value) |v| try writer.print("{d}", .{v}) else try writer.writeAll("-");
+}
+
+/// `<prefix>08:14 PDT` for a timestamp in milliseconds, in local time.
+fn writeLocalClock(writer: *std.Io.Writer, prefix: []const u8, ms: i64) !void {
+    try writer.writeAll(prefix);
+    const reading = local_time.local(ms) orelse return writer.writeAll("unknown");
+    try writeClock(writer, &reading);
+}
+
+/// `08:14 PDT`.
+fn writeClock(writer: *std.Io.Writer, reading: *const local_time.Reading) !void {
+    try writer.print("{d:0>2}:{d:0>2} {s}", .{ reading.hour, reading.minute, reading.zoneName() });
+}
+
+/// `Oct 11, 2026`.
+fn formatDate(buf: *[24]u8, reading: *const local_time.Reading) []const u8 {
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const month = months[reading.month.numeric() - 1];
+    return std.mem.print(buf, "{s} {d}, {d}", .{ month, reading.day, reading.year }) catch "Unknown";
+}
+
+/// `Refresh failed: <why>.`, naming the service the numbers come from.
+fn writeUsageFailure(writer: *std.Io.Writer, failure: usage.Failure, service: []const u8) !void {
+    try writer.writeAll("Refresh failed: ");
+    switch (failure) {
+        .network => try writer.print("couldn't reach {s}", .{service}),
+        .refused => try writer.print("{s} refused this sign-in", .{service}),
+        .not_available => try writer.writeAll(if (std.mem.eql(u8, service, "AI Gateway"))
+            "usage reports aren't available for this team"
+        else
+            "usage isn't available for this plan"),
+        .rate_limited => try writer.writeAll("rate limited, try again shortly"),
+        .server => try writer.print("{s} error", .{service}),
+        .bad_response => try writer.print("unexpected {s} response", .{service}),
+        .cache => try writer.writeAll("couldn't save the usage cache"),
+    }
+    try writer.writeAll(".\n");
+}
+
+/// `$12.50` for an amount in US cents, or `-`.
+fn writeOptionalCents(writer: *std.Io.Writer, value: ?i64) !void {
+    const cents: u64 = @intCast(@max(value orelse return writer.writeAll("-"), 0));
+    try writer.print("${d}.{d:0>2}", .{ cents / 100, cents % 100 });
+}
+
+fn writeUsageTotalsJson(writer: *std.Io.Writer, totals: usage.report.Totals) !void {
+    try writer.print(
+        "{{\"total_tokens\":{d},\"input_tokens\":{d},\"output_tokens\":{d},\"cache_read_tokens\":{d},\"cache_write_tokens\":{d},\"reasoning_tokens\":{d},\"request_count\":{d},\"spend\":{d}}}",
+        .{
+            totals.totalTokens(),
+            totals.input_tokens,
+            totals.output_tokens,
+            totals.cache_read_tokens,
+            totals.cache_write_tokens,
+            totals.reasoning_tokens,
+            totals.request_count,
+            totals.total_cost,
+        },
+    );
+}
+
+pub fn workspaceErrorMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.InvalidWorkspaceArgs => null,
+        error.InvalidPath => "path is invalid",
+        error.PathNotFound => "directory does not exist",
+        error.NotDirectory => "path is not a directory",
+        error.UnknownAdditionalDirectory => "directory is not configured as an additional workspace",
+        error.PrimaryDirectory => "the primary workspace cannot be added or removed",
+        error.TooManyDirectories => "additional directory limit reached",
+        error.HomeNotSet => io_mod.no_home_dir_reason,
+        error.SettingsStoreUnavailable => "settings are unavailable",
+        error.DurablePathUnsafe, error.PrivateStatePermissionsUnsupported => "settings path is unsafe",
+        else => "workspace update failed",
+    };
+}
+
+pub const ConfigUnknownSetting = struct {
+    key: settings_keys.UnknownKey,
+    /// Where the key is: `~/.fx/settings.json` or `.fx.json`.
+    file: []const u8,
+    suggestion: ?[]const u8 = null,
+};
+
+/// `fx config list` and `fx config get` in git's format: one `key=value`
+/// per line, lowest precedence first, with the origin first and a tab when
+/// asked.
+pub const ConfigSnapshot = struct {
+    entries: []const settings_entries.Entry,
+    /// Keys fx doesn't know. The JSON form lists them; the text form leaves
+    /// them to the warnings on stderr.
+    unknown: []const ConfigUnknownSetting = &.{},
+    workspace_root: []const u8,
+    show_origin: bool = false,
+    /// `fx config get` of one plain key prints the value alone.
+    value_only: bool = false,
+
+    pub fn render(self: ConfigSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    fn renderText(self: ConfigSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        for (self.entries) |entry| {
+            if (self.show_origin) {
+                switch (entry.origin) {
+                    .project => try out.writer.writeAll("file:.fx.json"),
+                    .global => try out.writer.writeAll(profile_paths.displayText("file:~/.fx/settings.json")),
+                    .workspace => {
+                        try out.writer.writeAll("workspace:");
+                        try writeTerminalSafe(&out.writer, alloc, self.workspace_root);
+                    },
+                    .env => try out.writer.print("env:{s}", .{entry.variable.?}),
+                    .default => try out.writer.writeAll("default"),
+                }
+                try out.writer.writeByte('\t');
+            }
+            if (!self.value_only) {
+                try writeTerminalSafe(&out.writer, alloc, entry.key);
+                try out.writer.writeByte('=');
+            }
+            try writeConfigValue(&out.writer, alloc, entry.value);
+            try out.writer.writeByte('\n');
+        }
+        return try out.toOwnedSlice();
+    }
+
+    fn renderJson(self: ConfigSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.writeAll("{\"kind\":\"config\",\"entries\":[");
+        for (self.entries, 0..) |entry, index| {
+            if (index > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"key\":");
+            try std.json.Stringify.value(entry.key, .{}, &out.writer);
+            try out.writer.writeAll(",\"value\":");
+            try std.json.Stringify.value(entry.value, .{}, &out.writer);
+            try out.writer.print(",\"origin\":\"{s}\"", .{@tagName(entry.origin)});
+            if (entry.origin == .env) {
+                try out.writer.writeAll(",\"variable\":");
+                try std.json.Stringify.value(entry.variable.?, .{}, &out.writer);
+            } else if (entry.origin != .default) {
+                try out.writer.writeAll(",\"file\":");
+                try std.json.Stringify.value(if (entry.origin == .project) ".fx.json" else profile_paths.displayText("~/.fx/settings.json"), .{}, &out.writer);
+            }
+            if (entry.origin == .workspace) {
+                try out.writer.writeAll(",\"workspace\":");
+                try std.json.Stringify.value(self.workspace_root, .{}, &out.writer);
+            }
+            try out.writer.writeByte('}');
+        }
+        try out.writer.writeAll("],\"unknown\":[");
+        for (self.unknown, 0..) |unknown, index| {
+            if (index > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"key\":\"");
+            if (unknown.key.parent) |parent| try std.json.Stringify.encodeJsonStringChars(parent, .{}, &out.writer);
+            if (unknown.key.parent != null) try out.writer.writeByte('.');
+            try std.json.Stringify.encodeJsonStringChars(unknown.key.name, .{}, &out.writer);
+            try out.writer.writeAll("\",\"file\":");
+            try std.json.Stringify.value(unknown.file, .{}, &out.writer);
+            try out.writer.writeAll(",\"workspace\":");
+            try std.json.Stringify.value(unknown.key.workspace, .{}, &out.writer);
+            try out.writer.writeAll(",\"suggestion\":");
+            try std.json.Stringify.value(unknown.suggestion, .{}, &out.writer);
+            try out.writer.writeByte('}');
+        }
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+};
+
+/// What `fx config set` or `fx config unset` did to the profile settings, as
+/// one line naming the key, the value, and the file, like other setters.
+pub const ConfigChangeSnapshot = struct {
+    unset: bool,
+    key: []const u8,
+    /// The saved value; null for `unset`.
+    value: ?std.json.Value = null,
+    changed: bool,
+
+    pub fn render(self: ConfigChangeSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        switch (format) {
+            .text => {
+                try writeTerminalSafe(&out.writer, alloc, self.key);
+                if (self.unset) {
+                    try out.writer.writeAll(if (self.changed) profile_paths.displayText(" removed from ~/.fx/settings.json.\n") else profile_paths.displayText(" isn't set in ~/.fx/settings.json.\n"));
+                } else {
+                    try out.writer.writeAll(if (self.changed) " set to " else " is already ");
+                    try writeConfigValue(&out.writer, alloc, self.value orelse .null);
+                    try out.writer.writeAll(if (self.changed) profile_paths.displayText(" in ~/.fx/settings.json.\n") else ".\n");
+                }
+            },
+            .json => {
+                try out.writer.print("{{\"kind\":\"config\",\"action\":\"{s}\",\"key\":", .{if (self.unset) "unset" else "set"});
+                try std.json.Stringify.value(self.key, .{}, &out.writer);
+                try out.writer.writeAll(",\"value\":");
+                try std.json.Stringify.value(self.value orelse .null, .{}, &out.writer);
+                try out.writer.print(",\"changed\":{},\"file\":", .{self.changed});
+                try std.json.Stringify.value(profile_paths.displayText("~/.fx/settings.json"), .{}, &out.writer);
+                try out.writer.writeByte('}');
+            },
+        }
+        return try out.toOwnedSlice();
+    }
+};
+
+/// A settings value as `fx config` prints it: text and numbers as they are,
+/// lists and objects as compact JSON.
+fn writeConfigValue(writer: *std.Io.Writer, alloc: Allocator, value: std.json.Value) !void {
+    switch (value) {
+        .string => |text| try writeTerminalSafe(writer, alloc, text),
+        .number_string => |text| try writeTerminalSafe(writer, alloc, text),
+        .bool => |flag| try writer.writeAll(if (flag) "true" else "false"),
+        .integer => |number| try writer.print("{d}", .{number}),
+        .float => |number| try writer.print("{d}", .{number}),
+        .null => try writer.writeAll("null"),
+        .array, .object => {
+            var json: std.Io.Writer.Allocating = .init(alloc);
+            defer json.deinit();
+            try std.json.Stringify.value(value, .{}, &json.writer);
+            try writeTerminalSafe(writer, alloc, json.written());
+        },
+    }
+}
+
+pub const WorkspaceSnapshot = struct {
+    primary_directory: []const u8,
+    saved_suppressed: bool,
+    additional_directories: []const workspace_access.Entry,
+    mutation: ?workspace_commands.Mutation = null,
+
+    pub fn fromAccess(primary_directory: []const u8, access: *const workspace_access.WorkspaceAccess) WorkspaceSnapshot {
+        return .{
+            .primary_directory = primary_directory,
+            .saved_suppressed = access.saved_suppressed,
+            .additional_directories = access.entries,
+        };
+    }
+
+    pub fn render(self: WorkspaceSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: WorkspaceSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("[workspace] primary=");
+        try writeTerminalSafe(&out.writer, alloc, self.primary_directory);
+        try out.writer.writeByte('\n');
+        try out.writer.print("[workspace] saved_suppressed={} limit={d}\n", .{ self.saved_suppressed, workspace_access.max_additional_directories });
+        if (self.mutation) |mutation| {
+            try out.writer.print("[workspace] {s}", .{mutation.action});
+            if (mutation.path) |path| {
+                try out.writer.writeByte(' ');
+                try writeTerminalSafe(&out.writer, alloc, path);
+            }
+            try out.writer.print(" saved_changed={} runtime_changed={} launch_flag_can_restore={}\n", .{
+                mutation.saved_changed,
+                mutation.runtime_changed,
+                mutation.launch_flag_can_restore,
+            });
+            if (mutation.launch_flag_can_restore) {
+                try out.writer.writeAll("[workspace] warning: repeating --add-dir can restore removed access on the next launch\n");
+            }
+        }
+        if (self.additional_directories.len == 0) {
+            try out.writer.writeAll("[workspace] additional directories: (none)\n");
+            return try out.toOwnedSlice();
+        }
+        try out.writer.writeAll("[workspace] additional directories:\n");
+        for (self.additional_directories) |entry| {
+            try out.writer.writeAll(" - ");
+            try writeTerminalSafe(&out.writer, alloc, entry.path);
+            try out.writer.print(" saved={} command_line={} available={} active={}\n", .{
+                entry.saved,
+                entry.command_line,
+                entry.available,
+                entry.active,
+            });
+        }
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderInteractiveBody(self: WorkspaceSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("primary=");
+        try writeTerminalSafe(&out.writer, alloc, self.primary_directory);
+        try out.writer.writeByte('\n');
+        try out.writer.print("saved_suppressed={} limit={d}\n", .{ self.saved_suppressed, workspace_access.max_additional_directories });
+        if (self.mutation) |mutation| {
+            try out.writer.writeAll(mutation.action);
+            if (mutation.path) |path| {
+                try out.writer.writeByte(' ');
+                try writeTerminalSafe(&out.writer, alloc, path);
+            }
+            try out.writer.print(" saved_changed={} runtime_changed={} launch_flag_can_restore={}\n", .{
+                mutation.saved_changed,
+                mutation.runtime_changed,
+                mutation.launch_flag_can_restore,
+            });
+            if (mutation.launch_flag_can_restore) {
+                try out.writer.writeAll("warning: repeating --add-dir can restore removed access on the next launch\n");
+            }
+        }
+        if (self.additional_directories.len == 0) {
+            try out.writer.writeAll("additional directories: (none)");
+            return try out.toOwnedSlice();
+        }
+        try out.writer.writeAll("additional directories:\n");
+        for (self.additional_directories, 0..) |entry, index| {
+            try out.writer.writeAll(" - ");
+            try writeTerminalSafe(&out.writer, alloc, entry.path);
+            try out.writer.print(" saved={} command_line={} available={} active={}", .{
+                entry.saved,
+                entry.command_line,
+                entry.available,
+                entry.active,
+            });
+            if (index + 1 < self.additional_directories.len) try out.writer.writeByte('\n');
+        }
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: WorkspaceSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const action = if (self.mutation) |mutation| mutation.action else "list";
+        const changed = if (self.mutation) |mutation| mutation.saved_changed or mutation.runtime_changed else false;
+        try out.writer.writeAll("{\"kind\":\"workspace\",\"action\":");
+        try std.json.Stringify.value(action, .{}, &out.writer);
+        try out.writer.print(",\"changed\":{}", .{changed});
+        try out.writer.writeAll(",\"primary_directory\":");
+        try std.json.Stringify.value(self.primary_directory, .{}, &out.writer);
+        try out.writer.print(",\"saved_suppressed\":{},\"limit\":{d}", .{ self.saved_suppressed, workspace_access.max_additional_directories });
+        if (self.mutation) |mutation| {
+            if (mutation.path) |path| {
+                try out.writer.writeAll(",\"path\":");
+                try std.json.Stringify.value(path, .{}, &out.writer);
+            }
+            try out.writer.print(",\"saved_changed\":{},\"runtime_changed\":{},\"launch_flag_can_restore\":{}", .{
+                mutation.saved_changed,
+                mutation.runtime_changed,
+                mutation.launch_flag_can_restore,
+            });
+        }
+        try out.writer.writeAll(",\"additional_directories\":[");
+        for (self.additional_directories, 0..) |entry, index| {
+            if (index > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"path\":");
+            try std.json.Stringify.value(entry.path, .{}, &out.writer);
+            try out.writer.print(",\"saved\":{},\"command_line\":{},\"available\":{},\"active\":{}}}", .{
+                entry.saved,
+                entry.command_line,
+                entry.available,
+                entry.active,
+            });
+        }
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+};
+
+fn writeTerminalSafe(writer: *std.Io.Writer, alloc: Allocator, raw: []const u8) !void {
+    var encoded = try text_utils.encodeTerminalSafe(alloc, raw, std.math.maxInt(usize));
+    defer encoded.deinit(alloc);
+    try writer.writeAll(encoded.bytes);
+}
+
+/// A terminal-safe copy of `raw`, allocated with `alloc`.
+fn safeText(alloc: Allocator, raw: []const u8) ![]const u8 {
+    return (try text_utils.encodeTerminalSafe(alloc, raw, std.math.maxInt(usize))).bytes;
+}
+
+/// How many entries a panel list holds, or `none`.
+fn countText(alloc: Allocator, count: usize) ![]const u8 {
+    return if (count == 0) "none" else alloc.print("{d}", .{count});
+}
+
+fn gatewayProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    const source = auth.active_source orelse return auth.gateway_connected;
+    return auth.gateway_connected or (source != .chatgpt_subscription and source != .grok_subscription and source != .configured);
+}
+
+fn chatGptProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.chatgpt_connected or auth.active_source == .chatgpt_subscription;
+}
+
+fn grokProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.grok_connected or auth.active_source == .grok_subscription;
+}
+
+fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.StatusSnapshot) !void {
+    var wrote_provider = false;
+    if (gatewayProviderConnected(auth)) {
+        try writer.writeAll("Vercel AI Gateway");
+        wrote_provider = true;
+    }
+    if (chatGptProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", Codex");
+        if (!wrote_provider) try writer.writeAll("Codex");
+        wrote_provider = true;
+    }
+    if (grokProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", Grok");
+        if (!wrote_provider) try writer.writeAll("Grok");
+        wrote_provider = true;
+    }
+    if (!wrote_provider) try writer.writeAll("none");
+}
+
+/// What `fx doctor` found when it checked one configured MCP server.
+pub const McpServerResult = struct {
+    /// The server's name, as the runtime knows it.
+    name: []const u8,
+    connection: Connection,
+    authentication: Authentication,
+
+    pub const Connection = enum { not_checked, ready, failed, timed_out };
+    pub const Authentication = enum { not_checked, ok, needs_login };
+};
+
+pub const McpLocalSnapshot = struct {
+    servers: []const mcp_health.ConfiguredServerSnapshot = &.{},
+    configuration_issues: []const mcp_health.ConfigurationIssue = &.{},
+    inspection_error: ?[]const u8 = null,
+    /// `checked` once doctor has asked each server for its tools.
+    connection_check: enum { not_checked, checked } = .not_checked,
+    /// What doctor found for each server it checked. A server with no entry
+    /// reads `not_checked`, as every server does for `fx status`.
+    results: []const McpServerResult = &.{},
+
+    fn resultFor(self: McpLocalSnapshot, name: []const u8) McpServerResult {
+        for (self.results) |result| if (std.mem.eql(u8, result.name, name)) return result;
+        return .{ .name = name, .connection = .not_checked, .authentication = .not_checked };
+    }
+
+    fn writeText(self: McpLocalSnapshot, writer: *std.Io.Writer, alloc: Allocator, prefix: []const u8) !void {
+        try writer.print("[{s}] mcp_connection_check={s}\n", .{ prefix, @tagName(self.connection_check) });
+        try writer.print(
+            "[{s}] mcp_servers={d} mcp_configuration_issues={d}\n",
+            .{ prefix, self.servers.len, self.configuration_issues.len },
+        );
+        for (self.servers) |server| {
+            const result = self.resultFor(server.configured_name);
+            try writer.print("[{s}] mcp_server=", .{prefix});
+            try writeTerminalSafe(writer, alloc, server.configured_name);
+            try writer.print(
+                " source={s} scope={s} admission={s} transport={s} connection={s} authentication={s}\n",
+                .{
+                    @tagName(server.source),
+                    @tagName(server.scope),
+                    if (server.workspace_admission) |admission| @tagName(admission) else "not_applicable",
+                    @tagName(server.transport),
+                    @tagName(result.connection),
+                    @tagName(result.authentication),
+                },
+            );
+        }
+        for (self.configuration_issues) |issue| {
+            try writer.print("[{s}] mcp_configuration_issue=", .{prefix});
+            try writeTerminalSafe(writer, alloc, issue.message);
+            try writer.writeByte('\n');
+        }
+        if (self.inspection_error) |error_name| {
+            try writer.print("[{s}] mcp_inspection_error={s}\n", .{ prefix, error_name });
+        }
+    }
+
+    fn writeJson(self: McpLocalSnapshot, writer: *std.Io.Writer) !void {
+        try writer.print("{{\"connection_check\":\"{s}\",\"servers\":[", .{@tagName(self.connection_check)});
+        for (self.servers, 0..) |server, index| {
+            if (index > 0) try writer.writeByte(',');
+            const result = self.resultFor(server.configured_name);
+            try std.json.Stringify.value(.{
+                .name = server.configured_name,
+                .source = server.source,
+                .scope = server.scope,
+                .admission = server.workspace_admission,
+                .required = server.required,
+                .transport = server.transport,
+                .connection = result.connection,
+                .authentication = result.authentication,
+            }, .{}, writer);
+        }
+        try writer.writeAll("],\"configuration_issues\":[");
+        for (self.configuration_issues, 0..) |issue, index| {
+            if (index > 0) try writer.writeByte(',');
+            try std.json.Stringify.value(issue.message, .{}, writer);
+        }
+        try writer.writeAll("],\"inspection_error\":");
+        if (self.inspection_error) |error_name| {
+            try std.json.Stringify.value(error_name, .{}, writer);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeByte('}');
+    }
+};
+
+pub const StatusSnapshot = struct {
+    model: []const u8,
+    /// Where startup found `model`: FX_MODEL, settings, or default.
+    model_origin: ?[]const u8 = null,
+    /// The reasoning effort a new session starts with, when the caller resolved one.
+    effort: ?types.ReasoningEffort = null,
+    provider_endpoint: ?[]const u8 = null,
+    provider: model_provider.ProviderId = .gateway,
+    update_channel: []const u8 = "stable",
+    build_channel: []const u8 = "stable",
+    build_revision: []const u8 = "",
+    auth: auth_runtime.StatusSnapshot = .{},
+    auth_help: ?[]const u8 = null,
+    mcp: ?McpLocalSnapshot = null,
+    mcp_config_error: ?[]const u8 = null,
+    mcp_config_warning: ?mcp_contract.ProfileConfigWarning = null,
+    permission_mode: types.PermissionMode,
+    /// The session modes ACP offers and the one a new session starts in,
+    /// when the caller has a mode registry with modes.
+    modes: ?SessionModes = null,
+    workspace_root: []const u8,
+    /// The interactive shell's session, which only the `/status` panel
+    /// shows. `fx status` runs outside any session and leaves it null.
+    session: ?ShellSession = null,
+    /// Why the profile settings could not be read, for the `/status` panel.
+    /// The credential they select is then unknown, so no auth row is shown.
+    settings_error: ?[]const u8 = null,
+    /// fx's folder: `$FX_HOME`, or `~/.fx` expanded. Shown when set.
+    fx_home: ?[]const u8 = null,
+    history_turns: usize,
+    session_permission_grants: usize,
+    agent_step_limit: usize,
+    /// Requested Ultrafast mode. The serving provider may still fall back.
+    ultrafast_requested: bool = false,
+
+    pub const SessionModes = struct {
+        current: []const u8,
+        all: []const mode_contract.ModeSpec,
+    };
+
+    pub const ShellSession = union(enum) {
+        /// No session could be created, so the shell saves nothing.
+        unavailable,
+        open: struct {
+            id: []const u8,
+            /// `fx --resume <id>` opens it now: its log is on disk (D90).
+            saved: bool,
+        },
+    };
+
+    /// The `/status` panel's rows, in order, the session first. Everything
+    /// is allocated with `alloc`, which should be an arena.
+    pub fn panelRows(self: StatusSnapshot, alloc: Allocator) ![]PanelRow {
+        var rows: std.ArrayList(PanelRow) = .empty;
+        if (self.session) |session| try rows.append(alloc, .{ .label = "Session", .value = switch (session) {
+            .unavailable => "none · this shell can't save sessions",
+            .open => |open| try alloc.print("{s} · {s}", .{
+                try safeText(alloc, open.id),
+                if (open.saved) "saved" else "not saved yet",
+            }),
+        } });
+        try rows.append(alloc, .{ .label = "Model", .value = try safeText(alloc, self.model) });
+        if (self.provider != .gateway) {
+            // A configured provider's name lives in `self.provider`, this
+            // call's copy, so it is copied out with the rest.
+            try rows.append(alloc, .{ .label = "Provider", .value = try safeText(alloc, providerDisplayName(&self.provider)) });
+        }
+        if (self.provider_endpoint) |endpoint| {
+            try rows.append(alloc, .{ .label = "Endpoint", .value = try safeText(alloc, endpoint) });
+        }
+        if (self.provider != .gateway) {
+            var connections: std.Io.Writer.Allocating = .init(alloc);
+            try self.writeConnections(&connections.writer);
+            try rows.append(alloc, .{ .label = "Connected", .value = try safeText(alloc, connections.written()) });
+        }
+        if (self.settings_error) |error_name| {
+            try rows.append(alloc, .{ .label = "Settings", .value = try alloc.print("couldn't be read: {s}", .{error_name}) });
+        } else {
+            var auth: std.Io.Writer.Allocating = .init(alloc);
+            try writeTerminalSafe(&auth.writer, alloc, self.auth.activeSourceLabel());
+            if (self.auth.expired) try auth.writer.writeAll(" · expired");
+            if (self.auth.refreshable()) try auth.writer.writeAll(" · refreshable");
+            try rows.append(alloc, .{ .label = "Auth", .value = auth.written() });
+            if (self.auth_help) |help| try rows.append(alloc, .{ .label = "Auth help", .value = try safeText(alloc, help) });
+            if (self.auth.team) |team| try rows.append(alloc, .{ .label = "Team", .value = try safeText(alloc, team) });
+        }
+        try rows.append(alloc, .{ .label = "Permissions", .value = permissions.permissionModeDisplayLabel(self.permission_mode) });
+        try rows.append(alloc, .{ .label = "Workspace", .value = try safeText(alloc, self.workspace_root) });
+        try rows.append(alloc, .{ .label = "Turns", .value = try alloc.print("{d}", .{self.history_turns}) });
+        try rows.append(alloc, .{ .label = "Session grants", .value = try alloc.print("{d}", .{self.session_permission_grants}) });
+        try rows.append(alloc, .{
+            .label = "Step limit",
+            .value = if (self.agent_step_limit == 0) "unlimited" else try alloc.print("{d}", .{self.agent_step_limit}),
+        });
+        try rows.append(alloc, .{ .label = "Ultrafast", .value = if (self.ultrafast_requested) "requested" else "not requested" });
+        try rows.append(alloc, .{ .label = "Updates", .value = try safeText(alloc, self.update_channel) });
+        try rows.append(alloc, .{
+            .label = "Build",
+            .value = if (self.build_revision.len > 0)
+                try alloc.print("{s} · {s}", .{ try safeText(alloc, self.build_channel), try safeText(alloc, self.build_revision) })
+            else
+                try safeText(alloc, self.build_channel),
+        });
+        return rows.toOwnedSlice(alloc);
+    }
+
+    pub fn render(self: StatusSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: StatusSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.print("[status] model={s}\n", .{self.model});
+        if (self.model_origin) |origin| try out.writer.print("[status] model_origin={s}\n", .{origin});
+        if (self.effort) |*effort| try out.writer.print("[status] effort={s}\n", .{effort.label()});
+        if (self.provider != .gateway) {
+            try out.writer.print("[status] model_source={s}\n", .{providerDisplayName(&self.provider)});
+        }
+        if (self.provider_endpoint) |endpoint| try out.writer.print("[status] provider_endpoint={s}\n", .{endpoint});
+        try out.writer.print("[status] update_channel={s}\n", .{self.update_channel});
+        try out.writer.print("[status] build_channel={s}\n", .{self.build_channel});
+        if (self.build_revision.len > 0) {
+            try out.writer.print("[status] build_revision={s}\n", .{self.build_revision});
+        }
+        if (self.mcp_config_error) |error_name| {
+            try out.writer.print("[status] mcp_config_error={s}\n", .{error_name});
+        }
+        if (self.mcp_config_warning) |warning| {
+            try out.writer.print(
+                "[status] mcp_config_warning={s}",
+                .{@tagName(warning.cause)},
+            );
+            if (warning.key()) |key| {
+                try out.writer.writeAll(" key=");
+                try writeTerminalSafe(&out.writer, alloc, key);
+            }
+            try out.writer.print(
+                " additional_matches={d}\n",
+                .{warning.additional_matches},
+            );
+        }
+        try out.writer.print("[status] auth={s}\n", .{self.auth.activeSourceLabel()});
+        if (self.provider != .gateway) {
+            try out.writer.writeAll("[status] connected_providers=");
+            try self.writeConnections(&out.writer);
+            try out.writer.writeByte('\n');
+        }
+        try out.writer.print("[status] auth_refreshable={}\n", .{self.auth.refreshable()});
+        if (self.auth.expired) try out.writer.writeAll("[status] auth_expired=true\n");
+        if (self.auth_help) |help| {
+            try out.writer.print("[status] auth_help={s}\n", .{help});
+        }
+        if (self.auth.team) |team| {
+            try out.writer.print("[status] team={s}\n", .{team});
+        }
+        try out.writer.print("[status] permission_mode={s}\n", .{permissions.permissionModeDisplayLabel(self.permission_mode)});
+        try out.writer.print("[status] workspace={s}\n", .{self.workspace_root});
+        if (self.fx_home) |path| try out.writer.print("[status] fx_home={s}\n", .{path});
+        try out.writer.print("[status] history_turns={d}\n", .{self.history_turns});
+        try out.writer.print("[status] session_permission_grants={d}\n", .{self.session_permission_grants});
+        try out.writer.print("[status] agent_step_limit={d}\n", .{self.agent_step_limit});
+        try out.writer.print("[status] ultrafast_requested={}\n", .{self.ultrafast_requested});
+        if (self.mcp) |mcp| try mcp.writeText(&out.writer, alloc, "status");
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: StatusSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try self.writeJson(&out.writer);
+        return try out.toOwnedSlice();
+    }
+
+    fn writeConnections(self: StatusSnapshot, writer: *std.Io.Writer) !void {
+        if (self.provider == .configured and self.auth.active_source == .configured) {
+            try writer.writeAll(self.provider.label());
+            if (!gatewayProviderConnected(self.auth) and !chatGptProviderConnected(self.auth) and !grokProviderConnected(self.auth)) return;
+            try writer.writeAll(", ");
+        }
+        try writeConnectedProvidersText(writer, self.auth);
+    }
+
+    pub fn writeJson(self: StatusSnapshot, writer: *std.Io.Writer) !void {
+        try writer.writeAll("{\"kind\":\"status\",\"model\":");
+        try std.json.Stringify.value(self.model, .{}, writer);
+        if (self.model_origin) |origin| {
+            try writer.writeAll(",\"model_origin\":");
+            try std.json.Stringify.value(origin, .{}, writer);
+        }
+        if (self.effort) |*effort| {
+            try writer.writeAll(",\"effort\":");
+            try std.json.Stringify.value(effort.label(), .{}, writer);
+        }
+        if (self.provider != .gateway) {
+            try writer.writeAll(",\"model_source\":");
+            try std.json.Stringify.value(providerDisplayName(&self.provider), .{}, writer);
+        }
+        if (self.provider_endpoint) |endpoint| {
+            try writer.writeAll(",\"provider_endpoint\":");
+            try std.json.Stringify.value(endpoint, .{}, writer);
+        }
+        try writer.writeAll(",\"update_channel\":");
+        try std.json.Stringify.value(self.update_channel, .{}, writer);
+        try writer.writeAll(",\"build_channel\":");
+        try std.json.Stringify.value(self.build_channel, .{}, writer);
+        try writer.writeAll(",\"build_revision\":");
+        try std.json.Stringify.value(self.build_revision, .{}, writer);
+        if (self.mcp_config_error) |error_name| {
+            try writer.writeAll(",\"mcp_config_error\":");
+            try std.json.Stringify.value(error_name, .{}, writer);
+        }
+        if (self.mcp_config_warning) |warning| {
+            try writer.writeAll(",\"mcp_config_warning\":{\"cause\":");
+            try std.json.Stringify.value(@tagName(warning.cause), .{}, writer);
+            try writer.writeAll(",\"key\":");
+            if (warning.key()) |key| {
+                try std.json.Stringify.value(key, .{}, writer);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.print(
+                ",\"additional_matches\":{d}}}",
+                .{warning.additional_matches},
+            );
+        }
+        try writer.writeAll(",\"auth\":");
+        try std.json.Stringify.value(self.auth.activeSourceLabel(), .{}, writer);
+        if (self.provider != .gateway) {
+            try writer.writeAll(",\"connected_providers\":[");
+            var wrote_provider = false;
+            if (self.provider == .configured and self.auth.active_source == .configured) {
+                try std.json.Stringify.value(self.provider.label(), .{}, writer);
+                wrote_provider = true;
+            }
+            if (gatewayProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("vercel-ai-gateway", .{}, writer);
+                wrote_provider = true;
+            }
+            if (chatGptProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("codex", .{}, writer);
+                wrote_provider = true;
+            }
+            if (grokProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("grok", .{}, writer);
+            }
+            try writer.writeByte(']');
+        }
+        try writer.print(",\"auth_refreshable\":{}", .{self.auth.refreshable()});
+        if (self.auth.expired) try writer.writeAll(",\"auth_expired\":true");
+        if (self.auth_help) |help| {
+            try writer.writeAll(",\"auth_help\":");
+            try std.json.Stringify.value(help, .{}, writer);
+        }
+        if (self.auth.team) |team| {
+            try writer.writeAll(",\"team\":");
+            try std.json.Stringify.value(team, .{}, writer);
+        }
+        try writer.writeAll(",\"permission_mode\":");
+        try std.json.Stringify.value(permissionModeLabel(self.permission_mode), .{}, writer);
+        if (self.modes) |modes| {
+            try writer.writeAll(",\"mode\":");
+            try std.json.Stringify.value(modes.current, .{}, writer);
+            try writer.writeAll(",\"modes\":[");
+            for (modes.all, 0..) |mode, index| {
+                if (index > 0) try writer.writeByte(',');
+                try writer.writeAll("{\"id\":");
+                try std.json.Stringify.value(mode.id, .{}, writer);
+                try writer.writeAll(",\"name\":");
+                try std.json.Stringify.value(mode.name, .{}, writer);
+                try writer.writeAll(",\"description\":");
+                try std.json.Stringify.value(mode.description, .{}, writer);
+                try writer.writeByte('}');
+            }
+            try writer.writeByte(']');
+        }
+        try writer.writeAll(",\"workspace\":");
+        try std.json.Stringify.value(self.workspace_root, .{}, writer);
+        if (self.fx_home) |path| {
+            try writer.writeAll(",\"fx_home\":");
+            try std.json.Stringify.value(path, .{}, writer);
+        }
+        try writer.print(",\"history_turns\":{d}", .{self.history_turns});
+        try writer.print(",\"session_permission_grants\":{d}", .{self.session_permission_grants});
+        try writer.print(",\"agent_step_limit\":{d}", .{self.agent_step_limit});
+        try writer.print(",\"ultrafast_requested\":{}", .{self.ultrafast_requested});
+        if (self.mcp) |mcp| {
+            try writer.writeAll(",\"mcp\":");
+            try mcp.writeJson(writer);
+        }
+        try writer.writeByte('}');
+    }
+};
+
+/// One line of a read-only footer panel, such as `/status` and
+/// `/permissions` open. Both texts are terminal-safe.
+pub const PanelRow = struct {
+    /// Empty for an entry of a list.
+    label: []const u8,
+    value: []const u8,
+    /// An entry of the list the labeled row above it counts, drawn as a
+    /// bullet under its value.
+    item: bool = false,
+};
+
+pub const PermissionsSnapshot = struct {
+    workspace_root: []const u8,
+    mode: types.PermissionMode,
+    grants: []const types.PermissionGrant,
+    rules: types.PermissionRuleSet = .{},
+    runtime_grants_available: bool = true,
+    /// The open saved session's remembered rules, which only the
+    /// `/permissions` panel shows. `fx permissions` leaves it null.
+    saved_rules: ?[]const SavedRule = null,
+
+    pub const SavedRule = struct {
+        /// What `/permissions revoke` takes.
+        id: u64,
+        decision: []const u8,
+        /// The tool and arguments the rule matches, as it was remembered.
+        identity: []const u8,
+    };
+
+    pub fn render(self: PermissionsSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: PermissionsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.print("[permissions] mode={s}\n", .{permissions.permissionModeDisplayLabel(self.mode)});
+        try writePermissionRulesText(&out.writer, self.rules);
+        if (self.grants.len == 0) {
+            try out.writer.writeAll("[permissions] session grants: (none)\n");
+            return try out.toOwnedSlice();
+        }
+
+        try out.writer.writeAll("[permissions] session grants:\n");
+        for (self.grants) |grant| {
+            const display_target = try displayGrantTarget(alloc, self.workspace_root, grant);
+            defer alloc.free(display_target);
+            try out.writer.print(" - {s} -> {s}\n", .{ grant.tool_name, display_target });
+        }
+
+        return try out.toOwnedSlice();
+    }
+
+    /// The `/permissions` panel's rows, in order: the mode, each list with
+    /// its count and entries, and how to change them. Everything is
+    /// allocated with `alloc`, which should be an arena.
+    pub fn panelRows(self: PermissionsSnapshot, alloc: Allocator) ![]PanelRow {
+        var rows: std.ArrayList(PanelRow) = .empty;
+        try rows.append(alloc, .{ .label = "Mode", .value = permissions.permissionModeDisplayLabel(self.mode) });
+        try rows.append(alloc, .{ .label = "Configured rules", .value = try countText(alloc, self.rules.rules.len) });
+        for (self.rules.rules) |rule| try rows.append(alloc, .{ .label = "", .item = true, .value = try safeText(alloc, try alloc.print(
+            "{s} {s} → {s}",
+            .{ @tagName(rule.action), rule.permission, rule.pattern },
+        )) });
+        try rows.append(alloc, .{ .label = "Session grants", .value = try countText(alloc, self.grants.len) });
+        for (self.grants) |grant| try rows.append(alloc, .{ .label = "", .item = true, .value = try safeText(alloc, try alloc.print(
+            "{s} → {s}",
+            .{ grant.tool_name, try displayGrantTarget(alloc, self.workspace_root, grant) },
+        )) });
+        if (self.saved_rules) |saved| {
+            try rows.append(alloc, .{ .label = "Saved rules", .value = try countText(alloc, saved.len) });
+            for (saved) |rule| try rows.append(alloc, .{ .label = "", .item = true, .value = try safeText(alloc, try alloc.print(
+                "{d} {s} {s}",
+                .{ rule.id, rule.decision, rule.identity },
+            )) });
+        }
+        try rows.append(alloc, .{ .label = "Change mode", .value = "/permissions ask, auto, full-access, or reset" });
+        try rows.append(alloc, .{ .label = "Remember", .value = "/permissions remember allow|deny <tool-name> <arguments-json>" });
+        try rows.append(alloc, .{ .label = "Revoke", .value = "/permissions revoke <rule-id>" });
+        return rows.toOwnedSlice(alloc);
+    }
+
+    pub fn renderJson(self: PermissionsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("{\"kind\":\"permissions\",\"mode\":");
+        try std.json.Stringify.value(permissionModeLabel(self.mode), .{}, &out.writer);
+        try out.writer.print(",\"grant_count\":{d}", .{self.grants.len});
+        try out.writer.writeAll(",\"grant_scope\":\"session\"");
+        try out.writer.print(",\"runtime_grants_available\":{}", .{self.runtime_grants_available});
+        try out.writer.writeAll(",\"rules_scope\":\"persistent_config\",\"rules\":");
+        try writePermissionRulesJson(&out.writer, self.rules);
+        try out.writer.writeAll(",\"grants\":[");
+
+        for (self.grants, 0..) |grant, i| {
+            if (i > 0) try out.writer.writeByte(',');
+
+            const display_target = try displayGrantTarget(alloc, self.workspace_root, grant);
+            defer alloc.free(display_target);
+
+            try out.writer.writeAll("{\"tool_name\":");
+            try std.json.Stringify.value(grant.tool_name, .{}, &out.writer);
+            try out.writer.writeAll(",\"target_path\":");
+            try std.json.Stringify.value(grant.target_path, .{}, &out.writer);
+            try out.writer.writeAll(",\"display_target\":");
+            try std.json.Stringify.value(display_target, .{}, &out.writer);
+            try out.writer.writeByte('}');
+        }
+
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+};
+
+/// What fx offers for one listed model: the same efforts and speed lanes a session on that model
+/// exposes. `efforts` excludes `auto`, which every model accepts.
+pub const ModelDetail = struct {
+    name: ?[]const u8 = null,
+    efforts: model_capabilities.ReasoningEffortOptions = .{},
+    fast: bool = false,
+    ultrafast: bool = false,
+};
+
+pub const ModelListSnapshot = struct {
+    ids: []const []const u8,
+    /// One per id when the provider's catalog describes its models; empty otherwise.
+    details: []const ModelDetail = &.{},
+    provider: model_provider.ProviderId = .gateway,
+    limit: ?usize = null,
+    private_models_hidden: bool = false,
+    public_only_reason: ?credentials.CatalogPublicOnlyReason = null,
+
+    pub fn render(self: ModelListSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: ModelListSnapshot, alloc: Allocator) ![]u8 {
+        if (self.ids.len == 0) {
+            const provider_name = self.emptyCatalogProviderName();
+            if (self.catalogExplanation()) |explanation| {
+                return alloc.print("[models] no models returned by {s}\n[models] {s}\n", .{ provider_name, explanation });
+            }
+            return alloc.print("[models] no models returned by {s}\n", .{provider_name});
+        }
+
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.print("[models] {d} available\n", .{self.ids.len});
+
+        const shown = self.shownCount();
+        for (self.ids[0..shown]) |id| {
+            if (self.provider != .gateway) {
+                try out.writer.print(" - {s} · {s}\n", .{ id, providerDisplayName(&self.provider) });
+            } else {
+                try out.writer.print(" - {s}\n", .{id});
+            }
+        }
+        if (self.ids.len > shown) {
+            try out.writer.print(" ... and {d} more\n", .{self.ids.len - shown});
+        }
+        if (self.catalogExplanation()) |explanation| try out.writer.print("[models] {s}\n", .{explanation});
+
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderInteractiveBody(self: ModelListSnapshot, alloc: Allocator) ![]u8 {
+        if (self.ids.len == 0) {
+            const provider_name = self.emptyCatalogProviderName();
+            if (self.catalogExplanation()) |explanation| {
+                return alloc.print("no models returned by {s}\n{s}", .{ provider_name, explanation });
+            }
+            return alloc.print("no models returned by {s}", .{provider_name});
+        }
+
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.print("{d} available", .{self.ids.len});
+        const shown = self.shownCount();
+        for (self.ids[0..shown]) |id| {
+            if (self.provider != .gateway) {
+                try out.writer.print("\n - {s} · {s}", .{ id, providerDisplayName(&self.provider) });
+            } else {
+                try out.writer.print("\n - {s}", .{id});
+            }
+        }
+        if (self.ids.len > shown) try out.writer.print("\n ... and {d} more", .{self.ids.len - shown});
+        if (self.catalogExplanation()) |explanation| try out.writer.print("\n{s}", .{explanation});
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: ModelListSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const shown = self.shownCount();
+        try out.writer.print(
+            "{{\"kind\":\"models\",\"count\":{d},\"shown_count\":{d},\"more_count\":{d},\"private_models_hidden\":{},\"ids\":[",
+            .{ self.ids.len, shown, self.ids.len - shown, self.private_models_hidden },
+        );
+        for (self.ids[0..shown], 0..) |id, i| {
+            if (i > 0) try out.writer.writeByte(',');
+            try std.json.Stringify.value(id, .{}, &out.writer);
+        }
+        const has_details = self.ids.len > 0 and self.details.len == self.ids.len;
+        if (self.provider != .gateway or has_details) {
+            try out.writer.writeAll("],\"models\":[");
+            for (self.ids[0..shown], 0..) |id, i| {
+                if (i > 0) try out.writer.writeByte(',');
+                try out.writer.writeAll("{\"id\":");
+                try std.json.Stringify.value(id, .{}, &out.writer);
+                if (self.provider != .gateway) {
+                    try out.writer.writeAll(",\"source\":");
+                    try std.json.Stringify.value(providerDisplayName(&self.provider), .{}, &out.writer);
+                }
+                if (has_details) try writeModelDetailJson(&out.writer, &self.details[i]);
+                try out.writer.writeByte('}');
+            }
+        }
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+
+    fn writeModelDetailJson(w: *std.Io.Writer, detail: *const ModelDetail) !void {
+        if (detail.name) |name| {
+            try w.writeAll(",\"name\":");
+            try std.json.Stringify.value(name, .{}, w);
+        }
+        try w.writeAll(",\"efforts\":[");
+        for (detail.efforts.slice(), 0..) |effort, i| {
+            if (i > 0) try w.writeByte(',');
+            try std.json.Stringify.value(effort.label(), .{}, w);
+        }
+        try w.print("],\"fast\":{},\"ultrafast\":{}", .{ detail.fast, detail.ultrafast });
+    }
+
+    fn shownCount(self: ModelListSnapshot) usize {
+        return if (self.limit) |value| @min(self.ids.len, value) else self.ids.len;
+    }
+
+    fn emptyCatalogProviderName(self: ModelListSnapshot) []const u8 {
+        return switch (self.provider) {
+            .gateway => "gateway",
+            .codex => provider_catalog.label(.codex),
+            .grok => provider_catalog.label(.grok),
+            .configured => "configured provider",
+        };
+    }
+
+    fn catalogExplanation(self: ModelListSnapshot) ?[]const u8 {
+        if (self.provider == .configured) return "Models from settings and, with fetch_models, the server; explicit model IDs need no catalog.";
+        if (!self.private_models_hidden) return null;
+        const reason = self.public_only_reason orelse return "Using the public model catalog.";
+        return switch (reason) {
+            .no_credential => "Using the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.",
+            .fx_login_team_required => "Choose a Vercel team to load its private models.",
+            .fx_login_refresh_required => "Vercel sign-in must refresh before team-private models can load.",
+            .credential_refresh_required => "The selected sign-in must refresh before authenticated models can load.",
+            .credential_refresh_failed => "Vercel sign-in refresh failed; using the public model catalog.",
+            .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
+            .chatgpt_subscription => "Codex models require an authenticated Codex catalog.",
+            .grok_subscription => "Grok models require an authenticated Grok catalog.",
+        };
+    }
+};
+
+/// How `fx sessions` and `fx sessions --live` print their text: color and
+/// width for a terminal, and the clock and home folder rows read from.
+pub const ListStyle = session_list_text.Style;
+
+pub const SessionListSnapshot = struct {
+    sessions: []const session_store.SessionSummary,
+    has_more: bool = false,
+    next_cursor: ?[]const u8 = null,
+    skipped_invalid: usize = 0,
+    all_workspaces: bool = false,
+    style: ListStyle = .{},
+
+    pub fn render(self: SessionListSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: SessionListSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try session_list_text.writeSaved(&out.writer, alloc, .{
+            .sessions = self.sessions,
+            .has_more = self.has_more,
+            .next_cursor = self.next_cursor,
+            .skipped_invalid = self.skipped_invalid,
+            .all_workspaces = self.all_workspaces,
+        }, self.style);
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: SessionListSnapshot, alloc: Allocator) ![]u8 {
+        if (self.sessions.len == 0 and self.skipped_invalid == 0) {
+            return alloc.dupe(u8, "{\"kind\":\"sessions\",\"count\":0,\"sessions\":[]}");
+        }
+
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.print("{{\"kind\":\"sessions\",\"count\":{d}", .{self.sessions.len});
+        if (self.skipped_invalid > 0) {
+            try out.writer.print(",\"skipped_invalid\":{d}", .{self.skipped_invalid});
+        }
+        if (self.has_more) {
+            try out.writer.writeAll(",\"has_more\":true,\"next_cursor\":");
+            try std.json.Stringify.value(self.next_cursor orelse "", .{}, &out.writer);
+        }
+        try out.writer.writeAll(",\"sessions\":[");
+        for (self.sessions, 0..) |entry, i| {
+            if (i > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"id\":");
+            try std.json.Stringify.value(entry.id, .{}, &out.writer);
+            try writeSessionDisplayJsonFields(&out.writer, entry);
+            try out.writer.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d},\"history_len\":{d}", .{ entry.created_at_ms, entry.updated_at_ms, entry.history_len });
+            try out.writer.writeAll(",\"conversation_language\":");
+            try std.json.Stringify.value(entry.conversation_language.view(), .{}, &out.writer);
+            try out.writer.writeByte('}');
+        }
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+};
+
+pub const SessionSummarySnapshot = struct {
+    summary: session_store.SessionSummary,
+
+    pub fn render(self: SessionSummarySnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: SessionSummarySnapshot, alloc: Allocator) ![]u8 {
+        return alloc.print(
+            "[session] {s}\ncreated_at_ms: {d}\nupdated_at_ms: {d}\nlanguage: {s}\nhistory_len: {d}\n",
+            .{
+                self.summary.id,
+                self.summary.created_at_ms,
+                self.summary.updated_at_ms,
+                self.summary.conversation_language.view(),
+                self.summary.history_len,
+            },
+        );
+    }
+
+    pub fn renderJson(self: SessionSummarySnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("{\"kind\":\"session_summary\",\"id\":");
+        try std.json.Stringify.value(self.summary.id, .{}, &out.writer);
+        try writeSessionDisplayJsonFields(&out.writer, self.summary);
+        try out.writer.print(
+            ",\"created_at_ms\":{d},\"updated_at_ms\":{d},\"history_len\":{d},\"conversation_language\":",
+            .{
+                self.summary.created_at_ms,
+                self.summary.updated_at_ms,
+                self.summary.history_len,
+            },
+        );
+        try std.json.Stringify.value(
+            self.summary.conversation_language.view(),
+            .{},
+            &out.writer,
+        );
+        try out.writer.writeByte('}');
+        return out.toOwnedSlice();
+    }
+};
+
+fn writeSessionDisplayJsonFields(writer: *std.Io.Writer, summary: session_store.SessionSummary) !void {
+    try writer.writeAll(",\"title\":");
+    try std.json.Stringify.value(
+        summary.title orelse session_display_metadata.fallback_title,
+        .{},
+        writer,
+    );
+    try writer.writeAll(",\"preview\":");
+    if (summary.preview) |preview| {
+        try std.json.Stringify.value(preview, .{}, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"workspace_root\":");
+    if (summary.workspace_root) |workspace_root| {
+        try std.json.Stringify.value(workspace_root, .{}, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"origin_workspace_root\":");
+    if (summary.origin_workspace_root) |origin_workspace_root| {
+        try std.json.Stringify.value(origin_workspace_root, .{}, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+pub const SessionDetailSnapshot = struct {
+    state: session_codec.DurableSessionState,
+    /// `--tail`: only the last this many turns, each under its own number.
+    tail: ?usize = null,
+    /// The `<id>/<agent>` a subagent was read by.
+    address: ?[]const u8 = null,
+
+    /// Index of the first turn shown: the last `tail` of them, or all.
+    fn firstShown(self: SessionDetailSnapshot) usize {
+        const count = self.tail orelse return 0;
+        return self.state.history.len - @min(count, self.state.history.len);
+    }
+
+    pub fn render(self: SessionDetailSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: SessionDetailSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const state = self.state;
+        const first = self.firstShown();
+        try out.writer.print("[session] {s}\n", .{state.id});
+        if (self.address) |address| try out.writer.print("address: {s}\n", .{address});
+        try out.writer.print("created_at_ms: {d}\n", .{state.created_at_ms});
+        try out.writer.print("updated_at_ms: {d}\n", .{state.updated_at_ms});
+        try out.writer.print("language: {f}\n", .{text_utils.terminalSafe(state.conversation_language.view())});
+        try out.writer.print("history_len: {d}\n", .{state.history.len});
+        if (self.tail != null) try out.writer.print("first_turn: {d}\n", .{first + 1});
+
+        if (state.history.len == 0) {
+            try out.writer.writeAll("\n(no history yet)\n");
+            return try out.toOwnedSlice();
+        }
+
+        for (state.history[first..], first..) |turn, i| {
+            try out.writer.print("\n[turn {d}]\n", .{i + 1});
+            try writeSessionHistoryTurnText(&out.writer, alloc, turn);
+        }
+
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: SessionDetailSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const state = self.state;
+        const first = self.firstShown();
+        try out.writer.writeAll("{\"kind\":\"session_detail\",\"id\":");
+        try std.json.Stringify.value(state.id, .{}, &out.writer);
+        if (self.address) |address| {
+            try out.writer.writeAll(",\"address\":");
+            try std.json.Stringify.value(address, .{}, &out.writer);
+        }
+        try out.writer.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d},\"history_len\":{d}", .{ state.created_at_ms, state.updated_at_ms, state.history.len });
+        if (self.tail != null) try out.writer.print(",\"first_turn\":{d}", .{first + 1});
+        try out.writer.writeAll(",\"conversation_language\":");
+        try std.json.Stringify.value(state.conversation_language.view(), .{}, &out.writer);
+        try out.writer.writeAll(",\"history\":[");
+
+        for (state.history[first..], 0..) |turn, i| {
+            if (i > 0) try out.writer.writeByte(',');
+            try writeSessionHistoryTurnJson(&out.writer, turn);
+        }
+
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+};
+
+test "--tail keeps the last turns under their own numbers for every length and count" {
+    // Seeded, so a failure names its case and replays.
+    var prng = std.Random.DefaultPrng.init(0x7a11);
+    const random = prng.random();
+    var summary_text = "summary".*;
+    var history: [40]types.HistoryTurn = undefined;
+    for (&history, 0..) |*turn, i| turn.* = .{ .compacted_summary = .{ .summary = &summary_text, .removed_turn_count = i, .compaction_count = i } };
+    var model = "m".*;
+    for (0..2000) |_| {
+        const len = random.uintAtMost(usize, history.len);
+        const tail: ?usize = if (random.boolean()) null else 1 + random.uintAtMost(usize, 1000 - 1);
+        const state: session_codec.DurableSessionState = .{
+            .id = @constCast("abc"),
+            .origin_workspace_root = @constCast("/Users/example/w"),
+            .workspace_root = @constCast("/Users/example/w"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.default(),
+            .preferences = .{ .model = &model, .effort = .auto, .fast_mode = false },
+            .history = history[0..len],
+            .total_input_tokens = 0,
+            .total_output_tokens = 0,
+        };
+        const snapshot: SessionDetailSnapshot = .{ .state = state, .tail = tail };
+        const first = snapshot.firstShown();
+        const shown = len - first;
+        if (tail) |count| {
+            try std.testing.expectEqual(@min(count, len), shown);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), first);
+        }
+        const text = try snapshot.renderText(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqual(shown, std.mem.count(u8, text, "\n[turn "));
+        if (shown > 0) {
+            var buf: [32]u8 = undefined;
+            try std.testing.expect(std.mem.find(u8, text, try std.mem.print(&buf, "\n[turn {d}]\n", .{first + 1})) != null);
+            try std.testing.expect(std.mem.find(u8, text, try std.mem.print(&buf, "\n[turn {d}]\n", .{len})) != null);
+        }
+        const json = try snapshot.renderJson(std.testing.allocator);
+        defer std.testing.allocator.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(i64, @intCast(len)), parsed.value.object.get("history_len").?.integer);
+        try std.testing.expectEqual(shown, parsed.value.object.get("history").?.array.items.len);
+        try std.testing.expectEqual(tail != null, parsed.value.object.get("first_turn") != null);
+    }
+}
+
+test "session detail text shows saved control bytes as escapes and keeps lines and tabs" {
+    const alloc = std.testing.allocator;
+    var user_text = "ask \x1b]0;owned\x07\r\nline two\ttab".*;
+    var assistant_text = "answer \x1b[2J".*;
+    var step_text = "step \x9b".*;
+    var call_id = "call\x1b".*;
+    var tool_name = "shell\x07".*;
+    var output = "out \xc2\x9b2J".*;
+    var path = "dir/\x1b[31mname".*;
+    var calls = [_]types.ToolCall{.{ .id = &call_id, .name = &tool_name, .arguments_json = "{\"x\":\"\x1b\"}" }};
+    var results = [_]types.PersistedToolResult{.{ .tool_call_id = &call_id, .tool_name = &tool_name, .status = .success, .output = &output, .output_bytes = output.len, .stored_output_bytes = output.len }};
+    var steps = [_]types.ToolExecutionStep{.{ .assistant = &step_text, .tool_calls = &calls, .tool_results = &results }};
+    var files = [_]types.FileEvidence{.{ .path = &path, .tool_call_id = &call_id, .tool_name = &tool_name }};
+    var completed = [_][]u8{&tool_name};
+    var history = [_]types.HistoryTurn{
+        .{ .assistant = .{ .user = .{ .text = &user_text }, .assistant = &assistant_text, .execution = .{ .tool_steps = &steps, .files = &files } } },
+        .{ .interrupted = .{ .user = .{ .text = &user_text }, .tool_call = calls[0], .completed_tool_names = &completed } },
+    };
+    var model = "m".*;
+    const snapshot: SessionDetailSnapshot = .{ .state = .{
+        .id = @constCast("abc"),
+        .origin_workspace_root = @constCast("/Users/example/w"),
+        .workspace_root = @constCast("/Users/example/w"),
+        .created_at_ms = 1,
+        .updated_at_ms = 2,
+        .conversation_language = types.ConversationLanguage.default(),
+        .preferences = .{ .model = &model, .effort = .auto, .fast_mode = false },
+        .history = &history,
+        .total_input_tokens = 0,
+        .total_output_tokens = 0,
+    }, .tail = 1 };
+    for ([_]SessionDetailSnapshot{ snapshot, .{ .state = snapshot.state } }) |shown| {
+        const text = try shown.renderText(alloc);
+        defer alloc.free(text);
+        try std.testing.expect(text_utils.isTerminalSafeText(text));
+        // Lines and tabs stay, and a CRLF ends a line.
+        try std.testing.expect(std.mem.find(u8, text, "ask \\x1b]0;owned\\x07\nline two\ttab\n") != null);
+        try std.testing.expect(std.mem.find(u8, text, "tool_name: shell\\x07\n") != null);
+        try std.testing.expect(std.mem.find(u8, text, "completed_tools: shell\\x07\n") != null);
+    }
+    const whole = try (SessionDetailSnapshot{ .state = snapshot.state }).renderText(alloc);
+    defer alloc.free(whole);
+    for ([_][]const u8{ "answer \\x1b[2J\n", "step \\x9b\n", "tool_call: call\\x1b shell\\x07\n", "tool_result: call\\x1b shell\\x07 success\noutput:\nout \\u{009b}2J\n", "dir/\\x1b[31mname\n" }) |expected| {
+        try std.testing.expect(std.mem.find(u8, whole, expected) != null);
+    }
+}
+
+/// `fx sessions --live`: each session an fx process has open now, with its
+/// subagents, nested under the subagent that started them.
+pub const LiveSessionListSnapshot = struct {
+    sessions: []const session_store.LiveSession,
+    all_workspaces: bool = false,
+    style: ListStyle = .{},
+
+    pub fn render(self: LiveSessionListSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: LiveSessionListSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try session_list_text.writeLive(&out.writer, alloc, self.sessions, self.all_workspaces, self.style);
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: LiveSessionListSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.print("{{\"kind\":\"live_sessions\",\"count\":{d},\"sessions\":[", .{self.sessions.len});
+        for (self.sessions, 0..) |entry, i| {
+            if (i > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"id\":");
+            try std.json.Stringify.value(entry.summary.id, .{}, &out.writer);
+            try out.writer.writeAll(",\"title\":");
+            try std.json.Stringify.value(entry.summary.title orelse session_display_metadata.fallback_title, .{}, &out.writer);
+            try out.writer.writeAll(",\"workspace_root\":");
+            try std.json.Stringify.value(entry.summary.workspace_root, .{}, &out.writer);
+            try out.writer.writeAll(",\"saved_model\":");
+            try std.json.Stringify.value(entry.saved_model, .{}, &out.writer);
+            try out.writer.print(",\"state\":\"{s}\",\"pid\":", .{@tagName(entry.state)});
+            try std.json.Stringify.value(entry.pid, .{}, &out.writer);
+            try out.writer.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d},\"agents\":", .{ entry.summary.created_at_ms, entry.summary.updated_at_ms });
+            try writeLiveAgentsJson(&out.writer, entry.agents);
+            try out.writer.writeByte('}');
+        }
+        try out.writer.writeAll("]}");
+        return try out.toOwnedSlice();
+    }
+};
+
+fn writeLiveAgentsJson(writer: *std.Io.Writer, agents: []const session_store.LiveAgent) !void {
+    try writer.writeByte('[');
+    for (agents, 0..) |agent, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":");
+        try std.json.Stringify.value(agent.name, .{}, writer);
+        try writer.writeAll(",\"address\":");
+        try std.json.Stringify.value(agent.address, .{}, writer);
+        try writer.writeAll(",\"id\":");
+        try std.json.Stringify.value(agent.id, .{}, writer);
+        try writer.print(",\"state\":\"{s}\",\"agents\":", .{@tagName(agent.state)});
+        try writeLiveAgentsJson(writer, agent.agents);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+test "a live listing prints each subagent under the one that started it, and escapes titles" {
+    const helper: session_store.LiveAgent = .{ .name = "helper", .address = "abc/lead/helper", .id = "h1", .state = .working, .agents = &.{} };
+    const lead: session_store.LiveAgent = .{ .name = "lead", .address = "abc/lead", .id = "l1", .state = .idle, .agents = &.{helper} };
+    const sessions = [_]session_store.LiveSession{.{
+        .summary = .{ .id = @constCast("abc"), .title = @constCast("Fix \x1b[31mred"), .workspace_root = @constCast("/Users/example/w"), .created_at_ms = 1, .updated_at_ms = 2, .conversation_language = types.ConversationLanguage.default(), .history_len = 0 },
+        .saved_model = "openai/gpt-5",
+        .state = .working,
+        .agents = &.{lead},
+        .pid = 4242,
+    }};
+    const no_pid = [_]session_store.LiveSession{.{
+        .summary = .{ .id = @constCast("def"), .created_at_ms = 3, .updated_at_ms = 4, .conversation_language = types.ConversationLanguage.default(), .history_len = 0 },
+        .saved_model = null,
+        .state = .idle,
+        .agents = &.{},
+        .pid = null,
+    }};
+    const text = try (LiveSessionListSnapshot{ .sessions = &sessions, .all_workspaces = true }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "1 live session in all workspaces  ·  1 working\nModel openai/gpt-5\n\n"));
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, text, "\nFix \\x1b[31mred  working  just now  abc         /Users/example/w\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "\n└─ lead          idle\n   └─ helper     working\n") != null);
+    const json = try (LiveSessionListSnapshot{ .sessions = &sessions }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"agents\":[{\"name\":\"lead\",\"address\":\"abc/lead\",\"id\":\"l1\",\"state\":\"idle\",\"agents\":[{\"name\":\"helper\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"state\":\"working\",\"pid\":4242,\"created_at_ms\":1,") != null);
+    const no_pid_json = try (LiveSessionListSnapshot{ .sessions = &no_pid }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(no_pid_json);
+    try std.testing.expect(std.mem.find(u8, no_pid_json, "\"state\":\"idle\",\"pid\":null,\"created_at_ms\":3,") != null);
+    const empty = try (LiveSessionListSnapshot{ .sessions = &.{} }).render(std.testing.allocator, .json);
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("{\"kind\":\"live_sessions\",\"count\":0,\"sessions\":[]}", empty);
+}
+
+pub const SessionRecoverySnapshot = struct {
+    result: session_store.SessionRecoveryResult,
+
+    pub fn render(
+        self: SessionRecoverySnapshot,
+        alloc: Allocator,
+        format: OutputFormat,
+    ) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(
+        self: SessionRecoverySnapshot,
+        alloc: Allocator,
+    ) ![]u8 {
+        const result = self.result;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.print("[session recovery] copied {s} to {s}\nhistory_turns: {d}\n", .{
+            result.source_session_id,
+            result.recovered_session_id,
+            result.history_len,
+        });
+        if (result.status == .recovered_with_unverified_artifacts) {
+            try out.writer.writeAll("warning: legacy command artifacts could not be authenticated\n");
+        }
+        if (result.permission_rules_dropped) {
+            try out.writer.writeAll("warning: saved permission rules could not be read and were not copied\n");
+        }
+        try out.writer.print("resume: fx --resume {s}\n", .{result.recovered_session_id});
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(
+        self: SessionRecoverySnapshot,
+        alloc: Allocator,
+    ) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.writeAll(
+            "{\"kind\":\"session_recovery\",\"source_id\":",
+        );
+        try std.json.Stringify.value(
+            self.result.source_session_id,
+            .{},
+            &out.writer,
+        );
+        try out.writer.writeAll(",\"recovered_id\":");
+        try std.json.Stringify.value(
+            self.result.recovered_session_id,
+            .{},
+            &out.writer,
+        );
+        try out.writer.writeAll(",\"status\":");
+        try std.json.Stringify.value(
+            @tagName(self.result.status),
+            .{},
+            &out.writer,
+        );
+        try out.writer.print(
+            ",\"history_turns\":{d},\"permission_rules_dropped\":{}",
+            .{ self.result.history_len, self.result.permission_rules_dropped },
+        );
+        try out.writer.writeByte('}');
+        return try out.toOwnedSlice();
+    }
+};
+
+pub const SessionForkSnapshot = struct {
+    result: session_store.SessionForkResult,
+
+    pub fn render(
+        self: SessionForkSnapshot,
+        alloc: Allocator,
+        format: OutputFormat,
+    ) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(
+        self: SessionForkSnapshot,
+        alloc: Allocator,
+    ) ![]u8 {
+        const result = self.result;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.print("[session fork] copied {s} to {s}\nhistory_turns: {d}\n", .{
+            result.source_session_id,
+            result.fork_session_id,
+            result.history_len,
+        });
+        if (result.copied_agents > 0) {
+            try out.writer.print("copied_agents: {d}\n", .{result.copied_agents});
+        }
+        if (!result.files_complete) {
+            try out.writer.writeAll("warning: some side files could not be copied\n");
+        }
+        try out.writer.print("resume: fx --resume {s}\n", .{result.fork_session_id});
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(
+        self: SessionForkSnapshot,
+        alloc: Allocator,
+    ) ![]u8 {
+        const result = self.result;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.writeAll("{\"kind\":\"session_fork\",\"source_id\":");
+        try std.json.Stringify.value(result.source_session_id, .{}, &out.writer);
+        try out.writer.writeAll(",\"fork_id\":");
+        try std.json.Stringify.value(result.fork_session_id, .{}, &out.writer);
+        try out.writer.writeAll(",\"workspace_root\":");
+        try std.json.Stringify.value(result.workspace_root, .{}, &out.writer);
+        try out.writer.print(
+            ",\"history_turns\":{d},\"copied_agents\":{d},\"files_complete\":{}}}",
+            .{ result.history_len, result.copied_agents, result.files_complete },
+        );
+        return try out.toOwnedSlice();
+    }
+};
+
+/// What `fx sessions convert` did (D61): counts, then one line per session
+/// it skipped.
+pub const SessionConvertSnapshot = struct {
+    converted: usize,
+    busy: usize,
+    unreadable: usize,
+    skipped: []const Skipped,
+    /// Each file a converted session was converted without, which its
+    /// earlier folder keeps.
+    left_out: []const LeftOut = &.{},
+    /// Each subagent an older fx saved that no conversion takes, kept as it
+    /// is, with why no fx opens it.
+    kept: []const Kept = &.{},
+
+    pub const Kept = struct {
+        id: []const u8,
+        reason: []const u8,
+    };
+
+    pub const Skipped = struct {
+        id: []const u8,
+        /// `SessionBusy` or `InvalidSessionFormat`.
+        code: []const u8,
+        /// The file and the reason, for an unreadable session.
+        reason: ?[]const u8,
+    };
+
+    pub const LeftOut = struct {
+        /// The converted session.
+        id: []const u8,
+        /// The session that kept the file: `id`, or one of its subagents.
+        member: []const u8,
+        file: []const u8,
+        /// `too_large`, a side file over `limit`, which is `bytes` long; or
+        /// `not_regular`, `unreadable` or `too_deep`, hosted terminal state
+        /// the copy can't take.
+        cause: []const u8,
+        /// Why, as a clause.
+        reason: []const u8,
+        bytes: u64,
+        limit: u64,
+    };
+
+    pub fn render(self: SessionConvertSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    fn renderText(self: SessionConvertSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.print("converted {d}, busy {d}, unreadable {d}\n", .{ self.converted, self.busy, self.unreadable });
+        for (self.skipped) |skipped| {
+            if (skipped.reason) |reason| {
+                try out.writer.print("{s}: unreadable: {s}\n", .{ skipped.id, reason });
+            } else if (std.mem.eql(u8, skipped.code, "SessionBusy")) {
+                try out.writer.print("{s}: busy, open in another fx\n", .{skipped.id});
+            } else try out.writer.print("{s}: unreadable\n", .{skipped.id});
+        }
+        for (self.left_out) |left| {
+            try out.writer.print("{s}: converted without {s}", .{ left.id, left.file });
+            if (!std.mem.eql(u8, left.member, left.id)) try out.writer.print(" of its subagent {s}", .{left.member});
+            try out.writer.print(" because {s}; ~/.fx/sessions/{s} keeps it\n", .{ left.reason, left.member });
+        }
+        for (self.kept) |kept| try out.writer.print("{s}: kept as it is: {s}\n", .{ kept.id, kept.reason });
+        return out.toOwnedSlice();
+    }
+
+    fn renderJson(self: SessionConvertSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.print("{{\"kind\":\"sessions_convert\",\"converted\":{d},\"busy\":{d},\"unreadable\":{d}", .{ self.converted, self.busy, self.unreadable });
+        // A skip fails the command; its error names the first one.
+        if (self.skipped.len > 0) {
+            try out.writer.writeAll(",\"error\":");
+            try std.json.Stringify.value(self.skipped[0].code, .{}, &out.writer);
+        }
+        try out.writer.writeAll(",\"skipped\":[");
+        for (self.skipped, 0..) |skipped, index| {
+            if (index > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"id\":");
+            try std.json.Stringify.value(skipped.id, .{}, &out.writer);
+            try out.writer.writeAll(",\"error\":");
+            try std.json.Stringify.value(skipped.code, .{}, &out.writer);
+            if (skipped.reason) |reason| {
+                try out.writer.writeAll(",\"reason\":");
+                try std.json.Stringify.value(reason, .{}, &out.writer);
+            }
+            try out.writer.writeByte('}');
+        }
+        try out.writer.writeAll("],\"left_out\":[");
+        for (self.left_out, 0..) |left, index| {
+            if (index > 0) try out.writer.writeByte(',');
+            try std.json.Stringify.value(left, .{}, &out.writer);
+        }
+        try out.writer.writeAll("],\"kept\":");
+        try std.json.Stringify.value(self.kept, .{}, &out.writer);
+        try out.writer.writeByte('}');
+        return out.toOwnedSlice();
+    }
+};
+
+test "fx sessions convert names each file it left out, in text and JSON" {
+    const alloc = std.testing.allocator;
+    const snapshot: SessionConvertSnapshot = .{ .converted = 1, .busy = 0, .unreadable = 0, .skipped = &.{}, .left_out = &.{
+        .{ .id = "root", .member = "root", .file = "logs/commands/replay.bin", .cause = "too_large", .reason = "it is 600 bytes, more than the 512 the new store keeps in one file", .bytes = 600, .limit = 512 },
+        .{ .id = "root", .member = "kid", .file = "tool-results/big.txt", .cause = "too_large", .reason = "it is 700 bytes, more than the 512 the new store keeps in one file", .bytes = 700, .limit = 512 },
+        .{ .id = "root", .member = "root", .file = "terminal/state/link", .cause = "not_regular", .reason = "it is not a file or folder", .bytes = 0, .limit = 512 },
+    } };
+    const text = try snapshot.render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings(
+        "converted 1, busy 0, unreadable 0\n" ++
+            "root: converted without logs/commands/replay.bin because it is 600 bytes, more than the 512 the new store keeps in one file; ~/.fx/sessions/root keeps it\n" ++
+            "root: converted without tool-results/big.txt of its subagent kid because it is 700 bytes, more than the 512 the new store keeps in one file; ~/.fx/sessions/kid keeps it\n" ++
+            "root: converted without terminal/state/link because it is not a file or folder; ~/.fx/sessions/root keeps it\n",
+        text,
+    );
+    const json = try snapshot.render(alloc, .json);
+    defer alloc.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"sessions_convert\",\"converted\":1,\"busy\":0,\"unreadable\":0,\"skipped\":[],\"left_out\":[" ++
+            "{\"id\":\"root\",\"member\":\"root\",\"file\":\"logs/commands/replay.bin\",\"cause\":\"too_large\",\"reason\":\"it is 600 bytes, more than the 512 the new store keeps in one file\",\"bytes\":600,\"limit\":512}," ++
+            "{\"id\":\"root\",\"member\":\"kid\",\"file\":\"tool-results/big.txt\",\"cause\":\"too_large\",\"reason\":\"it is 700 bytes, more than the 512 the new store keeps in one file\",\"bytes\":700,\"limit\":512}," ++
+            "{\"id\":\"root\",\"member\":\"root\",\"file\":\"terminal/state/link\",\"cause\":\"not_regular\",\"reason\":\"it is not a file or folder\",\"bytes\":0,\"limit\":512}],\"kept\":[]}",
+        json,
+    );
+}
+
+test "fx sessions convert renders its counts and each skip as text and JSON from one snapshot" {
+    const alloc = std.testing.allocator;
+    const snapshot: SessionConvertSnapshot = .{ .converted = 2, .busy = 1, .unreadable = 1, .skipped = &.{
+        .{ .id = "held", .code = "SessionBusy", .reason = null },
+        .{ .id = "torn", .code = "InvalidSessionFormat", .reason = "events.jsonl line 3 is not valid JSON" },
+    } };
+    const text = try snapshot.render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings(
+        "converted 2, busy 1, unreadable 1\nheld: busy, open in another fx\ntorn: unreadable: events.jsonl line 3 is not valid JSON\n",
+        text,
+    );
+    const json = try snapshot.render(alloc, .json);
+    defer alloc.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"sessions_convert\",\"converted\":2,\"busy\":1,\"unreadable\":1,\"error\":\"SessionBusy\",\"skipped\":[{\"id\":\"held\",\"error\":\"SessionBusy\"},{\"id\":\"torn\",\"error\":\"InvalidSessionFormat\",\"reason\":\"events.jsonl line 3 is not valid JSON\"}],\"left_out\":[],\"kept\":[]}",
+        json,
+    );
+}
+
+test "fx sessions convert names each subagent it keeps as it is, in text and JSON (D88)" {
+    const alloc = std.testing.allocator;
+    const snapshot: SessionConvertSnapshot = .{ .converted = 1, .busy = 0, .unreadable = 0, .skipped = &.{}, .kept = &.{
+        .{ .id = "grandchild", .reason = "it is a subagent of the earlier subagent child, which no fx opens" },
+    } };
+    const text = try snapshot.render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings(
+        "converted 1, busy 0, unreadable 0\n" ++
+            "grandchild: kept as it is: it is a subagent of the earlier subagent child, which no fx opens\n",
+        text,
+    );
+    const json = try snapshot.render(alloc, .json);
+    defer alloc.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"sessions_convert\",\"converted\":1,\"busy\":0,\"unreadable\":0,\"skipped\":[],\"left_out\":[]," ++
+            "\"kept\":[{\"id\":\"grandchild\",\"reason\":\"it is a subagent of the earlier subagent child, which no fx opens\"}]}",
+        json,
+    );
+}
+
+pub const DoctorSnapshot = struct {
+    /// The fx version that ran the checks.
+    version: []const u8 = "",
+    workspace_root: []const u8,
+    model: []const u8,
+    provider: model_provider.ProviderId = .gateway,
+    auth: auth_runtime.StatusSnapshot = .{},
+    permission_mode: types.PermissionMode,
+    agent_step_limit: usize,
+    checks: []const doctor_runtime.Check,
+    mcp: ?McpLocalSnapshot = null,
+
+    pub fn render(self: DoctorSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: DoctorSnapshot, alloc: Allocator) ![]u8 {
+        return self.renderTextStyled(alloc, .{});
+    }
+
+    pub const TextStyle = struct {
+        /// Colors the status marks, headings, and fixes; for a terminal
+        /// that allows color.
+        color: bool = false,
+        /// The terminal's width. A long value, detail, or fix then wraps
+        /// at a space and goes on under its own column, so the columns
+        /// stay whole. Null, as for a pipe, writes each on one line.
+        columns: ?usize = null,
+    };
+
+    /// The report a person reads: what doctor ran with, then each check
+    /// under its group, then the totals.
+    pub fn renderTextStyled(self: DoctorSnapshot, alloc: Allocator, style: TextStyle) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        const w = &out.writer;
+        const paint: DoctorPaint = .{ .color = style.color };
+
+        try paint.begin(w, .bold);
+        try w.writeAll("fx doctor");
+        try paint.end(w);
+        if (self.version.len > 0) {
+            try w.writeAll("  ");
+            try paint.begin(w, .dim);
+            try w.writeAll("fx ");
+            try writeTerminalSafe(w, alloc, self.version);
+            try paint.end(w);
+        }
+        try w.writeAll("\n\n");
+
+        try writeDoctorField(w, alloc, "Workspace", self.workspace_root, style.columns);
+        // Each value is built whole first, so it wraps as one.
+        var value: std.Io.Writer.Allocating = .init(alloc);
+        defer value.deinit();
+        const v = &value.writer;
+        try v.writeAll(self.model);
+        if (self.provider != .gateway) try v.print(" via {s}", .{providerDisplayName(&self.provider)});
+        try writeDoctorField(w, alloc, "Model", value.written(), style.columns);
+        value.clearRetainingCapacity();
+        try v.writeAll(self.auth.activeSourceLabel());
+        if (self.auth.team) |team| try v.print(" \u{00b7} team {s}", .{team});
+        if (self.auth.expired) try v.writeAll(" \u{00b7} expired");
+        try writeDoctorField(w, alloc, "Auth", value.written(), style.columns);
+        try writeDoctorField(w, alloc, "Permissions", permissions.permissionModeDisplayLabel(self.permission_mode), style.columns);
+        try writeDoctorFieldLabel(w, "Step limit");
+        if (self.agent_step_limit == 0) try w.writeAll("none\n") else try w.print("{d}\n", .{self.agent_step_limit});
+        if (self.mcp) |mcp| {
+            value.clearRetainingCapacity();
+            try v.print("{d} server{s}", .{ mcp.servers.len, if (mcp.servers.len == 1) "" else "s" });
+            if (mcp.configuration_issues.len > 0) try v.print(" \u{00b7} {d} config issue{s}", .{ mcp.configuration_issues.len, if (mcp.configuration_issues.len == 1) "" else "s" });
+            if (mcp.inspection_error) |error_name| try v.print(" \u{00b7} could not be read: {s}", .{error_name});
+            try writeDoctorField(w, alloc, "MCP", value.written(), style.columns);
+        }
+
+        for (std.enums.values(DoctorGroup)) |group| {
+            var shown = false;
+            for (self.checks) |entry| {
+                if (DoctorGroup.of(entry.name) != group) continue;
+                // The header already names the workspace.
+                if (std.mem.eql(u8, entry.name, "workspace") and entry.status == .ok) continue;
+                if (!shown) {
+                    try w.writeByte('\n');
+                    try paint.begin(w, .bold);
+                    try w.writeAll(group.title());
+                    try paint.end(w);
+                    try w.writeByte('\n');
+                    shown = true;
+                }
+                try w.writeAll("  ");
+                try paint.begin(w, switch (entry.status) {
+                    .ok => .green,
+                    .warn => .yellow,
+                    .fail => .red,
+                });
+                try w.writeAll(doctorStatusMark(entry.status));
+                try paint.end(w);
+                try w.writeByte(' ');
+                try paint.begin(w, .dim);
+                try writeTerminalSafe(w, alloc, entry.name);
+                try paint.end(w);
+                try w.splatByteAll(' ', @max(1, doctor_name_width -| entry.name.len));
+                try writeDoctorWrapped(w, alloc, entry.detail, doctor_detail_column, style.columns);
+                try w.writeByte('\n');
+                if (entry.fix) |fix| {
+                    try w.splatByteAll(' ', doctor_detail_column);
+                    try paint.begin(w, .dim);
+                    try w.writeAll("fix:");
+                    try paint.end(w);
+                    try w.writeByte(' ');
+                    try writeDoctorWrapped(w, alloc, fix, doctor_fix_column, style.columns);
+                    try w.writeByte('\n');
+                }
+            }
+        }
+
+        const counts = countDoctorChecks(self.checks);
+        try w.writeByte('\n');
+        try w.print("{d} ok \u{00b7} ", .{counts.ok});
+        if (counts.warn > 0) try paint.begin(w, .yellow);
+        try w.print("{d} warning{s}", .{ counts.warn, if (counts.warn == 1) "" else "s" });
+        if (counts.warn > 0) try paint.end(w);
+        try w.writeAll(" \u{00b7} ");
+        if (counts.fail > 0) try paint.begin(w, .red);
+        try w.print("{d} failure{s}", .{ counts.fail, if (counts.fail == 1) "" else "s" });
+        if (counts.fail > 0) try paint.end(w);
+        try w.writeByte('\n');
+
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: DoctorSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try self.writeJson(&out.writer);
+        return try out.toOwnedSlice();
+    }
+
+    pub fn writeJson(self: DoctorSnapshot, writer: *std.Io.Writer) !void {
+        const counts = countDoctorChecks(self.checks);
+        try writer.print(
+            "{{\"kind\":\"doctor\",\"ok_count\":{d},\"warn_count\":{d},\"fail_count\":{d}",
+            .{ counts.ok, counts.warn, counts.fail },
+        );
+        if (self.version.len > 0) {
+            try writer.writeAll(",\"version\":");
+            try std.json.Stringify.value(self.version, .{}, writer);
+        }
+        try writer.writeAll(",\"workspace\":");
+        try std.json.Stringify.value(self.workspace_root, .{}, writer);
+        try writer.writeAll(",\"model\":");
+        try std.json.Stringify.value(self.model, .{}, writer);
+        if (self.provider != .gateway) {
+            try writer.writeAll(",\"model_source\":");
+            try std.json.Stringify.value(providerDisplayName(&self.provider), .{}, writer);
+        }
+        try writer.writeAll(",\"auth\":");
+        try std.json.Stringify.value(self.auth.activeSourceLabel(), .{}, writer);
+        try writer.print(",\"auth_refreshable\":{}", .{self.auth.refreshable()});
+        if (self.auth.expired) try writer.writeAll(",\"auth_expired\":true");
+        if (self.auth.team) |team| {
+            try writer.writeAll(",\"team\":");
+            try std.json.Stringify.value(team, .{}, writer);
+        }
+        try writer.writeAll(",\"permission_mode\":");
+        try std.json.Stringify.value(permissionModeLabel(self.permission_mode), .{}, writer);
+        try writer.print(",\"agent_step_limit\":{d},\"checks\":[", .{self.agent_step_limit});
+
+        for (self.checks, 0..) |entry, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"name\":");
+            try std.json.Stringify.value(entry.name, .{}, writer);
+            try writer.writeAll(",\"status\":");
+            try std.json.Stringify.value(checkStatusLabel(entry.status), .{}, writer);
+            try writer.writeAll(",\"detail\":");
+            try std.json.Stringify.value(entry.detail, .{}, writer);
+            if (entry.fix) |fix| {
+                try writer.writeAll(",\"fix\":");
+                try std.json.Stringify.value(fix, .{}, writer);
+            }
+            try writer.writeByte('}');
+        }
+
+        try writer.writeByte(']');
+        if (self.mcp) |mcp| {
+            try writer.writeAll(",\"mcp\":");
+            try mcp.writeJson(writer);
+        }
+        try writer.writeByte('}');
+    }
+};
+
+pub const CreditsSnapshot = struct {
+    balance: ?[]const u8 = null,
+    used: ?[]const u8 = null,
+    plan: ?[]const u8 = null,
+    /// The team's Token Pass credit, a separate balance, while it has an
+    /// active Token Pass.
+    token_pass: ?TokenPassCredit = null,
+    /// The Gateway said the team has no active Token Pass (`token_pass: null`),
+    /// as opposed to a reply that does not mention Token Pass.
+    no_token_pass: bool = false,
+    raw_json: ?[]const u8 = null,
+    err_message: ?[]const u8 = null,
+
+    pub const TokenPassCredit = struct {
+        /// The credit left, or null when the Gateway could not read it.
+        remaining: ?[]const u8 = null,
+        /// When the credit resets, as the Gateway writes it.
+        resets_at: ?[]const u8 = null,
+    };
+
+    /// Frees provider-owned fields. `raw_json` remains borrowed presentation
+    /// input and is not released here.
+    pub fn deinit(self: *CreditsSnapshot, alloc: Allocator) void {
+        if (self.balance) |value| alloc.free(value);
+        if (self.used) |value| alloc.free(value);
+        if (self.plan) |value| alloc.free(value);
+        if (self.token_pass) |credit| {
+            if (credit.remaining) |value| alloc.free(value);
+            if (credit.resets_at) |value| alloc.free(value);
+        }
+        if (self.err_message) |value| alloc.free(value);
+        self.* = undefined;
+    }
+
+    fn hasFields(self: CreditsSnapshot) bool {
+        return self.balance != null or self.used != null or self.plan != null or self.token_pass != null;
+    }
+
+    pub fn render(self: CreditsSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.err_message) |msg| {
+            try out.writer.print("[credits] error: {f}\n", .{text_utils.terminalSafe(msg)});
+            return try out.toOwnedSlice();
+        }
+
+        if (self.balance) |b| {
+            try out.writer.print("[credits] balance={f}\n", .{text_utils.terminalSafe(b)});
+        }
+        if (self.used) |u| {
+            try out.writer.print("[credits] used={f}\n", .{text_utils.terminalSafe(u)});
+        }
+        if (self.plan) |p| {
+            try out.writer.print("[credits] plan={f}\n", .{text_utils.terminalSafe(p)});
+        }
+        if (self.token_pass) |credit| {
+            if (credit.remaining) |remaining| try out.writer.print("[credits] token_pass_remaining={f}\n", .{text_utils.terminalSafe(remaining)});
+            if (credit.resets_at) |resets_at| try out.writer.print("[credits] token_pass_resets_at={f}\n", .{text_utils.terminalSafe(resets_at)});
+        }
+
+        if (!self.hasFields()) {
+            if (self.raw_json) |raw| {
+                try out.writer.print("[credits] {f}\n", .{text_utils.terminalSafe(raw)});
+            } else {
+                try out.writer.writeAll("[credits] no data returned by gateway\n");
+            }
+        }
+
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderInteractiveBody(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.err_message) |msg| return alloc.print("{f}", .{text_utils.terminalSafe(msg)});
+        var wrote_field = false;
+        if (self.balance) |balance| {
+            try out.writer.print("balance={f}", .{text_utils.terminalSafe(balance)});
+            wrote_field = true;
+        }
+        if (self.used) |used| {
+            if (wrote_field) try out.writer.writeByte('\n');
+            try out.writer.print("used={f}", .{text_utils.terminalSafe(used)});
+            wrote_field = true;
+        }
+        if (self.plan) |plan| {
+            if (wrote_field) try out.writer.writeByte('\n');
+            try out.writer.print("plan={f}", .{text_utils.terminalSafe(plan)});
+            wrote_field = true;
+        }
+        if (self.token_pass) |credit| {
+            if (credit.remaining) |remaining| {
+                if (wrote_field) try out.writer.writeByte('\n');
+                try out.writer.print("token_pass_remaining={f}", .{text_utils.terminalSafe(remaining)});
+                wrote_field = true;
+            }
+            if (credit.resets_at) |resets_at| {
+                if (wrote_field) try out.writer.writeByte('\n');
+                try out.writer.print("token_pass_resets_at={f}", .{text_utils.terminalSafe(resets_at)});
+                wrote_field = true;
+            }
+        }
+        if (!self.hasFields()) {
+            if (self.raw_json) |raw| {
+                try out.writer.print("{f}", .{text_utils.terminalSafe(raw)});
+            } else {
+                try out.writer.writeAll("no data returned by gateway");
+            }
+        }
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("{\"kind\":\"credits\"");
+
+        if (self.err_message) |msg| {
+            try out.writer.writeAll(",\"error\":");
+            try std.json.Stringify.value(msg, .{}, &out.writer);
+            try out.writer.writeByte('}');
+            return try out.toOwnedSlice();
+        }
+
+        inline for (.{ .{ "balance", self.balance }, .{ "used", self.used }, .{ "plan", self.plan } }) |pair| {
+            try out.writer.writeAll(",\"");
+            try out.writer.writeAll(pair[0]);
+            try out.writer.writeAll("\":");
+            if (pair[1]) |val| {
+                try std.json.Stringify.value(val, .{}, &out.writer);
+            } else {
+                try out.writer.writeAll("null");
+            }
+        }
+        try out.writer.writeAll(",\"token_pass\":");
+        if (self.token_pass) |credit| {
+            try std.json.Stringify.value(credit, .{}, &out.writer);
+        } else {
+            try out.writer.writeAll("null");
+        }
+
+        try out.writer.writeByte('}');
+        return try out.toOwnedSlice();
+    }
+};
+
+pub const UpgradeSnapshot = struct {
+    current: []const u8,
+    latest: []const u8,
+    channel: []const u8 = "stable",
+    current_channel: []const u8 = "stable",
+    current_revision: []const u8 = "",
+    latest_revision: []const u8 = "",
+    status: Status,
+    err_message: ?[]const u8 = null,
+
+    pub const Status = enum {
+        upgraded,
+        up_to_date,
+        failed,
+
+        fn label(self: Status) []const u8 {
+            return switch (self) {
+                .upgraded => "upgraded",
+                .up_to_date => "up_to_date",
+                .failed => "failed",
+            };
+        }
+    };
+
+    pub fn render(self: UpgradeSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: UpgradeSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.err_message) |msg| {
+            try out.writer.print("error: {s}\n", .{msg});
+            return try out.toOwnedSlice();
+        }
+
+        switch (self.status) {
+            .upgraded => {
+                try out.writer.writeAll("upgraded to ");
+                if (std.mem.eql(u8, self.channel, "dev") and self.latest_revision.len > 0) {
+                    try out.writer.print("dev {s} (", .{shortRevision(self.latest_revision)});
+                    try writeVersionWithPrefix(&out.writer, self.latest);
+                    try out.writer.writeByte(')');
+                } else {
+                    try writeVersionWithPrefix(&out.writer, self.latest);
+                }
+                try out.writer.writeByte('\n');
+                const channel = update_target.Channel.parse(self.channel) orelse .stable;
+                if (update_notes.destination(
+                    channel,
+                    self.latest,
+                    self.current_revision,
+                    self.latest_revision,
+                )) |notes| {
+                    try update_notes.writeLabel(notes.kind, &out.writer);
+                    try out.writer.writeAll(": ");
+                    try notes.writeUrl(&out.writer);
+                    try out.writer.writeByte('\n');
+                }
+            },
+            .up_to_date => {
+                if (std.mem.eql(u8, self.channel, "dev") and self.latest_revision.len > 0) {
+                    try out.writer.print("fx dev {s} is already up to date (", .{shortRevision(self.latest_revision)});
+                } else {
+                    try out.writer.writeAll("fx is already up to date (");
+                }
+                try writeVersionWithPrefix(&out.writer, self.latest);
+                try out.writer.writeAll(")\n");
+            },
+            .failed => try out.writer.writeAll("upgrade failed\n"),
+        }
+
+        return try out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: UpgradeSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("{\"kind\":\"upgrade\"");
+
+        if (self.err_message) |msg| {
+            try out.writer.writeAll(",\"error\":");
+            try std.json.Stringify.value(msg, .{}, &out.writer);
+            try out.writer.writeByte('}');
+            return try out.toOwnedSlice();
+        }
+
+        try out.writer.writeAll(",\"current\":");
+        try std.json.Stringify.value(self.current, .{}, &out.writer);
+        try out.writer.writeAll(",\"latest\":");
+        try std.json.Stringify.value(self.latest, .{}, &out.writer);
+        if (!std.mem.eql(u8, self.channel, "stable") or
+            !std.mem.eql(u8, self.current_channel, "stable") or
+            self.latest_revision.len > 0)
+        {
+            try out.writer.writeAll(",\"channel\":");
+            try std.json.Stringify.value(self.channel, .{}, &out.writer);
+            try out.writer.writeAll(",\"current_channel\":");
+            try std.json.Stringify.value(self.current_channel, .{}, &out.writer);
+            try out.writer.writeAll(",\"current_revision\":");
+            try std.json.Stringify.value(self.current_revision, .{}, &out.writer);
+            try out.writer.writeAll(",\"latest_revision\":");
+            try std.json.Stringify.value(self.latest_revision, .{}, &out.writer);
+        }
+        try out.writer.writeAll(",\"status\":");
+        try std.json.Stringify.value(self.status.label(), .{}, &out.writer);
+        try out.writer.writeByte('}');
+        return try out.toOwnedSlice();
+    }
+};
+
+fn shortRevision(revision: []const u8) []const u8 {
+    return revision[0..@min(revision.len, 12)];
+}
+
+fn writeVersionWithPrefix(writer: *std.Io.Writer, version: []const u8) !void {
+    if (version.len == 0 or version[0] != 'v') {
+        try writer.writeByte('v');
+    }
+    try writer.writeAll(version);
+}
+
+fn displayGrantTarget(alloc: Allocator, workspace_root: []const u8, grant: types.PermissionGrant) ![]u8 {
+    if (std.mem.eql(u8, grant.tool_name, "run_command") or std.mem.eql(u8, grant.tool_name, "bash")) {
+        return alloc.dupe(u8, grant.target_path);
+    }
+
+    if (std.Io.Dir.path.isAbsolute(grant.target_path)) {
+        return std.Io.Dir.path.relativeAlloc(alloc, "/", null, workspace_root, grant.target_path) catch alloc.dupe(u8, grant.target_path);
+    }
+
+    return alloc.dupe(u8, grant.target_path);
+}
+
+fn writePermissionRulesText(writer: *std.Io.Writer, rules: types.PermissionRuleSet) !void {
+    if (rules.rules.len == 0) {
+        try writer.writeAll("[permissions] configured rules: (none)\n");
+        return;
+    }
+
+    try writer.writeAll("[permissions] configured rules:\n");
+    for (rules.rules) |rule| {
+        try writer.print(" - {s} {s} -> {s}\n", .{ @tagName(rule.action), rule.permission, rule.pattern });
+    }
+}
+
+fn writePermissionRulesJson(writer: *std.Io.Writer, rules: types.PermissionRuleSet) !void {
+    try writer.writeByte('[');
+    for (rules.rules, 0..) |rule, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"permission\":");
+        try std.json.Stringify.value(rule.permission, .{}, writer);
+        try writer.writeAll(",\"pattern\":");
+        try std.json.Stringify.value(rule.pattern, .{}, writer);
+        try writer.writeAll(",\"action\":");
+        try std.json.Stringify.value(@tagName(rule.action), .{}, writer);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+const DoctorCheckCounts = struct {
+    ok: usize = 0,
+    warn: usize = 0,
+    fail: usize = 0,
+};
+
+fn countDoctorChecks(checks: []const doctor_runtime.Check) DoctorCheckCounts {
+    var counts: DoctorCheckCounts = .{};
+    for (checks) |entry| {
+        switch (entry.status) {
+            .ok => counts.ok += 1,
+            .warn => counts.warn += 1,
+            .fail => counts.fail += 1,
+        }
+    }
+    return counts;
+}
+
+/// The groups `fx doctor` shows its checks under, in this order.
+const DoctorGroup = enum {
+    install,
+    config,
+    auth,
+    sessions,
+    mcp,
+    tools,
+    other,
+
+    fn of(check_name: []const u8) DoctorGroup {
+        const names = [_]struct { []const u8, DoctorGroup }{
+            .{ "workspace", .install },
+            .{ "install", .install },
+            .{ "config", .config },
+            .{ "env", .config },
+            .{ "startup", .config },
+            .{ "mcp_config", .mcp },
+            .{ "auth", .auth },
+            .{ "login", .auth },
+            .{ "provider", .auth },
+            .{ "model", .auth },
+            .{ "state", .sessions },
+            .{ "session", .sessions },
+            .{ "sessions", .sessions },
+            .{ "mcp", .mcp },
+            .{ "git", .tools },
+            .{ "gh", .tools },
+            .{ "skills", .tools },
+        };
+        for (names) |entry| if (std.mem.eql(u8, entry[0], check_name)) return entry[1];
+        return .other;
+    }
+
+    fn title(group: DoctorGroup) []const u8 {
+        return switch (group) {
+            .install => "Install",
+            .config => "Config",
+            .auth => "Auth and model",
+            .sessions => "Sessions",
+            .mcp => "MCP servers",
+            .tools => "Tools",
+            .other => "Other",
+        };
+    }
+};
+
+fn doctorStatusMark(status: doctor_runtime.CheckStatus) []const u8 {
+    return switch (status) {
+        .ok => "\u{2713}",
+        .warn => "!",
+        .fail => "\u{2717}",
+    };
+}
+
+const doctor_field_width = 13;
+/// The check name column, wide enough for `mcp_config`.
+const doctor_name_width = 11;
+/// Where a check's detail starts: two spaces, the mark, a space, the name.
+const doctor_detail_column = 4 + doctor_name_width;
+/// Where a fix's text starts, after `fix: ` under the detail.
+const doctor_fix_column = doctor_detail_column + "fix: ".len;
+/// Below this many columns for the text, wrapping would leave too little on
+/// each line, so the text is written whole and the terminal wraps it.
+const doctor_min_wrap_width = 20;
+
+/// Writes `raw` made terminal-safe, starting at column `indent`. With a
+/// known `columns`, it breaks at the last space that fits before the edge
+/// and starts each next line at `indent`; a word wider than a whole line
+/// breaks at the edge, between whole characters, emoji sequences included.
+fn writeDoctorWrapped(w: *std.Io.Writer, alloc: Allocator, raw: []const u8, indent: usize, columns: ?usize) !void {
+    const width = columns orelse return writeTerminalSafe(w, alloc, raw);
+    if (width < indent + doctor_min_wrap_width) return writeTerminalSafe(w, alloc, raw);
+    var encoded = try text_utils.encodeTerminalSafe(alloc, raw, std.math.maxInt(usize));
+    defer encoded.deinit(alloc);
+    var rest = display_width.trimBreakWhitespace(encoded.bytes);
+    var first = true;
+    while (rest.len > 0) {
+        var line = display_width.wrapCutIgnoringAnsi(rest, width - indent);
+        // A single character wider than the line still takes one line.
+        if (line.len == 0) line = rest[0..display_width.displayUnitAt(rest, 0).byte_len];
+        if (!first) {
+            try w.writeByte('\n');
+            try w.splatByteAll(' ', indent);
+        }
+        try w.writeAll(std.mem.trimEnd(u8, line, " \t"));
+        rest = display_width.trimBreakWhitespace(rest[line.len..]);
+        first = false;
+    }
+}
+
+fn writeDoctorFieldLabel(w: *std.Io.Writer, label: []const u8) !void {
+    try w.writeAll("  ");
+    try w.writeAll(label);
+    try w.splatByteAll(' ', doctor_field_width -| label.len);
+}
+
+fn writeDoctorField(w: *std.Io.Writer, alloc: Allocator, label: []const u8, value: []const u8, columns: ?usize) !void {
+    try writeDoctorFieldLabel(w, label);
+    try writeDoctorWrapped(w, alloc, value, 2 + doctor_field_width, columns);
+    try w.writeByte('\n');
+}
+
+/// SGR codes for the doctor report, written only when color is on.
+const DoctorPaint = struct {
+    color: bool,
+
+    const Tone = enum { bold, dim, green, yellow, red };
+
+    fn begin(paint: DoctorPaint, w: *std.Io.Writer, tone: Tone) !void {
+        if (!paint.color) return;
+        try w.writeAll(switch (tone) {
+            .bold => "\x1b[1m",
+            .dim => "\x1b[2m",
+            .green => "\x1b[32m",
+            .yellow => "\x1b[33m",
+            .red => "\x1b[31m",
+        });
+    }
+
+    fn end(paint: DoctorPaint, w: *std.Io.Writer) !void {
+        if (paint.color) try w.writeAll("\x1b[0m");
+    }
+};
+
+fn checkStatusLabel(status: doctor_runtime.CheckStatus) []const u8 {
+    return switch (status) {
+        .ok => "ok",
+        .warn => "warn",
+        .fail => "fail",
+    };
+}
+
+fn writeSessionHistoryTurnText(writer: *std.Io.Writer, alloc: Allocator, turn: types.HistoryTurn) !void {
+    switch (turn) {
+        .compacted_summary => |entry| {
+            try writer.print("[compacted] removed_turns={d} compactions={d}\n", .{ entry.removed_turn_count, entry.compaction_count });
+            var arena_state = std.heap.ArenaAllocator.init(alloc);
+            defer arena_state.deinit();
+            const rendered = compactor.modelText(arena_state.allocator(), entry.summary) catch null;
+            try writeTextBlock(writer, alloc, rendered orelse entry.summary);
+        },
+        .assistant => |entry| {
+            try writeSessionUserTurnText(writer, alloc, entry.user);
+            try writeSessionExecutionText(writer, alloc, entry.execution);
+            try writer.writeAll("[assistant]\n");
+            try writeTextBlock(writer, alloc, entry.assistant);
+        },
+        .interrupted => |entry| {
+            try writeSessionUserTurnText(writer, alloc, entry.user);
+            try writeSessionExecutionText(writer, alloc, entry.execution);
+            if (entry.assistant) |assistant| {
+                try writer.writeAll("[assistant]\n");
+                try writeTextBlock(writer, alloc, assistant);
+            }
+            try writer.writeAll("[interrupted]\n");
+            if (entry.tool_call) |tool_call| {
+                try writer.print("tool_call_id: {f}\n", .{text_utils.terminalSafe(tool_call.id)});
+                try writer.print("tool_name: {f}\n", .{text_utils.terminalSafe(tool_call.name)});
+            } else {
+                try writer.writeAll("tool: (none)\n");
+            }
+            if (entry.completed_tool_names.len > 0) {
+                try writer.writeAll("completed_tools: ");
+                for (entry.completed_tool_names, 0..) |name, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.print("{f}", .{text_utils.terminalSafe(name)});
+                }
+                try writer.writeByte('\n');
+            }
+        },
+    }
+}
+
+fn writeSessionExecutionText(writer: *std.Io.Writer, alloc: Allocator, execution: types.ExecutionMemory) !void {
+    if (execution.isEmpty()) return;
+
+    try writer.writeAll("[execution]\n");
+    for (execution.tool_steps) |step| {
+        if (step.assistant) |assistant| {
+            try writer.writeAll("assistant:\n");
+            try writeTextBlock(writer, alloc, assistant);
+        }
+        for (step.tool_calls) |call| {
+            try writer.print("tool_call: {f} {f}\n", .{ text_utils.terminalSafe(call.id), text_utils.terminalSafe(call.name) });
+            try writer.writeAll("arguments:\n");
+            try writeTextBlock(writer, alloc, call.arguments_json);
+        }
+        for (step.tool_results) |result| {
+            try writer.print(
+                "tool_result: {f} {f} {s}\n",
+                .{ text_utils.terminalSafe(result.tool_call_id), text_utils.terminalSafe(result.tool_name), @tagName(result.status) },
+            );
+            try writer.writeAll("output:\n");
+            try writeTextBlock(writer, alloc, result.output);
+        }
+    }
+    for (execution.files) |file| {
+        try writer.print(
+            "file: {s} {s} {f}\n",
+            .{ @tagName(file.action), @tagName(file.status), text_utils.terminalSafe(file.path) },
+        );
+    }
+}
+
+fn writeSessionUserTurnText(writer: *std.Io.Writer, alloc: Allocator, user: types.UserTurn) !void {
+    try writer.writeAll("[user]\n");
+    try writeTextBlock(writer, alloc, user.text);
+    if (user.images.len > 0) {
+        try writer.print("[images] {d}\n", .{user.images.len});
+        for (user.images) |image| {
+            try writer.print(" - {f} ({f})\n", .{ text_utils.terminalSafe(image.path), text_utils.terminalSafe(image.media_type) });
+        }
+    }
+}
+
+/// Saved text as a terminal can show it: lines and tabs stay, and every
+/// other control byte becomes a visible escape, so a model's or a tool's
+/// own sequences never reach the terminal.
+fn writeTextBlock(writer: *std.Io.Writer, alloc: Allocator, text: []const u8) !void {
+    if (text.len == 0) {
+        try writer.writeAll("(empty)\n");
+        return;
+    }
+
+    var safe: std.ArrayList(u8) = .empty;
+    defer safe.deinit(alloc);
+    try text_utils.appendTerminalSafeText(alloc, &safe, text);
+    try writer.writeAll(safe.items);
+    if (safe.items.len == 0 or safe.items[safe.items.len - 1] != '\n') try writer.writeByte('\n');
+}
+
+fn writeSessionHistoryTurnJson(writer: *std.Io.Writer, turn: types.HistoryTurn) !void {
+    switch (turn) {
+        .compacted_summary => |entry| {
+            try writer.writeAll("{\"kind\":\"compacted_summary\",\"summary\":");
+            try std.json.Stringify.value(entry.summary, .{}, writer);
+            try writer.print(",\"removed_turn_count\":{d},\"compaction_count\":{d}", .{ entry.removed_turn_count, entry.compaction_count });
+            try writer.writeByte('}');
+        },
+        .assistant => |entry| {
+            try writer.writeAll("{\"kind\":\"assistant\",\"user\":");
+            try writeSessionUserTurnJson(writer, entry.user);
+            try writer.writeAll(",\"assistant\":");
+            try std.json.Stringify.value(entry.assistant, .{}, writer);
+            try writer.writeAll(",\"execution\":");
+            try session_json.writeExecutionMemoryJson(writer, entry.execution);
+            try writer.writeByte('}');
+        },
+        .interrupted => |entry| {
+            try writer.writeAll("{\"kind\":\"interrupted\",\"user\":");
+            try writeSessionUserTurnJson(writer, entry.user);
+            try writer.writeAll(",\"assistant\":");
+            if (entry.assistant) |assistant| {
+                try std.json.Stringify.value(assistant, .{}, writer);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"tool_call\":");
+            if (entry.tool_call) |tool_call| {
+                try writer.writeAll("{\"id\":");
+                try std.json.Stringify.value(tool_call.id, .{}, writer);
+                try writer.writeAll(",\"name\":");
+                try std.json.Stringify.value(tool_call.name, .{}, writer);
+                try writer.writeAll(",\"arguments_json\":");
+                try std.json.Stringify.value(tool_call.arguments_json, .{}, writer);
+                try writer.writeByte('}');
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"completed_tool_names\":[");
+            for (entry.completed_tool_names, 0..) |name, i| {
+                if (i > 0) try writer.writeByte(',');
+                try std.json.Stringify.value(name, .{}, writer);
+            }
+            try writer.writeByte(']');
+            if (!entry.execution.isEmpty()) {
+                try writer.writeAll(",\"execution\":");
+                try session_json.writeExecutionMemoryJson(writer, entry.execution);
+            }
+            try writer.writeByte('}');
+        },
+    }
+}
+
+fn writeSessionUserTurnJson(writer: *std.Io.Writer, user: types.UserTurn) !void {
+    try writer.writeAll("{\"text\":");
+    try std.json.Stringify.value(user.text, .{}, writer);
+    try writer.writeAll(",\"images\":[");
+
+    for (user.images, 0..) |image, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"path\":");
+        try std.json.Stringify.value(image.path, .{}, writer);
+        try writer.writeAll(",\"media_type\":");
+        try std.json.Stringify.value(image.media_type, .{}, writer);
+        try writer.writeByte('}');
+    }
+
+    try writer.writeAll("]}");
+}
+
+test "command failure snapshot renders stable escaped json" {
+    const rendered = try (CommandFailureSnapshot{
+        .kind = "models",
+        .message = "could not list \"models\"",
+        .code = "ConnectionRefused",
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"models\",\"error\":\"could not list \\\"models\\\"\",\"code\":\"ConnectionRefused\"}",
+        rendered,
+    );
+}
+
+test "core status snapshot text and json stay stable" {
+    const snapshot = StatusSnapshot{
+        .model = "alpha",
+        .auth_help = "fx needs access to Vercel AI Gateway. Run fx login to sign in, fx login vercel --api-key to use an API key, or set AI_GATEWAY_API_KEY.",
+        .permission_mode = .ask,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 3,
+        .session_permission_grants = 1,
+        .agent_step_limit = 24,
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=fx needs access to Vercel AI Gateway. Run fx login to sign in, fx login vercel --api-key to use an API key, or set AI_GATEWAY_API_KEY.\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n[status] ultrafast_requested=false\n",
+        text,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"fx needs access to Vercel AI Gateway. Run fx login to sign in, fx login vercel --api-key to use an API key, or set AI_GATEWAY_API_KEY.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24,\"ultrafast_requested\":false}",
+        json,
+    );
+}
+
+test "core status snapshot includes selected team when present" {
+    const snapshot = StatusSnapshot{
+        .model = "alpha",
+        .auth = .{ .active_source = .fx_login, .team = "example-team" },
+        .permission_mode = .ask,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=fx login\n[status] auth_refreshable=true\n[status] team=example-team\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=0\n[status] session_permission_grants=0\n[status] agent_step_limit=24\n[status] ultrafast_requested=false\n",
+        text,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"fx login\",\"auth_refreshable\":true,\"team\":\"example-team\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":24,\"ultrafast_requested\":false}",
+        json,
+    );
+}
+
+test "status distinguishes the selected model route from connected providers" {
+    const snapshot = StatusSnapshot{
+        .model = "gpt-5.4",
+        .provider = .codex,
+        .auth = .{
+            .active_source = .chatgpt_subscription,
+            .gateway_connected = true,
+            .chatgpt_connected = true,
+        },
+        .permission_mode = .auto,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "model_source=Codex subscription") != null);
+    try std.testing.expect(std.mem.find(u8, text, "connected_providers=Vercel AI Gateway, Codex") != null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"model_source\":\"Codex subscription\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"connected_providers\":[\"vercel-ai-gateway\",\"codex\"]") != null);
+    try std.testing.expect(std.mem.find(u8, json, "model_origin") == null);
+}
+
+test "status reports where the model came from alongside the model" {
+    const snapshot = StatusSnapshot{
+        .model = "gpt-5.4",
+        .model_origin = "FX_MODEL",
+        .provider = .codex,
+        .permission_mode = .auto,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "[status] model=gpt-5.4\n[status] model_origin=FX_MODEL\n"));
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"kind\":\"status\",\"model\":\"gpt-5.4\",\"model_origin\":\"FX_MODEL\","));
+}
+
+test "status reports the effort a new session starts with after the model" {
+    const snapshot = StatusSnapshot{
+        .model = "provider/model",
+        .model_origin = "settings",
+        .effort = types.ReasoningEffort.literal("xhigh"),
+        .permission_mode = .auto,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "[status] model=provider/model\n[status] model_origin=settings\n[status] effort=xhigh\n"));
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"kind\":\"status\",\"model\":\"provider/model\",\"model_origin\":\"settings\",\"effort\":\"xhigh\","));
+
+    var unresolved = snapshot;
+    unresolved.effort = null;
+    const plain = try unresolved.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.find(u8, plain, "effort") == null);
+}
+
+test "status JSON lists the session modes after the permission mode" {
+    const modes = [_]mode_contract.ModeSpec{
+        .{ .id = "careful", .name = "Careful", .description = "Asks first", .permission_mode = .ask },
+        .{ .id = "open", .name = "Open", .permission_mode = .yolo },
+    };
+    var snapshot = StatusSnapshot{
+        .model = "provider/model",
+        .permission_mode = .yolo,
+        .modes = .{ .current = "open", .all = modes[0..] },
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(
+        u8,
+        json,
+        "\"permission_mode\":\"full-access\",\"mode\":\"open\",\"modes\":[{\"id\":\"careful\",\"name\":\"Careful\",\"description\":\"Asks first\"},{\"id\":\"open\",\"name\":\"Open\",\"description\":\"\"}],\"workspace\":",
+    ) != null);
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "careful") == null);
+
+    snapshot.modes = null;
+    const plain = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.find(u8, plain, "\"modes\"") == null);
+}
+
+test "config entries from the environment name their variable" {
+    const alloc = std.testing.allocator;
+    const entries = [_]settings_entries.Entry{
+        .{ .key = "max_agent_steps", .value = .{ .integer = 5 }, .origin = .global },
+        .{ .key = "max_agent_steps", .value = .{ .integer = 20 }, .origin = .env, .variable = "FX_MAX_AGENT_STEPS" },
+    };
+    const snapshot: ConfigSnapshot = .{ .entries = &entries, .workspace_root = "/w", .show_origin = true };
+    const text = try snapshot.render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings("file:~/.fx/settings.json\tmax_agent_steps=5\nenv:FX_MAX_AGENT_STEPS\tmax_agent_steps=20\n", text);
+    const json = try snapshot.render(alloc, .json);
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "{\"key\":\"max_agent_steps\",\"value\":20,\"origin\":\"env\",\"variable\":\"FX_MAX_AGENT_STEPS\"}") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"origin\":\"global\",\"file\":\"~/.fx/settings.json\"") != null);
+}
+
+test "MCP config diagnostic renders in status text and JSON but not interactive body" {
+    const snapshot = StatusSnapshot{
+        .model = "alpha",
+        .permission_mode = .ask,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+        .mcp_config_error = "McpConfigInvalidJson",
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(
+        u8,
+        text,
+        "[status] mcp_config_error=McpConfigInvalidJson\n",
+    ) != null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(
+        u8,
+        json,
+        "\"mcp_config_error\":\"McpConfigInvalidJson\"",
+    ) != null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for (try snapshot.panelRows(arena.allocator())) |row| {
+        try std.testing.expect(std.mem.find(u8, row.value, "McpConfigInvalidJson") == null);
+    }
+}
+
+test "MCP config warning renders bounded status text and JSON" {
+    const snapshot = StatusSnapshot{
+        .model = "test-model",
+        .permission_mode = .ask,
+        .workspace_root = "/tmp/project",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 10,
+        .mcp_config_warning = mcp_contract.ProfileConfigWarning.init(
+            .suspicious_server_key,
+            "MCP-Servers",
+            1,
+        ),
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(
+        u8,
+        text,
+        "[status] mcp_config_warning=suspicious_server_key key=MCP-Servers additional_matches=1\n",
+    ) != null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"mcp_config_warning\":{") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"key\":\"MCP-Servers\"") != null);
+}
+
+test "status and doctor share a side-effect-free MCP inspection contract" {
+    const servers = [_]mcp_health.ConfiguredServerSnapshot{.{
+        .configured_name = @constCast("project-docs"),
+        .source = .workspace,
+        .scope = .profile,
+        .workspace_admission = .pending,
+        .required = false,
+        .transport = .http,
+    }};
+    const issues = [_]mcp_health.ConfigurationIssue{.{
+        .message = @constCast("broken entry was ignored"),
+    }};
+    const mcp = McpLocalSnapshot{
+        .servers = &servers,
+        .configuration_issues = &issues,
+    };
+    const status = StatusSnapshot{
+        .model = "alpha",
+        .permission_mode = .auto,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+        .mcp = mcp,
+    };
+    const status_text = try status.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(status_text);
+    try std.testing.expect(std.mem.find(
+        u8,
+        status_text,
+        "[status] mcp_server=project-docs source=workspace scope=profile admission=pending transport=http connection=not_checked authentication=not_checked",
+    ) != null);
+    const status_json = try status.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(status_json);
+    try std.testing.expect(std.mem.find(
+        u8,
+        status_json,
+        "\"mcp\":{\"connection_check\":\"not_checked\"",
+    ) != null);
+    try std.testing.expect(std.mem.find(u8, status_json, "\"connection\":\"not_checked\"") != null);
+    try std.testing.expect(std.mem.find(u8, status_json, "broken entry was ignored") != null);
+
+    const doctor = DoctorSnapshot{
+        .workspace_root = "/tmp/fx",
+        .model = "alpha",
+        .permission_mode = .auto,
+        .agent_step_limit = 24,
+        .checks = &.{},
+        .mcp = mcp,
+    };
+    const doctor_json = try doctor.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(doctor_json);
+    try std.testing.expect(std.mem.find(
+        u8,
+        doctor_json,
+        "\"mcp\":{\"connection_check\":\"not_checked\"",
+    ) != null);
+}
+
+test "doctor's MCP rows say what doctor found for each server it checked" {
+    const servers = [_]mcp_health.ConfiguredServerSnapshot{
+        .{ .configured_name = @constCast("docs"), .source = .profile, .scope = .profile, .required = false, .transport = .stdio },
+        .{ .configured_name = @constCast("slow"), .source = .profile, .scope = .profile, .required = false, .transport = .http },
+        .{ .configured_name = @constCast("unapproved"), .source = .workspace, .scope = .profile, .workspace_admission = .pending, .required = false, .transport = .stdio },
+    };
+    const results = [_]McpServerResult{
+        .{ .name = "docs", .connection = .ready, .authentication = .ok },
+        .{ .name = "slow", .connection = .timed_out, .authentication = .not_checked },
+    };
+    const doctor = DoctorSnapshot{
+        .workspace_root = "/tmp/fx",
+        .model = "alpha",
+        .permission_mode = .auto,
+        .agent_step_limit = 24,
+        .checks = &.{},
+        .mcp = .{ .servers = &servers, .connection_check = .checked, .results = &results },
+    };
+    const text = try doctor.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    // The text names how many servers there are; each server's own result
+    // is a check line, and the JSON carries every field.
+    try std.testing.expect(std.mem.find(u8, text, "  MCP          3 servers\n") != null);
+    const json = try doctor.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    for ([_][]const u8{
+        "\"connection_check\":\"checked\"",
+        "\"name\":\"docs\",\"source\":\"profile\",\"scope\":\"profile\",\"admission\":null,\"required\":false,\"transport\":\"stdio\",\"connection\":\"ready\",\"authentication\":\"ok\"",
+        "\"name\":\"slow\",\"source\":\"profile\",\"scope\":\"profile\",\"admission\":null,\"required\":false,\"transport\":\"http\",\"connection\":\"timed_out\",\"authentication\":\"not_checked\"",
+        "\"name\":\"unapproved\",\"source\":\"workspace\",\"scope\":\"profile\",\"admission\":\"pending\",\"required\":false,\"transport\":\"stdio\",\"connection\":\"not_checked\",\"authentication\":\"not_checked\"",
+    }) |part| try std.testing.expect(std.mem.find(u8, json, part) != null);
+}
+
+test "core permissions snapshot text and json stay stable" {
+    const grants = [_]types.PermissionGrant{
+        .{ .tool_name = @constCast("write_file"), .target_path = @constCast("/tmp/workspace/src/app.zig") },
+        .{ .tool_name = @constCast("run_command"), .target_path = @constCast("/tmp/workspace::npm test") },
+    };
+    const rules = [_]types.PermissionRule{
+        .{ .permission = @constCast("edit"), .pattern = @constCast("src/*"), .action = .allow },
+        .{ .permission = @constCast("open_url"), .pattern = @constCast("*"), .action = .ask },
+    };
+    const snapshot = PermissionsSnapshot{
+        .workspace_root = "/tmp/workspace",
+        .mode = .auto,
+        .grants = &grants,
+        .rules = .{ .rules = @constCast(&rules) },
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[permissions] mode=auto\n[permissions] configured rules:\n - allow edit -> src/*\n - ask open_url -> *\n[permissions] session grants:\n - write_file -> src/app.zig\n - run_command -> /tmp/workspace::npm test\n",
+        text,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"permissions\",\"mode\":\"auto\",\"grant_count\":2,\"grant_scope\":\"session\",\"runtime_grants_available\":true,\"rules_scope\":\"persistent_config\",\"rules\":[{\"permission\":\"edit\",\"pattern\":\"src/*\",\"action\":\"allow\"},{\"permission\":\"open_url\",\"pattern\":\"*\",\"action\":\"ask\"}],\"grants\":[{\"tool_name\":\"write_file\",\"target_path\":\"/tmp/workspace/src/app.zig\",\"display_target\":\"src/app.zig\"},{\"tool_name\":\"run_command\",\"target_path\":\"/tmp/workspace::npm test\",\"display_target\":\"/tmp/workspace::npm test\"}]}",
+        json,
+    );
+}
+
+test "model list explains public-only and rejected-credential catalogs" {
+    const alloc = std.testing.allocator;
+    const ids = [_][]const u8{"alpha"};
+    const rejected = ModelListSnapshot{ .ids = &ids, .private_models_hidden = true, .public_only_reason = .authenticated_credential_rejected };
+    const shown = ModelListSnapshot{ .ids = &ids };
+    const cases = [_]struct {
+        snapshot: ModelListSnapshot,
+        text: []const u8,
+        body: []const u8,
+    }{
+        .{
+            .snapshot = .{ .ids = &ids, .private_models_hidden = true, .public_only_reason = .no_credential },
+            .text = "[models] 1 available\n - alpha\n[models] Using the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.\n",
+            .body = "1 available\n - alpha\nUsing the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.",
+        },
+        .{
+            .snapshot = rejected,
+            .text = "[models] 1 available\n - alpha\n[models] Your Gateway credential was rejected; using the public model catalog.\n",
+            .body = "1 available\n - alpha\nYour Gateway credential was rejected; using the public model catalog.",
+        },
+        .{
+            .snapshot = .{ .ids = &.{}, .private_models_hidden = true, .public_only_reason = .no_credential },
+            .text = "[models] no models returned by gateway\n[models] Using the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.\n",
+            .body = "no models returned by gateway\nUsing the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.",
+        },
+        .{
+            .snapshot = .{ .ids = &.{}, .private_models_hidden = true, .public_only_reason = .authenticated_credential_rejected },
+            .text = "[models] no models returned by gateway\n[models] Your Gateway credential was rejected; using the public model catalog.\n",
+            .body = "no models returned by gateway\nYour Gateway credential was rejected; using the public model catalog.",
+        },
+        .{
+            .snapshot = .{ .ids = &.{}, .provider = .codex },
+            .text = "[models] no models returned by Codex subscription\n",
+            .body = "no models returned by Codex subscription",
+        },
+    };
+
+    for (cases) |case| {
+        const text = try case.snapshot.renderText(alloc);
+        defer alloc.free(text);
+        try std.testing.expectEqualStrings(case.text, text);
+
+        const body = try case.snapshot.renderInteractiveBody(alloc);
+        defer alloc.free(body);
+        try std.testing.expectEqualStrings(case.body, body);
+    }
+
+    const json = try rejected.renderJson(alloc);
+    defer alloc.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"models\",\"count\":1,\"shown_count\":1,\"more_count\":0,\"private_models_hidden\":true,\"ids\":[\"alpha\"]}",
+        json,
+    );
+
+    // An API key hides nothing, so the note must stay absent.
+    const quiet_text = try shown.renderText(alloc);
+    defer alloc.free(quiet_text);
+    try std.testing.expect(std.mem.find(u8, quiet_text, "team-private") == null);
+    const quiet_body = try shown.renderInteractiveBody(alloc);
+    defer alloc.free(quiet_body);
+    try std.testing.expect(std.mem.find(u8, quiet_body, "team-private") == null);
+}
+
+test "model list json describes each shown model when details are known" {
+    const ids = [_][]const u8{ "openai/gpt-6-astra", "provider/plain", "provider/hidden" };
+    const details = [_]ModelDetail{
+        .{
+            .name = "GPT-6 Astra",
+            .efforts = .fromSlice(&.{ types.ReasoningEffort.literal("low"), types.ReasoningEffort.literal("xhigh") }),
+            .fast = true,
+            .ultrafast = true,
+        },
+        .{},
+        .{ .name = "Hidden" },
+    };
+    const json = try (ModelListSnapshot{ .ids = &ids, .details = &details, .limit = 2 }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"models\",\"count\":3,\"shown_count\":2,\"more_count\":1,\"private_models_hidden\":false," ++
+            "\"ids\":[\"openai/gpt-6-astra\",\"provider/plain\"],\"models\":[" ++
+            "{\"id\":\"openai/gpt-6-astra\",\"name\":\"GPT-6 Astra\",\"efforts\":[\"low\",\"xhigh\"],\"fast\":true,\"ultrafast\":true}," ++
+            "{\"id\":\"provider/plain\",\"efforts\":[],\"fast\":false,\"ultrafast\":false}]}",
+        json,
+    );
+}
+
+test "core model list snapshot handles limits and empty lists" {
+    const ids = [_][]const u8{ "alpha", "beta", "gamma" };
+
+    const all_text = try (ModelListSnapshot{ .ids = &ids }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(all_text);
+    try std.testing.expectEqualStrings(
+        "[models] 3 available\n - alpha\n - beta\n - gamma\n",
+        all_text,
+    );
+
+    const limit_text = try (ModelListSnapshot{ .ids = &ids, .limit = 2 }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(limit_text);
+    try std.testing.expectEqualStrings(
+        "[models] 3 available\n - alpha\n - beta\n ... and 1 more\n",
+        limit_text,
+    );
+
+    const limit_json = try (ModelListSnapshot{ .ids = &ids, .limit = 2 }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(limit_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"models\",\"count\":3,\"shown_count\":2,\"more_count\":1,\"private_models_hidden\":false,\"ids\":[\"alpha\",\"beta\"]}",
+        limit_json,
+    );
+
+    const empty_text = try (ModelListSnapshot{ .ids = &.{} }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(empty_text);
+    try std.testing.expectEqualStrings("[models] no models returned by gateway\n", empty_text);
+
+    const empty_json = try (ModelListSnapshot{ .ids = &.{} }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(empty_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"models\",\"count\":0,\"shown_count\":0,\"more_count\":0,\"private_models_hidden\":false,\"ids\":[]}",
+        empty_json,
+    );
+}
+
+test "core session list snapshot text and json stay stable" {
+    const sessions = [_]session_store.SessionSummary{
+        .{
+            .id = @constCast("abc"),
+            .workspace_root = @constCast("/tmp/workspace"),
+            .origin_workspace_root = @constCast("/tmp/origin"),
+            .title = @constCast("Session title"),
+            .preview = @constCast("Session title\npreview line"),
+            .display_metadata_present = true,
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("es"),
+            .history_len = 3,
+        },
+    };
+
+    const text = try (SessionListSnapshot{ .sessions = &sessions }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "1 saved session in this workspace, newest first\n\n" ++
+            "TITLE          TURNS  UPDATED   SESSION ID\n" ++
+            "Session title      3  just now  abc\n\n" ++
+            "Read a session    fx session <session id> --tail 5\n" ++
+            "Running now       fx sessions --live\n",
+        text,
+    );
+
+    const json = try (SessionListSnapshot{ .sessions = &sessions }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"sessions\",\"count\":1,\"sessions\":[{\"id\":\"abc\",\"title\":\"Session title\",\"preview\":\"Session title\\npreview line\",\"workspace_root\":\"/tmp/workspace\",\"origin_workspace_root\":\"/tmp/origin\",\"created_at_ms\":1,\"updated_at_ms\":2,\"history_len\":3,\"conversation_language\":\"es\"}]}",
+        json,
+    );
+
+    const paged_text = try (SessionListSnapshot{
+        .sessions = &sessions,
+        .has_more = true,
+        .next_cursor = "v1:2:abc",
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(paged_text);
+    try std.testing.expectEqualStrings(
+        "Newest 1 saved session in this workspace\n\n" ++
+            "TITLE          TURNS  UPDATED   SESSION ID\n" ++
+            "Session title      3  just now  abc\n\n" ++
+            "More              fx sessions --cursor v1:2:abc\n" ++
+            "Read a session    fx session <session id> --tail 5\n" ++
+            "Running now       fx sessions --live\n",
+        paged_text,
+    );
+
+    const paged_json = try (SessionListSnapshot{
+        .sessions = &sessions,
+        .has_more = true,
+        .next_cursor = "v1:2:abc",
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(paged_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"sessions\",\"count\":1,\"has_more\":true,\"next_cursor\":\"v1:2:abc\",\"sessions\":[{\"id\":\"abc\",\"title\":\"Session title\",\"preview\":\"Session title\\npreview line\",\"workspace_root\":\"/tmp/workspace\",\"origin_workspace_root\":\"/tmp/origin\",\"created_at_ms\":1,\"updated_at_ms\":2,\"history_len\":3,\"conversation_language\":\"es\"}]}",
+        paged_json,
+    );
+
+    const fallback_sessions = [_]session_store.SessionSummary{
+        .{
+            .id = @constCast("legacy"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.default(),
+            .history_len = 0,
+        },
+    };
+    const fallback_text = try (SessionListSnapshot{ .sessions = &fallback_sessions }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(fallback_text);
+    try std.testing.expect(std.mem.find(u8, fallback_text, "\nUntitled session      0  just now  legacy\n") != null);
+
+    var script_session = fallback_sessions[0];
+    script_session.conversation_language = types.ConversationLanguage.literal("und-Latn");
+    script_session.history_len = 1;
+    const script_text = try (SessionListSnapshot{ .sessions = @as(*const [1]session_store.SessionSummary, &script_session) }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(script_text);
+    // The language is in JSON only.
+    try std.testing.expect(std.mem.find(u8, script_text, "\nUntitled session      1  just now  legacy\n") != null);
+    try std.testing.expect(std.mem.find(u8, script_text, "Latin") == null);
+
+    const long_title = text_utils.repeat("a", session_display_metadata.max_title_bytes);
+    var long_session = sessions[0];
+    long_session.title = @constCast(long_title);
+    const long_text = try (SessionListSnapshot{ .sessions = @as(*const [1]session_store.SessionSummary, &long_session) }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(long_text);
+    // Outside a terminal a title prints whole.
+    try std.testing.expect(std.mem.find(u8, long_text, "\n" ++ long_title ++ "      3  just now  abc\n") != null);
+
+    const warning_text = try (SessionListSnapshot{
+        .sessions = &sessions,
+        .skipped_invalid = 2,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(warning_text);
+    try std.testing.expect(std.mem.endsWith(u8, warning_text, "\nSkipped 2 unreadable saved sessions; run `fx doctor` for recovery guidance\n"));
+
+    const warning_json = try (SessionListSnapshot{
+        .sessions = &.{},
+        .skipped_invalid = 2,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(warning_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"sessions\",\"count\":0,\"skipped_invalid\":2,\"sessions\":[]}",
+        warning_json,
+    );
+}
+
+test "core session list text reads updated times in the local zone" {
+    const sessions = [_]session_store.SessionSummary{
+        .{
+            .id = @constCast("local"),
+            .created_at_ms = 1,
+            .updated_at_ms = 1_700_000_000_123,
+            .conversation_language = types.ConversationLanguage.default(),
+            .history_len = 0,
+        },
+    };
+    local_time.test_zone = .{ .offset_s = 5 * std.time.s_per_hour + 30 * std.time.s_per_min, .name = "IST" };
+    defer local_time.test_zone = .utc;
+    const text = try (SessionListSnapshot{ .sessions = &sessions, .style = .{ .now_ms = 1_800_000_000_000 } }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    // 2023-11-14 22:13:20 UTC is already the 15th in IST.
+    try std.testing.expect(std.mem.find(u8, text, "\nUntitled session      0  2023-11-15  local\n") != null);
+}
+
+test "core session list text visibly escapes terminal controls in titles" {
+    const sessions = [_]session_store.SessionSummary{
+        .{
+            .id = @constCast("hostile-title"),
+            .title = @constCast("\x1b[2Jbreak\nnext"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.default(),
+            .history_len = 0,
+        },
+    };
+
+    const text = try (SessionListSnapshot{ .sessions = &sessions }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, text, "\n\\x1b[2Jbreak\\x0anext      0  just now  hostile-title\n") != null);
+}
+
+test "core session list text leaves out the language, so a hostile tag never prints" {
+    const sessions = [_]session_store.SessionSummary{
+        .{
+            .id = @constCast("hostile-language"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = try types.ConversationLanguage.fromSlice("\x1b[2J"),
+            .history_len = 0,
+        },
+    };
+
+    const text = try (SessionListSnapshot{ .sessions = &sessions }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, text, "2J") == null);
+    try std.testing.expect(std.mem.find(u8, text, "\nUntitled session      0  just now  hostile-language\n") != null);
+}
+
+test "core session summary snapshot text and json stay stable" {
+    const summary = session_store.SessionSummary{
+        .id = @constCast("abc"),
+        .workspace_root = @constCast("/tmp/workspace"),
+        .origin_workspace_root = @constCast("/tmp/origin"),
+        .title = @constCast("Session title"),
+        .preview = @constCast("Session preview"),
+        .display_metadata_present = true,
+        .created_at_ms = 1,
+        .updated_at_ms = 2,
+        .conversation_language = types.ConversationLanguage.literal("es"),
+        .history_len = 3,
+    };
+
+    const text = try (SessionSummarySnapshot{
+        .summary = summary,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[session] abc\ncreated_at_ms: 1\nupdated_at_ms: 2\nlanguage: es\nhistory_len: 3\n",
+        text,
+    );
+
+    const json = try (SessionSummarySnapshot{
+        .summary = summary,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_summary\",\"id\":\"abc\",\"title\":\"Session title\",\"preview\":\"Session preview\",\"workspace_root\":\"/tmp/workspace\",\"origin_workspace_root\":\"/tmp/origin\",\"created_at_ms\":1,\"updated_at_ms\":2,\"history_len\":3,\"conversation_language\":\"es\"}",
+        json,
+    );
+}
+
+test "core session JSON uses fallback title for metadata-missing summaries" {
+    const summary = session_store.SessionSummary{
+        .id = @constCast("old-session"),
+        .workspace_root = null,
+        .created_at_ms = 1,
+        .updated_at_ms = 2,
+        .conversation_language = types.ConversationLanguage.literal("en"),
+        .history_len = 1,
+    };
+
+    const json = try (SessionSummarySnapshot{
+        .summary = summary,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_summary\",\"id\":\"old-session\",\"title\":\"Untitled session\",\"preview\":null,\"workspace_root\":null,\"origin_workspace_root\":null,\"created_at_ms\":1,\"updated_at_ms\":2,\"history_len\":1,\"conversation_language\":\"en\"}",
+        json,
+    );
+}
+
+test "core empty session detail snapshot text and json stay stable" {
+    const detail = session_store.ReadOnlyDetail{
+        .summary = .{
+            .id = @constCast("sess-empty"),
+            .workspace_root = @constCast("/tmp/fx"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("en"),
+            .history_len = 0,
+        },
+        .state = .{
+            .id = @constCast("sess-empty"),
+            .origin_workspace_root = @constCast("/tmp/fx"),
+            .workspace_root = @constCast("/tmp/fx"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("en"),
+            .preferences = .{
+                .model = @constCast("model"),
+                .effort = .auto,
+                .fast_mode = false,
+            },
+            .history = &.{},
+            .total_input_tokens = 0,
+            .total_output_tokens = 0,
+        },
+        .storage_format = .schema_v3,
+    };
+
+    const text = try (SessionDetailSnapshot{ .state = detail.state }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[session] sess-empty\ncreated_at_ms: 1\nupdated_at_ms: 2\nlanguage: en\nhistory_len: 0\n\n(no history yet)\n",
+        text,
+    );
+
+    const json = try (SessionDetailSnapshot{ .state = detail.state }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_detail\",\"id\":\"sess-empty\",\"created_at_ms\":1,\"updated_at_ms\":2,\"history_len\":0,\"conversation_language\":\"en\",\"history\":[]}",
+        json,
+    );
+}
+
+test "core session detail snapshot preserves history variant shapes" {
+    const images = [_]types.ImageAttachment{
+        .{ .path = @constCast("/tmp/a.png"), .media_type = @constCast("image/png") },
+    };
+    var files = [_]types.FileEvidence{.{
+        .path = @constCast("src/main.zig"),
+        .tool_call_id = @constCast("call_read"),
+        .tool_name = @constCast("read_file"),
+        .action = .read,
+        .status = .success,
+    }};
+    const history = [_]types.HistoryTurn{
+        .{ .compacted_summary = .{
+            .summary = @constCast("summary"),
+            .removed_turn_count = 3,
+            .compaction_count = 1,
+        } },
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("hola"), .images = @constCast(&images) },
+            .assistant = @constCast("que tal"),
+        } },
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("npm run dev") },
+            .assistant = @constCast("The historical command is no longer owned."),
+            .execution = .{ .files = files[0..] },
+        } },
+        .{ .interrupted = .{
+            .user = .{ .text = @constCast("inspect") },
+            .assistant = @constCast("I inspected the entry point."),
+            .execution = .{ .files = files[0..] },
+        } },
+    };
+    const detail = session_store.ReadOnlyDetail{
+        .summary = .{
+            .id = @constCast("sess-history"),
+            .workspace_root = @constCast("/tmp/fx"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("es"),
+            .history_len = history.len,
+        },
+        .state = .{
+            .id = @constCast("sess-history"),
+            .origin_workspace_root = @constCast("/tmp/fx"),
+            .workspace_root = @constCast("/tmp/fx"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("es"),
+            .preferences = .{
+                .model = @constCast("model"),
+                .effort = .auto,
+                .fast_mode = false,
+            },
+            .history = @constCast(&history),
+            .total_input_tokens = 0,
+            .total_output_tokens = 0,
+        },
+        .storage_format = .schema_v3,
+    };
+
+    const text = try (SessionDetailSnapshot{ .state = detail.state }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "[compacted] removed_turns=3 compactions=1") != null);
+    try std.testing.expect(std.mem.find(u8, text, "[user]\nhola\n[images] 1\n - /tmp/a.png (image/png)\n[assistant]\nque tal\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "[execution]\nfile: read success src/main.zig\n[assistant]\nThe historical command is no longer owned.\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "[background]") == null);
+    try std.testing.expect(std.mem.find(u8, text, "[assistant]\nI inspected the entry point.\n[interrupted]") != null);
+
+    const json = try (SessionDetailSnapshot{ .state = detail.state }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"kind\":\"compacted_summary\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"kind\":\"assistant\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"kind\":\"background_command\"") == null);
+    try std.testing.expect(std.mem.find(u8, json, "\"kind\":\"interrupted\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "{\"path\":\"/tmp/a.png\",\"media_type\":\"image/png\"}") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"assistant\":\"The historical command is no longer owned.\"") != null);
+    try std.testing.expect(std.mem.count(u8, json, "\"execution\"") >= 2);
+}
+
+test "core session detail JSON includes assistant execution memory" {
+    var calls = [_]types.ToolCall{.{
+        .id = "fetch_1",
+        .name = "web_fetch",
+        .arguments_json = "{\"url\":\"https://example.com/file.pdf\",\"prompt\":\"[REDACTED]\"}",
+    }};
+    var results = [_]types.PersistedToolResult{.{
+        .tool_call_id = @constCast("fetch_1"),
+        .tool_name = @constCast("web_fetch"),
+        .status = .success,
+        .output = @constCast("<artifact_handle>artifact-file.pdf</artifact_handle>"),
+        .output_bytes = 48,
+        .stored_output_bytes = 48,
+        .command_output_replay = .{ .available = .{
+            .handle = "fx-command-replay-private-sentinel.bin",
+            .framed_bytes = 77,
+        } },
+        .command_process_presentation = .{ .exit_code = 9 },
+    }};
+    var steps = [_]types.ToolExecutionStep{.{
+        .assistant = @constCast("Fetching artifact."),
+        .tool_calls = calls[0..],
+        .tool_results = results[0..],
+    }};
+    const history = [_]types.HistoryTurn{.{ .assistant = .{
+        .user = .{ .text = @constCast("fetch pdf") },
+        .assistant = @constCast("artifact saved"),
+        .execution = .{
+            .tool_steps = steps[0..],
+            .turn_summary = .{
+                .started_at_ms = 100,
+                .completed_at_ms = 250,
+                .thinking_duration_ms = 40,
+                .turn_duration_ms = 150,
+                .token_progress = .{ .input_tokens = 12, .output_tokens = 34 },
+            },
+        },
+    } }};
+    const detail = session_store.ReadOnlyDetail{
+        .summary = .{
+            .id = @constCast("sess-exec"),
+            .workspace_root = @constCast("/tmp/fx"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("en"),
+            .history_len = history.len,
+        },
+        .state = .{
+            .id = @constCast("sess-exec"),
+            .origin_workspace_root = @constCast("/tmp/fx"),
+            .workspace_root = @constCast("/tmp/fx"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.literal("en"),
+            .preferences = .{
+                .model = @constCast("model"),
+                .effort = .auto,
+                .fast_mode = false,
+            },
+            .history = @constCast(&history),
+            .total_input_tokens = 0,
+            .total_output_tokens = 0,
+        },
+        .storage_format = .schema_v3,
+    };
+
+    const json = try (SessionDetailSnapshot{ .state = detail.state }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"execution\":{\"schema_version\":3") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"turn_summary\"") == null);
+    try std.testing.expect(std.mem.find(u8, json, "\"name\":\"web_fetch\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "artifact-file.pdf") != null);
+    try std.testing.expect(std.mem.find(u8, json, "command_output_replay") == null);
+    try std.testing.expect(std.mem.find(u8, json, "command_process_presentation") == null);
+    try std.testing.expect(std.mem.find(u8, json, "fx-command-replay-private-sentinel.bin") == null);
+
+    const text = try (SessionDetailSnapshot{ .state = detail.state }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "started_at_ms") == null);
+    try std.testing.expect(std.mem.find(u8, text, "input_tokens") == null);
+}
+
+test "core session recovery snapshot text and json stay stable" {
+    const result = session_store.SessionRecoveryResult{
+        .source_session_id = @constCast("source-session"),
+        .recovered_session_id = @constCast("recovered-session"),
+        .history_len = 4,
+    };
+
+    const text = try (SessionRecoverySnapshot{ .result = result }).renderText(
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[session recovery] copied source-session to recovered-session\nhistory_turns: 4\nresume: fx --resume recovered-session\n",
+        text,
+    );
+
+    const json = try (SessionRecoverySnapshot{ .result = result }).renderJson(
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_recovery\",\"source_id\":\"source-session\",\"recovered_id\":\"recovered-session\",\"status\":\"recovered\",\"history_turns\":4,\"permission_rules_dropped\":false}",
+        json,
+    );
+
+    const partial = session_store.SessionRecoveryResult{
+        .source_session_id = @constCast("source-session"),
+        .recovered_session_id = @constCast("partial-session"),
+        .history_len = 4,
+        .status = .recovered_with_unverified_artifacts,
+    };
+    const partial_text = try (SessionRecoverySnapshot{
+        .result = partial,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(partial_text);
+    try std.testing.expectEqualStrings(
+        "[session recovery] copied source-session to partial-session\nhistory_turns: 4\nwarning: legacy command artifacts could not be authenticated\nresume: fx --resume partial-session\n",
+        partial_text,
+    );
+    const partial_json = try (SessionRecoverySnapshot{
+        .result = partial,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(partial_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_recovery\",\"source_id\":\"source-session\",\"recovered_id\":\"partial-session\",\"status\":\"recovered_with_unverified_artifacts\",\"history_turns\":4,\"permission_rules_dropped\":false}",
+        partial_json,
+    );
+
+    const without_rules = session_store.SessionRecoveryResult{
+        .source_session_id = @constCast("source-session"),
+        .recovered_session_id = @constCast("ruleless-session"),
+        .history_len = 4,
+        .permission_rules_dropped = true,
+    };
+    const without_rules_text = try (SessionRecoverySnapshot{
+        .result = without_rules,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(without_rules_text);
+    try std.testing.expectEqualStrings(
+        "[session recovery] copied source-session to ruleless-session\nhistory_turns: 4\nwarning: saved permission rules could not be read and were not copied\nresume: fx --resume ruleless-session\n",
+        without_rules_text,
+    );
+    const without_rules_json = try (SessionRecoverySnapshot{
+        .result = without_rules,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(without_rules_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_recovery\",\"source_id\":\"source-session\",\"recovered_id\":\"ruleless-session\",\"status\":\"recovered\",\"history_turns\":4,\"permission_rules_dropped\":true}",
+        without_rules_json,
+    );
+}
+
+test "core session fork snapshot text and json stay stable" {
+    const alone: session_store.SessionForkResult = .{
+        .source_session_id = @constCast("source-session"),
+        .fork_session_id = @constCast("fork-session"),
+        .workspace_root = @constCast("/w"),
+        .history_len = 4,
+    };
+    const alone_text = try (SessionForkSnapshot{ .result = alone }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(alone_text);
+    try std.testing.expectEqualStrings(
+        "[session fork] copied source-session to fork-session\nhistory_turns: 4\nresume: fx --resume fork-session\n",
+        alone_text,
+    );
+    const alone_json = try (SessionForkSnapshot{ .result = alone }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(alone_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_fork\",\"source_id\":\"source-session\",\"fork_id\":\"fork-session\",\"workspace_root\":\"/w\",\"history_turns\":4,\"copied_agents\":0,\"files_complete\":true}",
+        alone_json,
+    );
+
+    const with_agents: session_store.SessionForkResult = .{
+        .source_session_id = @constCast("source-session"),
+        .fork_session_id = @constCast("fork-session"),
+        .workspace_root = @constCast("/w"),
+        .history_len = 4,
+        .copied_agents = 2,
+    };
+    const agents_text = try (SessionForkSnapshot{ .result = with_agents }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(agents_text);
+    try std.testing.expectEqualStrings(
+        "[session fork] copied source-session to fork-session\nhistory_turns: 4\ncopied_agents: 2\nresume: fx --resume fork-session\n",
+        agents_text,
+    );
+    const agents_json = try (SessionForkSnapshot{ .result = with_agents }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(agents_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_fork\",\"source_id\":\"source-session\",\"fork_id\":\"fork-session\",\"workspace_root\":\"/w\",\"history_turns\":4,\"copied_agents\":2,\"files_complete\":true}",
+        agents_json,
+    );
+
+    const partial: session_store.SessionForkResult = .{
+        .source_session_id = @constCast("source-session"),
+        .fork_session_id = @constCast("fork-session"),
+        .workspace_root = @constCast("/w"),
+        .history_len = 4,
+        .files_complete = false,
+    };
+    const partial_text = try (SessionForkSnapshot{ .result = partial }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(partial_text);
+    try std.testing.expectEqualStrings(
+        "[session fork] copied source-session to fork-session\nhistory_turns: 4\nwarning: some side files could not be copied\nresume: fx --resume fork-session\n",
+        partial_text,
+    );
+    const partial_json = try (SessionForkSnapshot{ .result = partial }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(partial_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"session_fork\",\"source_id\":\"source-session\",\"fork_id\":\"fork-session\",\"workspace_root\":\"/w\",\"history_turns\":4,\"copied_agents\":0,\"files_complete\":false}",
+        partial_json,
+    );
+}
+
+test "core doctor snapshot text and json stay stable" {
+    const checks = [_]doctor_runtime.Check{
+        .{ .name = @constCast("auth"), .status = .ok, .detail = @constCast("AI_GATEWAY_API_KEY is configured") },
+        .{ .name = @constCast("gh"), .status = .warn, .detail = @constCast("GitHub CLI not found in PATH"), .fix = "install gh from https://cli.github.com" },
+    };
+    const snapshot = DoctorSnapshot{
+        .version = "0.0.16",
+        .workspace_root = "/tmp/fx",
+        .model = "alpha",
+        .auth = .{ .active_source = .ai_gateway_api_key },
+        .permission_mode = .ask,
+        .agent_step_limit = 24,
+        .checks = &checks,
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "fx doctor  fx 0.0.16\n" ++
+            "\n" ++
+            "  Workspace    /tmp/fx\n" ++
+            "  Model        alpha\n" ++
+            "  Auth         AI_GATEWAY_API_KEY\n" ++
+            "  Permissions  ask\n" ++
+            "  Step limit   24\n" ++
+            "\n" ++
+            "Auth and model\n" ++
+            "  \u{2713} auth       AI_GATEWAY_API_KEY is configured\n" ++
+            "\n" ++
+            "Tools\n" ++
+            "  ! gh         GitHub CLI not found in PATH\n" ++
+            "               fix: install gh from https://cli.github.com\n" ++
+            "\n" ++
+            "1 ok \u{00b7} 1 warning \u{00b7} 0 failures\n",
+        text,
+    );
+
+    const colored = try snapshot.renderTextStyled(std.testing.allocator, .{ .color = true });
+    defer std.testing.allocator.free(colored);
+    try std.testing.expect(std.mem.find(u8, colored, "\x1b[1mfx doctor\x1b[0m") != null);
+    try std.testing.expect(std.mem.find(u8, colored, "  \x1b[32m\u{2713}\x1b[0m \x1b[2mauth\x1b[0m       AI_GATEWAY_API_KEY is configured\n") != null);
+    try std.testing.expect(std.mem.find(u8, colored, "  \x1b[33m!\x1b[0m \x1b[2mgh\x1b[0m         GitHub CLI not found in PATH\n") != null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"doctor\",\"ok_count\":1,\"warn_count\":1,\"fail_count\":0,\"version\":\"0.0.16\",\"workspace\":\"/tmp/fx\",\"model\":\"alpha\",\"auth\":\"AI_GATEWAY_API_KEY\",\"auth_refreshable\":false,\"permission_mode\":\"ask\",\"agent_step_limit\":24,\"checks\":[{\"name\":\"auth\",\"status\":\"ok\",\"detail\":\"AI_GATEWAY_API_KEY is configured\"},{\"name\":\"gh\",\"status\":\"warn\",\"detail\":\"GitHub CLI not found in PATH\",\"fix\":\"install gh from https://cli.github.com\"}]}",
+        json,
+    );
+}
+
+test "doctor text wraps long values, details, and fixes under their own columns on a narrow terminal" {
+    const checks = [_]doctor_runtime.Check{.{
+        .name = "install",
+        .status = .warn,
+        .detail = "another fx at /usr/local/bin/fx is on PATH; a shell may run it instead",
+        .fix = "remove the copy you do not use, so one fx is on PATH",
+    }};
+    const snapshot = DoctorSnapshot{
+        .workspace_root = "/Users/example/Developer/a-very-long-folder-name-for-wrapping",
+        .model = "alpha",
+        .permission_mode = .ask,
+        .agent_step_limit = 0,
+        .checks = &checks,
+    };
+    const text = try snapshot.renderTextStyled(std.testing.allocator, .{ .columns = 50 });
+    defer std.testing.allocator.free(text);
+    // The path has no space, so it breaks at the edge.
+    const workspace =
+        "  Workspace    /Users/example/Developer/a-very-lon\n" ++
+        "               g-folder-name-for-wrapping\n";
+    const check =
+        "  ! install    another fx at /usr/local/bin/fx is\n" ++
+        "               on PATH; a shell may run it instead\n" ++
+        "               fix: remove the copy you do not\n" ++
+        "                    use, so one fx is on PATH\n";
+    try std.testing.expect(std.mem.find(u8, text, workspace) != null);
+    try std.testing.expect(std.mem.find(u8, text, check) != null);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| try std.testing.expect(display_width.visibleWidth(line) <= 50);
+
+    // Without a width, as for a pipe, each stays on one line.
+    const piped = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(piped);
+    try std.testing.expect(std.mem.find(u8, piped, "  ! install    another fx at /usr/local/bin/fx is on PATH; a shell may run it instead\n") != null);
+
+    // Too narrow to leave 20 columns for the text: written whole.
+    const narrow = try snapshot.renderTextStyled(std.testing.allocator, .{ .columns = 30 });
+    defer std.testing.allocator.free(narrow);
+    try std.testing.expectEqualStrings(piped, narrow);
+}
+
+test "doctor text wraps every header value, and breaks a long word between whole emoji" {
+    const smile = "\u{1F600}";
+    // 18 two-column emoji in one word: 36 columns, more than the 35 left
+    // after the 15-column indent at a width of 50.
+    const emoji_word = text_utils.repeat(smile, 18);
+    const checks = [_]doctor_runtime.Check{.{ .name = "skills", .status = .warn, .detail = emoji_word, .fix = "rename it" }};
+    const snapshot = DoctorSnapshot{
+        .workspace_root = "/tmp/fx",
+        .model = "example/a-model-with-a-long-name and-more-words-after-it",
+        .auth = .{ .active_source = .ai_gateway_api_key, .team = "a-team-with-a-long-name-too" },
+        .permission_mode = .ask,
+        .agent_step_limit = 0,
+        .checks = &checks,
+    };
+    const text = try snapshot.renderTextStyled(std.testing.allocator, .{ .columns = 50 });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "  Model        example/a-model-with-a-long-name\n" ++
+        "               and-more-words-after-it\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "  Auth         AI_GATEWAY_API_KEY \u{00b7} team\n" ++
+        "               a-team-with-a-long-name-too\n") != null);
+    // 17 emoji fill 34 columns; the 18th would cross the edge.
+    try std.testing.expect(std.mem.find(u8, text, "  ! skills     " ++ text_utils.repeat(smile, 17) ++ "\n               " ++ smile ++ "\n") != null);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| try std.testing.expect(display_width.visibleWidth(line) <= 50);
+}
+
+test "doctor text escapes hostile check details while json preserves data" {
+    const checks = [_]doctor_runtime.Check{.{
+        .name = "mcp_config",
+        .status = .warn,
+        .detail = "warning key=bad\n\x1b]0;pwn\x07",
+    }};
+    const snapshot = DoctorSnapshot{
+        .workspace_root = "/tmp/fx",
+        .model = "alpha",
+        .permission_mode = .ask,
+        .agent_step_limit = 24,
+        .checks = &checks,
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(
+        u8,
+        text,
+        "warning key=bad\\x0a\\x1b]0;pwn\\x07",
+    ) != null);
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x1b) == null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(
+        u8,
+        json,
+        "\"detail\":\"warning key=bad\\n\\u001b]0;pwn\\u0007\"",
+    ) != null);
+}
+
+test "core credits snapshot renders error output" {
+    const snapshot = CreditsSnapshot{ .err_message = "gateway unavailable" };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("[credits] error: gateway unavailable\n", text);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"error\":\"gateway unavailable\"}",
+        json,
+    );
+}
+
+test "core credits snapshot renders parsed, raw, and empty fallbacks" {
+    const parsed = CreditsSnapshot{ .balance = "10", .used = "2", .plan = "pro" };
+
+    const parsed_text = try parsed.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(parsed_text);
+    try std.testing.expectEqualStrings(
+        "[credits] balance=10\n[credits] used=2\n[credits] plan=pro\n",
+        parsed_text,
+    );
+
+    const parsed_json = try parsed.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(parsed_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"balance\":\"10\",\"used\":\"2\",\"plan\":\"pro\",\"token_pass\":null}",
+        parsed_json,
+    );
+
+    const raw = CreditsSnapshot{ .raw_json = "{\"raw\":true}" };
+
+    const raw_text = try raw.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(raw_text);
+    try std.testing.expectEqualStrings("[credits] {\"raw\":true}\n", raw_text);
+
+    const raw_json = try raw.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(raw_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"balance\":null,\"used\":null,\"plan\":null,\"token_pass\":null}",
+        raw_json,
+    );
+
+    const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(empty_text);
+    try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
+}
+
+test "core credits snapshot never lets Gateway text add lines or reach the terminal raw" {
+    const snapshot = CreditsSnapshot{
+        .balance = "1\n[credits] balance=999999",
+        .plan = "pro\x1b]52;c;aGk=\x07\x1b[2K",
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "\n"));
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, text, 0x07) == null);
+
+    const body = try snapshot.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\n"));
+    try std.testing.expect(std.mem.findScalar(u8, body, 0x1b) == null);
+
+    const failed = CreditsSnapshot{ .err_message = "denied\x1b[2J" };
+    const failed_text = try failed.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(failed_text);
+    try std.testing.expect(std.mem.findScalar(u8, failed_text, 0x1b) == null);
+}
+
+test "core credits snapshot renders the Token Pass balance on every surface" {
+    const snapshot = CreditsSnapshot{
+        .balance = "10",
+        .token_pass = .{ .remaining = "79.92906", .resets_at = "2026-12-05T08:00:00.000Z" },
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[credits] balance=10\n[credits] token_pass_remaining=79.92906\n[credits] token_pass_resets_at=2026-12-05T08:00:00.000Z\n",
+        text,
+    );
+
+    const body = try snapshot.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(
+        "balance=10\ntoken_pass_remaining=79.92906\ntoken_pass_resets_at=2026-12-05T08:00:00.000Z",
+        body,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"balance\":\"10\",\"used\":null,\"plan\":null,\"token_pass\":{\"remaining\":\"79.92906\",\"resets_at\":\"2026-12-05T08:00:00.000Z\"}}",
+        json,
+    );
+}
+
+test "core credits snapshot leaves out a Token Pass balance the Gateway could not read" {
+    const snapshot = CreditsSnapshot{
+        .token_pass = .{ .resets_at = "2026-12-05T08:00:00.000Z" },
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("[credits] token_pass_resets_at=2026-12-05T08:00:00.000Z\n", text);
+
+    const body = try snapshot.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("token_pass_resets_at=2026-12-05T08:00:00.000Z", body);
+
+    // JSON keeps the object, so it still says the team has Token Pass.
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"balance\":null,\"used\":null,\"plan\":null,\"token_pass\":{\"remaining\":null,\"resets_at\":\"2026-12-05T08:00:00.000Z\"}}",
+        json,
+    );
+}
+
+test "core upgrade snapshot renders errors and statuses" {
+    const error_snapshot = UpgradeSnapshot{
+        .current = "0.2.9",
+        .latest = "0.2.10",
+        .status = .failed,
+        .err_message = "download failed",
+    };
+
+    const error_text = try error_snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(error_text);
+    try std.testing.expectEqualStrings("error: download failed\n", error_text);
+
+    const error_json = try error_snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(error_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"upgrade\",\"error\":\"download failed\"}",
+        error_json,
+    );
+
+    const upgraded_text = try (UpgradeSnapshot{
+        .current = "0.2.9",
+        .latest = "0.2.10",
+        .status = .upgraded,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(upgraded_text);
+    try std.testing.expectEqualStrings(
+        "upgraded to v0.2.10\n" ++
+            "notes: https://fx.sh/changelog#v0.2.10\n",
+        upgraded_text,
+    );
+
+    const upgraded_json = try (UpgradeSnapshot{
+        .current = "0.2.9",
+        .latest = "0.2.10",
+        .current_revision = "0123456789ab",
+        .status = .upgraded,
+    }).renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(upgraded_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"upgrade\",\"current\":\"0.2.9\",\"latest\":\"0.2.10\",\"status\":\"upgraded\"}",
+        upgraded_json,
+    );
+
+    const prefixed_text = try (UpgradeSnapshot{
+        .current = "0.2.9",
+        .latest = "v0.2.10",
+        .status = .upgraded,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(prefixed_text);
+    try std.testing.expectEqualStrings(
+        "upgraded to v0.2.10\n" ++
+            "notes: https://fx.sh/changelog#v0.2.10\n",
+        prefixed_text,
+    );
+
+    const up_to_date = UpgradeSnapshot{
+        .current = "0.2.9",
+        .latest = "0.2.10",
+        .status = .up_to_date,
+    };
+
+    const up_to_date_text = try up_to_date.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(up_to_date_text);
+    try std.testing.expectEqualStrings("fx is already up to date (v0.2.10)\n", up_to_date_text);
+
+    const failed_text = try (UpgradeSnapshot{
+        .current = "0.2.9",
+        .latest = "0.2.10",
+        .status = .failed,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(failed_text);
+    try std.testing.expectEqualStrings("upgrade failed\n", failed_text);
+
+    const up_to_date_json = try up_to_date.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(up_to_date_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"upgrade\",\"current\":\"0.2.9\",\"latest\":\"0.2.10\",\"status\":\"up_to_date\"}",
+        up_to_date_json,
+    );
+}
+
+test "core upgrade snapshot identifies dev revisions" {
+    const snapshot = UpgradeSnapshot{
+        .current = "0.3.66",
+        .latest = "0.3.66",
+        .channel = "dev",
+        .current_channel = "stable",
+        .current_revision = "111111111111",
+        .latest_revision = "abcdef0123456789abcdef0123456789abcdef01",
+        .status = .upgraded,
+    };
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "upgraded to dev abcdef012345 (v0.3.66)\n" ++
+            "changes: https://github.com/vercel-labs/fx/compare/111111111111...abcdef0123456789abcdef0123456789abcdef01\n",
+        text,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"upgrade\",\"current\":\"0.3.66\",\"latest\":\"0.3.66\",\"channel\":\"dev\",\"current_channel\":\"stable\",\"current_revision\":\"111111111111\",\"latest_revision\":\"abcdef0123456789abcdef0123456789abcdef01\",\"status\":\"upgraded\"}",
+        json,
+    );
+}
+
+test "workspace snapshot renders source availability and mutation in text and json" {
+    const entries = [_]workspace_access.Entry{
+        .{
+            .path = @constCast("/tmp/shared"),
+            .saved = true,
+            .command_line = false,
+            .available = true,
+            .active = true,
+        },
+        .{
+            .path = @constCast("/tmp/run-only"),
+            .saved = false,
+            .command_line = true,
+            .available = true,
+            .active = true,
+        },
+    };
+    const snapshot = WorkspaceSnapshot{
+        .primary_directory = "/tmp/project",
+        .saved_suppressed = false,
+        .additional_directories = &entries,
+        .mutation = .{
+            .action = "remove",
+            .path = "/tmp/removed",
+            .saved_changed = false,
+            .runtime_changed = true,
+            .launch_flag_can_restore = true,
+        },
+    };
+
+    const text_output = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text_output);
+    try std.testing.expect(std.mem.find(u8, text_output, "[workspace] remove /tmp/removed saved_changed=false runtime_changed=true launch_flag_can_restore=true") != null);
+    try std.testing.expect(std.mem.find(u8, text_output, "warning: repeating --add-dir can restore removed access on the next launch") != null);
+    try std.testing.expect(std.mem.find(u8, text_output, "/tmp/run-only saved=false command_line=true available=true active=true") != null);
+
+    const json_output = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json_output);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"workspace\",\"action\":\"remove\",\"changed\":true,\"primary_directory\":\"/tmp/project\",\"saved_suppressed\":false,\"limit\":16,\"path\":\"/tmp/removed\",\"saved_changed\":false,\"runtime_changed\":true,\"launch_flag_can_restore\":true,\"additional_directories\":[{\"path\":\"/tmp/shared\",\"saved\":true,\"command_line\":false,\"available\":true,\"active\":true},{\"path\":\"/tmp/run-only\",\"saved\":false,\"command_line\":true,\"available\":true,\"active\":true}]}",
+        json_output,
+    );
+
+    var saved_only = snapshot;
+    saved_only.mutation = .{
+        .action = "remove",
+        .path = "/tmp/shared",
+        .saved_changed = true,
+        .runtime_changed = true,
+    };
+    const saved_text = try saved_only.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(saved_text);
+    try std.testing.expect(std.mem.find(u8, saved_text, "launch_flag_can_restore=false") != null);
+    try std.testing.expect(std.mem.find(u8, saved_text, "warning: repeating --add-dir") == null);
+
+    const saved_json = try saved_only.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(saved_json);
+    try std.testing.expect(std.mem.find(u8, saved_json, "\"launch_flag_can_restore\":false") != null);
+}
+
+test "workspace errors expose shared user-facing copy" {
+    try std.testing.expectEqualStrings("path is invalid", workspaceErrorMessage(error.InvalidPath).?);
+    try std.testing.expectEqualStrings(
+        "directory is not configured as an additional workspace",
+        workspaceErrorMessage(error.UnknownAdditionalDirectory).?,
+    );
+    try std.testing.expectEqualStrings(
+        "the primary workspace cannot be added or removed",
+        workspaceErrorMessage(error.PrimaryDirectory).?,
+    );
+    try std.testing.expectEqualStrings(
+        "additional directory limit reached",
+        workspaceErrorMessage(error.TooManyDirectories).?,
+    );
+    try std.testing.expect(workspaceErrorMessage(error.InvalidWorkspaceArgs) == null);
+}
+
+test "workspace text snapshot terminal-encodes paths" {
+    const entries = [_]workspace_access.Entry{.{
+        .path = @constCast("/tmp/shared\x1b[31m\n"),
+        .saved = true,
+        .command_line = false,
+        .available = true,
+        .active = true,
+    }};
+    const output = try (WorkspaceSnapshot{
+        .primary_directory = "/tmp/project\r",
+        .saved_suppressed = false,
+        .additional_directories = &entries,
+    }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(output);
+
+    try std.testing.expect(std.mem.find(u8, output, "\\x1b[31m\\x0a") != null);
+    try std.testing.expect(std.mem.find(u8, output, "project\\x0d") != null);
+    try std.testing.expect(std.mem.findScalar(u8, output, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, output, '\r') == null);
+}
+
+test "usage text and JSON render the same AI Gateway facts" {
+    const alloc = std.testing.allocator;
+    const models = [_]usage.report.ModelRow{
+        .{ .model = "anthropic/claude-opus-5.5", .totals = .{ .request_count = 3, .input_tokens = 10, .output_tokens = 5, .total_cost = 1.5 } },
+    };
+    var views: [usage.Period.all.len]usage.View = undefined;
+    for (&views, usage.Period.all) |*v, period| {
+        v.* = .{
+            .arena = std.heap.ArenaAllocator.init(alloc),
+            .period = period,
+            .models = &models,
+            .totals = models[0].totals,
+            .today_current = true,
+            .finished_current = true,
+            .fetched_at_ms = 20737 * std.time.ms_per_day + 8 * std.time.ms_per_hour + 14 * std.time.ms_per_min,
+            .budget = .{ .limit = 100, .spent = 25, .period = .monthly },
+        };
+    }
+    var snapshot: usage.Snapshot = .{
+        .arena = std.heap.ArenaAllocator.init(alloc),
+        .views = views,
+        .status = .{ .failed = .rate_limited },
+        .label = "",
+        .now_ms = 0,
+    };
+    defer snapshot.deinit();
+    const contract: UsageSnapshot = .{ .snapshot = &snapshot, .period = .days_7 };
+
+    const text = try contract.render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "Usage (7d, UTC) from AI Gateway, updated 08:14 UTC\nRefresh failed: rate limited, try again shortly.\nBudget        $25.00 of $100.00 this month\n"));
+    try std.testing.expect(std.mem.find(u8, text, "- anthropic/claude-opus-5.5  $1.5000  3 requests  15 tokens") != null);
+
+    const json = try contract.render(alloc, .json);
+    defer alloc.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("7d", root.get("period").?.string);
+    try std.testing.expectEqualStrings("failed", root.get("status").?.string);
+    try std.testing.expectEqualStrings("rate_limited", root.get("reason").?.string);
+    try std.testing.expectEqual(@as(i64, 3), root.get("totals").?.object.get("request_count").?.integer);
+    try std.testing.expectEqual(@as(i64, 15), root.get("models").?.array.items[0].object.get("totals").?.object.get("total_tokens").?.integer);
+    try std.testing.expectEqualStrings("monthly", root.get("budget").?.object.get("period").?.string);
+    try std.testing.expect(root.get("codex").? == .null);
+    try std.testing.expectEqualStrings("ai_gateway", root.get("source").?.string);
+}
+
+test "usage text and JSON render a Grok plan's allowance and credits" {
+    const alloc = std.testing.allocator;
+    var views: [usage.Period.all.len]usage.View = undefined;
+    for (&views, usage.Period.all) |*v, period| {
+        v.* = .{
+            .arena = std.heap.ArenaAllocator.init(alloc),
+            .period = period,
+            .models = &.{},
+            .totals = .{},
+            .today_current = false,
+            .finished_current = false,
+            .fetched_at_ms = null,
+            .budget = null,
+        };
+    }
+    const at = 20737 * std.time.ms_per_day + 8 * std.time.ms_per_hour + 14 * std.time.ms_per_min;
+    var snapshot: usage.Snapshot = .{
+        .arena = std.heap.ArenaAllocator.init(alloc),
+        .views = views,
+        .status = .ready,
+        .label = "grok (xAI)",
+        .now_ms = at,
+        .scope = .grok,
+        .grok_usage = .{
+            .used_percent = 42.7,
+            .period = .weekly,
+            .resets_at_ms = 20741 * std.time.ms_per_day,
+            .products = &.{.{ .name = "grok build", .used_percent = 61.2 }},
+            .prepaid_cents = 0,
+            .on_demand_used_cents = 300,
+            .on_demand_cap_cents = 10000,
+            .settings = .{ .plan = "SuperGrok" },
+        },
+        .grok_at_ms = at,
+    };
+    defer snapshot.deinit();
+
+    const text = try (UsageSnapshot{ .snapshot = &snapshot }).render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings(
+        "Grok usage from xAI, updated 08:14 UTC\n" ++
+            "Plan          SuperGrok\n" ++
+            "Used          42% of the weekly allowance, resets Oct 15, 2026 00:00 UTC\n" ++
+            "By product    grok build 61.2%\n" ++
+            "Credits       none\n" ++
+            "Pay as you go $3.00 of $100.00 this month\n",
+        text,
+    );
+
+    {
+        // West of UTC, the reset falls on the previous calendar day.
+        local_time.test_zone = .{ .offset_s = -5 * std.time.s_per_hour, .name = "EST" };
+        defer local_time.test_zone = .utc;
+        const local_text = try (UsageSnapshot{ .snapshot = &snapshot }).render(alloc, .text);
+        defer alloc.free(local_text);
+        try std.testing.expect(std.mem.startsWith(u8, local_text, "Grok usage from xAI, updated 03:14 EST\n"));
+        try std.testing.expect(std.mem.find(u8, local_text, ", resets Oct 14, 2026 19:00 EST\n") != null);
+    }
+
+    var failed = snapshot;
+    failed.status = .{ .failed = .network };
+    const failed_text = try (UsageSnapshot{ .snapshot = &failed }).render(alloc, .text);
+    defer alloc.free(failed_text);
+    try std.testing.expect(std.mem.find(u8, failed_text, "Refresh failed: couldn't reach Grok.\n") != null);
+
+    const json = try (UsageSnapshot{ .snapshot = &snapshot }).render(alloc, .json);
+    defer alloc.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("grok", root.get("source").?.string);
+    try std.testing.expect(root.get("codex").? == .null);
+    const grok = root.get("grok").?.object;
+    try std.testing.expectEqual(@as(f64, 42.7), grok.get("used_percent").?.float);
+    try std.testing.expectEqualStrings("weekly", grok.get("period").?.string);
+    try std.testing.expectEqualStrings("SuperGrok", grok.get("settings").?.object.get("plan").?.string);
+}
+
+test "usage text and JSON render a Codex plan's limits" {
+    const alloc = std.testing.allocator;
+    var views: [usage.Period.all.len]usage.View = undefined;
+    for (&views, usage.Period.all) |*v, period| {
+        v.* = .{
+            .arena = std.heap.ArenaAllocator.init(alloc),
+            .period = period,
+            .models = &.{},
+            .totals = .{},
+            .today_current = false,
+            .finished_current = false,
+            .fetched_at_ms = null,
+            .budget = null,
+        };
+    }
+    const at = 20737 * std.time.ms_per_day + 8 * std.time.ms_per_hour + 14 * std.time.ms_per_min;
+    var snapshot: usage.Snapshot = .{
+        .arena = std.heap.ArenaAllocator.init(alloc),
+        .views = views,
+        .status = .ready,
+        .label = "codex (ChatGPT)",
+        .now_ms = at,
+        .scope = .codex,
+        .codex_usage = .{
+            .plan = "plus",
+            .limits = &.{.{ .name = "codex", .primary = .{ .used_percent = 42, .window_seconds = 18000, .resets_at_ms = at + 2 * std.time.ms_per_hour } }},
+            .credits = .{ .has_credits = false, .unlimited = false },
+        },
+        .codex_at_ms = at,
+    };
+    defer snapshot.deinit();
+    const contract: UsageSnapshot = .{ .snapshot = &snapshot };
+
+    // With activity: tokens by period, records, habits, and shares by model
+    // and surface for the period asked for.
+    var with_profile = snapshot;
+    var limits = snapshot.codex_usage.?;
+    limits.profile = .{
+        .name = "samdoe",
+        .as_of_day = 20737,
+        .lifetime_tokens = 315686778511,
+        .peak_day_tokens = 11594630891,
+        .longest_turn_seconds = 110473,
+        .streak_days = 132,
+        .best_streak_days = 132,
+        .chats = 11374,
+        .fast_mode_percent = 66.5,
+        .reasoning = "xhigh",
+        .reasoning_percent = 85.1,
+        .days = &.{ .{ .day = 20736, .tokens = 52293426 }, .{ .day = 20737, .tokens = 39877412 } },
+    };
+    limits.breakdown = .{ .days = &.{.{
+        .day = 20737,
+        .models = &.{ .{ .model = "gpt-6.1-sol", .speed = "fast", .value = 3 }, .{ .model = "gpt-6.1-sol", .speed = "standard", .value = 1 } },
+        .surfaces = &.{.{ .surface = "desktop_app", .value = 4 }},
+    }} };
+    with_profile.codex_usage = limits;
+    const profile_text = try (UsageSnapshot{ .snapshot = &with_profile }).render(alloc, .text);
+    defer alloc.free(profile_text);
+    try std.testing.expectEqualStrings(
+        "Codex usage from ChatGPT for samdoe, updated 08:14 UTC\n" ++
+            "Tokens        39877412 today, 92170838 7d, 92170838 month, 315686778511 lifetime\n" ++
+            "Record        peak day 11594630891 tokens, longest chat 30h 41m, streak 132 days (best 132), 11374 chats\n" ++
+            "Habits        fast mode 67%, reasoning xhigh (85%)\n" ++
+            "Share by model (month): gpt-6.1-sol fast 75.0%, gpt-6.1-sol standard 25.0%\n" ++
+            "Share by surface (month): desktop app 100.0%\n" ++
+            "Plan          plus\nCredits       none\nSpend limit   not reached\n\nLimits\n- codex (5h window): 42% used, resets 10:14 UTC\n",
+        profile_text,
+    );
+
+    const text = try contract.render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings(
+        "Codex usage from ChatGPT, updated 08:14 UTC\nPlan          plus\nCredits       none\nSpend limit   not reached\n\nLimits\n- codex (5h window): 42% used, resets 10:14 UTC\n",
+        text,
+    );
+
+    {
+        local_time.test_zone = .{ .offset_s = 5 * std.time.s_per_hour + 30 * std.time.s_per_min, .name = "IST" };
+        defer local_time.test_zone = .utc;
+        const local_text = try contract.render(alloc, .text);
+        defer alloc.free(local_text);
+        try std.testing.expectEqualStrings(
+            "Codex usage from ChatGPT, updated 13:44 IST\nPlan          plus\nCredits       none\nSpend limit   not reached\n\nLimits\n- codex (5h window): 42% used, resets 15:44 IST\n",
+            local_text,
+        );
+    }
+
+    const json = try contract.render(alloc, .json);
+    defer alloc.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("chatgpt", root.get("source").?.string);
+    try std.testing.expectEqual(@as(i64, at), root.get("fetched_at_ms").?.integer);
+    const codex = root.get("codex").?.object;
+    try std.testing.expectEqualStrings("plus", codex.get("plan").?.string);
+    try std.testing.expectEqual(@as(i64, 18000), codex.get("limits").?.array.items[0].object.get("primary").?.object.get("window_seconds").?.integer);
+}
+
+pub const SlackSnapshot = struct {
+    action: []const u8,
+    installed: bool,
+    app_id: ?[]const u8,
+    team_id: ?[]const u8,
+    bot_user_id: ?[]const u8,
+    expires_at_ms: ?i64,
+    refresh_expires_at_ms: ?i64,
+
+    pub fn render(self: SlackSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        if (format == .json) {
+            try std.json.Stringify.value(self, .{}, &out.writer);
+        } else if (!self.installed) {
+            try out.writer.writeAll("No local Slack bot installation. Run fx slack install.\n");
+        } else {
+            try out.writer.writeAll(if (std.mem.eql(u8, self.action, "install"))
+                "fx is now installed in your Slack workspace.\n"
+            else
+                "Your fx Slack bot credentials are saved on this computer.\n");
+            if (self.expires_at_ms) |expiry| {
+                if (local_time.local(expiry)) |reading| {
+                    var date_buf: [24]u8 = undefined;
+                    try out.writer.print("Access expires on {s} at ", .{formatDate(&date_buf, &reading)});
+                    try writeClock(&out.writer, &reading);
+                    try out.writer.writeAll(".\n");
+                } else {
+                    try out.writer.writeAll("Access expiration time is unavailable.\n");
+                }
+                try out.writer.writeAll("Run fx slack refresh to renew locally.\n");
+            }
+        }
+        return out.toOwnedSlice();
+    }
+};
+
+test "slack text reads the access expiry in the local zone" {
+    const alloc = std.testing.allocator;
+    var snapshot: SlackSnapshot = .{
+        .action = "status",
+        .installed = true,
+        .app_id = null,
+        .team_id = null,
+        .bot_user_id = null,
+        // 2026-10-15 00:00 UTC.
+        .expires_at_ms = 20741 * std.time.ms_per_day,
+        .refresh_expires_at_ms = null,
+    };
+    const utc_text = try snapshot.render(alloc, .text);
+    defer alloc.free(utc_text);
+    try std.testing.expect(std.mem.find(u8, utc_text, "Access expires on Oct 15, 2026 at 00:00 UTC.\n") != null);
+
+    local_time.test_zone = .{ .offset_s = -7 * std.time.s_per_hour, .name = "PDT" };
+    defer local_time.test_zone = .utc;
+    const local_text = try snapshot.render(alloc, .text);
+    defer alloc.free(local_text);
+    try std.testing.expect(std.mem.find(u8, local_text, "Access expires on Oct 14, 2026 at 17:00 PDT.\n") != null);
+
+    snapshot.expires_at_ms = -1;
+    const unknown_text = try snapshot.render(alloc, .text);
+    defer alloc.free(unknown_text);
+    try std.testing.expect(std.mem.find(u8, unknown_text, "Access expiration time is unavailable.\n") != null);
+}
+
+pub const plain_build_label_bytes: usize = 96;
+const dev_revision_bytes: usize = 7;
+
+pub fn writePlainBuildLabel(
+    out: []u8,
+    channel: update_target.Channel,
+    version_text: []const u8,
+    revision: []const u8,
+) ![]const u8 {
+    if (channel != .dev) return std.mem.print(out, "v{s}", .{version_text});
+    if (revision.len < dev_revision_bytes or std.mem.eql(u8, revision, "unknown")) {
+        return std.mem.print(out, "v{s} [dev]", .{version_text});
+    }
+    return std.mem.print(out, "v{s}-{s} [dev]", .{
+        version_text,
+        revision[0..dev_revision_bytes],
+    });
+}
+
+/// Caller owns the returned slice.
+pub fn oneOffHeaderMessageStyled(alloc: Allocator, color: bool) ![]u8 {
+    const channel = update_target.Channel.parse(build_options.update_channel) orelse .stable;
+    var label_buf: [plain_build_label_bytes]u8 = undefined;
+    const build_label = try writePlainBuildLabel(
+        &label_buf,
+        channel,
+        build_options.app_version,
+        build_options.git_commit,
+    );
+    if (!color) return alloc.print("𝒇x {s}\n", .{build_label});
+    return alloc.print("\x1b[1m𝒇x\x1b[0m {s}\n", .{build_label});
+}
+
+test "writePlainBuildLabel keeps dev builds free of embedded dim escapes" {
+    var buf: [plain_build_label_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("v0.0.5", try writePlainBuildLabel(&buf, .stable, "0.0.5", "abcdef123456"));
+    try std.testing.expectEqualStrings("v0.0.5-abcdef1 [dev]", try writePlainBuildLabel(&buf, .dev, "0.0.5", "abcdef123456"));
+    try std.testing.expectEqualStrings("v0.0.5 [dev]", try writePlainBuildLabel(&buf, .dev, "0.0.5", "unknown"));
+}
+
+test "oneOffHeaderMessageStyled uses adaptive bold brand without help hint" {
+    const alloc = std.testing.allocator;
+    const channel = update_target.Channel.parse(build_options.update_channel) orelse .stable;
+    var label_buf: [plain_build_label_bytes]u8 = undefined;
+    const build_label = try writePlainBuildLabel(
+        &label_buf,
+        channel,
+        build_options.app_version,
+        build_options.git_commit,
+    );
+
+    const styled = try oneOffHeaderMessageStyled(alloc, true);
+    defer alloc.free(styled);
+    const expected_styled = try alloc.print("\x1b[1m𝒇x\x1b[0m {s}\n", .{build_label});
+    defer alloc.free(expected_styled);
+    try std.testing.expectEqualStrings(expected_styled, styled);
+    try std.testing.expect(std.mem.find(u8, styled, "Run /help for commands") == null);
+
+    const plain = try oneOffHeaderMessageStyled(alloc, false);
+    defer alloc.free(plain);
+    const expected_plain = try alloc.print("𝒇x {s}\n", .{build_label});
+    defer alloc.free(expected_plain);
+    try std.testing.expectEqualStrings(expected_plain, plain);
+    try std.testing.expect(std.mem.findScalar(u8, plain, '\x1b') == null);
+}

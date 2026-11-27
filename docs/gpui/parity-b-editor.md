@@ -1,0 +1,684 @@
+# Editor-surface parity inventory (B)
+
+Reference: committed `main` at `d9a98ea5a7db1df245627eb0246713a53452a9b8`. Read with `git show main:<path>`; paths below refer to that revision, including test-backed acceptance contracts. Unchecked boxes are rewrite obligations, not claims that the native port implements them. Renderer pixel math, app shell, library/cloud and agent UI are outside this inventory.
+
+Modifiers: Cmd = Command, Option = Alt; Ctrl equivalents exist where specified by the keymap. Tests are executable evidence of edge behavior; their names are retained where that is the most precise concise contract. Area 7 defines gestures inherited by inspector fields.
+
+## 1. Viewer / canvas
+
+- [ ] Wheel navigation: mouse wheel zooms; trackpad scroll pans; pinch zooms about the pointer; Shift redirects vertical scroll horizontally. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Zoom tool: Z selects; click magnifies 1.25×, Option-click reduces to 0.8×; drag a rectangle to frame it. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Fit: Cmd+0 or Shift+/ fits composition; Cmd+1 or / selects actual size; . and , zoom in/out. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Hand: H selects Hand; middle-button drag pans; temporary Hand preserves the chosen tool. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Canvas picking: ordinary click selects the group; Cmd/Ctrl-click picks deeper; hover previews the resolved target. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Additive picking: Shift-click toggles selected targets; empty unmodified click clears selection. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Marquee: drag empty canvas to select enclosed layers; Shift toggles the enclosed set. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Common selection box: drag empty space inside the common box to move the selection as one gesture. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Locked selection members: keep locked members in common chrome; do not transform only the unlocked subset. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Resize: opposite edge/corner stays fixed in local space; Option resizes from center; Shift locks aspect; image/video lock aspect by default. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Text resize: resize paragraph width/box without rewriting font Size or layer Scale X/Y. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Rotation: W selects rotation; Shift quantizes 15°, Cmd/Ctrl quantizes 45°; common selection rotates around common pivot. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Anchor: Y selects Pan Behind; double-click toolbar centers anchor; Cmd+Option+Home centers anchor. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Anchor drag: ordinary drag preserves layer appearance; Option moves the layer; Cmd/Ctrl enables anchor snapping. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Shape drawing: Q cycles rectangle, rounded rectangle, ellipse, polygon and star; Shift constrains; Option draws from center. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Canvas drag cancellation: Escape restores original state; pointer release commits one undo operation. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Move snapping: ordinary moves align both axes; Cmd bypasses snapping; show alignment feedback. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Canvas context menu: offers Paste, Select All Layers, Fit Composition in View and Composition Settings. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Drop media: place media through viewer drop interaction using composition coordinates. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Lost canvas recovery: show one-click return only after explicit pan fully loses the composition. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Zoom continuity: preserve point beneath cursor and last frame while resizing the drawing buffer. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Pen vertices: G selects Pen; click adds vertex; drag creates mirrored incoming/outgoing tangents. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Path closure: double-click closes path; clicking first vertex closes an active path with at least three vertices. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Delete vertex: Cmd/Ctrl-click a hit vertex deletes it with Undo. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Independent tangents: Option-drag splits tangent behavior; ordinary tangent drag mirrors the opposite tangent. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Path targets: shape layers receive vector paths; supported non-shape layers receive mask paths; otherwise create a Path layer. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Path transforms: hit-test and drag vertices in inverse layer and nested path-group transforms. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Animated vertices: editing animated coordinates writes keys at layer-local playhead time. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Path overlay: draw vertices, tangents and handles at constant screen size while Pen is active. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Path locks: refuse edits through locked ancestor groups. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Path cancellation: restore original paths, masks and active path; refresh inspector on completion/cancel. — `apps/desktop/src/extensions/viewer/path-editing.ts`
+- [ ] Enter text edit: double-click text or Enter on selected text opens in-place editor; selected text remains editable beneath a covering layer. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Point text: Cmd+T then click creates point text; type live; click away commits and returns to Selection. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Paragraph text: drag Type tool creates fixed-width paragraph with automatic height. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Text selection: click moves caret; double-click selects word; Cmd+A selects text inside editor. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Multiline text: Enter inserts line breaks while editing; clipboard and selection stay local to text editor. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Empty text: leaving a new text layer empty removes it without a history entry. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Text history: a complete in-place edit commits as one undo step; save preserves editor focus. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Text tool precedence: click-away returns to Selection unless another tool was explicitly chosen. — `apps/desktop/src/extensions/viewer/text-editor.ts`
+- [ ] Editor camera: orbit, pan, dolly and framing change editor view without changing render camera or saved project. — `apps/desktop/src/renderer/src/core/scene3d/navigation.ts`
+- [ ] Orbit gesture: middle button or Option-drag orbits; add Shift to pan. — `apps/desktop/src/renderer/src/core/scene3d/navigation.ts`
+- [ ] Fine navigation: Shift slows non-pan navigation to one tenth. — `apps/desktop/src/renderer/src/core/scene3d/navigation.ts`
+- [ ] 3D framing: F frames selection; Home frames composition; Escape cancels gesture or returns to selection navigation. — `apps/desktop/src/renderer/src/core/scene3d/navigation.ts`
+- [ ] 3D navigation ownership: navigation consumes gestures only when available and navigation tool/Option applies. — `apps/desktop/src/renderer/src/core/scene3d/navigation.ts`
+- [ ] canvas-text contract: Locked group text refuses canvas editing and works after unlocking with one Undo. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] canvas-text contract: Edits existing text in place: caret, selection, clipboard, multiline, commit and one-step undo. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] canvas-text contract: Text tool: click creates point text, typing renders live, clicking away commits and returns to Select. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] canvas-text contract: Text tool: leaving a new layer empty removes it without a history entry. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] canvas-text contract: Text tool: dragging creates a fixed-width paragraph with automatic height. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] canvas-text contract: Clicking inside the edited text moves the caret; double-click selects a word. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] canvas-text contract: Enter edits the selected text layer; Command+A selects all inside the editor; focus survives a save. — `apps/desktop/e2e/canvas-text.spec.ts`
+- [ ] directional-snapping contract: Playhead latches only after crossing an edge and releases for fine movement. — `apps/desktop/e2e/directional-snapping.spec.ts`
+- [ ] font-anchor contract: Typography preserves its anchor while changed alignment restores the natural origin. — `apps/desktop/e2e/font-anchor.spec.ts`
+- [ ] pan-presentation contract: High-zoom pans move the presented picture before another render is available. — `apps/desktop/e2e/pan-presentation.spec.ts`
+- [ ] pan-presentation contract: Paused zoom refines after settling and content or time changes bypass deferral. — `apps/desktop/e2e/pan-presentation.spec.ts`
+- [ ] pan-presentation contract: Fractional pans reuse covered pixels while crop changes and independent redraws still render. — `apps/desktop/e2e/pan-presentation.spec.ts`
+- [ ] pan-presentation contract: Native outward pans keep GPU allocation stable at every composition edge. — `apps/desktop/e2e/pan-presentation.spec.ts`
+- [ ] pen-group-locks contract: Pen edits protect nested locked groups and work after unlocking with one Undo. — `apps/desktop/e2e/pen-group-locks.spec.ts`
+- [ ] scale-aspect-ratio contract: Aspect ratio lock stays in sync and preserves proportions in both panels. — `apps/desktop/e2e/scale-aspect-ratio.spec.ts`
+- [ ] size-anchor contract: Resized shapes render and hit-test from their anchor in preview and export. — `apps/desktop/e2e/size-anchor.spec.ts`
+- [ ] viewer-alignment contract: Renders the composition center as full-axis guides with a fixed bullseye. — `apps/desktop/e2e/viewer-alignment.spec.ts`
+- [ ] viewer-alignment contract: Aligns both axes during an ordinary layer drag and allows Command to bypass snapping. — `apps/desktop/e2e/viewer-alignment.spec.ts`
+- [ ] viewer-anchor-indicators contract: Selected layers show their transformed anchors at a constant screen size. — `apps/desktop/e2e/viewer-anchor-indicators.spec.ts`
+- [ ] viewer-anchor-indicators contract: Clicking away commits canvas text and returns to Selection while explicit tool choices win. — `apps/desktop/e2e/viewer-anchor-indicators.spec.ts`
+- [ ] viewer-panel-drag contract: Moves the Preview canvas through the shared panel drag affordance. — `apps/desktop/e2e/viewer-panel-drag.spec.ts`
+- [ ] viewer-recovery contract: Keeps rendered pixels on the visible canvas across extension reloads. — `apps/desktop/e2e/viewer-recovery.spec.ts`
+- [ ] viewer-recovery contract: Offers a one-click return only after explicit panning fully loses the composition. — `apps/desktop/e2e/viewer-recovery.spec.ts`
+- [ ] viewer-recovery contract: Keeps the same composition point under the cursor through small-to-oversized zoom. — `apps/desktop/e2e/viewer-recovery.spec.ts`
+- [ ] viewer-recovery contract: Keeps the last composition frame visible while zoom resizes its drawing buffer. — `apps/desktop/e2e/viewer-recovery.spec.ts`
+- [ ] viewer-recovery contract: Zooms with a mouse wheel, pans with trackpad scroll, pinches to zoom, and middle-drags. — `apps/desktop/e2e/viewer-recovery.spec.ts`
+- [ ] viewer-recovery contract: Double-clicks selected text through a full-frame top layer and selects all its source. — `apps/desktop/e2e/viewer-recovery.spec.ts`
+- [ ] viewer-resize contract: Resizes a shape parent and its selected child together around the common fixed corner. — `apps/desktop/e2e/viewer-resize.spec.ts`
+- [ ] viewer-resize contract: Resizes the selected layer in local space with a fixed opposite edge and correct cursors. — `apps/desktop/e2e/viewer-resize.spec.ts`
+- [ ] viewer-resize contract: Resizes the text box without changing typography Size or Scale X/Y. — `apps/desktop/e2e/viewer-resize.spec.ts`
+- [ ] viewer-resize contract: Resizes and rotates a multi-selection around the common pivot with one-step undo. — `apps/desktop/e2e/viewer-resize.spec.ts`
+- [ ] viewer-selection contract: Drags the timeline-selected layer beneath a full-frame top layer. — `apps/desktop/e2e/viewer-selection.spec.ts`
+- [ ] viewer-selection contract: Moves a multi-selection from the empty gap inside its common box as one undoable gesture. — `apps/desktop/e2e/viewer-selection.spec.ts`
+- [ ] viewer-selection contract: Keeps locked members in common chrome without transforming the unlocked subset. — `apps/desktop/e2e/viewer-selection.spec.ts`
+- [ ] viewer-selection contract: Clicks select groups first, Cmd goes deeper, and hover previews the target. — `apps/desktop/e2e/viewer-selection.spec.ts`
+- [ ] viewer-tools contract: Keeps tool buttons clear of native window drag regions after resizing. — `apps/desktop/e2e/viewer-tools.spec.ts`
+- [ ] viewer-tools contract: Keeps tools distinct from creation commands and draws an undoable shape. — `apps/desktop/e2e/viewer-tools.spec.ts`
+- [ ] viewer-tools contract: Marquee-selects enclosed layers and Shift toggles the enclosed set. — `apps/desktop/e2e/viewer-tools.spec.ts`
+- [ ] viewer-tools contract: Rotation, Pan Behind, Type, Zoom, and temporary Hand use professional gesture semantics. — `apps/desktop/e2e/viewer-tools.spec.ts`
+- [ ] index contract: Reattaches the renderer canvas after a module update with a new service facade. — `apps/desktop/src/extensions/viewer/index.test.ts`
+- [ ] index contract: Does not repeat hover hit testing while a viewer drag owns the cursor. — `apps/desktop/src/extensions/viewer/index.test.ts`
+- [ ] index contract: Keeps the original WebGL host when a panel rebuild attempts to attach a second stage. — `apps/desktop/src/extensions/viewer/index.test.ts`
+- [ ] index contract: Disposes listeners and rebinds replacement closures to the same live WebGL stage. — `apps/desktop/src/extensions/viewer/index.test.ts`
+- [ ] index contract: Replaces typed event subscriptions without installing duplicate stage listeners. — `apps/desktop/src/extensions/viewer/index.test.ts`
+- [ ] path-editing contract: Removes a newly drawn mask and restores the active path on cancellation. — `apps/desktop/src/extensions/viewer/path-editing.test.ts`
+- [ ] source-preview contract: Names the source and offers a way back so the stage never reads as a broken composition. — `apps/desktop/src/extensions/viewer/source-preview.test.ts`
+- [ ] source-preview contract: Shows the audio filename only once below the audio icon. — `apps/desktop/src/extensions/viewer/source-preview.test.ts`
+- [ ] source-preview contract: Hides the transport for a still image, which has nothing to play. — `apps/desktop/src/extensions/viewer/source-preview.test.ts`
+- [ ] source-preview contract: Seeks with the keyboard and keeps playback time accessible without visible timestamps. — `apps/desktop/src/extensions/viewer/source-preview.test.ts`
+- [ ] source-preview contract: Pauses the composition once instead of restarting it behind the monitor. — `apps/desktop/src/extensions/viewer/source-preview.test.ts`
+- [ ] source-preview contract: Replaces only the preview controller during a hot update. — `apps/desktop/src/extensions/viewer/source-preview.test.ts`
+- [ ] text-editor contract: Opens one transaction, writes live and commits on Escape without losing text. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Commits on Command+Enter and lets other shortcuts bubble to the field-aware keymap. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Removes a fresh layer with no history when it ends empty, and names a kept one after its text. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Deletes an existing layer whose text was emptied. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Returns the Text tool to Select when the session ends. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Places the caret from a click, selects words on double click and drags a range. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Selects everything on entry when asked and mirrors external text changes. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Commits on clicks outside the viewer but keeps editing through the inspector. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Commits before an inspector value field starts its own transaction. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Closes a transaction left open elsewhere instead of failing to start. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Handles Command+A itself and offers style shortcuts. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Takes focus back when nothing else holds it. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+- [ ] text-editor contract: Refuses locked layers. — `apps/desktop/src/extensions/viewer/text-editor.test.ts`
+
+- [ ] Preview resolution: Auto, Full, Half and Quarter select preview scale; change relayouts viewer and reflects current transport quality. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Zoom menu: Fit plus 5/12.5/25/50/100/200/400/800%; custom zoom displays current percentage; clamp displayed zoom 2–800%. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] 3D transform controls: choose Move/Rotate/Scale; choosing transform returns navigation to Select. — `apps/desktop/src/extensions/viewer/GizmoToolbar.svelte`
+- [ ] 3D axis space: Global/Local toggle changes transform basis. — `apps/desktop/src/extensions/viewer/GizmoToolbar.svelte`
+- [ ] 3D viewpoint: Camera returns to rendered shot; Editor exposes editor navigation view. — `apps/desktop/src/extensions/viewer/GizmoToolbar.svelte`
+- [ ] 3D view tools: Select, Orbit, Pan, Dolly, Frame selection and Frame all available from dropdown. — `apps/desktop/src/extensions/viewer/GizmoToolbar.svelte`
+- [ ] Viewer overlay coverage: dedicated ruler, user-guide, safe-area and grid toggles were not located in committed viewer sources; preserve actual alignment/anchor/path overlays rather than assume AE features exist. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Proxy indicator coverage: preview-resolution selector is confirmed; dedicated per-source proxy-status badge was not located in viewer chrome. — `apps/desktop/src/extensions/viewer/viewer-chrome.ts`
+
+## 2. Timeline
+
+- [ ] Time ruler: click/drag ruler changes playhead; empty timeline clicks preserve playhead. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline pan: middle-button drag pans timeline horizontally. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Playhead snapping: Shift held or pressed during scrub latches when crossing clip boundaries and keys. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline graph: Shift+F3 toggles graph editor; button reflects state. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Layer gutter: drag divider to resize layer list. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Column menu: Layer Name and Link Layers remain present; Layer Numbers and Switches can toggle; restore all AE columns. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Layer switches: click hide/solo/lock and 3D switches; precomps expose continuous rasterization. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline rename: inline layer-name edit commits Enter and cancels Escape; ignore blank names. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Key marquee: Shift or Cmd adds marquee-selected keys; graph marquee retains original targets while panning. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Key drag: move selected keys together; paired Scale dimensions move/delete together without deleting layer. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Quick stagger: Cmd+Option drag offsets layers in selection order at subframe precision; key groups preserve each span. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Graph types: choose Value Graph or Speed Graph; fit selected curves; merge selected curves; optionally show layer bars. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Graph handles: incoming/outgoing handles remain separately hittable; Option splits continuous handles. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Graph multi-edit: same-property selected keys across layers accept handle adjustment; preserve unrelated key times. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Keyframe value editor: double-click value opens typed editor; Enter commits and Escape cancels. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Property reset: clearing final key preserves evaluated value and disables current-key diamond; Undo restores. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Work-area bounds: B sets work in and N work out; handles keep at least one frame span. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Work-area menu: start/end here or at playhead and reset to entire composition. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Marker menu: right-click ruler adds marker here; marker context menu removes it; duplicate-time marker disabled. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Property menu: Add Keyframe Here, Paste Keyframes Here and Clear All Keyframes operate on hit property. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline modes: switch Layers/Tracks from mode control or context menu; preserve animation access. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Live clip preview: moving clip updates composition before release; Escape restores track stacking and local video time. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Group strips: moving/trimming group strip applies to members; reveal ancestors when selecting grouped descendants. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Layer disclosure: show existing keyframed properties immediately; collapse/reopen without losing selection. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Layer strip selection: strip clicks retain the graph-focused curve. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Property values: timeline readouts support typed edits, axis-specific scrubs, cancellation, Undo and locks. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Linked Scale: aspect lock stays synchronized with inspector; paired keys are created when linked. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] File drops: timeline import uses drop time/index; Option imports as folder. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] graph-editor-review contract: Graph editor exposes its state and keeps value and speed navigation usable. — `apps/desktop/e2e/graph-editor-review.spec.ts`
+- [ ] graph-handle-independence contract: Dragging an incoming handle leaves another selected key handle fixed and supports Undo. — `apps/desktop/e2e/graph-handle-independence.spec.ts`
+- [ ] graph-picking contract: A Weight handle edits Weight while Scale is focused, and Undo restores it. — `apps/desktop/e2e/graph-picking.spec.ts`
+- [ ] graph-picking contract: Vertical scrolling pans the graph without scrolling rows or editing animation. — `apps/desktop/e2e/graph-picking.spec.ts`
+- [ ] graph-picking contract: Selected curves expose all their keys and remain editable after clearing selection. — `apps/desktop/e2e/graph-picking.spec.ts`
+- [ ] graph-picking contract: Marquee keeps its original graph targets and selected points still drag together. — `apps/desktop/e2e/graph-picking.spec.ts`
+- [ ] graph-picking contract: Drawing an empty graph marquee preserves selected keyframes. — `apps/desktop/e2e/graph-picking.spec.ts`
+- [ ] graph-picking contract: A graph marquee selects a subset and moves only enclosed points. — `apps/desktop/e2e/graph-picking.spec.ts`
+- [ ] graph-reference contract: Reference graph supports combined editing, persistent handles, and group scaling with undo. — `apps/desktop/e2e/graph-reference.spec.ts`
+- [ ] group-timeline-interactions contract: M closes and reopens nested group layers with no selection. — `apps/desktop/e2e/group-timeline-interactions.spec.ts`
+- [ ] group-timeline-interactions contract: Selecting grouped layers reveals ancestors without hiding siblings. — `apps/desktop/e2e/group-timeline-interactions.spec.ts`
+- [ ] group-timeline-interactions contract: Both edges of a selected group strip freely trim its members. — `apps/desktop/e2e/group-timeline-interactions.spec.ts`
+- [ ] property-reveal contract: AE property toggles and global M disclosure use actual timeline rows. — `apps/desktop/e2e/property-reveal.spec.ts`
+- [ ] property-reveal contract: Timeline diamond toggles playhead keys without clearing other times. — `apps/desktop/e2e/property-reveal.spec.ts`
+- [ ] timeline-gesture-performance contract: Moving a group in a large timeline expands selection once and remains undoable. — `apps/desktop/e2e/timeline-gesture-performance.spec.ts`
+- [ ] timeline-keyframe-navigation contract: Timeline shortcuts navigate real keyframes with a compact transport. — `apps/desktop/e2e/timeline-keyframe-navigation.spec.ts`
+- [ ] timeline-keyframe-navigation contract: Clicking away clears row selection and deleting final keys preserves value with Undo. — `apps/desktop/e2e/timeline-keyframe-navigation.spec.ts`
+- [ ] timeline-keyframe-navigation contract: Removing the last current key disables its diamond and Undo restores it. — `apps/desktop/e2e/timeline-keyframe-navigation.spec.ts`
+- [ ] timeline-keyframe-navigation contract: Composition zoom dropdown follows presets, shortcuts, pan and Fit without changing the project. — `apps/desktop/e2e/timeline-keyframe-navigation.spec.ts`
+- [ ] timeline-keyframe-rows contract: Expanding a layer strip immediately shows its existing keyframed properties. — `apps/desktop/e2e/timeline-keyframe-rows.spec.ts`
+- [ ] timeline-keyframe-rows contract: Disclosure shows only keyframed properties and refreshes animation changes. — `apps/desktop/e2e/timeline-keyframe-rows.spec.ts`
+- [ ] timeline-layer-rows contract: Compact layer rows keep names centered and parenting in dedicated controls. — `apps/desktop/e2e/timeline-layer-rows.spec.ts`
+- [ ] timeline-markers contract: Native timeline markers support ruler menus, Undo/Redo and save/reopen. — `apps/desktop/e2e/timeline-markers.spec.ts`
+- [ ] timeline-marquee-scroll contract: Graph selection origin stays at the same time and value while panning. — `apps/desktop/e2e/timeline-marquee-scroll.spec.ts`
+- [ ] timeline-modes contract: The track timeline packs layers onto Premiere-style tracks and moves clips between them. — `apps/desktop/e2e/timeline-modes.spec.ts`
+- [ ] timeline-modes contract: Animated clips unfold their keyframes inside the track timeline. — `apps/desktop/e2e/timeline-modes.spec.ts`
+- [ ] timeline-panel-collapse contract: Keeps the timeline usable after double-clicks and a saved collapsed state. — `apps/desktop/e2e/timeline-panel-collapse.spec.ts`
+- [ ] timeline-playback-viewport contract: Playback and scrubbing draw only the active timeline viewport, including after reload. — `apps/desktop/e2e/timeline-playback-viewport.spec.ts`
+- [ ] timeline-quick-offset contract: Stagger layers in selection order with a subframe Cmd+Option drag and one undo. — `apps/desktop/e2e/timeline-quick-offset.spec.ts`
+- [ ] timeline-quick-offset contract: Stagger selected keyframe groups per layer without changing each group span. — `apps/desktop/e2e/timeline-quick-offset.spec.ts`
+- [ ] timeline-quick-offset contract: One Graph Editor handle adjusts selected same-property keyframes across layers. — `apps/desktop/e2e/timeline-quick-offset.spec.ts`
+- [ ] timeline-refresh-cadence contract: Timeline motion retains subpixel updates independently of composition frame rate. — `apps/desktop/e2e/timeline-refresh-cadence.spec.ts`
+- [ ] timeline-refresh-cadence contract: Scrub indicator follows subframe pointer motion while selected frames stay accurate. — `apps/desktop/e2e/timeline-refresh-cadence.spec.ts`
+- [ ] timeline-scroll-integrity contract: Large timeline stays usable after vertical scrolling, panning, zooming and scrubbing. — `apps/desktop/e2e/timeline-scroll-integrity.spec.ts`
+- [ ] timeline-track-live-drag contract: Moving a clip in time updates the composition before release and creates one undo step. — `apps/desktop/e2e/timeline-track-live-drag.spec.ts`
+- [ ] timeline-track-live-drag contract: Moving between tracks previews stacking and Escape restores the composition without an edit. — `apps/desktop/e2e/timeline-track-live-drag.spec.ts`
+- [ ] timeline-track-live-drag contract: A paused video seeks to its new local time during a clip drag and restores on pointer cancellation. — `apps/desktop/e2e/timeline-track-live-drag.spec.ts`
+- [ ] timeline-track-values contract: Track property values support typing, axis-specific dragging, cancellation, Undo, and locks. — `apps/desktop/e2e/timeline-track-values.spec.ts`
+- [ ] timeline-track-values contract: A track readout edits the clip at the playhead and creates paired Scale keys. — `apps/desktop/e2e/timeline-track-values.spec.ts`
+- [ ] timeline contract: Scale keys move outside the layer, delete together, and never delete their layer. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: The easing grid applies a curve to both Scale dimensions and preserves linear defaults. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: The disclosure opens and collapses the selected layer strip. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Command Shift D selects the new segment to the right of the playhead. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Editing one Bézier handle keeps the neighboring handle visible. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Continuous Bézier handles stay joined unless Option-drag splits them. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Marquee-selected graph keyframes move together from inside their transform box. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: A Bézier handle adjusts paired Scale axes without changing other selected times. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Layer-strip clicks do not replace the curve focused in the Graph Editor. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Project rename is available from the title menu and persists the live document. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Empty timeline clicks preserve the playhead and marquee selection still works. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Clicking the ruler moves the playhead. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Middle-button dragging pans the timeline viewport horizontally. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Shift pressed during a playhead drag latches when crossing clip edges and keyframes. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] timeline contract: Clicking the transport button pauses playback. — `apps/desktop/e2e/timeline.spec.ts`
+- [ ] directional-snap contract: Does not attract a pointer near an edge, and acquires only when crossing it. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Works in both directions and releases immediately when reversing. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Does not reacquire a latch in the sample that reverses across its edge. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Does not snap when toggled at rest or acquire an edge passed while disabled. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Moves a rigid selection from any eligible edge without changing its spacing. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Ignores incompatible edges and never jumps to a distant target crossed by a fast drag. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Keeps the same latch among dense targets and releases a removed target. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Chooses the last crossed target and does not let a weighted target pull backwards. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Does not latch while moving away from an initially aligned edge. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Matches exhaustive snapping through large mixed-edge drags, reversals, toggles and target edits. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] directional-snap contract: Limits target reads for a large selection while choosing the same edge. — `apps/desktop/src/extensions/timeline/directional-snap.test.ts`
+- [ ] graph-performance contract: Indexes neighbours once for a 10,000-key move and scale. — `apps/desktop/src/extensions/timeline/graph-performance.test.ts`
+- [ ] graph-presentation contract: Keeps axis identity through reordered selections. — `apps/desktop/src/extensions/timeline/graph-presentation.test.ts`
+- [ ] graph-presentation contract: Labels readable intervals across negative, fractional, and large ranges. — `apps/desktop/src/extensions/timeline/graph-presentation.test.ts`
+- [ ] graph-presentation contract: Distinguishes held, linear, and curved keys. — `apps/desktop/src/extensions/timeline/graph-presentation.test.ts`
+- [ ] graph-presentation contract: Reserves usable space on both sides of the adjustable split. — `apps/desktop/src/extensions/timeline/graph-presentation.test.ts`
+- [ ] graph-sample-cache contract: Reuses redraw samples and refreshes them after an edit, mode or project change. — `apps/desktop/src/extensions/timeline/graph-sample-cache.test.ts`
+- [ ] index contract: Binds M to open mixed layer strips together and collapse an open selection. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Closes selected group hierarchies when M collapses their layer strips. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Selects only the new right-hand segments after splitting. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Preserves source time when splitting timed media. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Keeps caption cues in place on both halves of a split. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Re-bases caption cues from the gesture start while the In edge is dragged. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Uses the M command to close and reopen nested groups with every strip. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Owns the property-reveal and adjacent-keyframe command ids. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Builds the exact canvas skeleton and rebinds the runtime to replacement hosts. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Refreshes timecode and graph state when switching projects or changing frame rate. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Scrubs time from the initial position instead of accumulating pointer offsets. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Places only the essential controls in the ruler gutter. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Switches between the layer and track timelines from the panel and the command palette. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Preserves the live panel move handle when the extension rebuilds in place. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Renders the move slot synchronously before the layout injects its handle. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Registers and runs a disposer for kernel reload or disable. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Reactivates in place with fresh handlers and preserved view state. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Shift-moving a strip snaps its edges to the playhead exactly and holds through the release radius. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] index contract: Releases an external text field when the timeline starts a pointer gesture. — `apps/desktop/src/extensions/timeline/index.test.ts`
+- [ ] keyframe-navigation contract: Uses real keys, offsets, finite composition times and both Scale channels. — `apps/desktop/src/extensions/timeline/keyframe-navigation.test.ts`
+- [ ] keyframe-navigation contract: Does not wrap at endpoints, fall through an unanimated selection, or mutate keys. — `apps/desktop/src/extensions/timeline/keyframe-navigation.test.ts`
+- [ ] keyframe-navigation contract: Does not scan unrelated layers or reread row keyframes during playback. — `apps/desktop/src/extensions/timeline/keyframe-navigation.test.ts`
+- [ ] keyframe-value-dialog contract: Still rejects collisions on the neighboring keyframe. — `apps/desktop/src/extensions/timeline/keyframe-value-dialog.test.ts`
+- [ ] keyframe-value-dialog contract: Snaps composition times to the nearest frame. — `apps/desktop/src/extensions/timeline/keyframe-value-dialog.test.ts`
+- [ ] layer-drop contract: Group center nests, edges place outside the entire group. — `apps/desktop/src/extensions/timeline/layer-drop.test.ts`
+- [ ] layer-drop contract: Properties resolve to their owner and child gaps preserve membership. — `apps/desktop/src/extensions/timeline/layer-drop.test.ts`
+- [ ] markers contract: Adds frame-aligned markers without duplicate pins and clamps the composition bounds. — `apps/desktop/src/extensions/timeline/markers.test.ts`
+- [ ] markers contract: Resolves a marker when its menu runs, including legacy markers without IDs. — `apps/desktop/src/extensions/timeline/markers.test.ts`
+- [ ] markers contract: Hits only visible ruler pins, leaving work-area handles and track interactions alone. — `apps/desktop/src/extensions/timeline/markers.test.ts`
+- [ ] markers contract: Draws only visible pins and neutral guides, restoring the canvas state. — `apps/desktop/src/extensions/timeline/markers.test.ts`
+- [ ] markers contract: Adds and removes through the real edit boundary, persists in .pmv, and restores Undo/Redo. — `apps/desktop/src/extensions/timeline/markers.test.ts`
+- [ ] professional-animation contract: Snaps a multi-keyframe group by whichever selected key reaches a target. — `apps/desktop/src/extensions/timeline/professional-animation.test.ts`
+- [ ] professional-animation contract: Holds a group snap until the anchored key clears the release radius. — `apps/desktop/src/extensions/timeline/professional-animation.test.ts`
+- [ ] professional-animation contract: Distinguishes Shift-click toggle from Shift-drag movement. — `apps/desktop/src/extensions/timeline/professional-animation.test.ts`
+- [ ] professional-animation contract: Jumps to clamped work-area boundaries without editing the work area. — `apps/desktop/src/extensions/timeline/professional-animation.test.ts`
+- [ ] professional-animation contract: Keeps selected-event navigation scoped to selected layer events. — `apps/desktop/src/extensions/timeline/professional-animation.test.ts`
+- [ ] property-reveal contract: Isolates static properties and Shift adds and removes rows. — `apps/desktop/src/extensions/timeline/property-reveal.test.ts`
+- [ ] property-reveal contract: M with no selection opens and closes every strip on consecutive taps. — `apps/desktop/src/extensions/timeline/property-reveal.test.ts`
+- [ ] property-reveal contract: Single shortcut toggles closed when its rows are already shown. — `apps/desktop/src/extensions/timeline/property-reveal.test.ts`
+- [ ] property-sections contract: Names each property after its Properties panel section. — `apps/desktop/src/extensions/timeline/property-sections.test.ts`
+- [ ] property-sections contract: Orders sections like the Properties panel and heads each one once. — `apps/desktop/src/extensions/timeline/property-sections.test.ts`
+- [ ] property-values contract: Scrubs within limits and supports precise and fast adjustment. — `apps/desktop/src/extensions/timeline/property-values.test.ts`
+
+- [ ] Slip coverage: source slip preserves strip and animation while respecting source handles; this is a tested editing operation, not evidence of a dedicated mouse slip tool. — `apps/desktop/src/renderer/src/legacy/__tests__/agent-video-editing.test.ts`
+- [ ] Ripple coverage: no dedicated ripple-edit timeline tool/shortcut was located in timeline/keymap sources; do not infer it from spatial ripple animation. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Combined graph splitter: drag graph/layer boundary vertically; keep split ratio between 0.2 and 0.65. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timecode readout: show hours:minutes:seconds:frames at composition FPS; draggable readout is excluded from panel move/collapse hit area. — `apps/desktop/src/extensions/timeline/timeline.ts`
+
+## 3. Layers / outliner and composition tabs
+
+- [ ] Composition tabs: show open compositions and activate selected composition through shared project state. — `apps/desktop/src/extensions/timeline/comp-tabs.ts`
+- [ ] Composition tab lifetime: preserve valid tabs when compositions change and repair active composition references. — `apps/desktop/src/extensions/timeline/comp-tabs.ts`
+- [ ] Parent pickwhip: drag dedicated parenting control to target layer; parenting control also offers menu selection. — `apps/desktop/src/renderer/src/legacy/ui/parent-pickwhip.ts`
+- [ ] compositions contract: Pre-compose keeps every rendered pixel, and the new comp opens, nests and survives a save. — `apps/desktop/e2e/compositions.spec.ts`
+- [ ] precomp contract: Grouping preserves rendered pixels, time, parent rigs, save data and Undo. — `apps/desktop/e2e/precomp.spec.ts`
+- [ ] precomp contract: Canvas and timeline open the same compact layer menu. — `apps/desktop/e2e/precomp.spec.ts`
+- [ ] precomp contract: Pickwhip parents to a timeline row with no pose jump and one Undo. — `apps/desktop/e2e/precomp.spec.ts`
+- [ ] precompose-group-appearance contract: Partial precomposition preserves overlapping group alpha, animated rigs and Undo. — `apps/desktop/e2e/precompose-group-appearance.spec.ts`
+- [ ] precompose-group-appearance contract: Nested shared blur, mask and blend remain on their original group boundary. — `apps/desktop/e2e/precompose-group-appearance.spec.ts`
+- [ ] precompose-group-appearance contract: Offcanvas transformed styled groups reject partial moves and preserve whole-group pixels. — `apps/desktop/e2e/precompose-group-appearance.spec.ts`
+- [ ] comp-tabs contract: Coalesces project-switch notifications and retains unchanged tab DOM and focus. — `apps/desktop/src/extensions/timeline/comp-tabs.test.ts`
+- [ ] comp-tabs contract: Switches nested composition tabs by pointer and keyboard without scrolling parent panels. — `apps/desktop/src/extensions/timeline/comp-tabs.test.ts`
+- [ ] comp-tabs contract: Cancels deferred work and unsubscribes on disposal. — `apps/desktop/src/extensions/timeline/comp-tabs.test.ts`
+
+- [ ] Tab close: close affordance exists only when more than one composition tab is open; close click does not activate tab. — `apps/desktop/src/extensions/timeline/comp-tabs.ts`
+- [ ] Tab keyboard: active tab has tab stop; Enter/Space opens composition. — `apps/desktop/src/extensions/timeline/comp-tabs.ts`
+- [ ] Tab menu: Composition Settings acts on clicked tab; New Composition Cmd+N and conditional Close are offered. — `apps/desktop/src/extensions/timeline/comp-tabs.ts`
+- [ ] Tab reveal: scroll selected tab into strip view only when active composition changes; do not scroll surrounding panel. — `apps/desktop/src/extensions/timeline/comp-tabs.ts`
+- [ ] Outliner ownership: layer hierarchy/disclosures and parenting are implemented in timeline rather than an additional independent built-in layers panel. — `apps/desktop/src/extensions/timeline/timeline.ts`
+
+## 4. Inspector
+
+- [ ] Property animation: stopwatch enables/removes animation; diamond adds/removes current-time key; axis fields expose independent diamonds. — `apps/desktop/src/extensions/inspector/ChannelRow.svelte`
+- [ ] Property context menu: Add Keyframe at Playhead, Remove Animation, Show in Graph Editor, Separate Dimensions, expression and Reset actions. — `apps/desktop/src/extensions/inspector/ChannelRow.svelte`
+- [ ] Scale linking: link toggle preserves aspect during edits; unlinked axes edit separately. — `apps/desktop/src/extensions/inspector/ChannelRow.svelte`
+- [ ] Expressions: Add/Edit Expression opens modal with Cancel/Apply; Remove Expression clears expression. — `apps/desktop/src/extensions/inspector/ChannelRow.svelte`
+- [ ] Multi-edit locks: disable writes for locked layers and locked ancestor groups. — `apps/desktop/src/extensions/inspector/ChannelRow.svelte`
+- [ ] Effect selection: Shift selects contiguous range; Cmd/Ctrl toggles; selection has its own keyboard/clipboard context. — `apps/desktop/src/extensions/inspector/EffectsSection.svelte`
+- [ ] Effect stack: add, toggle, reset, remove and reorder effects; changes apply through inspector history. — `apps/desktop/src/extensions/inspector/EffectsSection.svelte`
+- [ ] Effect keyboard order: Option+Up/Down reorders selected effects. — `apps/desktop/src/extensions/inspector/EffectsSection.svelte`
+- [ ] Track matte: remove source independently and edit matte mode; show chosen source in effect stack. — `apps/desktop/src/extensions/inspector/EffectsSection.svelte`
+- [ ] CaptionsSection / Caption weight: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Caption size: NumField edits selected content; step={1}; min={4}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Caption color: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Caption outline: NumField edits selected content; step={0.5}; min={0}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Outline color: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Text case: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Background: ToggleField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Background color: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Background opacity: NumField edits selected content; step={1}; min={0}; max={100}; unit="%"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Background padding: NumField edits selected content; step={1}; min={0}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Background corner radius: NumField edits selected content; step={1}; min={0}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Caption position: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Caption alignment: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Horizontal offset: NumField edits selected content; step={1}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Vertical offset: NumField edits selected content; step={1}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Safe margin: NumField edits selected content; step={0.5}; min={0}; max={45}; unit="%"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Maximum width: NumField edits selected content; step={1}; min={10}; max={100}; unit="%"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Maximum lines: NumField edits selected content; step={1}; min={1}; max={6}; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Word highlight: ToggleField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Highlight color: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Highlight size: NumField edits selected content; step={1}; min={50}; max={300}; unit="%"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] CaptionsSection / Word animation: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/CaptionsSection.svelte`
+- [ ] ContentSection / Size: NumField edits selected content; step={1}; min={4}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Text color: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Tracking: NumField edits selected content; step={0.5}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Leading: NumField edits selected content; step={0.02}; precision={2}; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Fill: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Shape: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Width: NumField edits selected content; step={1}; min={1}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Height: NumField edits selected content; step={1}; min={1}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Corner smoothing: NumField edits selected content; step={1}; min={0}; max={100}; unit="%"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Corner radius: NumField edits selected content; step={1}; min={0}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Stroke: NumField edits selected content; step={0.5}; min={0}; unit="px"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Stroke: ColorField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Points: NumField edits selected content; step={1}; min={3}; max={24}; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Fit: SelectField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Trim start: NumField edits selected content; step={0.05}; precision={2}; unit="s"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Speed: NumField edits selected content; step={0.05}; precision={2}; min={0.05}; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Mute audio: ToggleField edits selected content; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Audio gain: NumField edits selected content; step={0.05}; precision={2}; min={0}; max={4}; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Trim start: NumField edits selected content; step={0.05}; precision={2}; min={0}; unit="s"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Gain: NumField edits selected content; step={0.05}; precision={2}; min={0}; max={4}; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Fade in: NumField edits selected content; step={0.05}; precision={2}; min={0}; max={layer.dur}; unit="s"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] ContentSection / Fade out: NumField edits selected content; step={0.05}; precision={2}; min={0}; max={layer.dur}; unit="s"; use component keyboard/gesture rules in area 7. — `apps/desktop/src/extensions/inspector/ContentSection.svelte`
+- [ ] background-color-drag contract: New project background follows dragging and restores on Escape. — `apps/desktop/e2e/background-color-drag.spec.ts`
+- [ ] bulk-property-edit contract: A shared dimension edit reaches mixed types while type-private fields stay put. — `apps/desktop/e2e/bulk-property-edit.spec.ts`
+- [ ] color-alpha contract: Colour alpha from the picker renders see-through and survives Undo. — `apps/desktop/e2e/color-alpha.spec.ts`
+- [ ] color-picker-overlay contract: Color picker stays above adjacent panels and inside the viewport. — `apps/desktop/e2e/color-picker-overlay.spec.ts`
+- [ ] infinite-sliders contract: Numeric scrubbing handles relative motion beyond display bounds and undoes as one edit. — `apps/desktop/e2e/infinite-sliders.spec.ts`
+- [ ] inspector-effects contract: A copied effect pastes onto the layer selected after copying. — `apps/desktop/e2e/inspector-effects.spec.ts`
+- [ ] inspector-effects contract: Effect rows select, copy, paste, delete, and undo as editable source transactions. — `apps/desktop/e2e/inspector-effects.spec.ts`
+- [ ] inspector-effects contract: Timeline controls occupy the ruler gutter without legacy navigation buttons. — `apps/desktop/e2e/inspector-effects.spec.ts`
+- [ ] inspector-group-locks contract: Inspector edits skip selected layers inside locked groups and Undo restores editable siblings. — `apps/desktop/e2e/inspector-group-locks.spec.ts`
+- [ ] inspector-scroll contract: Properties remembers the scroll position of each layer. — `apps/desktop/e2e/inspector-scroll.spec.ts`
+- [ ] keyframe-value-dialog contract: Numeric keyframe times extend beyond the layer strip, Undo, and reject invalid times. — `apps/desktop/e2e/keyframe-value-dialog.spec.ts`
+- [ ] property-animation contract: Properties and timeline expose editable content animation, scrubbing, and one-step Undo. — `apps/desktop/e2e/property-animation.spec.ts`
+- [ ] property-animation contract: Dragging a timeline value adjusts the same property on every selected layer in one undo step. — `apps/desktop/e2e/property-animation.spec.ts`
+- [ ] text-color-drag contract: Text color follows the pointer throughout a drag. — `apps/desktop/e2e/text-color-drag.spec.ts`
+- [ ] variable-font-sliders contract: Variable font numeric fields scrub, animate, undo, and persist. — `apps/desktop/e2e/variable-font-sliders.spec.ts`
+- [ ] variable-font-sliders contract: Installed variable font exposes its axes before editing and changes real glyph pixels. — `apps/desktop/e2e/variable-font-sliders.spec.ts`
+- [ ] variable-font-sliders contract: First-pass keyframe playback renders every width sample without delayed font swaps. — `apps/desktop/e2e/variable-font-sliders.spec.ts`
+- [ ] variable-font-sliders contract: SF Pro weight scrubbing reuses decoded faces without crashing the renderer. — `apps/desktop/e2e/variable-font-sliders.spec.ts`
+- [ ] InspectorPanel contract: Limits playback property evaluation and shows the exact stopped value immediately. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Checks a multi-selection for mixed values on the readout clock, never on a playback frame. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Updates animated values on time events without rebuilding parenting choices. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Exposes the compact footprint of a transparent null object. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Offers parent selection when a group layer is selected. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Exposes effects, masks, blend, motion blur and track mattes for groups. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Offers a group as a transform parent without changing membership. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Activates by registering the Properties and Layer Effects panel contributions. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Caps multi-selection rendering to the first layer and keeps the header consistent. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Does not repeat the Properties heading above composition controls. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Presents imported SVG paths as Motioner-style property sections. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Updates a channel value on the values tick without remounting its row. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Keeps both axes in the same Scale row when linking or unlinking. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Edits both linked axes proportionally and only the chosen axis when unlinked. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Toggles only playhead keys with the property diamond. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Selects a property without opening its timeline rows. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Resets an animated effect parameter to its defined default. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Derives keyframe-diamond state from keyframes and playhead time. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Sends the exact legacy remove-effect command. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Reorders effects by drag and by option-arrow. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Selects multiple effects and routes copy, paste, and delete before layer shortcuts. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Keeps a copied effect active while a different destination layer is selected. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Routes composition fields through an exact set_composition command. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Routes transform, effect, layer, and content fields through exact typed commands. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Exposes direct keyframe controls for numeric, color, and toggle effect parameters. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Keeps paired visual effect coordinates precise and independently animatable. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Falls back to available effect fields when an older instance lacks widget properties. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Uses set_effect for toggles and exposes one controlled expansion button. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Selects effect rows without changing disclosure and reserves disclosure for the chevron. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Clears effect selection when clicking anywhere outside it but not from nested controls. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] InspectorPanel contract: Labels every numeric spinbutton and gives every button an accessible name. — `apps/desktop/src/extensions/inspector/InspectorPanel.test.ts`
+- [ ] VariableFontInspector contract: Shows real discovered axes without creating project values or duplicate weight fields. — `apps/desktop/src/extensions/inspector/VariableFontInspector.test.ts`
+- [ ] VariableFontInspector contract: Distinguishes static fonts and keeps saved custom axes without invented sliders. — `apps/desktop/src/extensions/inspector/VariableFontInspector.test.ts`
+- [ ] VariableFontInspector contract: Shows the current alignment and writes changes through the animated content binding. — `apps/desktop/src/extensions/inspector/VariableFontInspector.test.ts`
+- [ ] align contract: Moves a box so the chosen edge or center meets the frame. — `apps/desktop/src/extensions/inspector/align.test.ts`
+- [ ] align contract: Aligns a multi-selection by moving its union bounds against the composition. — `apps/desktop/src/extensions/inspector/align.test.ts`
+- [ ] align contract: Expresses a world delta in a scaled or rotated parent space. — `apps/desktop/src/extensions/inspector/align.test.ts`
+- [ ] audio contract: Finds sound at any depth. — `apps/desktop/src/extensions/inspector/audio.test.ts`
+- [ ] audio contract: Is false for silent, missing and cyclic compositions. — `apps/desktop/src/extensions/inspector/audio.test.ts`
+- [ ] multi-edit-content contract: Applies a fill change to every selected layer that has a colour, regardless of type. — `apps/desktop/src/extensions/inspector/multi-edit-content.test.ts`
+- [ ] multi-edit-content contract: Skips selected layers whose type has no such content field. — `apps/desktop/src/extensions/inspector/multi-edit-content.test.ts`
+- [ ] multi-edit-content contract: Shares dimension edits across mixed types. — `apps/desktop/src/extensions/inspector/multi-edit-content.test.ts`
+- [ ] multi-edit-content contract: Reports mixed fills across a cross-type selection. — `apps/desktop/src/extensions/inspector/multi-edit-content.test.ts`
+
+- [ ] 3D Color: color field (color); ; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Roughness: num field (roughness); step: 0.01, min: 0.02, max: 1; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Metalness: num field (metalness); step: 0.01, min: 0, max: 1; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Emission: color field (emissive); ; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Emission strength: num field (emissiveIntensity); step: 0.05, min: 0; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Opacity: num field (opacity); step: 0.01, min: 0, max: 1; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Color: color field (color); ; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Intensity: num field (intensity); step: 0.05, min: 0; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Range: num field (distance); step: 0.1, min: 0; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Falloff: num field (decay); step: 0.05, min: 0; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Cone angle: num field (angle); step: 1, min: 1, max: 89, unit: '°'; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Softness: num field (penumbra); step: 0.01, min: 0, max: 1; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Field of view: num field (fov); step: 0.5, min: 1, max: 150, unit: '°'; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Zoom: num field (zoom); step: 0.01, min: 0.01; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Clip start: num field (near); step: 0.01, min: 0.001; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Clip end: num field (far); step: 1, min: 0.01; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Ambient: num field (ambient); step: 0.01, min: 0; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Ambient color: color field (ambientColor); ; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+- [ ] 3D Exposure: num field (exposure); step: 0.01, min: 0; evaluated channel supports SceneField animation controls. — `apps/desktop/src/extensions/layers-3d/scene-model.ts`
+
+## 5. Effects, easing, vectors, text, captions, audio and delivery
+
+- [ ] Effect browsing: search registered definitions by group; Escape clears search; keyboard moves through tree. — `apps/desktop/src/renderer/src/panels/FxBrowserPanel.svelte`
+- [ ] Apply effect: double-click, Enter or Add applies to selected layer; drag effect payload onto layer. — `apps/desktop/src/renderer/src/panels/FxBrowserPanel.svelte`
+- [ ] Track Matte browser item: special Matte item sets matte source rather than adding shader effect. — `apps/desktop/src/renderer/src/panels/FxBrowserPanel.svelte`
+- [ ] Curve workspace: show Graph + Library or toggle views; preserve panel layout preferences. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Curve editing: drag handles; numeric X/Y inputs; mirror/reset curve; local curve undo/redo separate from project history. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Auto apply: option applies graph changes to selected keys in one undoable gesture. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Paste easing: Cmd+V pastes easing; Cmd+Shift+V pastes values; context targets incoming/middle/outgoing sections. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Preset management: save, rename, color, duplicate, move to group, export or delete preset; manage groups. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Preset import: accept .json/.kease files and folders; export preset, group or entire library. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Animation utilities: duplicate/mirror keys at playhead; linear/continuous/auto Bezier; overshoot/bounce expressions; clean path/create controller. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Preset presentation: configure columns, size 32/44/56/72, labels, palette and preview. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Export entry: Cmd+E or Cmd+Shift+E opens Export; Cancel dismisses; action label follows format. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Format gating: format controls availability of size, frame rate, quality, audio and alpha options. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Output size: scale presets show dimensions; Custom size accepts explicit dimensions. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Export range: choose full composition or work area; unset work area is identified. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Caption sidecars: choose None, SubRip .srt or WebVTT .vtt. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Render presets: name/save settings excluding output name; select saved preset. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Export progress: show Preparing then actual frame/pixel progress; Cancel releases export; completion permits another export. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Sequence confirmation: detect sequence and offer Import sequence, Cancel and optional Individual images. — `apps/desktop/src/renderer/src/legacy/core/image-sequence.ts`
+- [ ] Sequence progress: show checking frames, creating sequence and loading sequence progress with counts. — `apps/desktop/src/renderer/src/legacy/core/image-sequence.ts`
+- [ ] Sequence ownership: release playback proxy on completion/failure; cancellation does not partially replace source. — `apps/desktop/src/renderer/src/legacy/core/image-sequence.ts`
+- [ ] captions-ui contract: Every preset renders a caption. — `apps/desktop/e2e/captions-ui.spec.ts`
+- [ ] captions contract: Subtitles import onto a caption track, edit in place, burn into frames and export back. — `apps/desktop/e2e/captions.spec.ts`
+- [ ] captions contract: Timeline cue gestures keep neighbours apart and Delete removes selected cues. — `apps/desktop/e2e/captions.spec.ts`
+- [ ] easing-panel contract: Graph editing auto-applies as one undoable gesture and imports extended presets. — `apps/desktop/e2e/easing-panel.spec.ts`
+- [ ] easing-panel contract: Vector presets and curved path cleanup work through the native panel and playback. — `apps/desktop/e2e/easing-panel.spec.ts`
+- [ ] export-capabilities contract: Reports the hidden packaged-renderer video delivery capabilities. — `apps/desktop/e2e/export-capabilities.spec.ts`
+- [ ] export-destination contract: Every export asks for its destination before rendering or showing progress. — `apps/desktop/e2e/export-destination.spec.ts`
+- [ ] export-destination contract: Still and sequence exports use the selected file or folder without another prompt. — `apps/desktop/e2e/export-destination.spec.ts`
+- [ ] export-dialog contract: Export inherits Settings spacing and rounded cards and controls in both themes. — `apps/desktop/e2e/export-dialog.spec.ts`
+- [ ] export-dialog contract: Export dialog gates fields by format and accepts a custom size. — `apps/desktop/e2e/export-dialog.spec.ts`
+- [ ] export-dialog contract: Export button shows rendered frames, finishes, and can export again. — `apps/desktop/e2e/export-dialog.spec.ts`
+- [ ] export-dialog contract: Progress displays actual pixels and cancelling releases the export. — `apps/desktop/e2e/export-dialog.spec.ts`
+- [ ] import-image-sequence contract: Sequence import warns about gaps and permits importing individual stills or cancelling. — `apps/desktop/e2e/import-image-sequence.spec.ts`
+- [ ] import-image-sequence contract: Reimport replaces missing frames, preserves the frame rate and insertion time, and allows cancellation. — `apps/desktop/e2e/import-image-sequence.spec.ts`
+- [ ] import-svg contract: @viewer imports SVG as durable editable Shape paths and preserves its source. — `apps/desktop/e2e/import-svg.spec.ts`
+- [ ] media-replacement contract: Replacement uses the import picker, progress, and image sequence flow. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] media-replacement contract: Replacement picker remains bound to its original project. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] media-replacement contract: Right-click replacement preserves layers, renders new pixels, undoes/redoes, and survives portable save. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] media-replacement contract: Replacement picker cancellation and unreadable or incompatible files leave media intact. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] mixer contract: Mute and solo change what plays, and meters run only while sound plays. — `apps/desktop/e2e/mixer.spec.ts`
+- [ ] split-text contract: Wrapped lines, locked layers and blank text. — `apps/desktop/e2e/split-text.spec.ts`
+- [ ] text-animators contract: A stagger preset plays without keyframes and its timeline band edits timing with one Undo each. — `apps/desktop/e2e/text-animators.spec.ts`
+- [ ] transcription contract: Captions ask for a word-timed model when the one in use only times phrases. — `apps/desktop/e2e/transcription.spec.ts`
+- [ ] transcription contract: Main asks the focused editor for a model with a reason. — `apps/desktop/e2e/transcription.spec.ts`
+- [ ] agent-generate contract: Returns a job for long transcriptions and applies the result in the run. — `apps/desktop/src/renderer/src/captions/agent-generate.test.ts`
+- [ ] agent-generate contract: Answers in one call when the transcript is ready in time. — `apps/desktop/src/renderer/src/captions/agent-generate.test.ts`
+- [ ] agent-generate contract: Cancels the job when the run ends, so no captions land afterwards. — `apps/desktop/src/renderer/src/captions/agent-generate.test.ts`
+- [ ] agent-generate contract: Refuses to apply into a run whose transaction is gone, even without the abort. — `apps/desktop/src/renderer/src/captions/agent-generate.test.ts`
+- [ ] agent-generate contract: Refuses a second generation while one is running in the same run. — `apps/desktop/src/renderer/src/captions/agent-generate.test.ts`
+- [ ] agent-generate contract: Keeps jobs private to their run and reports a missing model cleanly. — `apps/desktop/src/renderer/src/captions/agent-generate.test.ts`
+- [ ] cjk contract: Joins transcript words without spaces where Chinese or Japanese meet. — `apps/desktop/src/renderer/src/captions/cjk.test.ts`
+- [ ] cjk contract: Breaks between characters; closing punctuation and small kana stay with the character before. — `apps/desktop/src/renderer/src/captions/cjk.test.ts`
+- [ ] cjk contract: Wraps a long Chinese cue across lines with no spaces between characters. — `apps/desktop/src/renderer/src/captions/cjk.test.ts`
+- [ ] cjk contract: Spreads word timings over the characters they cover, for highlight. — `apps/desktop/src/renderer/src/captions/cjk.test.ts`
+- [ ] cjk contract: Segments transcripts into unspaced cues sized by display width. — `apps/desktop/src/renderer/src/captions/cjk.test.ts`
+- [ ] cjk contract: Splits and merges Chinese cues without inventing spaces. — `apps/desktop/src/renderer/src/captions/cjk.test.ts`
+- [ ] clip-timing contract: Re-bases cues when the In point moves, clipping the cue spanning it. — `apps/desktop/src/renderer/src/captions/clip-timing.test.ts`
+- [ ] clip-timing contract: Splits a captions clip so both halves keep their cues where they were heard. — `apps/desktop/src/renderer/src/captions/clip-timing.test.ts`
+- [ ] clip-timing contract: Splits captions in a blade-all split with nothing selected. — `apps/desktop/src/renderer/src/captions/clip-timing.test.ts`
+- [ ] clip-timing contract: Keeps cues in place when the In point is trimmed to the playhead. — `apps/desktop/src/renderer/src/captions/clip-timing.test.ts`
+- [ ] commands contract: Adds a captions layer on top from SRT text, sized to the composition. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Normalises set_content on a captions layer, so raw patches cannot corrupt the cue list. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Stacks a second captions layer showing at the same time instead of covering the first. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Uses composition time in commands and layer time in storage. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Edits cues as one undo step each and undoes them. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Moves, deletes, inserts, restyles and re-imports. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Fails cleanly and leaves the project untouched. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Respects layer locks for generated origins. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Merges a live cue drag into one recorded command. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Does not regrow a trimmed Out point when an earlier cue is edited. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] commands contract: Keeps a live cue drag cheap on a long word-timed transcript. — `apps/desktop/src/renderer/src/captions/commands.test.ts`
+- [ ] formats contract: Reads BOM, CRLF, wrong numbering and markup. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Accepts missing hours, dot separators, no numbers and stray whitespace lines. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Sorts out-of-order cues and resolves overlaps. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Skips unreadable blocks and empty cues. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Writes numbered cues with comma milliseconds and an offset. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Round-trips through the parser. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Reads headers, NOTE/STYLE/REGION blocks, identifiers and cue settings. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Turns inline timestamps into word timings. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Writes a valid file with escaped text and an optional language. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Clips to a range and rebases to its start. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Detects by name, then by header, and falls back across formats. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Parses timestamps and strips markup. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] formats contract: Keeps ids unique through normalisation. — `apps/desktop/src/renderer/src/captions/formats.test.ts`
+- [ ] generate-toast contract: Shows no progress while the model download sheet is open and nothing runs. — `apps/desktop/src/renderer/src/captions/generate-toast.test.ts`
+
+- [ ] Queue snapshot: enqueue captures project plus render options, assigns pending status and shows Added to render queue. — `apps/desktop/src/renderer/src/legacy/core/render-queue.ts`
+- [ ] Queue recovery: persist queue; jobs left rendering reopen as pending. — `apps/desktop/src/renderer/src/legacy/core/render-queue.ts`
+- [ ] Queue rows: show name, uppercase format, status and error; empty list shows empty-state message. — `apps/desktop/src/renderer/src/legacy/core/render-queue.ts`
+- [ ] Queue retry/remove: failed/cancelled jobs show Retry and reset to pending; others Remove; rendering job button disabled. — `apps/desktop/src/renderer/src/legacy/core/render-queue.ts`
+- [ ] Render pending: process pending jobs serially; stop at first non-complete result; restore original project/playhead and reopen queue. — `apps/desktop/src/renderer/src/legacy/core/render-queue.ts`
+- [ ] Export render options: Motion blur, Include audio, Transparent background and Burn in captions have format/capability-dependent availability. — `apps/desktop/src/renderer/src/legacy/core/exporter.ts`
+- [ ] Caption keyboard edit: Enter commits cue text, Shift+Enter allows newline, Escape cancels. — `apps/desktop/src/renderer/src/captions/CaptionsPanel.svelte`
+- [ ] Caption search: filter cue list; Escape clears and blurs; ArrowDown enters list at first visible cue. — `apps/desktop/src/renderer/src/captions/CaptionsPanel.svelte`
+- [ ] Caption list navigation: Up/Down selects cue, Enter edits, Delete/Backspace removes selected cues; list supports multi-selection. — `apps/desktop/src/renderer/src/captions/CaptionsPanel.svelte`
+- [ ] Caption layer menu: choose caption layer and synchronize layer selection. — `apps/desktop/src/renderer/src/captions/CaptionsPanel.svelte`
+- [ ] Mixer strip: one strip per audible layer plus master; click name selects layer; locked strips disable gain edits. — `apps/desktop/src/renderer/src/mixer/MixerStrip.svelte`
+- [ ] Mixer solo: solo is listening control; Option-click listens only to this strip. — `apps/desktop/src/renderer/src/mixer/MixerStrip.svelte`
+- [ ] Mixer clipping: clip indicator latches and clicking clears it. — `apps/desktop/src/renderer/src/mixer/MixerStrip.svelte`
+- [ ] Mixer animation: current-time level diamond adds/removes key; mute control indicates timeline animation. — `apps/desktop/src/renderer/src/mixer/MixerStrip.svelte`
+
+## 6. Cross-panel interaction, history, clipboard and keyboard
+
+- [ ] Primary modifier: Cmd shortcuts have Ctrl equivalents; exact file chords reject extra modifiers. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Undo/redo: Cmd+Z undo and Cmd+Shift+Z redo; editor commands defer to focused editable fields. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Split: Cmd+B or Cmd+Shift+D splits at playhead; select new right segment. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Layer clipboard: Cmd+C copies layers; Cmd+X cuts; Cmd+V pastes contextually; Cmd+D duplicates. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Grouping: Cmd+G groups; Cmd+Shift+G ungroups; Cmd+Shift+C precomposes. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Layer selection: Cmd+A selects all; Cmd+Shift+A deselects; Cmd+Up/Down selects previous/next; Shift extends. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Layer nudge: arrows move one unit; Shift+arrows ten; held arrows repeat. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Key nudge: Option+Left/Right moves one frame; Option+Shift+Left/Right ten; held keys repeat. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Playback: Space toggles playback outside text fields, including pointer over viewer. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Frame step: PageUp/PageDown or Cmd+Left/Right step one frame; Shift variants step ten. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Composition boundaries: Home/End jump start/end; Shift+Home/End jump work in/out. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Visible events: J previous visible event and K next; Shift+J/K previous/next real keyframe; Ctrl+Left/Right also navigate keys. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Layer timing: I/O jump layer in/out; [/] moves layer in/out to playhead; Option+[ or ] trims. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Boundary retime: Option+Home/End moves layer in to composition start or out to end. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Easing shortcuts: F9 Easy Ease; Shift+F9 Ease In; Cmd/Ctrl+Shift+F9 Ease Out. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Property reveal: P/S/R/T/A/U/M/F/E/L reveal property groups; Shift adds to existing reveal; Cmd+backtick reveals all. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Layer controls: Cmd+Shift+H toggles canvas layer controls. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Layer lock: Cmd+L locks selection; Cmd+Shift+L unlocks all. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Stack order: Cmd+[ or ] moves backward/forward; Shift sends to back/front. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Escape ownership: Escape in field blurs without deselecting; otherwise Escape deselects. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Delete ownership: Backspace/Delete removes context selection; selected keyframes take precedence over layer deletion. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Repeat safety: only frame steps and nudges repeat; destructive creation commands ignore key repeat. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] button-pointer-focus contract: Clicking a button does not leave focus or assign Space to its action. — `apps/desktop/e2e/button-pointer-focus.spec.ts`
+- [ ] figma-paste contract: Native copy and paste creates editable grouped layers, preserves rendered placement and undoes once. — `apps/desktop/e2e/figma-paste.spec.ts`
+- [ ] layer-paste contract: Keyboard paste places copied layers at the playhead and undo restores the stack. — `apps/desktop/e2e/layer-paste.spec.ts`
+- [ ] panel-text-entry contract: Command+V pastes text into a panel search field without pasting layers. — `apps/desktop/e2e/panel-text-entry.spec.ts`
+- [ ] panel-workflow contract: Drawing a box notes every touched panel and sends that focus with the prompt. — `apps/desktop/e2e/panel-workflow.spec.ts`
+- [ ] pro-editor-shortcuts contract: Command+Shift+D splits a group into two group strips. — `apps/desktop/e2e/pro-editor-shortcuts.spec.ts`
+- [ ] pro-editor-shortcuts contract: Professional shortcuts split, cut, paste, nudge, and respect focused fields. — `apps/desktop/e2e/pro-editor-shortcuts.spec.ts`
+- [ ] pro-editor-shortcuts contract: Space toggles playback while the pointer is over the viewer but stays local in text fields. — `apps/desktop/e2e/pro-editor-shortcuts.spec.ts`
+- [ ] pro-editor-shortcuts contract: After Effects timeline keys navigate, retime layers, and move selected keyframes. — `apps/desktop/e2e/pro-editor-shortcuts.spec.ts`
+
+- [ ] Effect clipboard payload: clone type/version, parameters, inputs, open state, enabled value and enabled animation; paste creates new effects for destination. — `apps/desktop/src/extensions/inspector/effect-clipboard.ts`
+
+## 7. Reusable controls component kit
+
+- [ ] BackTitle: back navigation heading exposes its action and title within inspector subpages. — `apps/desktop/src/renderer/src/controls/BackTitle.svelte`
+- [ ] ColorField: color swatch opens shared picker; mixed values supported; edits use gesture transactions. — `apps/desktop/src/renderer/src/controls/ColorField.svelte`
+- [ ] Disclosure: expand/collapse button exposes expanded state and controls visibility of child content. — `apps/desktop/src/renderer/src/controls/Disclosure.svelte`
+- [ ] FillField: edit solid/gradient fill through picker with fallback color and fill transaction. — `apps/desktop/src/renderer/src/controls/FillField.svelte`
+- [ ] FontField: searchable font sheet previews each face, checks current face, pages 80 results and restores trigger focus on dismiss. — `apps/desktop/src/renderer/src/controls/FontField.svelte`
+- [ ] NumField: drag right/up increases and left/down decreases; 3 px threshold, infinite drag; Shift ×10, Option ×0.1; click/Enter/F2 edits. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] PointField: 2D pad plus X/Y fields; arrows step, Shift ×10, Home resets to clamped zero; drag respects per-axis bounds. — `apps/desktop/src/renderer/src/controls/PointField.svelte`
+- [ ] RampField: drag/select color stops and midpoint; arrows ±1 or Shift ±10; Home/End choose endpoints; midpoint clamped 1–99. — `apps/desktop/src/renderer/src/controls/RampField.svelte`
+- [ ] Row: shared label associates with child control; supports paired and full-width content and consistent alignment. — `apps/desktop/src/renderer/src/controls/Row.svelte`
+- [ ] Section: shared section heading and optional action slot preserve inspector hierarchy. — `apps/desktop/src/renderer/src/controls/Section.svelte`
+- [ ] Segmented: tablist choices support keyboard navigation and animated active indicator. — `apps/desktop/src/renderer/src/controls/Segmented.svelte`
+- [ ] SelectField: typed option values preserved; mixed/unknown values represented; shared enhanced dropdown supplies listbox behavior. — `apps/desktop/src/renderer/src/controls/SelectField.svelte`
+- [ ] SliderField: visual slider or angle dial plus numeric value; arrows step, Shift ×10, Home/End choose min/max. — `apps/desktop/src/renderer/src/controls/SliderField.svelte`
+- [ ] TextField: Enter blurs/commits; live edit Escape cancels; editor shortcuts stay within input. — `apps/desktop/src/renderer/src/controls/TextField.svelte`
+- [ ] ToggleField: Left/Up false, Right/Down true, Space/Enter toggles; mixed and disabled state supported. — `apps/desktop/src/renderer/src/controls/ToggleField.svelte`
+- [ ] Numeric arithmetic: accept arithmetic; +5, *2, /4 and -=3 are relative; -2 means absolute negative two. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric commit: Enter/blur commits changed finite draft; Escape cancels; unchanged draft creates no edit. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric arrows: Up/Down changes one step, Shift ten; while editing arrows update draft. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric wheel: horizontal scrub is transactional; Shift ×10 and Option ×0.1; normal vertical scrolling remains available. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric display: show unit and precision; trim trailing zeroes; Mixed for multi-selection differences. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric drag cancel: Escape rolls back gesture and releases drag listeners; destroy cancels active scrub. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric feedback: haptic alignment on changed displayed value, limited to 40 ms intervals. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] Numeric range distinction: scrubs/arrows clamp to min/max; typed finite values follow text commit path without scrub clamp. — `apps/desktop/src/renderer/src/controls/NumField.svelte`
+- [ ] binding contract: Reads a live API time source for channel edits. — `apps/desktop/src/renderer/src/controls/binding.test.ts`
+- [ ] binding contract: Maps layer and content fields to typed commands. — `apps/desktop/src/renderer/src/controls/binding.test.ts`
+- [ ] binding contract: Clamps work-area endpoints through project and utility APIs. — `apps/desktop/src/renderer/src/controls/binding.test.ts`
+- [ ] color-space contract: Parses the notations a person pastes, with their alpha. — `apps/desktop/src/renderer/src/controls/color-space.test.ts`
+- [ ] color-space contract: Stores six digits while opaque so existing documents keep their values. — `apps/desktop/src/renderer/src/controls/color-space.test.ts`
+- [ ] color-space contract: Keeps Display P3 colours outside sRGB and clips only when writing hex. — `apps/desktop/src/renderer/src/controls/color-space.test.ts`
+- [ ] color-space contract: Formats each notation the way the value field shows it. — `apps/desktop/src/renderer/src/controls/color-space.test.ts`
+- [ ] color-space contract: Holds lightness while reducing chroma into gamut. — `apps/desktop/src/renderer/src/controls/color-space.test.ts`
+- [ ] components contract: Refreshes playback readouts at 15 Hz while edits and paused scrubs use live values. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Adjusts from horizontal trackpad movement and commits one gesture. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Keeps a negative value when the editor is opened and left, and treats a bare minus as a number. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Aborts a scrub cleanly when another edit transaction is already live. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Scrubs on both axes: right or up raises, left or down lowers. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Scrubs through begin → writes → commit and opens editing after a click/cancel. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Supports Tab-focus keyboard editing and commits arrows through once. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Formats precision/unit, clamps scrubs, and preserves legacy zero-option defaults. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Associates a visible Row label with the spinbutton. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Re-derives its getter after a document value tick. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: ToggleField uses the live animated value between playback readout ticks. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: FontField applies a choice matching the stale readout when the live font has changed. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: ToggleField applies the inverted getter value once. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: SelectField applies the selected typed option once. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: SelectField displays an unmatched raw value instead of the first option. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: FontField toggles closed and can open again. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: FontField uses the font list, invalidates all views, and exposes a dialog/listbox. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Starts typing from the live value between playback readout ticks. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Uses begin/write/commit and cancels an Escape edit. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: ColorField previews saturation and brightness continuously, then cancels the preview. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: ColorField removes confirmation buttons and commits the normalized choice when clicking outside. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: ColorField samples a screen color through the system eyedropper. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Mounts color and fill picker overlays above clipped panel contents. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: ColorField picks in Display P3 and writes the clipped sRGB hex. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: FillField previews color continuously across pointer moves. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: FillField shares the redesigned editor, preserves opacity, and cancels its transaction. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: FillField applies a normalized fill rather than its mutable draft. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Keeps the last valid gradient-stop color when the text buffer is invalid. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Commits a continuous slider drag once, then cancels a second drag with Escape. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Edits a ramp midpoint by keyboard and restores local state when a stop drag is cancelled. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Writes both point axes in a single command batch and supports exact fields. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Moves smoothly through normalized point ranges without an authored step. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Uses independent point steps anchored to each range minimum. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] components contract: Wraps a positive full-turn dial and uses a track for a narrow angle. — `apps/desktop/src/renderer/src/controls/components.test.ts`
+- [ ] gesture contract: Command mode drives a typed edit transaction with the label and origin. — `apps/desktop/src/renderer/src/controls/gesture.test.ts`
+- [ ] gesture contract: Click-without-drag still begins and cancels (edit.cancel fast path). — `apps/desktop/src/renderer/src/controls/gesture.test.ts`
+- [ ] gesture contract: Once() applies one-shot with the default interface origin. — `apps/desktop/src/renderer/src/controls/gesture.test.ts`
+- [ ] gesture contract: Local mode never touches edit or history. — `apps/desktop/src/renderer/src/controls/gesture.test.ts`
+- [ ] gesture contract: Legacy set mode wraps in history. — `apps/desktop/src/renderer/src/controls/gesture.test.ts`
+- [ ] horizontal-scrub contract: Groups horizontal movement, preserves vertical scrolling, and cancels on disposal. — `apps/desktop/src/renderer/src/controls/horizontal-scrub.test.ts`
+- [ ] horizontal-scrub contract: Paces haptics and stays quiet when the value cannot change. — `apps/desktop/src/renderer/src/controls/horizontal-scrub.test.ts`
+- [ ] legacy-color contract: Unmounts a control added and removed before mutation delivery. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Detects an ancestor added and removed in the same delivery. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Cleans up a same-turn removal through a real MutationObserver. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Preserves fields moved or reattached before delivery and disposes after their final removal. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Waits for initially detached controls to be attached. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Ignores mutations that happened before a field was created inside a detached container. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Preserves a never-connected field added to a container after its document removal. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Distinguishes real ephemeral connection from later detached insertion in the same batch. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Shares one observer and one callback delivery across 200 fields and releases it when empty. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Continues cleaning other controls when one component cleanup throws. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] legacy-color contract: Preserves live color/fill reads, writes and sync updates while attached. — `apps/desktop/src/renderer/src/controls/legacy-color.test.ts`
+- [ ] linked-scale contract: Keys the unchanged axis too when editing an unlinked animated Scale, and cancels both together. — `apps/desktop/src/renderer/src/controls/linked-scale.test.ts`
+- [ ] linked-scale contract: Keeps the starting scale ratio through zero, keys both axes, and undoes once. — `apps/desktop/src/renderer/src/controls/linked-scale.test.ts`
+- [ ] num-field-drag contract: Scrubs through the real component and drag helper, locks after the threshold, and undoes one edit. — `apps/desktop/src/renderer/src/controls/num-field-drag.test.ts`
+- [ ] num-field-drag contract: Cancels the whole scrub when pointer lock is lost, and a click still opens text editing. — `apps/desktop/src/renderer/src/controls/num-field-drag.test.ts`
+- [ ] pointer-focus contract: Releases a pointer-clicked button, including clicks on its icon, before its action. — `apps/desktop/src/renderer/src/controls/pointer-focus.test.ts`
+
+- [ ] Fill modes: Solid, Linear, Radial and None; preview uses a gesture, cancellation restores prior fill, close restores trigger focus. — `apps/desktop/src/renderer/src/controls/FillField.svelte`
+- [ ] Color picker axes: saturation/brightness pad, hue and opacity controls support keyboard and pointer edits. — `apps/desktop/src/renderer/src/controls/ColorField.svelte`
+- [ ] Color picker tools: screen color sampling, picker settings, color-space choices, notation choice, per-row Copy and restore previous color. — `apps/desktop/src/renderer/src/controls/ColorField.svelte`
+- [ ] Color picker gamut: out-of-sRGB draft shows Clipped and saves nearest sRGB color. — `apps/desktop/src/renderer/src/controls/ColorField.svelte`
+- [ ] Color picker focus: Escape cancels preview; Enter on slider commits/closes; Tab remains inside non-embedded popover. — `apps/desktop/src/renderer/src/controls/ColorField.svelte`
+
+## GPUI port notes
+
+- Custom hit-testing is the highest-risk shared dependency: prioritize transform handles, text, paths, common selection boxes, clip edges, keys, graph handles, markers and parent pickwhips; maintain screen-space hit tolerances across zoom.
+- High-frequency drags need a preview transaction that updates evaluated output immediately, commits once on release, and restores all state on Escape, pointer cancellation, panel destruction or lost focus. Preserve subframe pointer motion independently of composition FPS.
+- Text editing needs a native text-input client with caret/word selection, multiline clipboard, marked-text/IME composition, accessibility and focus restoration. IME equivalence requires dedicated native validation; existing DOM tests do not prove native IME parity.
+- Use virtualization for large layer/track/property lists, font search and effect lists; retain selection IDs, reveal ancestors and preserve scroll anchors while recycling rows. Graph and timeline coordinate origins must stay stable during scrolling/marquee.
+- Canvas synchronous engine queries: evaluated world/local matrices, effective ancestor locks, visible/pickable layer IDs and group-resolution chain, transformed bounds and anchors, local source dimensions, mask/vector evaluated vertices and tangents, snap candidates, 3D ray picks and projected gizmo geometry.
+- Text surface synchronous engine queries: evaluated string/font/style, paragraph constraints, line/glyph/caret layout, selection rectangles, hit-to-character mapping and transformed text bounds. Rendering readiness may be asynchronous, but caret placement cannot wait for an export pipeline.
+- Timeline synchronous engine queries: active composition FPS/duration/work area, layer ordering/hierarchy/track assignment, local/source time maps, clip bounds and trims, marker times, property/key metadata, evaluated values at playhead, graph values/slopes/handles, snapping events and effective locks. Waveforms should use cached summaries.
+- Inspector synchronous engine queries: selected layers and compatible property intersection, mixed values, effective locks, property schemas/ranges/units, evaluated values, key-at-time/animation/expression status, effect/mask ordering, source assets and text/font metadata.
+- Auxiliary surfaces synchronous engine queries: caption cues/word timing/style, audible strips and gain/mute automation, meter snapshots, effect/transition registry, export capabilities and queue job snapshots. Progress and transcription/download work remain asynchronous.
+- Shared selection/focus must have distinct layer, keyframe, property, effect, caption-cue, path-vertex and text-range contexts; routing Delete/Copy/Paste/Undo must honor the focused editor and modal ownership.
+- Keep GPUI editor interactions simple and map chrome to AppKit separately. This inventory records current behavior; adopting Liquid Glass must not change canvas coordinates, hit areas, keyboard ownership or undo scope.

@@ -1,0 +1,999 @@
+//! Additive media migration. The caller supplies an availability checkpoint for
+//! the COMPLETE reference closure (including history/trash/takes/agent owners).
+//! The importer never deletes source data, objects, mappings, or previous passes.
+//! A project with a newly missing payload is blocked individually. An incomplete
+//! inventory, unknown original identity or a mapping conflict prevents cutover.
+use crate::{
+    Result,
+    indexeddb::{Record, v2_fingerprint},
+    snapshot::{
+        Snapshot, archive_attempt, atomic_json, check_space, copy_verified_length, hash_file,
+        hash_file_counted, open_regular,
+    },
+};
+use anyhow::{Context, ensure};
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyRecord {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_blake3: Option<String>,
+    pub hash: String,
+    pub size: u64,
+    #[serde(rename = "type")]
+    pub mime: String,
+    pub revision: String,
+    pub at: f64,
+    pub source: String,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum OwnerKind {
+    Current,
+    Trash,
+    Take,
+    Undo,
+    Redo,
+    Agent,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Availability {
+    Original,
+    ProxyOnly,
+    Offline,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reference {
+    /// Local manifest identifier only. Never print it in telemetry.
+    pub owner: String,
+    pub owner_kind: OwnerKind,
+    pub key: String,
+    #[serde(default)]
+    pub legacy_id: Option<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub original_blake3: Option<String>,
+    #[serde(default)]
+    pub source_path: Option<PathBuf>,
+    #[serde(default)]
+    pub playback_proxy: bool,
+    #[serde(default)]
+    pub playback_proxy_version: u64,
+    #[serde(default)]
+    pub poster: bool,
+    pub before: Availability,
+    /// Its original is in a folder macOS guards and couldn't be opened: denied,
+    /// skipped or unanswered. It stays offline, with its source, for a relink.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unreached: bool,
+}
+impl Reference {
+    pub fn is_proxy(&self) -> bool {
+        self.playback_proxy || self.playback_proxy_version > 0
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosureInput {
+    /// Must name ALL six domains, even if a domain has zero references.
+    pub inventoried: BTreeSet<OwnerKind>,
+    pub references: Vec<Reference>,
+}
+impl ClosureInput {
+    pub fn complete(&self) -> bool {
+        [
+            OwnerKind::Current,
+            OwnerKind::Trash,
+            OwnerKind::Take,
+            OwnerKind::Undo,
+            OwnerKind::Redo,
+            OwnerKind::Agent,
+        ]
+        .into_iter()
+        .all(|k| self.inventoried.contains(&k))
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Status {
+    VerifiedOriginal,
+    ProxyOnly,
+    AlreadyOffline,
+    Unclassified,
+    NewlyMissing,
+    RegeneratePoster,
+    /// Its original is in a folder the person didn't give access to (denied,
+    /// skipped or unanswered) and nothing captured stands in. Offline, never
+    /// blocking; it keeps its source for a relink or a later grant.
+    NotReached,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosureEntry {
+    pub reference: Reference,
+    pub status: Status,
+    pub original: Option<KeyRecord>,
+    pub stored: Option<KeyRecord>,
+    pub export_warning: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Imported {
+    /// Full source metadata stays in the private checkpoint, including unknown
+    /// fields and external File metadata; host key JSON stays schema-compatible.
+    pub source_record: Record,
+    pub stored: Option<KeyRecord>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    Copying,
+    CheckingClosure,
+    Complete,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pass {
+    pub phase: Phase,
+    pub snapshot: String,
+    pub base_hash: String,
+    pub records: BTreeMap<String, Imported>,
+    /// Main's filesystem-backed media keys, separate from browser origins.
+    #[serde(default)]
+    pub disk_records: BTreeMap<String, KeyRecord>,
+    /// Full main records and typed source availability remain private and durable.
+    #[serde(default)]
+    pub disk_sources: BTreeMap<String, (Value, crate::library_media::SourceStatus)>,
+    pub closure: Vec<ClosureEntry>,
+    pub blocked_owners: BTreeSet<String>,
+    pub mapping_conflicts: BTreeSet<String>,
+    pub cutover_ready: bool,
+}
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct State {
+    version: u32,
+    passes: BTreeMap<String, Pass>,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Checkpoint {
+    ObjectPublished,
+    RecordPublished,
+    ClosurePublished,
+}
+
+/// Returns a private manifest, never a list suitable for telemetry. `hook` is
+/// for progress and crash-injection tests; errors leave the last atomic step.
+pub fn migrate(
+    snapshot: &Snapshot,
+    records: &[Record],
+    closure: &ClosureInput,
+    root: &Path,
+    hook: impl FnMut(Checkpoint) -> Result<()>,
+) -> Result<Pass> {
+    migrate_many(&[(snapshot, records)], closure, root, hook)
+}
+
+/// Coordinate all Chromium origins as one availability pass. Empty batches
+/// support profiles with source-linked/offline assets and no IndexedDB yet.
+/// Records with the same database/store/key across origins are refused rather
+/// than silently choosing one. Source roots are all checked before writing.
+pub fn migrate_many(
+    batches: &[(&Snapshot, &[Record])],
+    closure: &ClosureInput,
+    root: &Path,
+    hook: impl FnMut(Checkpoint) -> Result<()>,
+) -> Result<Pass> {
+    migrate_many_with_disk(batches, &[], closure, root, hook)
+}
+
+/// Main's owned filesystem media is part of the same immutable pass and
+/// closure as browser media. Source links remain in the captured index.
+pub fn migrate_many_with_disk(
+    batches: &[(&Snapshot, &[Record])],
+    disk_records: &[crate::library_media::DiskMediaRecord],
+    closure: &ClosureInput,
+    root: &Path,
+    mut hook: impl FnMut(Checkpoint) -> Result<()>,
+) -> Result<Pass> {
+    let source_states = disk_records
+        .iter()
+        .map(|r| Ok((r.key.clone(), (r.raw.clone(), r.source_status()?))))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let mut disk_keys = BTreeSet::new();
+    for record in disk_records {
+        ensure!(
+            disk_keys.insert(&record.key),
+            "duplicate disk media input key"
+        );
+        record.verify_owned()?;
+    }
+    for (snapshot, _) in batches {
+        ensure!(
+            snapshot.complete(),
+            "sampled snapshots cannot authorize a media migration"
+        );
+        snapshot.ensure_destination(root)?;
+    }
+    let records: Vec<_> = batches
+        .iter()
+        .flat_map(|(_, records)| records.iter())
+        .collect();
+    ensure!(
+        records.iter().all(|r| r.payload_index < r.external.len()),
+        "invalid media payload index"
+    );
+    fs::create_dir_all(root)?;
+    ensure!(
+        fs::symlink_metadata(root)?.is_dir(),
+        "unsafe migration destination"
+    );
+    for record in disk_records {
+        if let Some(path) = &record.owned_path {
+            ensure!(
+                !path.canonicalize()?.starts_with(root.canonicalize()?),
+                "migration destination overlaps disk media input"
+            );
+        }
+    }
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    check_space(root, 0)?;
+    // Serialization is per destination; source is never locked or opened by a
+    // database engine. TR/native must also hold the app's library lock.
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join("migration.lock"))?;
+    lock.try_lock_exclusive()
+        .context("migration already running")?;
+    let _lock = lock;
+    for dir in ["objects", "keys", "tmp"] {
+        fs::create_dir_all(root.join(dir))?;
+    }
+    // Keep existing single-origin checkpoints byte compatible.
+    let snapshot_id = if batches.len() == 1 {
+        batches[0].0.identity()?
+    } else {
+        blake3::hash(&serde_json::to_vec(
+            &batches
+                .iter()
+                .map(|(s, _)| s.identity())
+                .collect::<Result<Vec<_>>>()?,
+        )?)
+        .to_hex()
+        .to_string()
+    };
+    let state_file = root.join("migration.json");
+    let mut state: State = if state_file.exists() {
+        serde_json::from_reader(open_regular(&state_file)?)?
+    } else {
+        State {
+            version: 1,
+            ..State::default()
+        }
+    };
+    ensure!(state.version == 1, "unsupported migration checkpoint");
+    let mut fallbacks = BTreeMap::new();
+    for r in disk_records {
+        if matches!(
+            source_states[&r.key].1,
+            crate::library_media::SourceStatus::Owned
+                | crate::library_media::SourceStatus::Verified
+        ) {
+            continue;
+        }
+        let path = root
+            .join("keys")
+            .join(format!("{}.json", sha256(r.key.as_bytes())));
+        let mut candidates = state
+            .passes
+            .values()
+            .filter_map(|p| p.disk_records.get(&r.key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if path.exists() {
+            candidates.push(serde_json::from_reader(open_regular(&path)?)?);
+        }
+        for old in candidates {
+            verify_key(root, &old)?;
+            if old.key != r.key
+                || old.revision != r.revision
+                || old.size != r.size
+                || old.mime != r.mime
+            {
+                continue;
+            }
+            let mut owned = r.clone();
+            owned.owned_path = Some(object_path(root, &old.hash)?);
+            owned.source_path = None;
+            if owned.verify_owned().is_ok() {
+                fallbacks.insert(r.key.clone(), old);
+                break;
+            }
+        }
+    }
+    let mut base_bytes = serde_json::to_vec(&(records, closure))?;
+    if !fallbacks.is_empty() {
+        base_bytes.extend(serde_json::to_vec(&fallbacks)?);
+    }
+    // Preserve existing pass identities when the extra format is absent.
+    if !disk_records.is_empty() {
+        base_bytes.extend(serde_json::to_vec(&source_states)?);
+    }
+    let base_hash = blake3::hash(&base_bytes).to_hex().to_string();
+    let id = format!("{snapshot_id}:{base_hash}");
+    let mut pass = state.passes.get(&id).cloned().unwrap_or(Pass {
+        phase: Phase::Copying,
+        snapshot: snapshot_id,
+        base_hash,
+        records: BTreeMap::new(),
+        disk_records: BTreeMap::new(),
+        disk_sources: source_states.clone(),
+        closure: Vec::new(),
+        blocked_owners: BTreeSet::new(),
+        mapping_conflicts: BTreeSet::new(),
+        cutover_ready: false,
+    });
+    if pass.phase == Phase::Complete {
+        verify_pass(root, &pass)?;
+        return Ok(pass); // No timestamp/state rewrite, even on a subsequent launch.
+    }
+    save(&mut state, &id, &pass, &state_file)?;
+    let mut seen = BTreeSet::new();
+    for (snapshot, records) in batches {
+        for record in *records {
+            let rid = record_id(record);
+            if !seen.insert(rid.clone()) {
+                // A development server's origin holding a copy of a key the
+                // shipped app's origin (captured first) already brought.
+                hook(Checkpoint::RecordPublished)?;
+                continue;
+            }
+            if let Some(done) = pass.records.get(&rid) {
+                if let Some(key) = &done.stored {
+                    verify_key(root, key)?;
+                }
+                continue;
+            }
+            let payload = record.payload();
+            let path = record.payload_path(snapshot)?;
+            let stored = if let Some(path) = path {
+                let key = import_file(
+                    root,
+                    &path,
+                    payload.size,
+                    ImportInfo {
+                        key: &record.key,
+                        mime: &payload.mime,
+                        revision: record.revision(),
+                        at: record.value.get("at").and_then(Value::as_f64),
+                        expected: None,
+                    },
+                )?;
+                hook(Checkpoint::ObjectPublished)?;
+                Some(key)
+            } else if payload.size == 0 {
+                Some(import_empty(
+                    root,
+                    &record.key,
+                    &payload.mime,
+                    record.revision(),
+                )?)
+            } else {
+                None
+            };
+            // Checkpoint the manifest BEFORE publishing the public key. On conflict
+            // keep the existing key and both objects. Resolution belongs to cutover.
+            pass.records.insert(
+                rid,
+                Imported {
+                    source_record: record.clone(),
+                    stored: stored.clone(),
+                },
+            );
+            save(&mut state, &id, &pass, &state_file)?;
+            if let Some(key) = stored {
+                publish_key(root, &key, &mut pass.mapping_conflicts)?;
+            }
+            save(&mut state, &id, &pass, &state_file)?;
+            hook(Checkpoint::RecordPublished)?;
+        }
+    }
+    // Resume a crash between the record checkpoint and its key publication.
+    for r in pass.records.values() {
+        if let Some(k) = &r.stored {
+            publish_key(root, k, &mut pass.mapping_conflicts)?;
+        }
+    }
+    for r in disk_records {
+        use crate::library_media::SourceStatus;
+        if !matches!(
+            source_states[&r.key].1,
+            SourceStatus::Owned | SourceStatus::Verified
+        ) {
+            if let Some(key) = fallbacks.get(&r.key) {
+                pass.disk_records.insert(r.key.clone(), key.clone());
+                publish_key(root, key, &mut pass.mapping_conflicts)?;
+            }
+            continue;
+        }
+        let path = r
+            .owned_path
+            .as_ref()
+            .or(r.source_path.as_ref())
+            .context("missing media path")?;
+        r.open_verified()?;
+        let mut key = import_file(
+            root,
+            path,
+            r.size,
+            ImportInfo {
+                key: &r.key,
+                mime: &r.mime,
+                revision: Some(&r.revision),
+                at: Some(0.0),
+                expected: None,
+            },
+        )?;
+        // Verify both the checkpoint and the published copy against main's
+        // full SHA-256, in addition to the native BLAKE3 verification.
+        let mut copied = r.clone();
+        copied.owned_path = Some(object_path(root, &key.hash)?);
+        copied.source_path = None;
+        copied.verify_owned()?;
+        key.source = if r.source_path.is_some() {
+            "main-source-link"
+        } else {
+            "main-disk"
+        }
+        .into();
+        pass.disk_records.insert(r.key.clone(), key.clone());
+        save(&mut state, &id, &pass, &state_file)?;
+        hook(Checkpoint::ObjectPublished)?;
+        publish_key(root, &key, &mut pass.mapping_conflicts)?;
+        save(&mut state, &id, &pass, &state_file)?;
+        hook(Checkpoint::RecordPublished)?;
+    }
+    pass.phase = Phase::CheckingClosure;
+    save(&mut state, &id, &pass, &state_file)?;
+    pass.closure.clear();
+    pass.blocked_owners.clear();
+    for reference in &closure.references {
+        let matches: Vec<&Imported> = pass
+            .records
+            .values()
+            .filter(|r| {
+                r.source_record.key == reference.key
+                    || reference.legacy_id.as_deref() == Some(&r.source_record.key)
+            })
+            .collect();
+        let selected = select_record(&matches, reference)?;
+        let disk = pass
+            .disk_records
+            .get(&reference.key)
+            .or_else(|| {
+                reference
+                    .legacy_id
+                    .as_ref()
+                    .and_then(|id| pass.disk_records.get(id))
+            })
+            .filter(|r| {
+                reference
+                    .revision
+                    .as_ref()
+                    .is_none_or(|revision| revision == &r.revision)
+            });
+        let stored = disk
+            .cloned()
+            .or_else(|| selected.and_then(|r| r.stored.clone()));
+        // The captured record remains a rendition when project metadata says so,
+        // even if a sampled legacy fingerprint happens to collide.
+        let mut original = None;
+        if !reference.poster {
+            // The captured payload first: an original in a folder macOS guards is
+            // read only when nothing captured has its bytes.
+            if !reference.is_proxy()
+                && let Some(key) = &stored
+                && identity_matches(&object_path(root, &key.hash)?, reference)?
+            {
+                original = Some(key.clone());
+            }
+            // Main's index binds each original to its full SHA-256.
+            // Only the exact key/revision, verified again after copying, qualifies.
+            if original.is_none()
+                && !reference.is_proxy()
+                && reference.original_blake3.is_none()
+                && reference.fingerprint.is_none()
+                && let Some(key) = disk
+            {
+                original = Some(key.clone());
+            }
+            let indexed_source = disk_records
+                .iter()
+                .any(|r| r.key == reference.key || reference.legacy_id.as_deref() == Some(&r.key));
+            if original.is_none()
+                && !indexed_source
+                && !reference.unreached
+                && let Some(path) = &reference.source_path
+                && crate::library_media::is_resident(path)?
+                && reached(identity_matches(path, reference))?
+            {
+                let size = fs::metadata(path)?.len();
+                let mut key = import_file(
+                    root,
+                    path,
+                    size,
+                    ImportInfo {
+                        key: &format!("blake3-source:{}", sha256(&serde_json::to_vec(reference)?)),
+                        mime: "application/octet-stream",
+                        revision: None,
+                        at: None,
+                        expected: reference.original_blake3.as_deref(),
+                    },
+                )?;
+                ensure!(
+                    identity_matches(&object_path(root, &key.hash)?, reference)?,
+                    "original changed during migration"
+                );
+                key.source = "import".into();
+                original = Some(key);
+            }
+        }
+        let unavailable_disk = source_states.iter().any(|(key, (_, status))| {
+            (key == &reference.key || reference.legacy_id.as_ref() == Some(key))
+                && !matches!(
+                    status,
+                    crate::library_media::SourceStatus::Owned
+                        | crate::library_media::SourceStatus::Verified
+                )
+        });
+        let status =
+            if reference.unreached && !reference.poster && original.is_none() && stored.is_none() {
+                Status::NotReached
+            } else if unavailable_disk && stored.is_none() && !reference.poster {
+                Status::NewlyMissing
+            } else if reference.poster {
+                if stored.is_some() {
+                    Status::VerifiedOriginal
+                } else {
+                    Status::RegeneratePoster
+                }
+            } else if original.is_some() {
+                Status::VerifiedOriginal
+            } else if stored.is_some() && reference.is_proxy() {
+                Status::ProxyOnly
+            } else if stored.is_some() {
+                // A sampled mismatch can mean a transformed TIFF/HEIC/animation.
+                // Preserve it and warn; never call those bytes a verified original.
+                if reference.fingerprint.is_some() {
+                    Status::ProxyOnly
+                } else {
+                    Status::Unclassified
+                }
+            } else if reference.before == Availability::Offline {
+                Status::AlreadyOffline
+            } else {
+                Status::NewlyMissing
+            };
+        // Availability can improve. Losing an available original (even when a
+        // proxy remains), or losing an available proxy, blocks that owner.
+        let lost = match reference.before {
+            Availability::Original => original.is_none() && !reference.poster,
+            Availability::ProxyOnly => original.is_none() && stored.is_none() && !reference.poster,
+            Availability::Offline => false,
+        };
+        if lost || status == Status::NewlyMissing || status == Status::Unclassified {
+            pass.blocked_owners.insert(reference.owner.clone());
+        }
+        let export_warning = matches!(status, Status::ProxyOnly | Status::Unclassified);
+        pass.closure.push(ClosureEntry {
+            reference: reference.clone(),
+            status,
+            original,
+            stored,
+            export_warning,
+        });
+        save(&mut state, &id, &pass, &state_file)?;
+    }
+    // Missing *unreferenced* blobs also remain visible in the checkpoint. A
+    // complete source snapshot cannot silently omit available orphaned records.
+    pass.cutover_ready =
+        closure.complete() && pass.blocked_owners.is_empty() && pass.mapping_conflicts.is_empty();
+    verify_pass(root, &pass)?;
+    hook(Checkpoint::ClosurePublished)?;
+    pass.phase = Phase::Complete;
+    save(&mut state, &id, &pass, &state_file)?;
+    Ok(pass)
+}
+fn save(state: &mut State, id: &str, pass: &Pass, path: &Path) -> Result<()> {
+    state.passes.insert(id.to_owned(), pass.clone());
+    atomic_json(path, state)
+}
+fn record_id(r: &Record) -> String {
+    format!("{}:{}:{}", r.database, r.store, sha256(r.key.as_bytes()))
+}
+fn sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+fn select_record<'a>(records: &[&'a Imported], r: &Reference) -> Result<Option<&'a Imported>> {
+    let exact: Vec<_> = records
+        .iter()
+        .copied()
+        .filter(|i| i.source_record.key == r.key)
+        .collect();
+    let candidates = if exact.is_empty() {
+        records.to_vec()
+    } else {
+        exact
+    };
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|i| {
+            r.revision
+                .as_ref()
+                .is_none_or(|rev| i.source_record.revision() == Some(rev))
+        })
+        .collect();
+    ensure!(
+        candidates.len() <= 1,
+        "ambiguous media reference across databases/stores"
+    );
+    Ok(candidates.first().copied())
+}
+fn valid_hash(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn object_path(root: &Path, hash: &str) -> Result<PathBuf> {
+    ensure!(valid_hash(hash), "invalid object hash");
+    Ok(root.join("objects").join(&hash[..2]).join(hash))
+}
+fn verify_key(root: &Path, key: &KeyRecord) -> Result<()> {
+    let (hash, size) = hash_file(&object_path(root, &key.hash)?)?;
+    ensure!(
+        hash == key.hash && size == key.size,
+        "published media verification failed"
+    );
+    Ok(())
+}
+fn verify_pass(root: &Path, pass: &Pass) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for k in pass
+        .records
+        .values()
+        .filter_map(|r| r.stored.as_ref())
+        .chain(pass.disk_records.values())
+        .chain(
+            pass.closure
+                .iter()
+                .flat_map(|e| [e.original.as_ref(), e.stored.as_ref()])
+                .flatten(),
+        )
+    {
+        if seen.insert(&k.hash) {
+            verify_key(root, k)?;
+        }
+    }
+    for item in pass.records.values() {
+        if let Some(key) = &item.stored
+            && !pass.mapping_conflicts.contains(&key.key)
+        {
+            let file = root
+                .join("keys")
+                .join(format!("{}.json", sha256(key.key.as_bytes())));
+            let actual: KeyRecord = serde_json::from_reader(open_regular(&file)?)?;
+            ensure!(
+                same_mapping(&actual, key),
+                "published key mapping changed or missing"
+            );
+        }
+    }
+    for key in pass.disk_records.values() {
+        if !pass.mapping_conflicts.contains(&key.key) {
+            let file = root
+                .join("keys")
+                .join(format!("{}.json", sha256(key.key.as_bytes())));
+            let actual: KeyRecord = serde_json::from_reader(open_regular(&file)?)?;
+            ensure!(
+                same_mapping(&actual, key),
+                "published disk media mapping changed or missing"
+            );
+        }
+    }
+    Ok(())
+}
+fn same_mapping(a: &KeyRecord, b: &KeyRecord) -> bool {
+    a.key == b.key
+        && a.hash == b.hash
+        && a.size == b.size
+        && a.mime == b.mime
+        && a.revision == b.revision
+}
+fn publish_key(root: &Path, key: &KeyRecord, conflicts: &mut BTreeSet<String>) -> Result<()> {
+    ensure!(
+        !key.key.is_empty()
+            && key.key.len() <= 300
+            && key
+                .key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b":._-".contains(&b)),
+        "legacy key is outside host store schema; checkpoint retained"
+    );
+    ensure!(
+        // This is the native library mapping, not a PMV4 media index. Main's
+        // disk uploader accepts revisions up to 256 UTF-16 units and its
+        // stored-record reader preserves arbitrary strings. Keep them exact;
+        // the separate PMV4 writer still enforces that format's 200-unit bound.
+        !key.revision.is_empty() && key.at.is_finite() && key.size < (1u64 << 53),
+        "media metadata is outside host store schema"
+    );
+    let target = root
+        .join("keys")
+        .join(format!("{}.json", sha256(key.key.as_bytes())));
+    if target.exists() {
+        let old: KeyRecord = serde_json::from_reader(open_regular(&target)?)?;
+        verify_key(root, &old)?;
+        if !same_mapping(&old, key) {
+            conflicts.insert(key.key.clone());
+        }
+    } else {
+        atomic_json(&target, key)?;
+    }
+    Ok(())
+}
+fn import_empty(root: &Path, key: &str, mime: &str, revision: Option<&str>) -> Result<KeyRecord> {
+    let part = root.join("tmp/empty.part");
+    if fs::symlink_metadata(&part).is_ok() {
+        archive_attempt(&part)?;
+    }
+    let f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&part)?;
+    f.sync_all()?;
+    drop(f);
+    // The owned scratch input remains available even if import_file fails.
+    import_file(
+        root,
+        &part,
+        0,
+        ImportInfo {
+            key,
+            mime,
+            revision,
+            at: Some(0.0),
+            expected: None,
+        },
+    )
+}
+pub(crate) struct ImportInfo<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) mime: &'a str,
+    pub(crate) revision: Option<&'a str>,
+    pub(crate) at: Option<f64>,
+    pub(crate) expected: Option<&'a str>,
+}
+pub(crate) fn import_file(
+    root: &Path,
+    source: &Path,
+    size: u64,
+    info: ImportInfo<'_>,
+) -> Result<KeyRecord> {
+    let ImportInfo {
+        key,
+        mime,
+        revision,
+        at,
+        expected,
+    } = info;
+    // A same-volume APFS import is a clone; a streamed copy checks space itself.
+    if !crate::snapshot::clone_volume(source, root) {
+        check_space(root, size)?;
+    }
+    let (hash, read_size) = hash_file_counted(source)?;
+    ensure!(read_size == size, "source length changed");
+    if let Some(expected) = expected {
+        ensure!(hash == expected, "source BLAKE3 differs from reference");
+    }
+    let target = object_path(root, &hash)?;
+    if !target.exists() {
+        let temp = root.join("tmp").join(format!("{hash}.part"));
+        // Only our migration lock holder can own this deterministic staging file.
+        if temp.exists() {
+            archive_attempt(&temp)?;
+        }
+        copy_verified_length(source, &temp, size)?;
+        let (stored_hash, stored_size) = hash_file(&temp)?;
+        ensure!(
+            stored_hash == hash && stored_size == size,
+            "copied object BLAKE3 mismatch"
+        );
+        fs::create_dir_all(target.parent().unwrap())?;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o400))?;
+        fs::rename(&temp, &target)?;
+        File::open(target.parent().unwrap())?.sync_all()?;
+    }
+    let record = KeyRecord {
+        key: key.into(),
+        path: None,
+        sha256: None,
+        expected_blake3: None,
+        hash: hash.clone(),
+        size,
+        mime: mime.into(),
+        revision: revision.filter(|s| !s.is_empty()).unwrap_or(&hash).into(),
+        at: at.unwrap_or(0.0),
+        source: "indexeddb".into(),
+    };
+    verify_key(root, &record)?;
+    Ok(record)
+}
+/// A source macOS wouldn't let us open counts as not matching: it stays offline.
+fn reached(matched: Result<bool>) -> Result<bool> {
+    match matched {
+        Err(e) if crate::source_access::is_unreached(&e) => Ok(false),
+        other => other,
+    }
+}
+fn identity_matches(path: &Path, r: &Reference) -> Result<bool> {
+    if let Some(hash) = &r.original_blake3 {
+        ensure!(valid_hash(hash), "invalid expected BLAKE3");
+        return Ok(hash_file(path)?.0 == *hash);
+    }
+    if let Some(fp) = &r.fingerprint {
+        v2_fingerprint(fp)?;
+        return Ok(sampled_fingerprint(path)? == *fp);
+    }
+    Ok(false)
+}
+/// Exact shipped `v2` rule: deduplicated 64 KiB start/middle/end samples,
+/// prefixed with `powermove-media-v2\n<size>\n`. Full BLAKE3 is separate.
+pub fn sampled_fingerprint(path: &Path) -> Result<String> {
+    let mut file = open_regular(path)?;
+    let size = file.metadata()?.len();
+    let sample = size.min(64 * 1024);
+    let offsets = [0, (size - sample) / 2, size - sample];
+    let mut seen = BTreeSet::new();
+    let mut hash = Sha256::new();
+    hash.update(format!("powermove-media-v2\n{size}\n").as_bytes());
+    let mut buffer = vec![0; sample as usize];
+    for offset in offsets {
+        if seen.insert(offset) {
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(&mut buffer)?;
+            hash.update(&buffer);
+        }
+    }
+    ensure!(
+        file.metadata()?.len() == size,
+        "source changed during sampled fingerprint"
+    );
+    Ok(format!("v2:{size}:{}", hex::encode(hash.finalize())))
+}
+
+/// Finds complete asset-shaped objects in JSON project/history dictionaries,
+/// including nested patch `value`s and take snapshots. It is a discovery aid,
+/// NOT an assertion of closure: references represented only by packed paths,
+/// embedded PMV media or agent artifact files must also be supplied by the host.
+/// Unknown fields remain in the original input; this function never rewrites it.
+pub fn discover_assets(value: &Value) -> Vec<Value> {
+    fn walk(v: &Value, out: &mut Vec<Value>) {
+        match v {
+            Value::Object(o) => {
+                if o.get("id").and_then(Value::as_str).is_some()
+                    && (o.contains_key("storageKey")
+                        || o.contains_key("fingerprint")
+                        || o.contains_key("playbackProxy"))
+                {
+                    out.push(v.clone());
+                }
+                for v in o.values() {
+                    walk(v, out);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    walk(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, &mut out);
+    out
+}
+
+/// Logical localStorage export is private, atomic JSON. Exact DOM strings and
+/// unknown origin keys are retained alongside convenience parsed JSON values.
+pub fn export_local_storage(snapshot: &Snapshot, path: &Path) -> Result<usize> {
+    let entries = crate::local_storage::read(snapshot)?;
+    atomic_json(path, &entries)?;
+    Ok(entries.len())
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn interrupted_payload_is_archived_before_recopy() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("tmp")).unwrap();
+        let source = root.join("source");
+        fs::write(&source, b"synthetic original").unwrap();
+        let (hash, size) = hash_file(&source).unwrap();
+        fs::write(
+            root.join("tmp").join(format!("{hash}.part")),
+            b"synthetic partial",
+        )
+        .unwrap();
+        let key = import_file(
+            &root,
+            &source,
+            size,
+            ImportInfo {
+                key: "synthetic",
+                mime: "application/octet-stream",
+                revision: Some("v1"),
+                at: Some(0.0),
+                expected: Some(&hash),
+            },
+        )
+        .unwrap();
+        verify_key(&root, &key).unwrap();
+        assert_eq!(
+            fs::read(
+                root.join("tmp")
+                    .join(format!("{hash}.part.archive-0000000000000000"))
+            )
+            .unwrap(),
+            b"synthetic partial"
+        );
+        assert_eq!(fs::read(source).unwrap(), b"synthetic original");
+    }
+    #[test]
+    fn empty_payload_never_truncates_an_existing_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("tmp")).unwrap();
+        fs::write(root.join("tmp/empty.part"), b"retained unexpected input").unwrap();
+        let key = import_empty(&root, "empty", "application/octet-stream", Some("v1")).unwrap();
+        assert_eq!(key.size, 0);
+        verify_key(&root, &key).unwrap();
+        assert_eq!(
+            fs::read(root.join("tmp/empty.part.archive-0000000000000000")).unwrap(),
+            b"retained unexpected input"
+        );
+        assert_eq!(fs::metadata(root.join("tmp/empty.part")).unwrap().len(), 0);
+    }
+}

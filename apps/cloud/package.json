@@ -12,6 +12,10 @@
     "local:seed": "bun scripts/local-seed.ts",
     "local:samples": "bun scripts/local-samples.ts",
     "local:down": "bun scripts/local-down.ts",
+    "local:billing": "bun scripts/local-billing.ts",
+    "stripe:setup": "bun scripts/stripe-setup.ts",
+    "dev:stripe": "bun scripts/fake-stripe.ts",
+    "dev:ai": "bun scripts/ai-simulator.ts",
     "dev:emulate": "bun scripts/dev-emulate.ts",
     "admin:grant": "bun scripts/grant-admin.ts",
     "admin:revoke": "bun scripts/revoke-admin.ts",
@@ -20,16 +24,20 @@
     "types": "wrangler types --env-interface CloudflareBindings",
     "typecheck": "bun run types && tsc --noEmit",
     "test": "bun test",
-    "types:emit": "tsc -p tsconfig.types.json"
+    "types:emit": "bun run types && tsc -p tsconfig.types.json"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.106",
+    "@ai-sdk/openai": "4.0.121",
     "@hono/zod-validator": "0.9.1",
-    "@powermove/registry": "workspace:*",
     "@neondatabase/serverless": "1.1.0",
+    "@powermove/registry": "workspace:*",
+    "ai": "7.0.177",
     "better-auth": "1.7.5",
     "drizzle-orm": "0.45.3",
     "hono": "4.13.8",
     "pg": "8.23.0",
+    "stripe": "23.2.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
@@ -39,6 +47,6 @@
     "drizzle-kit": "0.31.11",
     "emulate": "^0.11.2",
     "typescript": "5.9.3",
-    "wrangler": "4.136.1"
+    "wrangler": "4.156.2"
   }
 }

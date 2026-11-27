@@ -1,0 +1,99 @@
+[
+  {
+    "id": "ollama",
+    "name": "Ollama",
+    "baseUrl": "http://localhost:11434/v1",
+    "kind": "local",
+    "downloadUrl": "https://ollama.com/download"
+  },
+  {
+    "id": "lmstudio",
+    "name": "LM Studio",
+    "baseUrl": "http://localhost:1234/v1",
+    "kind": "local",
+    "downloadUrl": "https://lmstudio.ai"
+  },
+  {
+    "id": "llamacpp",
+    "name": "llama.cpp server",
+    "baseUrl": "http://localhost:8080/v1",
+    "kind": "local",
+    "downloadUrl": "https://github.com/ggml-org/llama.cpp"
+  },
+  {
+    "id": "jan",
+    "name": "Jan",
+    "baseUrl": "http://localhost:1337/v1",
+    "kind": "local",
+    "downloadUrl": "https://jan.ai"
+  },
+  {
+    "id": "openrouter",
+    "name": "OpenRouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "kind": "cloud",
+    "keyUrl": "https://openrouter.ai/settings/keys",
+    "keyPrefix": "sk-or-"
+  },
+  {
+    "id": "openai",
+    "name": "OpenAI",
+    "baseUrl": "https://api.openai.com/v1",
+    "kind": "cloud",
+    "keyUrl": "https://platform.openai.com/api-keys",
+    "keyPrefix": "sk-"
+  },
+  {
+    "id": "anthropic",
+    "name": "Anthropic",
+    "baseUrl": "https://api.anthropic.com/v1",
+    "kind": "cloud",
+    "keyUrl": "https://console.anthropic.com/settings/keys",
+    "keyPrefix": "sk-ant-"
+  },
+  {
+    "id": "gemini",
+    "name": "Google Gemini",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "kind": "cloud",
+    "keyUrl": "https://aistudio.google.com/apikey",
+    "keyPrefix": "AIza"
+  },
+  {
+    "id": "groq",
+    "name": "Groq",
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "kind": "cloud",
+    "keyUrl": "https://console.groq.com/keys",
+    "keyPrefix": "gsk_"
+  },
+  {
+    "id": "deepseek",
+    "name": "DeepSeek",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "kind": "cloud",
+    "keyUrl": "https://platform.deepseek.com/api_keys",
+    "keyPrefix": "sk-"
+  },
+  {
+    "id": "xai",
+    "name": "xAI",
+    "baseUrl": "https://api.x.ai/v1",
+    "kind": "cloud",
+    "keyUrl": "https://console.x.ai",
+    "keyPrefix": "xai-"
+  },
+  {
+    "id": "mistral",
+    "name": "Mistral",
+    "baseUrl": "https://api.mistral.ai/v1",
+    "kind": "cloud",
+    "keyUrl": "https://console.mistral.ai/api-keys"
+  },
+  {
+    "id": "other",
+    "name": "Other compatible service",
+    "baseUrl": "",
+    "kind": "other"
+  }
+]

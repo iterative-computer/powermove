@@ -1,0 +1,48 @@
+{
+ "name": "confetti-field",
+ "kind": "extension",
+ "covers": [
+  "extension-number",
+  "iTime",
+  "helper-hash",
+  "arrays"
+ ],
+ "prompt": "Extension layer that draws falling confetti pieces; density and wind sliders.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "4182a7b37462acdd641d200b7753ea0a3c949192fe37d5183768ce45aa1f1472",
+  "seconds": 45.083,
+  "generated": "2026-10-17T07:34:41.506Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.confetti",
+  "label": "Confetti",
+  "version": 1,
+  "params": [
+   {
+    "k": "density",
+    "label": "Density",
+    "def": 0.5,
+    "min": 0,
+    "max": 1,
+    "step": 0.01
+   },
+   {
+    "k": "wind",
+    "label": "Wind",
+    "def": 0.3,
+    "min": -2,
+    "max": 2,
+    "step": 0.01
+   }
+  ],
+  "renderer": {
+   "kind": "fragment",
+   "fragment": "void main(){\n  float asp = iResolution.x / max(iResolution.y, 1.0);\n  vec2 p = vec2(uv.x * asp, uv.y);\n  vec4 acc = vec4(0.0);\n  for (int L = 0; L < 4; L++) {\n    float fl = float(L);\n    float sc = 6.0 + fl * 3.0;\n    float sp = 0.22 - 0.03 * fl;\n    vec2 q = p * sc + vec2(-u_wind * iTime * sp * sc * 0.6, iTime * sp * sc);\n    vec2 id = floor(q);\n    vec2 f = fract(q) - 0.5;\n    float h = hash(id + fl * 17.3);\n    if (h > u_density) continue;\n    float h2 = hash(id + vec2(3.1, 7.7) + fl);\n    float h3 = hash(id + vec2(11.0, 5.0) + fl);\n    vec2 c = (vec2(h2, h3) - 0.5) * 0.3;\n    c.x += 0.1 * sin(iTime * (1.0 + 2.0 * h2) + h * 6.2832);\n    vec2 d = f - c;\n    float dir = h2 > 0.5 ? 1.0 : -1.0;\n    float ang = iTime * (1.0 + 3.0 * h3) * dir + h * 6.2832 + u_wind * 0.5;\n    d = rot(ang) * d;\n    float flip = cos(iTime * (2.0 + 4.0 * h2) + h3 * 6.2832);\n    d.x /= max(abs(flip), 0.15);\n    float sz = 0.1 + 0.06 * h3;\n    float sd = h2 < 0.3 ? sdCircle(d, sz * 0.8) : sdBox(d, vec2(sz, sz * 0.45));\n    float aa = sc / max(iResolution.y, 1.0) * 1.5;\n    float a = 1.0 - smoothstep(-aa, aa, sd);\n    vec3 col = hsv2rgb(vec3(fract(h * 7.13 + h3), 0.75, 1.0));\n    col *= 0.55 + 0.45 * abs(flip);\n    acc.rgb += col * a * (1.0 - acc.a);\n    acc.a += a * (1.0 - acc.a);\n  }\n  fragColor = vec4(acc.rgb / max(acc.a, 1e-4), acc.a);\n}"
+  }
+ },
+ "summary": "I wrote `gen.confetti`, an extension layer of colored rectangles and circles that tumble, flip and sway as they fall over a transparent background. It's not compiled or rendered yet because this run had no live Powermove tools. It assumes the layer renderer provides the shader-layer helpers (iTime, iResolution, hash, rot, sdBox, hsv2rgb), but the API docs don't confirm that. It has keyframeable Density (0–1, default 0.5; how many grid cells get a piece) and Wind (−2 to 2, default 0.3; sideways drift and tilt), with pieces in 4 depth layers."
+}

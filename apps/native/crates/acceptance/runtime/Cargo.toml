@@ -1,0 +1,23 @@
+[package]
+name = "pm-acceptance-runtime"
+description = "Acceptance backing executable for checks that need V8, compat and services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+macos-sandbox = ["pm-runtime-v8/macos-sandbox", "pm-compat-runner/macos-sandbox"]
+
+[dependencies]
+pm-acceptance = { path = ".." }
+pm-compat-runner = { path = "../../compat-runner" }
+pm-mcp = { path = "../../mcp" }
+pm-runtime-v8 = { path = "../../runtime-v8" }
+pm-services = { path = "../../services" }
+pm-promedia = { path = "../../promedia" }
+pm-remote-dom = { path = "../../remote-dom" }
+pm-surface = { path = "../../surface" }
+pm-store-host = { path = "../../store-host" }
+pm-recorder = { path = "../../recorder" }
+serde_json = "1"

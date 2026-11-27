@@ -1,0 +1,538 @@
+//! Reuse the existing presenter policy without its bridge transport.
+use crate::audio::{AudioCtl, AudioLink};
+use crate::clock::TransportClock;
+use crate::media::MediaMap;
+use pm_protocol::{
+    clock::{ClockSample, TransportCommand, TransportState},
+    common::PlaybackRate,
+};
+
+pub use crate::clock::PREROLL_US;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShuttleKey {
+    J,
+    K,
+    L,
+}
+/// The shuttle's speeds, as Premiere and Final Cut step them: each further
+/// press in the direction of travel doubles, to eight times real time.
+pub const SHUTTLE_SPEEDS: [i32; 4] = [1, 2, 4, 8];
+/// K held with J or L held: this fraction of real time.
+pub const SHUTTLE_SLOW: u32 = 4;
+/// J and L start at real time in their direction (a press against the
+/// direction of travel turns around at once) and step up `SHUTTLE_SPEEDS`,
+/// staying consumed at the top; K pauses. While stopped they decline unless
+/// `from_pause` is set, so a keymap can give the keys another meaning then.
+pub fn shuttle(key: ShuttleKey, rate: PlaybackRate, from_pause: bool) -> Option<TransportCommand> {
+    let r = rate.num as f64 / rate.den.max(1) as f64;
+    if r == 0. && !from_pause {
+        return None;
+    }
+    let faster = |speed: f64| {
+        SHUTTLE_SPEEDS
+            .into_iter()
+            .find(|s| f64::from(*s) > speed)
+            .unwrap_or(SHUTTLE_SPEEDS[SHUTTLE_SPEEDS.len() - 1])
+    };
+    let num = match key {
+        ShuttleKey::K => return (r != 0.).then_some(TransportCommand::Pause),
+        // Slower than real time (a K+J release that never came) starts over.
+        ShuttleKey::J if r <= -1. => -faster(-r),
+        ShuttleKey::J => -1,
+        ShuttleKey::L if r >= 1. => faster(r),
+        ShuttleKey::L => 1,
+    };
+    Some(TransportCommand::Play {
+        rate: PlaybackRate { num, den: 1 },
+    })
+}
+
+/// Publish a stopped clock as soon as Pause is accepted by the viewer.
+pub(crate) fn freeze_sample(sample: &mut ClockSample, at: i64, frame_ticks: i64) {
+    use pm_protocol::common::{HostMicros, Ticks};
+    let at = HostMicros::new(at.max(0) as u64).unwrap_or(sample.host_time);
+    let media = sample.media_time_at(at.max(sample.host_time)).get().max(0);
+    let snap = media / frame_ticks * frame_ticks;
+    sample.media_time = Ticks::new(snap).unwrap_or(sample.media_time);
+    sample.host_time = at;
+    sample.rate = PlaybackRate::STOPPED;
+    sample.state = TransportState::Stopped;
+    sample.loop_range = None;
+}
+
+pub struct Transport {
+    pub clock: TransportClock,
+    pub audio: Option<std::sync::Arc<AudioLink>>,
+    // Deadline, previous device epoch, requested rate, requested media start.
+    awaiting: Option<(i64, Option<u32>, PlaybackRate, i64)>,
+    /// The last wait for the audio clock that ended: how long it took (µs)
+    /// and whether it ended on the host clock instead. Taken by the trace.
+    pub started: Option<(i64, bool)>,
+    pub fallback: bool,
+    audible: bool,
+    /// Latest known vsync (host s) and refresh interval for this viewer.
+    pub grid: Option<(f64, f64)>,
+    /// The Mixer's monitor solo (`None`: every strip), kept for a link that
+    /// opens later.
+    solo: Option<std::collections::HashSet<String>>,
+}
+/// The first vsync on `grid` at or after `at` (host µs). The picture can only
+/// change on vsync, so a run whose first sample is heard exactly on that line
+/// lets every following frame onset meet its audio (refresh-multiple rates).
+pub fn align_to_grid(at: i64, grid: Option<(f64, f64)>) -> i64 {
+    let Some((vsync, interval)) = grid.filter(|(v, i)| v.is_finite() && *v > 0. && *i >= 0.001)
+    else {
+        return at;
+    };
+    let t = at as f64 / 1e6;
+    let k = ((t - vsync) / interval).ceil();
+    let aligned = vsync + k * interval;
+    // Rounding can land a microsecond early; never start before `at`.
+    ((aligned * 1e6).round() as i64).max(at)
+}
+/// The end of composition `comp` of `doc` in ticks, as the audio clock reads it.
+fn composition_end(doc: &pm_model::Document, comp: &str) -> Option<i64> {
+    let dur = pm_eval::Comp::resolve(doc, comp).ok()?.duration();
+    dur.is_finite()
+        .then(|| (dur * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64)
+        .filter(|&e| e > 0)
+}
+impl Transport {
+    pub fn new(frame_ticks: i64) -> Self {
+        Self {
+            clock: TransportClock::new(frame_ticks),
+            audio: None,
+            awaiting: None,
+            started: None,
+            fallback: false,
+            audible: false,
+            grid: None,
+            solo: None,
+        }
+    }
+    /// Worker only. AudioLink lazily opens Playback after WARM_IDLE if audible.
+    pub fn enable_audio(
+        &mut self,
+        doc: &pm_model::Document,
+        comp: String,
+        media: MediaMap,
+        levels: crate::audio::LevelsSink,
+    ) -> anyhow::Result<()> {
+        let audible = self.refresh_audible(doc, &comp);
+        let link =
+            AudioLink::start(doc.clone(), comp, media, levels).map_err(anyhow::Error::msg)?;
+        link.send(AudioCtl::Warm);
+        if self.solo.is_some() {
+            link.send(AudioCtl::Solo(self.solo.clone()));
+        }
+        self.audio = Some(std::sync::Arc::new(link));
+        Ok(audible?)
+    }
+    pub fn update(
+        &mut self,
+        snapshot: &crate::Snapshot,
+        media: MediaMap,
+        comp: &str,
+    ) -> pm_audio::Result<()> {
+        let audible = self.refresh_audible(&snapshot.document, comp);
+        // A viewer that stops at the composition's end stops at its end as
+        // it is now: a duration changed in Project Settings moves it at once
+        // (the audio clock reads it from the same revision).
+        if self.clock.end().is_some()
+            && let Some(end) = composition_end(&snapshot.document, comp)
+        {
+            self.clock.set_end(Some(end));
+        }
+        if let Some(audio) = &self.audio {
+            // Composition identity is fixed for a viewer.
+            audio.send(AudioCtl::Document {
+                root: snapshot.document.root().cloned(),
+                revision: pm_protocol::common::Revision::new(snapshot.revision)
+                    .expect("kernel revision"),
+            });
+            audio.send(AudioCtl::Media(media));
+        }
+        audible
+    }
+    /// An empty document or an unresolved composition is an error, not
+    /// silence. It leaves nothing to hear, so playback follows the host clock.
+    fn refresh_audible(&mut self, doc: &pm_model::Document, comp: &str) -> pm_audio::Result<()> {
+        let audible = pm_audio::graph::audible(doc, comp, &mut pm_eval::Evaluator::new());
+        self.audible = matches!(audible, Ok(true));
+        audible.map(drop)
+    }
+    /// The Mixer's monitor solo: the strips heard (empty: every strip). A
+    /// listening aid; never part of the document or an export.
+    pub fn monitor(&mut self, solo: Vec<String>) {
+        self.solo = (!solo.is_empty()).then(|| solo.into_iter().collect());
+        if let Some(a) = &self.audio {
+            a.send(AudioCtl::Solo(self.solo.clone()));
+        }
+    }
+    pub(crate) fn pause_at(&mut self, at: i64) {
+        self.clock.apply(TransportCommand::Pause, at);
+        self.awaiting = None;
+        if let Some(audio) = &self.audio {
+            audio.send(AudioCtl::Pause);
+        }
+    }
+
+    pub fn command(&mut self, cmd: TransportCommand, now: i64) {
+        if cmd == TransportCommand::Pause {
+            self.pause_at(now);
+            return;
+        }
+        let before = self
+            .audio
+            .as_ref()
+            .and_then(|a| a.clock())
+            .and_then(|c| c.latest())
+            .map(|s| s.epoch);
+        let rate = self.awaiting.map_or(self.clock.rate(), |a| a.2);
+        let running = self.clock.is_playing() || self.awaiting.is_some();
+        match cmd {
+            TransportCommand::Play { rate } => {
+                if running && rate == self.clock.rate() {
+                    return;
+                }
+                let mut from = self.clock.picture_at(now);
+                if !running {
+                    let range = self.clock.loop_range();
+                    let start = range.map_or(0, |r| r.start.get());
+                    let end = range.map(|r| r.end.get()).or(self.clock.end());
+                    if rate.num > 0 && end.is_some_and(|end| from >= end) {
+                        from = start;
+                    }
+                    if rate.num < 0 && from <= start {
+                        from = end.unwrap_or(from);
+                    }
+                    self.clock.hold(from, now);
+                }
+                let start = align_to_grid(now + PREROLL_US, self.grid);
+                self.clock.play_at(rate, now, start);
+                if let Some(a) = self.audio.as_ref().filter(|_| self.audible) {
+                    a.send(AudioCtl::Play {
+                        from,
+                        rate,
+                        at: start,
+                    });
+                    self.clock.hold(from, now);
+                    self.awaiting = Some((
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
+                        before,
+                        rate,
+                        from,
+                    ));
+                }
+            }
+            TransportCommand::PlayAround {
+                pre_roll,
+                post_roll,
+            } => {
+                let here = self.clock.picture_at(now);
+                if let Some(a) = self.audio.as_ref().filter(|_| self.audible) {
+                    a.send(AudioCtl::PlayAround {
+                        at: here,
+                        pre: pre_roll,
+                        post: post_roll,
+                    });
+                    self.clock.hold(here, now);
+                    self.awaiting = Some((
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
+                        before,
+                        PlaybackRate::NORMAL,
+                        (here - pre_roll.get().max(0)).max(0),
+                    ));
+                } else {
+                    self.clock
+                        .play_around(here, pre_roll.get(), post_roll.get(), now);
+                }
+            }
+            TransportCommand::Seek { time, mode } => {
+                self.clock.apply(cmd, now);
+                if let Some(a) = &self.audio {
+                    if running && (self.audible || self.clock.following()) {
+                        a.send(AudioCtl::Seek(time.get()));
+                        self.clock.hold(time.get(), now);
+                        self.awaiting = Some((
+                            now + crate::clock::AUDIO_START_TIMEOUT_US,
+                            before,
+                            rate,
+                            time.get(),
+                        ));
+                    } else {
+                        a.send(if mode == pm_protocol::clock::SeekMode::Scrub {
+                            AudioCtl::Scrub(time.get())
+                        } else {
+                            AudioCtl::Seek(time.get())
+                        });
+                    }
+                }
+            }
+            TransportCommand::AudioScrub { enabled } => {
+                if let Some(a) = &self.audio {
+                    a.send(AudioCtl::AudioScrub(enabled));
+                }
+            }
+            _ => {
+                self.clock.apply(cmd, now);
+                if matches!(cmd, TransportCommand::Step { .. }) {
+                    self.awaiting = None;
+                }
+                if let Some(a) = &self.audio {
+                    a.send(AudioCtl::Transport(cmd));
+                }
+            }
+        }
+    }
+    pub fn poll(&mut self, now: i64) -> ClockSample {
+        if let Some(a) = &self.audio {
+            if let Some(s) = a.clock().and_then(|c| c.latest()) {
+                let accept = match self.awaiting {
+                    Some((_, epoch, ..)) => {
+                        s.state != TransportState::Stopped && Some(s.epoch) != epoch
+                    }
+                    None => self.clock.following(),
+                };
+                if accept {
+                    if let Some((_, _, _, from)) = self.awaiting {
+                        self.clock.follow_start(&s, from);
+                    } else {
+                        self.clock.follow(&s);
+                    }
+                    if let Some((deadline, ..)) = self.awaiting.take() {
+                        self.started = Some((
+                            now - (deadline - crate::clock::AUDIO_START_TIMEOUT_US),
+                            false,
+                        ));
+                    }
+                }
+            }
+            if let Some((deadline, _, rate, _)) = self.awaiting
+                && (a.failed() || now >= deadline)
+            {
+                self.awaiting = None;
+                self.started = Some((
+                    now - (deadline - crate::clock::AUDIO_START_TIMEOUT_US),
+                    true,
+                ));
+                self.clock.apply(TransportCommand::Play { rate }, now);
+                a.send(AudioCtl::Pause);
+                self.fallback = true;
+            }
+        }
+        self.clock.stop_at_end(now);
+        self.clock.sample(now)
+    }
+    /// Lift a wrapped frame time onto this audio epoch's unwrapped line near
+    /// its intended presentation. Loops are continuous; seek/play/device
+    /// discontinuities are fenced by poll() before this line is followed.
+    pub fn audio_host_for(
+        &self,
+        time: pm_protocol::common::Ticks,
+        near_host_us: i64,
+    ) -> Option<f64> {
+        if !self.clock.following() {
+            return None;
+        }
+        let predicted = self.clock.unwrapped_at(near_host_us);
+        let mut media = time.get();
+        if let Some(range) = self.clock.loop_range().filter(|r| r.is_valid()) {
+            let wrapped = self.clock.wrap(predicted);
+            if (wrapped != predicted || (range.start.get()..range.end.get()).contains(&predicted))
+                && (range.start.get()..range.end.get()).contains(&media)
+            {
+                let length = range.end.get() - range.start.get();
+                let passes = ((predicted - media) as f64 / length as f64).round() as i64;
+                media = media.saturating_add(passes.saturating_mul(length));
+            }
+        }
+        self.clock.host_at(media)
+    }
+    pub fn running(&self) -> bool {
+        self.clock.is_playing() || self.awaiting.is_some()
+    }
+    pub fn rate(&self) -> PlaybackRate {
+        self.awaiting.map_or(self.clock.rate(), |a| a.2)
+    }
+}
+
+/// Device presentation timestamps only. The caller matches a video media time
+/// to the host timestamp at which audio plays that SAME media time.
+#[derive(Default)]
+pub struct AvMeasurements {
+    offsets_ms: Vec<f64>,
+}
+#[derive(Debug)]
+pub struct AvReport {
+    pub samples: usize,
+    pub mean_abs_ms: f64,
+    pub p95_jitter_ms: f64,
+}
+impl AvMeasurements {
+    pub fn record(&mut self, video_host_us: u64, audio_host_us: u64) {
+        self.offsets_ms
+            .push((video_host_us as f64 - audio_host_us as f64) / 1000.);
+    }
+    pub fn report(&self) -> Option<AvReport> {
+        if self.offsets_ms.is_empty() {
+            return None;
+        }
+        let mean = self.offsets_ms.iter().sum::<f64>() / self.offsets_ms.len() as f64;
+        let mut jitter: Vec<_> = self.offsets_ms.iter().map(|v| (v - mean).abs()).collect();
+        jitter.sort_by(f64::total_cmp);
+        Some(AvReport {
+            samples: jitter.len(),
+            mean_abs_ms: self.offsets_ms.iter().map(|v| v.abs()).sum::<f64>() / jitter.len() as f64,
+            p95_jitter_ms: jitter[(jitter.len() * 95).div_ceil(100) - 1],
+        })
+    }
+}
+
+#[cfg(test)]
+mod start_wait_tests {
+    use super::*;
+
+    #[test]
+    fn a_delayed_pause_keeps_the_frame_at_the_request_time() {
+        use pm_protocol::common::TICKS_PER_SECOND as S;
+
+        let mut transport = Transport::new(S / 30);
+        transport.command(
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+            0,
+        );
+        let pause = PREROLL_US + 1_045_000;
+        let mut public = transport.clock.sample(pause - 20_000);
+        freeze_sample(&mut public, pause, S / 30);
+        transport.pause_at(pause);
+        let stopped = transport.poll(pause + 500_000);
+        assert_eq!(public.media_time, stopped.media_time);
+        assert_eq!(stopped.media_time.get(), S + S / 30);
+        assert_eq!(stopped.state, TransportState::Stopped);
+    }
+
+    /// A start that gives up on the audio clock says how long it waited and
+    /// that it fell back to the host clock; the trace takes it once.
+    #[test]
+    fn a_start_that_falls_back_reports_its_wait_once() {
+        let doc = pm_model::Document::new(None, 1);
+        let mut transport = Transport::new(1);
+        transport.audio = Some(std::sync::Arc::new(
+            AudioLink::start(doc, "C".into(), Default::default(), Box::new(|_| {})).unwrap(),
+        ));
+        let asked = 100;
+        transport.awaiting = Some((
+            asked + crate::clock::AUDIO_START_TIMEOUT_US,
+            None,
+            PlaybackRate::NORMAL,
+            0,
+        ));
+        transport.poll(asked + 400_000);
+        assert_eq!(transport.started, None, "still waiting");
+        transport.poll(asked + crate::clock::AUDIO_START_TIMEOUT_US + 7);
+        assert_eq!(
+            transport.started.take(),
+            Some((crate::clock::AUDIO_START_TIMEOUT_US + 7, true))
+        );
+        assert!(transport.fallback && transport.clock.is_playing());
+        transport.poll(asked + 2 * crate::clock::AUDIO_START_TIMEOUT_US);
+        assert_eq!(transport.started, None, "reported once");
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::align_to_grid;
+    #[test]
+    fn starts_land_on_the_next_vsync_and_never_early() {
+        let grid = Some((100.0, 1. / 120.));
+        // 100.05 s is between vsyncs 6 (100.05) exactly and 7.
+        assert_eq!(align_to_grid(100_050_000, grid), 100_050_000);
+        let at = align_to_grid(100_051_000, grid);
+        assert_eq!(at, 100_058_333);
+        assert!(at >= 100_051_000);
+        // Old phase extrapolates; no grid or a bad one leaves `at` alone.
+        let k = (align_to_grid(160_000_001, grid) - 100_000_000) as f64 / (1e6 / 120.);
+        assert!((k - k.round()).abs() < 1e-3, "extrapolated phase: {k}");
+        assert_eq!(align_to_grid(5, None), 5);
+        assert_eq!(align_to_grid(5, Some((f64::NAN, 0.01))), 5);
+    }
+}
+
+#[cfg(test)]
+mod audible_tests {
+    use super::Transport;
+    use pm_model::{Document, json::parse};
+
+    fn project(layers: &str) -> Document {
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":1,"layers":[{layers}],"comps":{{}},"assets":{{}},"params":{{}}}}"#
+        );
+        Document::new(Some(parse(&text).unwrap()), 1)
+    }
+
+    /// Project Settings ▸ Duration from 10 s to 90 s under a bound viewer: the
+    /// next revision moves where a run stops, so it plays on past 10 s.
+    #[test]
+    fn a_run_stops_at_the_compositions_end_as_it_is_now() {
+        use pm_protocol::common::{PlaybackRate, TICKS_PER_SECOND as S};
+        let snapshot = |dur: f64| {
+            let text = format!(
+                concat!(
+                    r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":{},"#,
+                    r#""layers":[],"comps":{{}},"assets":{{}},"params":{{}}}}"#
+                ),
+                dur
+            );
+            crate::Snapshot {
+                doc_id: 1,
+                revision: 2,
+                document: std::sync::Arc::new(Document::new(Some(parse(&text).unwrap()), 2)),
+            }
+        };
+        let mut transport = Transport::new(S / 30);
+        transport.clock.set_end(Some(10 * S));
+        let _ = transport.update(&snapshot(90.), Default::default(), "C");
+        assert_eq!(transport.clock.end(), Some(90 * S));
+        let play = pm_protocol::clock::TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        };
+        transport.command(play, 0);
+        let at = crate::clock::PREROLL_US + 13_000_000;
+        transport.poll(at);
+        assert_ne!(
+            transport.rate(),
+            PlaybackRate::STOPPED,
+            "13 s in, still playing"
+        );
+        assert_eq!(transport.clock.media_at(at), 13 * S);
+        // A viewer without an end (offscreen renders) is left without one.
+        let mut free = Transport::new(S / 30);
+        let _ = free.update(&snapshot(90.), Default::default(), "C");
+        assert_eq!(free.clock.end(), None);
+    }
+
+    #[test]
+    fn an_invalid_graph_is_an_error_and_silence_is_not() {
+        let audio = r#"{"id":"a","type":"audio","name":"a","from":0,"dur":1,"on":true,"solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],"d":{"asset":"x","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}"#;
+        let mut transport = Transport::new(1);
+        transport.refresh_audible(&project(audio), "C").unwrap();
+        assert!(transport.audible);
+        assert!(
+            transport
+                .refresh_audible(&project(audio), "missing")
+                .is_err()
+        );
+        assert!(!transport.audible);
+        assert!(
+            transport
+                .refresh_audible(&Document::new(None, 1), "C")
+                .is_err()
+        );
+        transport.refresh_audible(&project(""), "C").unwrap();
+        assert!(!transport.audible);
+    }
+}

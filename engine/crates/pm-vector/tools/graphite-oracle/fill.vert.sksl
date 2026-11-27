@@ -1,0 +1,23 @@
+// m152 TessellateWedgesRenderStep, using the source static/instance attributes.
+layout(set=0,binding=0) uniform Params { float4 u[12]; };
+layout(location=0) in float2 resolveLevel_and_idx;
+layout(location=1) in float4 p01;
+layout(location=2) in float4 p23;
+layout(location=3) in float2 fanPoint;
+layout(location=4) in float depth;
+layout(location=5) in uint ssboIndex;
+layout(location=6) in float curveType;
+void main() {
+    float4x4 localToDevice=float4x4(u[1],u[2],u[3],u[4]);
+    float2 localCoord;
+    if (resolveLevel_and_idx.x < 0) {
+        localCoord=fanPoint;
+    } else {
+        float2x2 vectorXform=float2x2(localToDevice[0].xy,localToDevice[1].xy);
+        localCoord=tessellate_filled_curve(vectorXform,resolveLevel_and_idx.x,
+            resolveLevel_and_idx.y,p01,p23,curveType);
+    }
+    float4 devPosition=localToDevice*float4(localCoord,0,1);
+    devPosition.z=depth;
+    sk_Position=float4(u[0].zw*devPosition.xy-sign(u[0].zw)*devPosition.ww,devPosition.zw);
+}

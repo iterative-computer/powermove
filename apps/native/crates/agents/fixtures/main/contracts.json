@@ -1,0 +1,2380 @@
+{
+  "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "synthetic": true,
+  "sources": [
+    {
+      "file": "apps/desktop/src/main/claude/adapter.ts",
+      "sha256": "94936dbfe6790fd48d7d25cd5edffaadb1da267c12a1b3bec5fccbb35df375b3"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-testing.ts",
+      "sha256": "5c4b96c7d944f3952623e497ebacd7544bec57bbaced5367104b801b65d4d767"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-models.ts",
+      "sha256": "891f5e1d10aab98199cd9c51145ccf65c4f9c5a3be4b39d405020dc69f4ea58e"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/core/memory.ts",
+      "sha256": "f8af5ce132862fb2b7b25cee4f833a97c42626b2df62c0dad3290adfc69f894e"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/core/types/project.ts",
+      "sha256": "b63348d52558889812616d69993a6ed4597b14413cf145fba1383eecd11b56f6"
+    },
+    {
+      "file": "apps/desktop/src/shared/compatible-provider.ts",
+      "sha256": "aa718450dfc13c9828b5578805beace6a77eaf3c42dfb77a33f4622a0b3f57ba"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/panels/agent/work-groups.ts",
+      "sha256": "556c470bca61164e861266da4f0992565814a670cdcdb5d589195fe5cf77d4fd"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/panels/agent/markdown.ts",
+      "sha256": "2d4adf66ca163f690413dfa35788843c296d7997b0bebc13ca1956c1d83d0097"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-media.ts",
+      "sha256": "81857c2f6213eb4214c843f66cb455b75406e21e9115ff17641678f595c26a39"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/panels/agent/markdown.test.ts",
+      "sha256": "f9609b8db8b2e0667bbe441190dde111083450612b3e089af6ddba06d9cea6ef"
+    },
+    {
+      "file": "apps/desktop/src/shared/visual-reply.ts",
+      "sha256": "7b0b4588ee04e162bfc532f78ed4a5c11ab02a7745a764f73d816093db827496"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-clients.ts",
+      "sha256": "ff694d33ce3be4e4aef44e37a9840556c0c5d9e3064b90677bc49cea61ce604f"
+    }
+  ],
+  "captureSha256": "57d2a2db7bc221b6231a3d6a37706dbd6c1e45d5a034a756e5ee4bcad72fff17",
+  "urls": [
+    {
+      "input": "localhost:11434",
+      "output": "http://localhost:11434/v1"
+    },
+    {
+      "input": "http://127.0.0.1:1234/v1/",
+      "output": "http://127.0.0.1:1234/v1"
+    },
+    {
+      "input": "[::1]:8080/chat/completions",
+      "output": "http://[::1]:8080/v1"
+    },
+    {
+      "input": "https://provider.example/deployment/chat/completions/",
+      "output": "https://provider.example/deployment"
+    },
+    {
+      "input": "provider.example",
+      "output": "https://provider.example/v1"
+    },
+    {
+      "input": "http://provider.example/v1",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://user:pass@provider.example",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://provider.example/v1?key=synthetic",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://provider.example/#fragment",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://PROVIDER.example:443/a//",
+      "output": "https://provider.example/a"
+    }
+  ],
+  "markdown": [
+    {
+      "input": {
+        "text": "# Authored **heading**\n\nParagraph with *emphasis* and `code`."
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 1,
+            "runs": [
+              {
+                "text": "Authored "
+              },
+              {
+                "text": "heading",
+                "b": true
+              }
+            ]
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Paragraph with "
+              },
+              {
+                "text": "emphasis",
+                "i": true
+              },
+              {
+                "text": " and "
+              },
+              {
+                "text": "code",
+                "c": true
+              },
+              {
+                "text": "."
+              }
+            ]
+          }
+        ],
+        "plain": "Authored heading\nParagraph with emphasis and code."
+      }
+    },
+    {
+      "input": {
+        "text": "- [x] done\n- [ ] pending\n  - child\n\n1. first\n2. second"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "done"
+                      }
+                    ]
+                  }
+                ],
+                "checked": true
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "pending"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "start": 1,
+                    "items": [
+                      {
+                        "blocks": [
+                          {
+                            "kind": "p",
+                            "runs": [
+                              {
+                                "text": "child"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "checked": false
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "first"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "second"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "done\npending\nchild\nfirst\nsecond"
+      }
+    },
+    {
+      "input": {
+        "text": "> ## Quote\n> body\n>\n> - nested item"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "quote",
+            "blocks": [
+              {
+                "kind": "h",
+                "level": 2,
+                "runs": [
+                  {
+                    "text": "Quote"
+                  }
+                ]
+              },
+              {
+                "kind": "p",
+                "runs": [
+                  {
+                    "text": "body"
+                  }
+                ]
+              },
+              {
+                "kind": "list",
+                "ordered": false,
+                "start": 1,
+                "items": [
+                  {
+                    "blocks": [
+                      {
+                        "kind": "p",
+                        "runs": [
+                          {
+                            "text": "nested item"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "Quote\nbody\nnested item"
+      }
+    },
+    {
+      "input": {
+        "text": "Title\n---\n\n---"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 2,
+            "runs": [
+              {
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "kind": "hr"
+          }
+        ],
+        "plain": "Title\n"
+      }
+    },
+    {
+      "input": {
+        "text": "| A | B |\n| :--- | ---: |\n| **one** | two |"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "table",
+            "headers": [
+              [
+                {
+                  "text": "A"
+                }
+              ],
+              [
+                {
+                  "text": "B"
+                }
+              ]
+            ],
+            "align": [
+              "left",
+              "right"
+            ],
+            "rows": [
+              [
+                [
+                  {
+                    "text": "one",
+                    "b": true
+                  }
+                ],
+                [
+                  {
+                    "text": "two"
+                  }
+                ]
+              ]
+            ]
+          }
+        ],
+        "plain": "A | B\none | two"
+      }
+    },
+    {
+      "input": {
+        "text": "```rust\nlet x = 1;\n```"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "let x = 1;",
+            "lang": "rust"
+          }
+        ],
+        "plain": "let x = 1;"
+      }
+    },
+    {
+      "input": {
+        "text": "Before\n```js\nstill streaming"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Before"
+              }
+            ]
+          },
+          {
+            "kind": "code",
+            "text": "still streaming",
+            "lang": "js"
+          }
+        ],
+        "plain": "Before\nstill streaming"
+      }
+    },
+    {
+      "input": {
+        "text": "two  \nlines\\\nhard"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "two\nlines\nhard"
+              }
+            ]
+          }
+        ],
+        "plain": "two\nlines\nhard"
+      }
+    },
+    {
+      "input": {
+        "text": "[safe](https://example.test/a) [unsafe](javascript:alert) <script>bad</script>"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "safe",
+                "href": "https://example.test/a"
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "unsafe"
+              },
+              {
+                "text": " <script>bad</script>"
+              }
+            ]
+          }
+        ],
+        "plain": "safe unsafe <script>bad</script>"
+      }
+    },
+    {
+      "input": {
+        "text": "![local](/tmp/frame.png) `/tmp/clip.mov` /tmp/sound.wav"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": " "
+              },
+              {
+                "text": "/tmp/clip.mov",
+                "c": true
+              },
+              {
+                "text": " /tmp/sound.wav"
+              }
+            ],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fframe.png",
+                "path": "/tmp/frame.png",
+                "alt": "local"
+              },
+              {
+                "kind": "video",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fclip.mov",
+                "path": "/tmp/clip.mov",
+                "alt": "clip.mov"
+              },
+              {
+                "kind": "audio",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fsound.wav",
+                "path": "/tmp/sound.wav",
+                "alt": "sound.wav"
+              }
+            ]
+          }
+        ],
+        "plain": " /tmp/clip.mov /tmp/sound.wav"
+      }
+    },
+    {
+      "input": {
+        "text": "![remote](https://example.test/image.png)"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [],
+            "media": [
+              {
+                "kind": "image",
+                "src": "https://example.test/image.png",
+                "path": "https://example.test/image.png",
+                "alt": "remote",
+                "remote": true
+              }
+            ]
+          }
+        ],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": "<b>bold</b> <em>em</em><br>line <img src=\"/tmp/frame.png\" alt=\"frame\">"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "bold",
+                "b": true
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "em",
+                "i": true
+              },
+              {
+                "text": "\nline "
+              }
+            ],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fframe.png",
+                "path": "/tmp/frame.png",
+                "alt": "frame"
+              }
+            ]
+          }
+        ],
+        "plain": "bold em\nline "
+      }
+    },
+    {
+      "input": {
+        "text": "snake_case ***both*** ~~gone~~ <https://example.test>"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "snake_case "
+              },
+              {
+                "text": "both",
+                "b": true,
+                "i": true
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "gone",
+                "s": true
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "https://example.test",
+                "href": "https://example.test"
+              }
+            ]
+          }
+        ],
+        "plain": "snake_case both gone https://example.test"
+      }
+    },
+    {
+      "input": {
+        "text": "- first\n\n  paragraph\n  ```txt\n  fenced\n  ```\n- second"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "first"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "code",
+                    "text": "fenced",
+                    "lang": "txt"
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "second"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "first\nparagraph\nfenced\nsecond"
+      }
+    },
+    {
+      "input": {
+        "text": "**streaming"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "**streaming"
+              }
+            ]
+          }
+        ],
+        "plain": "**streaming"
+      }
+    },
+    {
+      "input": {
+        "text": "**streaming**"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "streaming",
+                "b": true
+              }
+            ]
+          }
+        ],
+        "plain": "streaming"
+      }
+    },
+    {
+      "input": {
+        "text": "```\npartial"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "partial"
+          }
+        ],
+        "plain": "partial"
+      }
+    },
+    {
+      "input": {
+        "text": "```\npartial\n```"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "partial"
+          }
+        ],
+        "plain": "partial"
+      }
+    },
+    {
+      "input": {
+        "text": "## Plan\n\nFirst line\nsame paragraph\n\n- one\n- two\n1. first\n\n> aside\n\n```ts\nconst a = 1;\n```"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 2,
+            "runs": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "First line same paragraph"
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "one"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "two"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "first"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "quote",
+            "blocks": [
+              {
+                "kind": "p",
+                "runs": [
+                  {
+                    "text": "aside"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "code",
+            "text": "const a = 1;",
+            "lang": "ts"
+          }
+        ],
+        "plain": "Plan\nFirst line same paragraph\none\ntwo\nfirst\naside\nconst a = 1;"
+      }
+    },
+    {
+      "input": {
+        "text": "```\nhalf"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "half"
+          }
+        ],
+        "plain": "half"
+      }
+    },
+    {
+      "input": {
+        "text": ""
+      },
+      "output": {
+        "blocks": [],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": ""
+      },
+      "output": {
+        "blocks": [],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": "| Name | Value |\n| :--- | ---: |\n| **Clip** | `ready` |\n| a\\|b |\n\nAfter"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "table",
+            "headers": [
+              [
+                {
+                  "text": "Name"
+                }
+              ],
+              [
+                {
+                  "text": "Value"
+                }
+              ]
+            ],
+            "align": [
+              "left",
+              "right"
+            ],
+            "rows": [
+              [
+                [
+                  {
+                    "text": "Clip",
+                    "b": true
+                  }
+                ],
+                [
+                  {
+                    "text": "ready",
+                    "c": true
+                  }
+                ]
+              ],
+              [
+                [
+                  {
+                    "text": "a|b"
+                  }
+                ],
+                []
+              ]
+            ]
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "After"
+              }
+            ]
+          }
+        ],
+        "plain": "Name | Value\nClip | ready\na|b | \nAfter"
+      }
+    },
+    {
+      "input": {
+        "text": "a | b\nnot | a table"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "a | b not | a table"
+              }
+            ]
+          }
+        ],
+        "plain": "a | b not | a table"
+      }
+    },
+    {
+      "input": {
+        "text": "Before\n\n---\n\nAfter"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Before"
+              }
+            ]
+          },
+          {
+            "kind": "hr"
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "After"
+              }
+            ]
+          }
+        ],
+        "plain": "Before\n\nAfter"
+      }
+    },
+    {
+      "input": {
+        "text": "- one\n  - inner\n    1. deep\n- two\n\n  more of two\n- three\nlazy line"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "one"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "start": 1,
+                    "items": [
+                      {
+                        "blocks": [
+                          {
+                            "kind": "p",
+                            "runs": [
+                              {
+                                "text": "inner"
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "list",
+                            "ordered": true,
+                            "start": 1,
+                            "items": [
+                              {
+                                "blocks": [
+                                  {
+                                    "kind": "p",
+                                    "runs": [
+                                      {
+                                        "text": "deep"
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "two"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "more of two"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "three lazy line"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "one\ninner\ndeep\ntwo\nmore of two\nthree lazy line"
+      }
+    },
+    {
+      "input": {
+        "text": "- [x] shipped\n- [ ] pending"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "shipped"
+                      }
+                    ]
+                  }
+                ],
+                "checked": true
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "pending"
+                      }
+                    ]
+                  }
+                ],
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "plain": "shipped\npending"
+      }
+    },
+    {
+      "input": {
+        "text": "3) c\n4) d"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 3,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "c"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "d"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "c\nd"
+      }
+    },
+    {
+      "input": {
+        "text": "1. run:\n   ```sh\n   bun test\n   ```\n2. done"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "run:"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "code",
+                    "text": "bun test",
+                    "lang": "sh"
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "done"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "run:\nbun test\ndone"
+      }
+    },
+    {
+      "input": {
+        "text": "> # Note\n> - a\n>\n> > deeper\n> lazy"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "quote",
+            "blocks": [
+              {
+                "kind": "h",
+                "level": 1,
+                "runs": [
+                  {
+                    "text": "Note"
+                  }
+                ]
+              },
+              {
+                "kind": "list",
+                "ordered": false,
+                "start": 1,
+                "items": [
+                  {
+                    "blocks": [
+                      {
+                        "kind": "p",
+                        "runs": [
+                          {
+                            "text": "a"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "quote",
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "deeper lazy"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "Note\na\ndeeper lazy"
+      }
+    },
+    {
+      "input": {
+        "text": "Title\n=====\n\nSub\n---"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 1,
+            "runs": [
+              {
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "kind": "h",
+            "level": 2,
+            "runs": [
+              {
+                "text": "Sub"
+              }
+            ]
+          }
+        ],
+        "plain": "Title\nSub"
+      }
+    },
+    {
+      "input": {
+        "text": "a  \nb\\\nc\nd<br>e"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "a\nb\nc d\ne"
+              }
+            ]
+          }
+        ],
+        "plain": "a\nb\nc d\ne"
+      }
+    },
+    {
+      "input": {
+        "text": "````md\n```\ninner\n```\n````"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "```\ninner\n```",
+            "lang": "md"
+          }
+        ],
+        "plain": "```\ninner\n```"
+      }
+    },
+    {
+      "input": {
+        "text": "Intro\n-"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Intro -"
+              }
+            ]
+          }
+        ],
+        "plain": "Intro -"
+      }
+    },
+    {
+      "input": {
+        "text": "Intro\n- a"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Intro"
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "Intro\na"
+      }
+    },
+    {
+      "input": {
+        "text": "- a\n  ```\n  half"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "a"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "code",
+                    "text": "half"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "a\nhalf"
+      }
+    },
+    {
+      "input": {
+        "text": "![shot](/tmp/a.png)"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+                "path": "/tmp/a.png",
+                "alt": "shot"
+              }
+            ]
+          }
+        ],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": "/tmp/a.png then `/tmp/a.png`"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "/tmp/a.png"
+              },
+              {
+                "text": " then "
+              },
+              {
+                "text": "/tmp/a.png",
+                "c": true
+              }
+            ],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+                "path": "/tmp/a.png",
+                "alt": "a.png"
+              }
+            ]
+          }
+        ],
+        "plain": "/tmp/a.png then /tmp/a.png"
+      }
+    }
+  ],
+  "media": [
+    {
+      "input": "/tmp/frame.PNG",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": "/tmp/frame.PNG",
+        "url": "app://powermove/_agent-file?path=%2Ftmp%2Fframe.PNG"
+      }
+    },
+    {
+      "input": "file:///tmp/caf%C3%A9.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": "/tmp/café.png",
+        "url": "app://powermove/_agent-file?path=file%3A%2F%2F%2Ftmp%2Fcaf%25C3%25A9.png"
+      }
+    },
+    {
+      "input": "~/clips/test.mov",
+      "output": {
+        "extension": "mov",
+        "kind": "video",
+        "local": "~/clips/test.mov",
+        "url": "app://powermove/_agent-file?path=~%2Fclips%2Ftest.mov"
+      }
+    },
+    {
+      "input": "/tmp/../escape.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": null,
+        "url": "app://powermove/_agent-file?path=%2Ftmp%2F..%2Fescape.png"
+      }
+    },
+    {
+      "input": "https://example.test/a.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": null,
+        "url": "app://powermove/_agent-file?path=https%3A%2F%2Fexample.test%2Fa.png"
+      }
+    },
+    {
+      "input": "/tmp/audio.flac?literal",
+      "output": {
+        "extension": "flac",
+        "kind": "audio",
+        "local": "/tmp/audio.flac?literal",
+        "url": "app://powermove/_agent-file?path=%2Ftmp%2Faudio.flac%3Fliteral"
+      }
+    },
+    {
+      "input": "relative.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": null,
+        "url": "app://powermove/_agent-file?path=relative.png"
+      }
+    }
+  ],
+  "visual": [
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": " Authored ",
+          "html": "<script>document.body.textContent=\"hello\"</script>"
+        }
+      },
+      "output": {
+        "title": "Authored",
+        "html": "<script>document.body.textContent=\"hello\"</script>",
+        "height": 360
+      }
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "",
+          "html": "x"
+        }
+      },
+      "error": "Visual reply requires a title (1–120 characters), HTML up to 384 KiB and height from 160 to 900."
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "Reply",
+          "html": "x",
+          "height": 159
+        }
+      },
+      "error": "Visual reply requires a title (1–120 characters), HTML up to 384 KiB and height from 160 to 900."
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "Reply",
+          "html": "x",
+          "height": 900
+        }
+      },
+      "output": {
+        "title": "Reply",
+        "html": "x",
+        "height": 900
+      }
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "Reply",
+          "html": "x",
+          "unknown": true
+        }
+      },
+      "error": "Visual reply requires a title (1–120 characters), HTML up to 384 KiB and height from 160 to 900."
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "ready"
+        }
+      },
+      "output": {
+        "type": "ready"
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "size",
+          "height": 160.2
+        }
+      },
+      "output": {
+        "type": "size",
+        "height": 161
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "size",
+          "height": 99999
+        }
+      },
+      "output": {
+        "type": "size",
+        "height": 900
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "error",
+          "message": "frame error"
+        }
+      },
+      "output": {
+        "type": "error",
+        "message": "frame error"
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "wrong",
+          "type": "ready"
+        }
+      },
+      "output": null
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "ready",
+          "extra": true
+        }
+      },
+      "output": null
+    }
+  ],
+  "claude": [
+    {
+      "input": {
+        "access": "editor",
+        "approval": "auto"
+      },
+      "output": {
+        "mode": "default",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": false,
+            "allowUnsandboxedCommands": false,
+            "failIfUnavailable": true
+          }
+        },
+        "allowed": "Read,Glob,Grep,Skill,Agent,Task",
+        "disallowed": "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "editor",
+        "approval": "supervised"
+      },
+      "output": {
+        "mode": "default",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": false,
+            "allowUnsandboxedCommands": false,
+            "failIfUnavailable": true
+          }
+        },
+        "allowed": "Read,Glob,Grep,Skill,Agent,Task",
+        "disallowed": "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "project",
+        "approval": "auto"
+      },
+      "output": {
+        "mode": "auto",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "allowUnsandboxedCommands": true,
+            "failIfUnavailable": true,
+            "network": {
+              "allowedDomains": [
+                "*"
+              ],
+              "allowLocalBinding": true
+            }
+          }
+        },
+        "allowed": "Read,Glob,Grep,WebSearch,WebFetch,Skill,Agent,Task",
+        "disallowed": null,
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "project",
+        "approval": "supervised"
+      },
+      "output": {
+        "mode": "acceptEdits",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "allowUnsandboxedCommands": true,
+            "failIfUnavailable": true,
+            "network": {
+              "allowedDomains": [
+                "*"
+              ],
+              "allowLocalBinding": true
+            }
+          }
+        },
+        "allowed": "Read,Glob,Grep,WebSearch,WebFetch,Skill,Agent,Task",
+        "disallowed": null,
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "computer",
+        "approval": "auto"
+      },
+      "output": {
+        "mode": null,
+        "settings": null,
+        "allowed": null,
+        "disallowed": null,
+        "skip": true
+      }
+    },
+    {
+      "input": {
+        "access": "computer",
+        "approval": "supervised"
+      },
+      "output": {
+        "mode": null,
+        "settings": null,
+        "allowed": null,
+        "disallowed": null,
+        "skip": true
+      }
+    }
+  ],
+  "presets": [
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "baseUrl": "http://localhost:11434/v1",
+      "kind": "local",
+      "downloadUrl": "https://ollama.com/download"
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio",
+      "baseUrl": "http://localhost:1234/v1",
+      "kind": "local",
+      "downloadUrl": "https://lmstudio.ai"
+    },
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp server",
+      "baseUrl": "http://localhost:8080/v1",
+      "kind": "local",
+      "downloadUrl": "https://github.com/ggml-org/llama.cpp"
+    },
+    {
+      "id": "jan",
+      "name": "Jan",
+      "baseUrl": "http://localhost:1337/v1",
+      "kind": "local",
+      "downloadUrl": "https://jan.ai"
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "kind": "cloud",
+      "keyUrl": "https://openrouter.ai/settings/keys",
+      "keyPrefix": "sk-or-"
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "kind": "cloud",
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "keyPrefix": "sk-"
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.anthropic.com/settings/keys",
+      "keyPrefix": "sk-ant-"
+    },
+    {
+      "id": "gemini",
+      "name": "Google Gemini",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "kind": "cloud",
+      "keyUrl": "https://aistudio.google.com/apikey",
+      "keyPrefix": "AIza"
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.groq.com/keys",
+      "keyPrefix": "gsk_"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "kind": "cloud",
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "keyPrefix": "sk-"
+    },
+    {
+      "id": "xai",
+      "name": "xAI",
+      "baseUrl": "https://api.x.ai/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.x.ai",
+      "keyPrefix": "xai-"
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral",
+      "baseUrl": "https://api.mistral.ai/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.mistral.ai/api-keys"
+    },
+    {
+      "id": "other",
+      "name": "Other compatible service",
+      "baseUrl": "",
+      "kind": "other"
+    }
+  ],
+  "inline": [
+    {
+      "text": "run `npm test` then **stop**",
+      "flags": {},
+      "output": [
+        {
+          "text": "run "
+        },
+        {
+          "text": "npm test",
+          "c": true
+        },
+        {
+          "text": " then "
+        },
+        {
+          "text": "stop",
+          "b": true
+        }
+      ]
+    },
+    {
+      "text": "see [the docs](https://example.com/docs) now",
+      "flags": {},
+      "output": [
+        {
+          "text": "see "
+        },
+        {
+          "text": "the docs",
+          "href": "https://example.com/docs"
+        },
+        {
+          "text": " now"
+        }
+      ]
+    },
+    {
+      "text": "*soft* and _quiet_",
+      "flags": {},
+      "output": [
+        {
+          "text": "soft",
+          "i": true
+        },
+        {
+          "text": " and "
+        },
+        {
+          "text": "quiet",
+          "i": true
+        }
+      ]
+    },
+    {
+      "text": "use file_path here",
+      "flags": {},
+      "output": [
+        {
+          "text": "use file_path here"
+        }
+      ]
+    },
+    {
+      "text": "this is **not closed",
+      "flags": {},
+      "output": [
+        {
+          "text": "this is **not closed"
+        }
+      ]
+    },
+    {
+      "text": "Portrait: https://commons.wikimedia.org/wiki/File:Tim.jpg, CC BY",
+      "flags": {},
+      "output": [
+        {
+          "text": "Portrait: "
+        },
+        {
+          "text": "https://commons.wikimedia.org/wiki/File:Tim.jpg",
+          "href": "https://commons.wikimedia.org/wiki/File:Tim.jpg"
+        },
+        {
+          "text": ", CC BY"
+        }
+      ]
+    },
+    {
+      "text": "[x](javascript:alert(1))",
+      "flags": {},
+      "output": [
+        {
+          "text": "x"
+        }
+      ]
+    },
+    {
+      "text": "[Commons](https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg), CC BY",
+      "flags": {},
+      "output": [
+        {
+          "text": "Commons",
+          "href": "https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg"
+        },
+        {
+          "text": ", CC BY"
+        }
+      ]
+    },
+    {
+      "text": "See https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg.",
+      "flags": {},
+      "output": [
+        {
+          "text": "See "
+        },
+        {
+          "text": "https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg",
+          "href": "https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg"
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "text": "Docs: <https://x.y/a>.",
+      "flags": {},
+      "output": [
+        {
+          "text": "Docs: "
+        },
+        {
+          "text": "https://x.y/a",
+          "href": "https://x.y/a"
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "text": "[Guide](https://x.y/g \"The guide\")",
+      "flags": {},
+      "output": [
+        {
+          "text": "Guide",
+          "href": "https://x.y/g"
+        }
+      ]
+    },
+    {
+      "text": "![Frame 12](https://x.y/f.png)",
+      "flags": {},
+      "output": [
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "https://x.y/f.png",
+            "path": "https://x.y/f.png",
+            "alt": "Frame 12",
+            "remote": true
+          }
+        }
+      ]
+    },
+    {
+      "text": "![](http://x.y/shots/f.png)",
+      "flags": {},
+      "output": [
+        {
+          "text": "f.png",
+          "href": "http://x.y/shots/f.png"
+        }
+      ]
+    },
+    {
+      "text": "[mail](mailto:a@b.c)",
+      "flags": {},
+      "output": [
+        {
+          "text": "mail"
+        }
+      ]
+    },
+    {
+      "text": "[app.ts](/Users/me/app.ts:12)",
+      "flags": {},
+      "output": [
+        {
+          "text": "app.ts"
+        }
+      ]
+    },
+    {
+      "text": "`bun run test`",
+      "flags": {},
+      "output": [
+        {
+          "text": "bun run test",
+          "c": true
+        }
+      ]
+    },
+    {
+      "text": "``a `tick` here``",
+      "flags": {},
+      "output": [
+        {
+          "text": "a `tick` here",
+          "c": true
+        }
+      ]
+    },
+    {
+      "text": "\\*literal\\*",
+      "flags": {},
+      "output": [
+        {
+          "text": "*literal*"
+        }
+      ]
+    },
+    {
+      "text": "~~old~~ and ~~**bold**~~",
+      "flags": {},
+      "output": [
+        {
+          "text": "old",
+          "s": true
+        },
+        {
+          "text": " and "
+        },
+        {
+          "text": "bold",
+          "s": true,
+          "b": true
+        }
+      ]
+    },
+    {
+      "text": "***both*** __bold__",
+      "flags": {},
+      "output": [
+        {
+          "text": "both",
+          "b": true,
+          "i": true
+        },
+        {
+          "text": " "
+        },
+        {
+          "text": "bold",
+          "b": true
+        }
+      ]
+    },
+    {
+      "text": "<kbd>⌘K</kbd> <b>bold</b> <img src=\"/tmp/a.png\" alt=\"A\">",
+      "flags": {},
+      "output": [
+        {
+          "text": "⌘K",
+          "c": true
+        },
+        {
+          "text": " "
+        },
+        {
+          "text": "bold",
+          "b": true
+        },
+        {
+          "text": " "
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+            "path": "/tmp/a.png",
+            "alt": "A"
+          }
+        }
+      ]
+    },
+    {
+      "text": "<script>x</script>",
+      "flags": {},
+      "output": [
+        {
+          "text": "<script>x</script>"
+        }
+      ]
+    },
+    {
+      "text": "[![shot](/tmp/s.png)](https://x.y)",
+      "flags": {},
+      "output": [
+        {
+          "text": "shot",
+          "href": "https://x.y"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fs.png",
+            "path": "/tmp/s.png",
+            "alt": "shot"
+          }
+        }
+      ]
+    },
+    {
+      "text": "see /tmp/b.gif.",
+      "flags": {},
+      "output": [
+        {
+          "text": "see /tmp/b.gif"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fb.gif",
+            "path": "/tmp/b.gif",
+            "alt": "b.gif"
+          }
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "text": "`/tmp/c.mov`",
+      "flags": {},
+      "output": [
+        {
+          "text": "/tmp/c.mov",
+          "c": true
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "video",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fc.mov",
+            "path": "/tmp/c.mov",
+            "alt": "c.mov"
+          }
+        }
+      ]
+    },
+    {
+      "text": "file:///tmp/d.webp",
+      "flags": {},
+      "output": [
+        {
+          "text": "file:///tmp/d.webp"
+        }
+      ]
+    },
+    {
+      "text": "![d](file:///tmp/d%20e.webp)",
+      "flags": {},
+      "output": [
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fd%20e.webp",
+            "path": "/tmp/d e.webp",
+            "alt": "d"
+          }
+        }
+      ]
+    },
+    {
+      "text": "/etc/passwd",
+      "flags": {},
+      "output": [
+        {
+          "text": "/etc/passwd"
+        }
+      ]
+    },
+    {
+      "text": "shots/a.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "shots/a.png"
+        }
+      ]
+    },
+    {
+      "text": "![x](/tmp/../etc/a.png)",
+      "flags": {},
+      "output": [
+        {
+          "text": "x"
+        }
+      ]
+    },
+    {
+      "text": "a/tmp/x.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "a/tmp/x.png"
+        }
+      ]
+    },
+    {
+      "text": "/tmp/a.pngx",
+      "flags": {},
+      "output": [
+        {
+          "text": "/tmp/a.pngx"
+        }
+      ]
+    },
+    {
+      "text": "see https://x.y/r.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "see "
+        },
+        {
+          "text": "https://x.y/r.png",
+          "href": "https://x.y/r.png"
+        }
+      ]
+    },
+    {
+      "text": "/tmp/a.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "/tmp/a.png"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+            "path": "/tmp/a.png",
+            "alt": "a.png"
+          }
+        }
+      ]
+    }
+  ],
+  "words": [
+    {
+      "runs": [
+        {
+          "text": "a b"
+        },
+        {
+          "text": "x y",
+          "href": "https://x.y"
+        }
+      ],
+      "output": [
+        {
+          "text": "a",
+          "key": "0-0"
+        },
+        {
+          "text": " ",
+          "key": "0-1"
+        },
+        {
+          "text": "b",
+          "key": "0-2"
+        },
+        {
+          "text": "x y",
+          "href": "https://x.y",
+          "key": "1"
+        }
+      ]
+    },
+    {
+      "runs": [
+        {
+          "text": "bun run test",
+          "c": true
+        }
+      ],
+      "output": [
+        {
+          "text": "bun run test",
+          "c": true,
+          "key": "0"
+        }
+      ]
+    },
+    {
+      "runs": [
+        {
+          "text": "/tmp/a.png"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+            "path": "/tmp/a.png",
+            "alt": "a.png"
+          }
+        }
+      ],
+      "output": [
+        {
+          "text": "/tmp/a.png",
+          "key": "0-0"
+        }
+      ]
+    }
+  ],
+  "markdownSourceTests": 21
+}

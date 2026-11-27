@@ -1,0 +1,6450 @@
+use crate::{panels, platform};
+use gpui::{prelude::*, *};
+use pm_engine_service::{EngineService, MediaCatalog, Viewer, ViewerConfig};
+use pm_kernel::{
+    session::*,
+    state::{StateOp, StateTransaction},
+    *,
+};
+use pm_protocol::{
+    clock::{TransportCommand, TransportState},
+    common::{PlaybackRate, TICKS_PER_SECOND, Ticks},
+};
+use pm_shell::{Command as ShellCommand, Host};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
+
+pub(crate) fn defer_studio_view(
+    gizmos: Entity<crate::gizmo::GizmoSurface>,
+    group: String,
+    value: String,
+    capture: Rc<Cell<bool>>,
+    focus_canvas: impl FnOnce() + 'static,
+    window: &Window,
+    cx: &mut App,
+) {
+    // The gizmo's delegate reads the controller while applying the setting.
+    window.defer(cx, move |window, cx| {
+        gizmos.update(cx, |gizmos, cx| {
+            if group == "fly" {
+                gizmos.set_fly_capture(capture);
+            }
+            gizmos.studio_setting(&group, &value, cx);
+            if group == "fly" && gizmos.studio_flying() {
+                focus_canvas();
+                gizmos.studio_focus_fly(window, cx);
+            }
+        });
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn project_disabled_commands(
+    published: Option<&Published>,
+    layers: &[LayerInfo],
+) -> std::collections::BTreeSet<String> {
+    crate::layer_commands::disabled(published, layers)
+}
+
+#[derive(Default)]
+struct StudioEligibility {
+    composition: Option<(u64, Option<String>, u64)>,
+    supported: bool,
+}
+
+impl StudioEligibility {
+    fn supported(&mut self, p: &Published) -> bool {
+        let comp = p.snapshot.open_comp();
+        let rev = p
+            .snapshot
+            .root()
+            .and_then(|root| pm_kernel::model::comp_node(root, comp.as_deref()))
+            .map_or(0, pm_model::Node::rev);
+        let key = (p.snapshot.doc_id, comp, rev);
+        if self.composition.as_ref() != Some(&key) {
+            self.supported = pm_panel_studio3d::viewport::supports_navigation(p);
+            self.composition = Some(key);
+        }
+        self.supported
+    }
+}
+
+#[cfg(test)]
+mod layer_commands_latency_tests {
+    use super::StudioEligibility;
+    use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+    use std::sync::Arc;
+
+    #[test]
+    fn indexed_enablement_and_studio_eligibility_on_639_layers() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let stack: Vec<_> = (0..639)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("l{i}"), "type": if i == 637 { "text" } else { "solid" },
+                    "dur": 5, "lock": i == 638,
+                })
+            })
+            .collect();
+        let source = serde_json::json!({
+            "id": "project", "compId": "c", "w": 64, "h": 64, "fps": 30, "dur": 5,
+            "layers": stack,
+        });
+        let value = pm_model::json::parse(&source.to_string()).unwrap();
+        kernel
+            .open("test", OpenSource::Untitled(value))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("test").unwrap();
+        let rows = p.snapshot.layers(None);
+        assert_eq!(rows.len(), 639);
+        let index = crate::layer_commands::CommandRows::new(&rows);
+        let mut eligibility = StudioEligibility::default();
+        assert!(!eligibility.supported(&p));
+
+        let mut p = (*p).clone();
+        let mut updated = (*p.snapshot.document).clone();
+        let mut path = pm_kernel::model::comp_path(p.snapshot.open_comp().as_deref());
+        path.extend(["layers".into(), 638usize.into(), "threeD".into()]);
+        let change = updated
+            .apply(&[pm_model::Patch::set(path, true.into())])
+            .unwrap();
+        p.snapshot.revision = change.revision;
+        p.snapshot.document = Arc::new(updated);
+        let start = std::time::Instant::now();
+        assert!(eligibility.supported(&p));
+        let cold = start.elapsed();
+        assert_eq!(
+            eligibility.supported(&p),
+            pm_panel_studio3d::viewport::supports_navigation(&p)
+        );
+        let p = |id: &str| {
+            let mut p = p.clone();
+            p.selection =
+                pm_kernel::selection::Selection::from_parts(vec![id.into()], vec![], None);
+            p
+        };
+        let text = p("l637");
+        let locked = p("l638");
+        let mut times = Vec::new();
+        for i in 0..21 {
+            let p = if i % 2 == 0 { &text } else { &locked };
+            let start = std::time::Instant::now();
+            let studio = eligibility.supported(p);
+            let off = crate::layer_commands::disabled_indexed(Some(p), &rows, &index, studio);
+            times.push(start.elapsed());
+            assert!(!off.contains("studio.view"));
+            assert!(!off.contains("unlockAllLayers"));
+            assert!(!off.contains("copyLayers"));
+            assert_eq!(off.contains("text.editSelected"), i % 2 != 0);
+            assert_eq!(off.contains("duplicate"), i % 2 != 0);
+            assert_eq!(off.contains("unlockSelectedLayers"), i % 2 == 0);
+        }
+        times.sort_unstable();
+        let median = times[times.len() / 2];
+        eprintln!(
+            "639-layer command enablement and 3D eligibility: cached median {:.3} ms, cold 3D probe {:.3} ms",
+            median.as_secs_f64() * 1e3,
+            cold.as_secs_f64() * 1e3
+        );
+        assert!(median < std::time::Duration::from_millis(1), "{median:?}");
+    }
+}
+
+/// Cancellation wins even if the sheet's abort callback also sent an answer.
+/// Poll both channels so Quit wakes a wait whose sheet was never visible.
+pub(crate) async fn recovery_answer<A>(
+    answer: &async_channel::Receiver<Option<A>>,
+    cancellation: &async_channel::Receiver<()>,
+) -> Result<Option<A>, ()> {
+    use std::future::Future;
+    let mut answer = std::pin::pin!(answer.recv());
+    let mut cancellation = std::pin::pin!(cancellation.recv());
+    std::future::poll_fn(|cx| {
+        if cancellation.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(()));
+        }
+        answer.as_mut().poll(cx).map(|answer| Ok(answer.ok().flatten()))
+    }).await
+}
+
+#[derive(Clone)]
+struct CompositionView {
+    time: f64,
+    timeline: pm_model::Value,
+    viewer: pm_model::Value,
+}
+
+thread_local! {
+    /// The time of an input the app dispatches itself (MCP `computer_use_panel`),
+    /// which `event_time` reports instead of AppKit's last real event; `0`
+    /// while no trace stamped it, so `event_time` reads the clock if asked.
+    pub(crate) static DISPATCHING: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+pub struct Controller {
+    pub builtins: crate::builtins::Host,
+    pub extensions: crate::extensions::Extensions,
+    pub(crate) project_extension_scope: Option<(u64, pm_compat_runner::host::ProjectScope)>,
+    pub font_broker: Option<pm_text::host::FontBroker>,
+    /// Per-composition navigation view, scoped to the live document identity.
+    composition_views: std::collections::BTreeMap<(u64, String), CompositionView>,
+    pub kernel: KernelHandle,
+    pub engine: Arc<EngineService>,
+    pub host: Rc<RefCell<Host>>,
+    pub profile: PathBuf,
+    /// The original app's profile, when this Mac has one. A file it might hold
+    /// opens as a copy while it runs. The native library is never affected.
+    pub electron: Option<PathBuf>,
+    /// Guarded folders whose originals the migration couldn't open
+    /// (Settings › Media › Media in Protected Folders), read off the main thread.
+    pub(crate) waiting_folders: Vec<pm_first_launch::WaitingFolder>,
+    pub session: Option<SessionHandle>,
+    pub published: Option<Arc<Published>>,
+    pub viewer: Option<Viewer>,
+    /// The viewer last told whether its window can be seen, and what.
+    viewer_shown: Option<(u64, bool)>,
+    /// The extension host last told whether the window can be seen, and what.
+    extensions_shown: Option<(u64, bool)>,
+    pub media: MediaCatalog,
+    pub(crate) linked_sync: crate::linked_sync::Sync,
+    pub(crate) media_refresh: crate::media_refresh::Refresh,
+    /// The Project panel grid's thumbnails.
+    pub(crate) thumbs: crate::media_thumbs::Thumbs,
+    /// What the media resolver found; `media` adds the renditions.
+    pub(crate) media_base: MediaCatalog,
+    /// A media resolution for this session has landed: only then do missing
+    /// files read as offline (before it, everything is still loading).
+    pub(crate) media_resolved: bool,
+    /// Proxies, optimized media and their Background Tasks.
+    pub pro_media: Arc<crate::pro_media::ProMedia>,
+    /// Window ▸ Background Tasks, while open.
+    pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
+    pub opening: bool,
+    /// Cancels only the unanswered recovery choice, never an in-flight save.
+    pub(crate) recovery_cancel: Option<async_channel::Sender<()>>,
+    /// Held while a project opens and its panels settle: no App Nap or
+    /// background throttling.
+    pub(crate) busy: Option<crate::platform::Busy>,
+    /// The project an open is reading, shown until it lands or fails, and
+    /// then until the panels have drawn it (`settling`).
+    pub opening_name: Option<String>,
+    /// Ghost loading: the opening composition's aspect (from the library's
+    /// index, when it says), the panels showing their ghost, and when each
+    /// panel's real content replaced its ghost (it fades in).
+    pub(crate) ghost_aspect: Option<f32>,
+    /// The picture the viewer last showed for the opening project (or its
+    /// Home poster), in the opening viewer's frame until the viewer is
+    /// bound, then over the viewer until its first frame (`viewer_poster`):
+    /// the first picture waits for the open and for the extensions the
+    /// project draws with (PM-384).
+    pub(crate) ghost_picture: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// Ghost pictures no longer shown, given back to the window's atlas at
+    /// its next draw (`ghost_retire`).
+    pub(crate) ghost_retired: Vec<std::sync::Arc<gpui::RenderImage>>,
+    /// The picture the opening project's viewer stands in with until its
+    /// first real frame (`playback::Placeholder`); taken when its viewer is
+    /// bound.
+    pub(crate) viewer_poster: Option<std::path::PathBuf>,
+    /// The picture the viewer shows, kept as the last frame once it holds
+    /// still (`poster::still`).
+    pub(crate) last_frame_watch: crate::poster::StillWatch,
+    /// The opening project's saved workspace, laid out from the moment the
+    /// open is chosen until the project lands with it (PM-384).
+    pub(crate) opening_workspace: Option<pm_model::Value>,
+    /// This window was in front at the last quit and is opening its
+    /// project before the other restored windows (`release_front`).
+    front_restore: bool,
+    pub(crate) ghosted: std::collections::HashSet<String>,
+    pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
+    /// The project whose panels haven't published since it landed.
+    pub settling: Option<String>,
+    /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
+    pub(crate) open_timer: crate::diag::OpenTimer,
+    /// The open `project_opened` reports once its first publication arrives.
+    pub(crate) telemetry_open: Option<crate::telemetry::Opening>,
+    /// The panels this window showed at its last layout (`panel_opened`).
+    pub(crate) telemetry_panels: Option<std::collections::BTreeSet<String>>,
+    /// Project commands asked for while the project was arriving, bound to
+    /// that open: they run once it has settled here (`settled`).
+    pub(crate) after_open: crate::after_open::AfterOpen,
+    /// The open whose project is settling.
+    pub(crate) settling_open: u64,
+    pub rows: crate::rows::LayerRows,
+    /// The last refresh saw a save in flight (drives the status note).
+    pub saving_note: bool,
+    pub output_mode: crate::viewer2::OutputMode,
+    /// View › Viewer Media for this editor's viewers.
+    pub media_mode: pm_engine_service::MediaMode,
+    /// Preview Resolution (viewer bar) for this editor's viewers.
+    pub quality: pm_engine_service::Quality,
+    /// Currently focused group layer id (isolated in viewer and timeline like a composition).
+    pub focus_group: Option<String>,
+    /// What the open project delivers (Settings › Project › Output).
+    pub project_output: pm_protocol::color::ProjectOutput,
+    pub scopes: crate::colour::Scopes,
+    pub perf: crate::perf_panel::State,
+    pub mixer: crate::mixer_panel::State,
+    /// The workspace store this window last built (`crate::workspaces`).
+    pub workspace_store: crate::workspaces::Cache,
+    /// The Workspaces panel's last action, for its status line.
+    pub workspaces_status: String,
+    /// The layer a generated select's open menu edits, bound when it opened.
+    pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) agent_panel_sweep: bool,
+    pub(crate) agent_panel_builds:
+        std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
+    pub(crate) panel_builds:
+        std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    /// Isolated per-panel GPU aurora views so build animations never force
+    /// full-window Controller re-renders.
+    pub(crate) panel_build_views:
+        std::collections::HashMap<String, Entity<crate::generated_panel::BuildAuroraView>>,
+    /// The workspace `panel_builds` last followed, as JSON (`refresh`).
+    pub(crate) workspace_json: crate::generated_panel::WorkspaceJson,
+    /// Generated panels' Off/On toggles: the system's segmented control per
+    /// `panel#index`, kept while the control is shown.
+    pub(crate) generated_switches:
+        std::collections::HashMap<String, Entity<pm_shell::native_control::NativeControl>>,
+    /// This window's shell view (its live layout).
+    pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
+    /// Cloud media offered and downloading in this window.
+    pub cloud: crate::cloud_media::State,
+    pub captions: crate::captions_panel::State,
+    pub shader: crate::shader_panel::State,
+    pub takes: crate::takes_panel::State,
+    pub notes: crate::notes_panel::State,
+    pub safe_areas: bool,
+    pub guides: bool,
+    /// What the viewer shows of the picture (display only).
+    pub channels: pm_engine_service::Channels,
+    /// The imported-model part a viewer double-click focused, `(layer,
+    /// material slot, request number)`; Properties reveals that slot.
+    pub part_focus: Option<(String, u64, u64)>,
+    /// View ▸ Show Rulers and Show Grid.
+    pub rulers: bool,
+    /// Whether the workspace shows a timeline. While it does, its header owns
+    /// play and the timecode, and the viewer shows neither (`None` until the
+    /// first layout reports it).
+    pub timeline_shown: Option<bool>,
+    pub grid: bool,
+    pub skimming: crate::skimming::Skimming,
+    pub shuttle: crate::shuttle::Shuttle,
+    pub playback: crate::play_range::Playback,
+    pub popout: Option<crate::viewer2::Popout>,
+    /// Studio 3D views beyond the first (3d-studio.md §2).
+    pub studio_panes: Vec<crate::studio_panes::Pane>,
+    pub studio_pane_targets: Vec<objc2::rc::Retained<objc2_foundation::NSObject>>,
+    pub studio_pane_sender: Option<async_channel::Sender<(usize, isize)>>,
+    pub(crate) studio_pane_scenes: crate::studio_panes::PaneScenes,
+    /// The Render Selection waiting to start, by count: asking again
+    /// replaces the one that waits.
+    pub(crate) render_wait: u64,
+    /// This window's extension resources as they change: every viewer of the
+    /// window (the editor's, the popout's) is attached and follows them.
+    pub resource_feed: pm_engine_service::resources::ResourceFeed,
+    /// The editor viewer's last configured output (size, display, headroom).
+    pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
+    pub selected: Option<String>,
+    pub message: String,
+    /// The revision [`RAW_ERROR_NOTE`] was shown at ([`Self::settle_message`]).
+    raw_note_at: Option<u64>,
+    pub(crate) action_toast: Option<Entity<crate::action_toast::ToastView>>,
+    pub path: Option<PathBuf>,
+    pub recent: Vec<(String, String)>,
+    /// What the shell reads from the project on every frame, kept per
+    /// revision (`crate::frame_facts`).
+    pub(crate) frame_facts: crate::frame_facts::FrameFacts,
+    pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
+    /// Home is asked for over this window's project (toolbar, File ▸ Projects…).
+    pub home: bool,
+    /// Home was drawn last frame (it refreshes and takes focus as it appears).
+    pub(crate) home_visible: bool,
+    /// The pages open in this window's strip (Settings, the Store) and the
+    /// one showing over the project (`pages.rs`).
+    pub(crate) pages: crate::pages::Pages,
+    /// The Store, while its page is open.
+    pub(crate) store: Option<Entity<crate::store_window::StoreWindow>>,
+    /// A page was drawn last frame.
+    pub(crate) page_drawn: bool,
+    /// A restored window is checking whether its project reopens.
+    pub(crate) reopening: bool,
+    /// The open running is a window restored at launch: if it fails (the
+    /// project's file is gone, it can't be read) the project is left out of
+    /// the restore without a word, only in the Error Log (PM-392).
+    pub(crate) restoring: bool,
+    /// Wakes the playback loop, which places the playhead layers.
+    pub(crate) playback_wake: Option<async_channel::Sender<()>>,
+    pub errors: crate::error_log::Shared,
+    pub rate: pm_time::Rate,
+    pub dimensions: [f64; 2],
+    /// Composition background (`bg`); `None` when transparent.
+    pub background: Option<u32>,
+    /// Keyframes in the open composition, for the status bar.
+    pub keyframes: usize,
+    pub recovery_pending: bool,
+    /// The document whose stop (an internal error) this window already
+    /// offered to reopen.
+    pub stop_offered: Option<u64>,
+    /// The next open is Reopen after such a stop (its recovery prompt says so).
+    reopening_stopped: bool,
+    pub mcp: Arc<crate::mcp::Host>,
+    /// Every open document's override answers, for agents' jobs.
+    pub job_overrides: crate::raster_overrides::OverrideWindows,
+    /// The project and revision Home's poster was last written from.
+    pub poster_revision: Option<((String, u64), std::time::Instant)>,
+    /// This window's slot in `mcp`: the project it shows is its own.
+    pub window_key: u64,
+    pub close_pending: bool,
+    /// This window let go of its project for a quit that is still going:
+    /// a quit cancelled later puts it back to no project, never leaving it
+    /// "closing" (every later quit stopped at it, PM-464).
+    pub closed_for_quit: bool,
+    /// The project that opens here once this window's project has closed
+    /// (one project per window: an open replaces the one shown).
+    pub(crate) replace_with: Option<crate::entry::Pending>,
+    /// A change could not be written to the recovery data and no save has
+    /// succeeded since: said in a sheet once, and in the subtitle until then.
+    unprotected: bool,
+    /// What this window's close (or the app's quit) is waiting for, once
+    /// the person has answered: shown in the status line over any other
+    /// message, and named by a second Quit's prompt.
+    pub closing_note: Option<String>,
+    pub close_window: Option<gpui::AnyWindowHandle>,
+    pub close_operation: Option<crate::mcp::Operation>,
+    pub gizmo_layer: Option<crate::gizmo_layer::GizmoLayer>,
+    /// The gizmo's marks, sent just before its lines (`set_gizmos`).
+    pub gizmo_marks: Vec<crate::gizmo_layer::Mark>,
+    /// The toolbar tool, mirrored from shell commands for native surfaces.
+    pub tool: String,
+    /// The Shape tool's variant (`rect`, `rounded`, `ellipse`, `polygon`, `star`).
+    pub shape_variant: String,
+    pub view: crate::gizmo::ViewPlacement,
+    /// The pending or running write of `view`.
+    pub(crate) view_write: Option<gpui::Task<()>>,
+    /// Commands that cannot run now; menus and the palette show them off.
+    pub disabled: std::collections::BTreeSet<String>,
+    command_rows: Option<(Arc<Vec<LayerInfo>>, crate::layer_commands::CommandRows)>,
+    studio_eligibility: StudioEligibility,
+    transition_menu: std::cell::RefCell<crate::layer_commands::TransitionMenuFacts>,
+    pub save_pending: bool,
+    /// A save panel is busy, but no document write has started.
+    choosing_save_path: bool,
+    pub close_after_save: Option<crate::lifecycle::Intent>,
+    /// Queued batches and the cancel flag of the running one.
+    pub(crate) imports: std::collections::VecDeque<(
+        pm_builtins::media_import::ImportRequest,
+        Option<crate::media_import::ExtensionImport>,
+    )>,
+    pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Settings › Shortcuts: the row whose next key is being taken, the
+    /// state revision and keymap value this window's keys follow, and the
+    /// page as last built (`stamp` changes with it).
+    pub(crate) shortcut_recording: Option<String>,
+    /// The key the recording row asked about (another command had it).
+    pub(crate) shortcut_asked: Option<String>,
+    /// First run's Bring My Workspace waits for the project being created.
+    pub(crate) workspace_after_open: bool,
+    pub(crate) keymap_revision: Option<u64>,
+    pub(crate) keymap_seen: Option<pm_model::Value>,
+    pub(crate) shortcuts_page: serde_json::Value,
+    /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
+    /// (keymap.ts): the history mark taken before the first, and the timer
+    /// that squashes the burst once the keys rest.
+    nudge_mark: Option<ActorHistoryMark>,
+    nudge_idle: Option<gpui::Task<()>>,
+}
+/// How long arrow keys rest before a run of nudges becomes its undo step.
+const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
+/// How many tenths of a second a restored window waits for the front one's
+/// first frame (a Recover question there can hold it) before it opens its
+/// own project anyway (PM-384).
+const FRONT_WAIT_LOOKS: u32 = 300;
+/// How long the person and the viewer are quiet before a restored tab behind
+/// the front one opens its project (one at a time, as opens go).
+const RESTORE_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+/// The least time between two restored tabs behind the front one starting
+/// their opens: an open parses on every core, and what it starts (the
+/// project's extensions, its media) runs a while after it.
+const RESTORE_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a restored tab behind the front one waits for a quiet moment
+/// before it opens on its turn anyway (the front project may play on, the
+/// person keep editing, its viewer keep retrying missing media).
+const RESTORE_POSTPONE: std::time::Duration = std::time::Duration::from_secs(20);
+/// Whether no restored tab behind the front one started its open within
+/// [`RESTORE_GAP`]; `take`: one starts now.
+fn restore_spaced(take: bool) -> bool {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if take {
+        *last = Some(std::time::Instant::now());
+    }
+    take || last.is_none_or(|at| at.elapsed() >= RESTORE_GAP)
+}
+/// What a restored tab behind the front one sees when it looks again.
+#[derive(Clone, Copy)]
+struct RestoreNow {
+    /// The person selected it.
+    shown: bool,
+    /// A quit has begun (its Review Changes question may be up).
+    quitting: bool,
+    /// Another open, or a Recover question, holds the project fence.
+    busy: bool,
+    /// The person and the viewers have been quiet for [`RESTORE_QUIET`].
+    quiet: bool,
+    /// How long it has waited for its turn.
+    waited: std::time::Duration,
+    /// No other such tab started its open within [`RESTORE_GAP`].
+    spaced: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RestoreStep {
+    Open,
+    Wait,
+}
+/// A quit beginning holds every deferred open (one cancelled lets them go
+/// on); a Recover question or another open defers them until it ends; a tab
+/// the person selects opens at once; the others open one at a time, spaced,
+/// once the app is quiet, or after [`RESTORE_POSTPONE`] anyway.
+fn restore_step(now: RestoreNow) -> RestoreStep {
+    let open = !now.quitting
+        && !now.busy
+        && (now.shown || (now.spaced && (now.quiet || now.waited >= RESTORE_POSTPONE)));
+    if open { RestoreStep::Open } else { RestoreStep::Wait }
+}
+
+/// Why a project opened as a copy, in user language (never the enum name):
+/// said when it opens. The window's subtitle keeps saying it
+/// ([`copy_subtitle`]).
+pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static str> {
+    use pm_kernel::locks::{CopyReason::*, OpenDecision};
+    let OpenDecision::AsCopy(reason) = decision else {
+        return None;
+    };
+    Some(match reason {
+        ForeignLibrary => "Opened as a copy because the project belongs to another library.",
+        ChangedOnDisk => "Opened as a copy because the file changed on disk.",
+        OfflineFile => "Opened as a copy because the file isn’t downloaded.",
+        ReadOnly => {
+            "This is a copy: the file is read-only, so changes are kept in your projects. Use Save As to write a file."
+        }
+        OlderElectron => {
+            "This is a copy: the original Powermove app is running, so changes are kept in your projects. Use Save As to write a file."
+        }
+        Locked => {
+            "This is a copy: the file is open somewhere else, so changes are kept in your projects. Use Save As to write a file."
+        }
+        UncertainLock => {
+            "This is a copy: Powermove couldn’t confirm the file isn’t open elsewhere, so changes are kept in your projects. Use Save As to write a file."
+        }
+    })
+}
+
+/// The window subtitle of a project: its save state, and for a copy that
+/// stands in for a file (the entry's `copyOf`), which file and why, for as
+/// long as the window shows it.
+pub fn copy_subtitle(session: Option<&pm_model::Value>, state: &'static str) -> String {
+    let copy = session.and_then(|meta| meta.get("copyOf"));
+    let Some(file) = copy
+        .and_then(|c| c.get("path"))
+        .and_then(pm_model::Value::as_str)
+        .and_then(|path| std::path::Path::new(path).file_name())
+    else {
+        return state.to_owned();
+    };
+    let why = match copy
+        .and_then(|c| c.get("reason"))
+        .and_then(pm_model::Value::as_str)
+    {
+        Some("ReadOnly") => "the file is read-only",
+        Some("OlderElectron") => "the original app is running",
+        Some("Locked") => "the file is open elsewhere",
+        _ => "the file couldn’t be locked",
+    };
+    let copy = format!("Copy of {} ({why})", file.to_string_lossy());
+    if state.is_empty() {
+        copy
+    } else {
+        format!("{copy} — {state}")
+    }
+}
+
+/// The offer when a file that opens in place has copies in the library that
+/// hold work for it (earlier builds opened files in syncing folders as
+/// copies named "… — Native"). `true` opens the copy.
+fn stranded_copies_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let (message, which) = match copies {
+        [one] => (
+            format!("Your projects hold a copy of “{file}” with work that isn’t in this file."),
+            format!("“{one}”"),
+        ),
+        [first, rest @ ..] => (
+            format!("Your projects hold copies of “{file}” with work that isn’t in this file."),
+            format!("“{first}” and {} more", rest.len()),
+        ),
+        [] => (String::new(), String::new()),
+    };
+    Alert::new(
+        message,
+        format!(
+            "Powermove opened this file as a copy before and kept your changes there instead of in the file: {which}. The file now opens and saves in place. The copy stays in your projects either way."
+        ),
+        vec![
+            Button::new("Open the Copy", true).default(),
+            Button::new("Keep Working in This File", false).key(Key::Escape),
+        ],
+    )
+}
+/// Said once when a file in a folder a sync client keeps opens in place.
+const SYNCED_FOLDER: &str = "In a synced folder: a change made on another computer is noticed when you save, and both versions are kept.";
+
+/// Whether a background recovery-data failure for `project` leaves the work
+/// in the window showing `shown` unprotected.
+fn unprotects(project: &str, shown: Option<&str>) -> bool {
+    shown == Some(project)
+}
+
+/// Said when a file opened as a new copy although the library holds a copy
+/// made under its name: that copy was made of another file (this one
+/// replaced it, or changed somewhere else since), so it was not opened in
+/// its place. `true` opens the earlier copy.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+fn earlier_copy_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let which = match copies {
+        [one] => format!("“{one}”"),
+        [first, rest @ ..] => format!("“{first}” and {} more", rest.len()),
+        [] => String::new(),
+    };
+    Alert::new(
+        format!("“{file}” isn’t the file your earlier copy was made from."),
+        format!(
+            "A file with this name opened as a copy before, and your changes to it are in your projects: {which}. The file here now is a different one (it was replaced, or changed somewhere else), so it opened as a new copy of its own. The earlier copy stays in your projects either way."
+        ),
+        vec![
+            Button::new("Keep This One", false).default().cancel(),
+            Button::new("Open the Earlier Copy", true),
+        ],
+    )
+}
+
+pub struct Bridge(pub Entity<Controller>);
+impl pm_shell::integration::Integration for Bridge {
+    fn observe(&self, cx: &mut gpui::Context<pm_shell::view::Editor>) {
+        cx.observe(&self.0, |_, _, cx| cx.notify()).detach();
+        let shell = cx.weak_entity();
+        self.0.update(cx, |v, _| v.shell = Some(shell));
+    }
+    fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
+        self.0.update(cx, |v, cx| v.command(cmd, w, cx))
+    }
+    fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        self.0.read(cx).checked_commands(cx)
+    }
+    fn palette_effects(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_effects(&c.kernel.state())
+    }
+    fn palette_layers(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_layers(c.published.as_ref())
+    }
+    fn recent(&self, cx: &App) -> Vec<(String, String)> {
+        self.0.read(cx).recent.clone()
+    }
+    fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        self.0.read(cx).unavailable_commands()
+    }
+    fn transition_refusal(&self, cx: &App) -> Option<String> {
+        self.0.read(cx).transition_refusal().map(str::to_owned)
+    }
+    fn natural_panel_height(&self, id: &str, cx: &App) -> Option<f32> {
+        let controller = self.0.read(cx);
+        let view = controller.builtins.views.get(id)?;
+        let view = view.read(cx);
+        if id == "agent" {
+            return Some(view.agent_panel_minimum_height());
+        }
+        let height = view.natural_body_height();
+        (height > 0.).then(|| height + controller.host.borrow().tokens.metrics.header)
+    }
+    fn panel(
+        &self,
+        id: &str,
+        bounds: pm_shell::layout::Rect,
+        w: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.0.update(cx, |v, cx| {
+            for picture in v.ghost_retired.drain(..) {
+                w.drop_image(picture).ok();
+            }
+            if let Some(slot) = crate::generated_panel::agent_slot(v, id, bounds, w, cx) {
+                return Some(slot);
+            }
+            if let Some(ghost) = panels::opening(v, id, bounds) {
+                if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
+                    // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
+                    v.open_timer
+                        .mark("ghost", serde_json::json!({ "panel": id }));
+                }
+                return Some(ghost);
+            }
+            // The ghost gave way: the real content fades in over it.
+            if v.ghosted.remove(id) {
+                v.open_timer
+                    .mark("panel_ready", serde_json::json!({ "panel": id }));
+                v.revealed.insert(id.to_owned(), std::time::Instant::now());
+            }
+            let content = v
+                .extension_panel(id, bounds, cx)
+                .or_else(|| panels::scopes(v, id, cx))
+                .or_else(|| crate::perf_panel::panel(v, id, cx))
+                .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::captions_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::shader_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
+                .or_else(|| crate::generated_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| v.builtin_panel(id, bounds, w, cx))?;
+            let content = crate::generated_panel::extension_build(v, id, content, bounds, w, cx);
+            let Some(at) = v.revealed.get(id).copied() else {
+                return Some(content);
+            };
+            let tokens = v.host.borrow().tokens.clone();
+            let shown = crate::ghost::reveal(at.elapsed(), &tokens);
+            if shown >= 1. {
+                v.revealed.remove(id);
+                return Some(content);
+            }
+            w.request_animation_frame();
+            Some(
+                div()
+                    .size_full()
+                    .opacity(shown)
+                    .child(content)
+                    .into_any_element(),
+            )
+        })
+    }
+    fn home(&self, w: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        self.0.update(cx, |v, cx| {
+            v.page_element(w, cx).or_else(|| v.home_element(w, cx))
+        })
+    }
+    fn action_toast(&self, cx: &mut App) -> Option<AnyElement> {
+        self.0
+            .read(cx)
+            .action_toast
+            .clone()
+            .map(|v| v.into_any_element())
+    }
+    fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
+        id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn native_panel_id(&self, id: &str, cx: &App) -> String {
+        self.0
+            .read(cx)
+            .agent_panel_builds
+            .get(id)
+            .and_then(|b| b.target.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+    fn native_panel(&self, id: &str, cx: &App) -> bool {
+        self.0
+            .read(cx)
+            .extensions
+            .owns_panel(&self.native_panel_id(id, cx))
+    }
+    fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
+        if focused && id != "agent" {
+            let v = self.0.read(cx);
+            if let Some(runtime) = &v.builtins.runtime {
+                runtime.set_agent_focus(serde_json::json!({"panelId":id,"projectId":v.session.as_ref().map(|s| &s.project),"windowId":v.window_key}));
+            }
+        }
+        if id != "timeline" {
+            return;
+        }
+        let (timeline, runtime) = {
+            let v = self.0.read(cx);
+            (v.builtins.timeline.clone(), v.builtins.runtime.clone())
+        };
+        let Some(timeline) = timeline else { return };
+        // The tracks' scene and the panel's rows (its frame) follow it.
+        if timeline.update(cx, |t, cx| t.set_focused(focused, cx))
+            && let Some(runtime) = runtime
+            && let Ok(ticket) = runtime
+                .timeline_action(serde_json::json!({"type": "panelFocus", "focused": focused}))
+        {
+            let controller = self.0.downgrade();
+            cx.spawn(async move |cx| {
+                let _ = ticket.await;
+                let _ = controller.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
+        }
+    }
+    fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
+        Some(self.0.read(cx).workspace_store())
+    }
+    fn note(&self, text: &str, cx: &mut App) {
+        let text = text.to_owned();
+        self.0.update(cx, |v, cx| v.note(text, cx));
+    }
+    fn write_workspace(&self, write: pm_shell::workspace::Write, cx: &mut App) {
+        self.0.read(cx).write_workspace(write);
+    }
+    fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
+        let v = self.0.read(cx);
+        let mut panels = v.extensions.contributed.clone();
+        panels.extend(
+            v.agent_panel_builds
+                .iter()
+                .map(|(id, b)| (id.clone(), b.title.clone())),
+        );
+        // Titles are profile registry metadata, available even while this
+        // recovered window's own callbacks and panel runtime are loading.
+        for entry in v.kernel.state().registries.get("panels").into_iter().flatten().rev() {
+            if !panels.iter().any(|(id, _)| id == &entry.id) {
+                if let Some(title) = entry.definition.get("title").and_then(pm_model::Value::as_str) {
+                    panels.push((entry.id.clone(), title.to_owned()));
+                }
+            }
+        }
+        if let Some(host) = &v.extensions.host {
+            // Asked several times a frame: the records are read in place.
+            host.read_records(|records| {
+                for surface in records.filter(|record| {
+                    record["surface"] == true
+                        && record["enabled"] == true
+                        && record["health"]["state"] == "ok"
+                        && crate::extension_authoring::replaced_panel(&record["manifest"]).is_none()
+                }) {
+                    if let (Some(id), Some(title)) =
+                        (surface["id"].as_str(), surface["manifest"]["name"].as_str())
+                    {
+                        if !panels.iter().any(|(known, _)| known == id) {
+                            panels.push((id.to_owned(), title.to_owned()));
+                        }
+                    }
+                }
+            });
+        }
+        panels
+    }
+    fn panels_loading(&self, cx: &App) -> bool {
+        let v = self.0.read(cx);
+        v.extensions.host.as_ref().is_some_and(|host| !host.publication().settled)
+    }
+    fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
+        crate::extensions::remembered_titles(&self.0.read(cx).profile)
+    }
+    fn panel_closed(&self, id: &str, cx: &mut App) {
+        self.0.update(cx, |v, cx| {
+            v.forget_agent_build(id);
+            cx.notify();
+        });
+    }
+    fn open_panels(&self, open: &[&str], cx: &mut App) {
+        self.0.update(cx, |v, cx| {
+            // Each layout pass places the timeline again, if it draws it.
+            v.builtins.timeline_place = None;
+            v.builtins.viewer_place = None;
+            crate::telemetry::panels_shown(&mut v.telemetry_panels, open, |id| {
+                v.extensions.stores.get(id).map(|(store, _)| store.clone())
+            });
+            let mut effective: Vec<&str> = open.to_vec();
+            for id in open {
+                if let Some(target) = v
+                    .agent_panel_builds
+                    .get(*id)
+                    .and_then(|b| b.target.as_deref())
+                {
+                    effective.push(target);
+                }
+            }
+            let effective: Vec<String> = effective.into_iter().map(str::to_owned).collect();
+            v.sync_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
+            v.sync_parking(open, cx);
+            let was_docked = v.builtins.agent_docked;
+            v.builtins.agent_docked = open.contains(&"agent");
+            if v.builtins.agent_docked {
+                v.builtins.agent_parked = false;
+            }
+            // Closing the docked Agent (its tab, its own Close) returns it to
+            // its popover, as the original app's did; the toolbar item's
+            // park hides it in place instead.
+            if crate::builtins::returns_to_popover(
+                was_docked,
+                v.builtins.agent_docked,
+                v.builtins.agent_parked,
+            ) {
+                v.host.borrow().send_command("agent", vec![]);
+            }
+            if let Some(runtime) = &v.builtins.runtime {
+                let open_list: Vec<String> = open.iter().map(|s| (*s).to_owned()).collect();
+                runtime.emit_event("layout", &serde_json::json!({ "open": open_list }));
+            }
+        });
+    }
+    fn shown_panels(&self, shown: &[&str], cx: &mut App) {
+        self.0.update(cx, |v, cx| {
+            let agent_shown = shown.contains(&"agent");
+            if v.builtins.agent_shown != agent_shown {
+                v.builtins.agent_shown = agent_shown;
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update(cx, |v, cx| v.update_builtins(cx));
+                }).detach();
+            }
+            v.sync_agent_button(cx);
+            let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
+            for id in shown {
+                if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) {
+                    effective.push(target);
+                }
+            }
+            crate::gesture_publish::follow_shown(&mut v.builtins.shown, &effective);
+            v.finish_extension_layout(&effective.iter().map(String::as_str).collect::<Vec<_>>());
+            // The viewer's transport and timecode follow the timeline's
+            // presence: one set of play controls on screen, never two.
+            let timeline = shown.contains(&"timeline");
+            // A panel not on screen (another one maximised, a workspace
+            // without it) leaves no native playhead or timecode behind. Each
+            // layout pass clears the places before this runs, so the change
+            // of what is shown is what wakes the paused playback loop.
+            let mut gone = false;
+            if v.timeline_shown.replace(timeline) != Some(timeline) {
+                gone = true;
+                // Republished after this layout pass, not inside it.
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update(cx, |v, cx| v.update_builtins(cx));
+                })
+                .detach();
+            }
+            if !shown.contains(&"timeline") {
+                gone |= v.builtins.timeline_place.take().is_some();
+            }
+            if !shown.contains(&"viewer") {
+                gone |= v.builtins.viewer_place.take().is_some();
+            }
+            if gone && let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
+    }
+    fn panel_menu(
+        &self,
+        id: &str,
+        entries: Vec<pm_shell::MenuEntry>,
+        at: (f32, f32),
+        cx: &mut App,
+    ) -> Option<Vec<pm_shell::MenuEntry>> {
+        self.0
+            .update(cx, |v, cx| v.extension_panel_menu(id, entries, at, cx))
+    }
+    fn header(
+        &self,
+        id: &str,
+        bounds: pm_shell::layout::Rect,
+        tabbed: bool,
+        w: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.0.update(cx, |v, cx| {
+            if id == "scopes" {
+                return Some(v.scopes_header(cx));
+            }
+            v.builtin_header(id, bounds, tabbed, w, cx)
+        })
+    }
+    fn panel_header_actions(
+        &self,
+        id: &str,
+        cx: &App,
+    ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        self.0.read(cx).extension_panel_header_actions(id)
+    }
+    fn project_id(&self, cx: &App) -> Option<String> {
+        self.0.read(cx).session.as_ref().map(|s| s.project.clone())
+    }
+    fn status(&self, cx: &App) -> String {
+        self.0.read(cx).status_text()
+    }
+    fn status_trailing(&self, cx: &App) -> String {
+        let c = self.0.read(cx);
+        if c.published.is_none() {
+            return String::new();
+        }
+        let presented = c.viewer.as_ref().map_or(0, |v| v.status().presented);
+        let playback =
+            c.frame_facts
+                .playback_state(c.playing(), presented, std::time::Instant::now());
+        format!(
+            "{playback} · {}",
+            panels::format_facts(c.dimensions, c.rate.to_f64())
+        )
+    }
+    fn status_alert(&self, cx: &App) -> String {
+        let c = self.0.read(cx);
+        panels::offline_summary(c.frame_facts.offline(
+            c.published.as_ref(),
+            c.builtins.media_observed,
+            || c.offline_count(),
+        ))
+    }
+    fn status_alert_pressed(&self, _window: &mut Window, cx: &mut App) {
+        self.0.update(cx, |v, cx| v.show_offline_media(cx));
+    }
+    fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
+        self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
+    }
+}
+/// The size the editor lays a composition out at: its stored size, held to
+/// at least one pixel a side. A file needs only finite numbers to open, so a
+/// stored 0 (or a negative) is possible; fit, zoom and overlay math divide
+/// by this. The stored value is not rewritten: it changes only when the
+/// person edits the composition's settings.
+fn composition_size(w: f64, h: f64) -> [f64; 2] {
+    let side = |v: f64| if v.is_finite() { v.max(1.) } else { 1. };
+    [side(w), side(h)]
+}
+/// Where the playhead of a composition being left is: the viewer's clock, or,
+/// while a viewer bound a moment ago has not reported one yet, the time last
+/// asked for (written to the transport state by every seek). Reading only the
+/// clock left a composition at 0 s when the person came back to it and left
+/// again before its first frame.
+fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
+    clock.or(asked).unwrap_or(0.)
+}
+/// Shown while an Undo or a save waits for an agent's edit to finish.
+pub(crate) const UNDO_WAITING: &str = "Undo waits for the agent's edit to finish";
+impl Controller {
+    /// Toggles that are on: menu checkmarks, and `list_commands` for agents.
+    pub(crate) fn checked_commands(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        let v = self;
+        let mut on = std::collections::BTreeSet::new();
+        if v.playback.looping {
+            on.insert("toggleLoop".to_owned());
+        }
+        // The viewer's overlays and the channel it shows.
+        for (shown, command) in [
+            (v.safe_areas, "viewer.safeAreas"),
+            (v.guides, "viewer.guides"),
+            (v.rulers, "viewer.rulers"),
+            (v.grid, "viewer.grid"),
+        ] {
+            if shown {
+                on.insert(command.to_owned());
+            }
+        }
+        if let Some((_, _, command)) = crate::viewer2::CHANNELS
+            .iter()
+            .find(|(m, _, _)| *m == v.channels)
+        {
+            on.insert((*command).to_owned());
+        }
+        if let Some(timeline) = &v.builtins.timeline {
+            if timeline.read(cx).hides_shy() {
+                on.insert("timeline.toggleShy".to_owned());
+            }
+            let (tracks, snapping) = timeline.read(cx).toggles();
+            if tracks {
+                on.insert("timeline.toggleMode".to_owned());
+            }
+            if snapping {
+                on.insert("timeline.toggleSnapping".to_owned());
+            }
+            on.insert(timeline.read(cx).edit_tool().command());
+            if timeline.read(cx).graph_merged() {
+                on.insert("graph.merge".to_owned());
+            }
+        }
+        on
+    }
+    /// Commands that cannot run now: dimmed menu rows, refused agent runs.
+    fn transition_refusal(&self) -> Option<&'static str> {
+        if self.opening || self.settling.is_some() || self.home_visible {
+            return None;
+        }
+        self.transition_menu.borrow_mut().refusal(
+            self.published.as_deref()?,
+            self.layers(),
+            self.time(),
+        )
+    }
+    pub(crate) fn unavailable_commands(&self) -> std::collections::BTreeSet<String> {
+        let v = self;
+        let mut off = v.disabled.clone();
+        // Read at menu time so copies and pasteboard changes in another
+        // window are visible without a fresh project publication here.
+        if v.published.is_some() && crate::layer_commands::can_paste_per_frame() {
+            off.remove("pasteLayers");
+        }
+        if v.transition_refusal().is_some() {
+            off.insert("addDefaultTransition".into());
+        }
+        // While a project arrives its commands stay available: they wait for
+        // it (`Controller::command`) instead of being refused.
+        if v.opening || v.settling.is_some() {
+            off.retain(|name| !crate::layer_commands::waits_for_project(name));
+        }
+        // Home in front of the window's project: nothing to export (v1 dims
+        // File ▸ Export there), its keys included (PM-472).
+        if v.home_visible {
+            off.insert("export".to_owned());
+        }
+        off
+    }
+}
+/// The file name a project's first save or Save As proposes: its own name
+/// (v1), without characters a file name cannot hold.
+fn save_name(project: &str) -> String {
+    let name: String = project
+        .trim()
+        .chars()
+        .map(|c| if matches!(c, '/' | ':') { '-' } else { c })
+        .collect();
+    let name = name.trim_start_matches('.');
+    format!("{}.pmv", if name.is_empty() { "Untitled" } else { name })
+}
+/// The note after a save to a place chosen in the save panel: the file and
+/// the folder it is in, as Finder names them.
+fn saved_where(path: &std::path::Path) -> String {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder = path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "your Mac".into());
+    format!("Saved “{file}” in {folder}. File ▸ Show in Finder shows it.")
+}
+#[cfg(test)]
+mod first_save_tests {
+    #[test]
+    fn a_tab_behind_waiting_for_an_answer_is_named_in_front() {
+        assert_eq!(
+            super::waiting_note("Paper"),
+            "“Paper” is waiting for an answer. Switch to the project to respond."
+        );
+    }
+    #[test]
+    fn a_first_save_proposes_the_projects_own_name() {
+        assert_eq!(super::save_name("Paper"), "Paper.pmv");
+        assert_eq!(super::save_name("Cut 2/3: final"), "Cut 2-3- final.pmv");
+        assert_eq!(super::save_name("  "), "Untitled.pmv");
+        assert_eq!(super::save_name(".hidden"), "hidden.pmv");
+    }
+    #[test]
+    fn a_save_to_a_chosen_place_says_where() {
+        let note = super::saved_where(std::path::Path::new("/Users/someone/Movies/Paper.pmv"));
+        assert_eq!(note, "Saved “Paper.pmv” in Movies. File ▸ Show in Finder shows it.");
+    }
+}
+/// A background project has a question: the editor in front says so once.
+pub(crate) fn tell_front_waiting(asking: gpui::EntityId, name: &str, cx: &mut App) {
+    let shown = crate::entry::editors(cx)
+        .into_iter()
+        .find(|c| c.entity_id() != asking && c.read(cx).host.borrow().window.isKeyWindow());
+    if let Some(front) = shown {
+        let text = waiting_note(name);
+        front.update(cx, |v, cx| v.note(text, cx));
+    }
+}
+fn waiting_note(name: &str) -> String {
+    format!("“{name}” is waiting for an answer. Switch to the project to respond.")
+}
+/// Whether `text` is a program's error value rather than a sentence: a type
+/// or variant name with its fields, as `Storage("Kernel state changed")` or
+/// `Closed { id: 3 }` print.
+fn raw_error(text: &str) -> bool {
+    let text = text.trim();
+    let name: String = text.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let rest = &text[name.len()..];
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && !name.contains(' ')
+        && ((rest.starts_with('(') && rest.ends_with(')'))
+            || (rest.starts_with(" {") && rest.ends_with('}')))
+}
+/// The status line's sentence for a program's error value.
+const RAW_ERROR_NOTE: &str = "Something went wrong. Window ▸ Error Log has the details.";
+/// What a publication of document `revision` does to the status line's
+/// message ([`Controller::settle_message`]).
+#[derive(Debug, PartialEq)]
+enum Settle {
+    Keep,
+    /// A program's error value: it goes to the Error Log and the line says
+    /// [`RAW_ERROR_NOTE`].
+    Log(String),
+    /// [`RAW_ERROR_NOTE`] after a later edit: the failure was passing.
+    Clear,
+}
+fn settle(message: &str, noted_at: Option<u64>, revision: u64) -> Settle {
+    if raw_error(message) {
+        Settle::Log(message.to_owned())
+    } else if message == RAW_ERROR_NOTE && noted_at.is_some_and(|at| at != revision) {
+        Settle::Clear
+    } else {
+        Settle::Keep
+    }
+}
+#[cfg(test)]
+mod raw_error_tests {
+    /// PM-476: an error value is logged and read as a sentence; the next
+    /// edit (a later revision) clears it; nothing else is touched.
+    #[test]
+    fn an_error_value_is_logged_and_the_next_edit_clears_it() {
+        use super::{RAW_ERROR_NOTE, Settle, settle};
+        let raw = r#"Storage("Kernel state changed")"#;
+        assert_eq!(settle(raw, None, 7), Settle::Log(raw.into()));
+        assert_eq!(
+            settle(RAW_ERROR_NOTE, Some(7), 7),
+            Settle::Keep,
+            "same revision"
+        );
+        assert_eq!(
+            settle(RAW_ERROR_NOTE, Some(7), 8),
+            Settle::Clear,
+            "a later edit"
+        );
+        assert_eq!(
+            settle(RAW_ERROR_NOTE, Some(7), 1),
+            Settle::Clear,
+            "another document"
+        );
+        for kept in [
+            "Something went wrong; see the Error Log.",
+            "Select a layer to apply a LUT",
+            "Couldn’t write the caption file.",
+            "",
+        ] {
+            assert_eq!(settle(kept, Some(7), 8), Settle::Keep, "{kept}");
+        }
+    }
+    #[test]
+    fn a_program_error_value_never_reads_as_status() {
+        for raw in [r#"Storage("Kernel state changed")"#, "GestureActive()", "Closed { id: 3 }", r#"Kernel("x")"#] {
+            assert!(super::raw_error(raw), "{raw}");
+        }
+        for plain in [
+            "Saved · 868 layers · 26878 keyframes",
+            "Powermove didn’t quit: the Export sheet is open. Answer or close it, then quit again.",
+            "Viewer: the effect (Deep Glow) is missing",
+            "No project",
+            "Couldn’t write the caption file.",
+        ] {
+            assert!(!super::raw_error(plain), "{plain}");
+        }
+    }
+}
+impl Controller {
+    /// A program's error value left in the status line goes to the Error Log
+    /// and reads as [`RAW_ERROR_NOTE`] until the next edit (PM-476).
+    fn settle_message(&mut self, revision: u64) {
+        match settle(&self.message, self.raw_note_at, revision) {
+            Settle::Keep => {}
+            Settle::Log(raw) => {
+                self.errors.borrow_mut().push("Status", &raw);
+                self.message = RAW_ERROR_NOTE.into();
+                self.raw_note_at = Some(revision);
+            }
+            Settle::Clear => {
+                self.message.clear();
+                self.raw_note_at = None;
+            }
+        }
+    }
+    /// A passing status note (v1's status toast): shown in the status line,
+    /// then the line returns to Saved/Edited unless something replaced it.
+    pub fn note(&mut self, text: String, cx: &mut Context<Self>) {
+        let hold = self.host.borrow().tokens.motion.note_hold;
+        self.message = text.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs_f64(hold))
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                if v.message == text {
+                    v.message.clear();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Shows a floating popup toast letting the user know an interaction was
+    /// intercepted by one or more locked layers, with a one-click Unlock button.
+    pub(crate) fn show_locked_toast(
+        &mut self,
+        layers: Vec<String>,
+        document: u64,
+        composition: Option<String>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let project = session.project.clone();
+        let kernel = self.kernel.clone();
+        crate::v4_native::announce(&self.host.borrow().window, &message);
+        self.note(message.clone(), cx);
+        let mut unique = Vec::new();
+        for id in layers {
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
+        }
+        if unique.is_empty() {
+            self.action_toast = Some(cx.new(|cx| {
+                crate::action_toast::ToastView::notice(Some("lock.fill"), message, cx)
+            }));
+        } else {
+            let label = if unique.len() > 1 {
+                "Unlock All"
+            } else {
+                "Unlock"
+            };
+            let tx_label = if unique.len() > 1 {
+                "Unlock Layers"
+            } else {
+                "Unlock Layer"
+            };
+            self.action_toast = Some(cx.new(|cx| {
+                crate::action_toast::ToastView::with_icon_action(
+                    "lock.fill",
+                    message,
+                    label,
+                    move |cx| {
+                        let Some(publication) = kernel.published(&project) else {
+                            return;
+                        };
+                        if publication.snapshot.doc_id != document
+                            || publication.snapshot.open_comp() != composition
+                        {
+                            return;
+                        }
+                        let commands: Vec<_> = unique
+                            .iter()
+                            .map(|id| pm_kernel::Command::SetLayerLocked {
+                                layer_id: id.clone(),
+                                locked: false,
+                            })
+                            .collect();
+                        let request = pm_kernel::Request::new(
+                            pm_kernel::Caller::native(),
+                            pm_kernel::Call::Transact {
+                                label: Some(tx_label.into()),
+                                body: pm_kernel::WriteBody::Commands(commands),
+                                expected_revision: Some(publication.revision()),
+                            },
+                        )
+                        .with_document(document);
+                        let pending = kernel.call(&project, request);
+                        cx.spawn(async move |_| {
+                            let _ = pending.await;
+                        })
+                        .detach();
+                    },
+                    cx,
+                )
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Resolves the locking owner for `layer_id` in the active composition and
+    /// presents the locked-layer popup toast.
+    pub(crate) fn show_locked_layer_toast_for(
+        &mut self,
+        layer_id: &str,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let owner = index.locking_layer(layer_id);
+        let owner_id = owner
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| layer_id.to_owned());
+        let message = match (index.layer(layer_id), owner) {
+            (Some(layer), Some(group)) if group.id != layer.id => format!(
+                "“{}” is inside locked group “{}”",
+                layer.name.to_string_lossy(),
+                group.name.to_string_lossy()
+            ),
+            (Some(layer), _) => format!("“{}” is locked — can't {action}", layer.name.to_string_lossy()),
+            _ => format!("That layer is locked — can't {action}"),
+        };
+        self.show_locked_toast(
+            vec![owner_id],
+            published.snapshot.doc_id,
+            published.snapshot.open_comp(),
+            message,
+            cx,
+        );
+    }
+
+    /// Shows the locked-layer popup for a status/error message reported without
+    /// an explicit layer id, attaching Unlock for any locked selected layers.
+    pub(crate) fn show_locked_status_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        let Some(published) = self.published.clone() else {
+            self.note(message, cx);
+            return;
+        };
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let mut owners = Vec::new();
+        for id in index.expanded_ids(published.selection.layers()) {
+            if let Some(owner) = index.locking_layer(&id)
+                && !owners.contains(&owner.id)
+            {
+                owners.push(owner.id.clone());
+            }
+        }
+        self.show_locked_toast(
+            owners,
+            published.snapshot.doc_id,
+            published.snapshot.open_comp(),
+            message,
+            cx,
+        );
+    }
+    /// Status bar copy (language §14): a pending message or error, else
+    /// `Saved`/`Edited` with layer and keyframe counts.
+    pub fn status_text(&self) -> String {
+        if let Some(note) = &self.closing_note {
+            return note.clone();
+        }
+        if let Some(progress) = self.builtins.export_job.as_ref().and_then(|run| run.status()) {
+            return progress;
+        }
+        let preview_pause = self
+            .session
+            .as_ref()
+            .and_then(|session| self.pro_media.preview_pause_message(&session.project));
+        // "Saved" is the state word the computed line already starts with.
+        let status =
+            if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
+                self.message.clone()
+            } else {
+                let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
+                panels::status_line(
+                    dirty,
+                    self.path.is_some(),
+                    self.layers().len(),
+                    self.keyframes,
+                )
+            };
+        let status = if raw_error(&status) {
+            // Never a program's error value in the status line (PM-476).
+            RAW_ERROR_NOTE.to_owned()
+        } else {
+            status
+        };
+        match preview_pause {
+            Some(pause) => format!("{pause} · {status}"),
+            None => status,
+        }
+    }
+
+    pub fn new(
+        kernel: KernelHandle,
+        engine: Arc<EngineService>,
+        profile: PathBuf,
+        electron: Option<PathBuf>,
+        mcp: Arc<crate::mcp::Host>,
+        host: Rc<RefCell<Host>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        crate::diag::EDITORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pro_media = Arc::new(crate::pro_media::ProMedia::new(
+            profile.clone(),
+            crate::media::objects_dir(&profile),
+            engine.export_activity().flag(),
+        ));
+        pro_media.refresh_usage();
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |v, cx| v.refresh_waiting_folders(cx));
+        })
+        .detach();
+        cx.observe_global::<crate::pro_media::MediaPassDone>(|v, cx| v.refresh_waiting_folders(cx))
+            .detach();
+        crate::render_frames::install(engine.render_cache());
+        sync_render_storage(&pro_media, &engine);
+        engine
+            .render_cache()
+            .set_background(pro_media.preferences().background());
+        let pro_events = pro_media.event_receiver.clone();
+        cx.spawn(async move |this, cx| {
+            while let Ok(first) = pro_events.recv().await {
+                let mut renditions = matches!(first, crate::pro_media::Event::Renditions);
+                while let Ok(e) = pro_events.try_recv() {
+                    renditions |= matches!(e, crate::pro_media::Event::Renditions);
+                }
+                if this
+                    .update(cx, |v, cx| v.pro_media_changed(renditions, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // The profile's Appearance, from launch on.
+        crate::appearance::follow(&kernel.state());
+        let events = kernel.subscribe();
+        let (tx, rx) = async_channel::unbounded();
+        std::thread::spawn(move || {
+            while let Ok(e) = events.recv() {
+                if tx.send_blocking(e).is_err() {
+                    break;
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok(first) = rx.recv().await {
+                // Coalesce a burst (an MCP run publishes several revisions):
+                // one refresh reads the newest publication for all of them.
+                let mut events = vec![first];
+                while let Ok(e) = rx.try_recv() {
+                    events.push(e);
+                }
+                if this
+                    .update(cx, |v, cx| {
+                        let mut force_panels = false;
+                        for e in events {
+                            match e {
+                                // A change acknowledged earlier could not be made
+                                // durable afterwards: the window showing that
+                                // project says so exactly as for a change
+                                // refused at the time (sheet, subtitle until a
+                                // save succeeds, Error Log row).
+                                KernelEvent::Durability { project, message } => {
+                                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                                    if unprotects(&project, shown) {
+                                        v.notice(pm_kernel::Notice::NotDurable { message }, cx);
+                                    }
+                                }
+                                KernelEvent::Fault { message, .. } => {
+                                    v.message = "Something went wrong; see the Error Log.".into();
+                                    v.errors.borrow_mut().push("Kernel", &message);
+                                }
+                                KernelEvent::Log { message } => {
+                                    v.errors.borrow_mut().push("Kernel", &message);
+                                }
+                                KernelEvent::Notice { project, notice }
+                                    if v.session.as_ref().is_some_and(|s| s.project == project) =>
+                                {
+                                    v.notice(notice, cx);
+                                }
+                                // Settings › General › Appearance chosen (here or in
+                                // another window): the whole app takes it.
+                                KernelEvent::StateChanged { change, .. } => {
+                                    if !matches!(change, pm_kernel::state::StateChange::Ui { .. }) {
+                                        force_panels = true;
+                                        crate::appearance::follow(&v.kernel.state());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        v.refresh_publication(force_panels, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let layer = host.borrow().viewer_layer();
+        pm_engine_service::layers::configure_layer(
+            objc2::MainThreadMarker::new().unwrap(),
+            &layer,
+            &engine.metal_device(),
+        )
+        .expect("viewer layer");
+        host.borrow().set_viewer_label("Composition viewer");
+        let mut builtins = crate::builtins::Host::default();
+        builtins.export_tasks = crate::export_coordinator::tasks();
+        // A viewer made before the window's extensions start draws their
+        // first state (still loading), not an empty settled one.
+        let extensions = crate::extensions::Extensions::default();
+        let resource_feed =
+            pm_engine_service::resources::ResourceFeed::new(extensions.resources.clone());
+        Self {
+            builtins,
+            extensions,
+            project_extension_scope: None,
+            font_broker: None,
+            composition_views: Default::default(),
+            kernel,
+            engine,
+            profile,
+            electron,
+            waiting_folders: vec![],
+            host,
+            session: None,
+            published: None,
+            viewer: None,
+            viewer_shown: None,
+            extensions_shown: None,
+            media: MediaCatalog::default(),
+            linked_sync: Default::default(),
+            media_refresh: Default::default(),
+            thumbs: Default::default(),
+            media_base: MediaCatalog::default(),
+            media_resolved: false,
+            pro_media,
+            tasks_window: None,
+            opening: false,
+            recovery_cancel: None,
+            busy: None,
+            opening_name: None,
+            ghost_aspect: None,
+            ghost_picture: None,
+            ghost_retired: Vec::new(),
+            viewer_poster: None,
+            last_frame_watch: Default::default(),
+            opening_workspace: None,
+            front_restore: false,
+            ghosted: Default::default(),
+            revealed: Default::default(),
+            settling: None,
+            open_timer: Default::default(),
+            telemetry_open: None,
+            telemetry_panels: None,
+            after_open: Default::default(),
+            settling_open: 0,
+            rows: Default::default(),
+            saving_note: false,
+            output_mode: crate::viewer2::OutputMode::from_env(),
+            media_mode: Default::default(),
+            quality: Default::default(),
+            focus_group: None,
+            project_output: pm_protocol::color::ProjectOutput::Sdr,
+            scopes: Default::default(),
+            perf: Default::default(),
+            mixer: Default::default(),
+            workspace_store: Default::default(),
+            workspaces_status: String::new(),
+            generated_menu_layer: None,
+            agent_panel_sweep: false,
+            agent_panel_builds: Default::default(),
+            panel_builds: Default::default(),
+            panel_build_views: Default::default(),
+            workspace_json: Default::default(),
+            generated_switches: Default::default(),
+            shell: None,
+            cloud: Default::default(),
+            captions: Default::default(),
+            shader: Default::default(),
+            takes: Default::default(),
+            notes: Default::default(),
+            safe_areas: false,
+            guides: false,
+            channels: Default::default(),
+            part_focus: None,
+            rulers: false,
+            timeline_shown: None,
+            grid: false,
+            skimming: Default::default(),
+            shuttle: Default::default(),
+            playback: Default::default(),
+            popout: None,
+            studio_panes: vec![],
+            studio_pane_targets: vec![],
+            studio_pane_sender: None,
+            studio_pane_scenes: Default::default(),
+            render_wait: 0,
+            resource_feed,
+            main_output: Default::default(),
+            selected: None,
+            // The status bar holds facts, not instructions (review shell 2 #11).
+            message: "No project".into(),
+            raw_note_at: None,
+            action_toast: None,
+            path: None,
+            recent: vec![],
+            frame_facts: Default::default(),
+            library: None,
+            home: false,
+            home_visible: false,
+            pages: Default::default(),
+            store: None,
+            page_drawn: false,
+            reopening: false,
+            restoring: false,
+            playback_wake: None,
+            errors: crate::error_log::shared(cx),
+            rate: pm_time::Rate::FPS_30,
+            dimensions: [1920., 1080.],
+            background: None,
+            keyframes: 0,
+            recovery_pending: false,
+            stop_offered: None,
+            reopening_stopped: false,
+            mcp,
+            job_overrides: Default::default(),
+            poster_revision: None,
+            window_key: 0,
+            close_pending: false,
+            closed_for_quit: false,
+            replace_with: None,
+            unprotected: false,
+            closing_note: None,
+            close_window: None,
+            close_operation: None,
+            gizmo_layer: None,
+            gizmo_marks: Vec::new(),
+            tool: "toolSelect".into(),
+            shape_variant: "rect".into(),
+            view: Default::default(),
+            view_write: None,
+            disabled: crate::layer_commands::disabled_indexed(
+                None,
+                &[],
+                &Default::default(),
+                false,
+            ),
+            command_rows: None,
+            studio_eligibility: StudioEligibility::default(),
+            transition_menu: Default::default(),
+            save_pending: false,
+            choosing_save_path: false,
+            close_after_save: None,
+            imports: Default::default(),
+            importing: None,
+            shortcut_recording: None,
+            shortcut_asked: None,
+            workspace_after_open: false,
+            keymap_revision: None,
+            keymap_seen: None,
+            shortcuts_page: serde_json::Value::Null,
+            nudge_mark: None,
+            nudge_idle: None,
+        }
+    }
+    pub fn initialize(&mut self, opening: Option<crate::entry::Pending>, cx: &mut Context<Self>) {
+        self.load_recent(cx);
+        match opening {
+            Some(pending) => self.apply_pending(pending, cx),
+            None => self.reopen_restored(cx),
+        }
+    }
+    /// Opens `pending` in this window, which shows no project.
+    pub(crate) fn apply_pending(&mut self, pending: crate::entry::Pending, cx: &mut Context<Self>) {
+        match pending {
+            crate::entry::Pending::File(path) => self.open_file(path, cx),
+            crate::entry::Pending::ReceivedFile(path, _received) => self.open_file(path, cx),
+            crate::entry::Pending::Library(project) => self.open_named(
+                SessionSource::Library {
+                    profile: self.profile.clone(),
+                    project,
+                },
+                None,
+                cx,
+            ),
+            crate::entry::Pending::Session(session) => {
+                // Gone before this window took it: nothing to show.
+                if self.kernel.published(&session.project).is_some() {
+                    self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+                    self.mcp.activate_window(self.window_key);
+                }
+            }
+            crate::entry::Pending::Adopt { reply, name, file } => {
+                self.adopt_reply(*reply, name, file, cx)
+            }
+        }
+    }
+    /// A project that was to open here and won't (its replacement was
+    /// cancelled): one the kernel already opened for this window closes
+    /// again; nothing of it is lost (it was only opened).
+    pub(crate) fn dispose_pending(
+        &mut self,
+        pending: crate::entry::Pending,
+        cx: &mut Context<Self>,
+    ) {
+        let session = match pending {
+            crate::entry::Pending::Session(session) => Some(session),
+            crate::entry::Pending::Adopt { reply, .. } => match *reply {
+                ShellReply::Opened { session, .. } => Some(session),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(session) = session {
+            let closing = self.kernel.shell(ShellCall::Close(session));
+            cx.spawn(async move |_, _| drop(closing.await)).detach();
+        }
+    }
+    /// Ghost loading: the editor's ghost from now until each panel is ready
+    /// (`panels::opening`), the project's name in the bar with “Opening…”
+    /// under it. Called again for the same open, it keeps its clock.
+    pub(crate) fn begin_ghost(&mut self, name: &str, aspect: Option<f32>, cx: &mut Context<Self>) {
+        if self.opening_name.as_deref() != Some(name) {
+            self.ghosted.clear();
+            self.revealed.clear();
+            self.ghost_aspect = aspect;
+            self.open_timer.begin();
+            self.open_timer.mark("chosen", serde_json::json!({}));
+            if self.telemetry_open.as_ref().is_none_or(|o| o.settled) {
+                self.telemetry_open = crate::telemetry::opening(crate::telemetry::home_source());
+            }
+        } else if aspect.is_some() {
+            self.ghost_aspect = aspect;
+        }
+        self.opening_name = Some(name.to_owned());
+        self.home = false;
+        self.host
+            .borrow()
+            .set_document_metadata(name, "Opening…", false, None);
+        cx.notify();
+    }
+    /// The front window's restored project showed its first frame, or its
+    /// open ended without one: the other restored windows open theirs.
+    pub(crate) fn release_front(&mut self) {
+        if std::mem::take(&mut self.front_restore) {
+            pm_shell::set_front_restoring(None);
+        }
+    }
+    /// An open that ended without a project: the ghost goes, Home is back.
+    pub(crate) fn end_ghost(&mut self, cx: &mut Context<Self>) {
+        self.release_front();
+        self.opening_workspace = None;
+        self.opening_name = None;
+        self.ghosted.clear();
+        self.revealed.clear();
+        self.ghost_aspect = None;
+        self.ghost_retire();
+        self.host
+            .borrow()
+            .set_document_metadata("Untitled", "", false, None);
+        cx.notify();
+    }
+    /// One project per window: `next` opens in place of the project shown.
+    /// That project closes first as any close does (an unsaved one asks
+    /// Save, Don't Save or Cancel); Cancel keeps it and `next` does not open.
+    pub(crate) fn replace_project(&mut self, next: crate::entry::Pending, cx: &mut Context<Self>) {
+        match crate::lifecycle::open_plan(
+            self.session.is_some(),
+            self.opening,
+            self.close_pending || self.replace_with.is_some(),
+        ) {
+            crate::lifecycle::OpenPlan::Here => {
+                self.hide_home(cx);
+                self.apply_pending(next, cx);
+                return;
+            }
+            crate::lifecycle::OpenPlan::Refuse => {
+                self.dispose_pending(next, cx);
+                self.message = "Finish closing this project first.".into();
+                cx.notify();
+                return;
+            }
+            // Tabs mode: the project shown stays as it is and the other
+            // opens as a new tab of this window.
+            crate::lifecycle::OpenPlan::AfterClose if pm_shell::tabs_mode() => {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(next, leader, cx);
+                return;
+            }
+            crate::lifecycle::OpenPlan::AfterClose => {}
+        }
+        self.replace_with = Some(next);
+        self.request_close(crate::lifecycle::Intent::Project, cx);
+        // Refused (busy, saving, an operation in progress): it says why,
+        // and the other project doesn't open.
+        if !self.close_pending
+            && let Some(next) = self.replace_with.take()
+        {
+            self.dispose_pending(next, cx);
+        }
+    }
+    /// A window restored at launch reopens its project when that project has
+    /// unsaved work from a crash (so the person is asked about it at once),
+    /// when the system keeps documents open across quits, or when Settings ›
+    /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
+    /// on unless turned off).
+    fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        // The pages open in this window's strip at the last quit open again,
+        // behind the project.
+        let pages = std::mem::take(&mut self.host.borrow_mut().restored_pages);
+        if !pages.is_empty() {
+            for page in &pages {
+                self.pages.open(page);
+            }
+            self.pages.leave();
+            self.sync_pages();
+        }
+        let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
+            return;
+        };
+        let keep = keep
+            || self
+                .kernel
+                .state()
+                .settings
+                .get("restoreWindows")
+                .and_then(pm_model::Value::as_bool)
+                != Some(false);
+        // Its picture stands in from the window's first frame, while the
+        // library is read (PM-384).
+        let front = self.host.borrow().restored_front;
+        // A tab behind the front one shows its own layout and the quiet
+        // loading state until its own open, never a picture (PM-384).
+        let picture = front || pm_shell::front_restoring().is_none();
+        if keep {
+            self.stage_open_with(&project, picture);
+            // The project's name, as the window showed it last: the tab,
+            // the bar and the ghost (with the front tab's picture) say it
+            // from the first frame, never an untitled window, while the
+            // library is read (PM-384: ~6 s under load).
+            let name = self.host.borrow().restored_name.clone();
+            if let Some(name) = name {
+                self.message.clear();
+                self.begin_ghost(&name, None, cx);
+            }
+        }
+        self.front_restore = front;
+        let profile = self.profile.clone();
+        let found = cx.background_executor().spawn(async move {
+            let unsaved =
+                !pm_kernel::journal::sessions(&profile.join("journals").join(&project)).is_empty();
+            if !(unsaved || keep) {
+                return None;
+            }
+            let row = pm_kernel::library::LibraryStore::open(&profile)
+                .projects()
+                .ok()?
+                .into_iter()
+                .find(|row| row.id == project)?;
+            Some((row.id, row.name))
+        });
+        // Home waits for the answer, showing the project's ghost, so a
+        // project that reopens never flashes Home or an empty editor first.
+        self.reopening = true;
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            let _ = this.update(cx, |v, cx| {
+                v.reopening = false;
+                // The tab shows its project opening, with its picture, from
+                // now: not Home while the tabs before it open (PM-384).
+                if let Some((id, name)) = &found
+                    && v.session.is_none()
+                    && !v.opening
+                {
+                    v.stage_open_with(id, front || pm_shell::front_restoring().is_none());
+                    v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_some() && !v.opening {
+                    // Named from the session, but the library has no such
+                    // project now: Home, as for any open that ends without one.
+                    v.end_ghost(cx);
+                    v.viewer_poster = None;
+                } else if found.is_none() && v.opening_name.is_none() {
+                    v.ghost_retire();
+                    v.viewer_poster = None;
+                }
+                if found.is_none() {
+                    v.release_front();
+                    // Nothing to reopen: the window is Home, and starts its
+                    // panels now.
+                    v.host.borrow_mut().restored_project = None;
+                    v.update_builtins(cx);
+                }
+                cx.notify();
+            });
+            if let Some((id, name)) = found {
+                // The window that was in front opens first, alone, and
+                // shows its first frame; the others wait for it, and then
+                // for the person and the viewer to be quiet a moment, so a
+                // launch with many tabs works on the front one first. A tab
+                // the person selects opens at once.
+                if !front {
+                    // Selected by the person: shown once the restored tabs
+                    // have joined their groups (until then every window is).
+                    let shown = |v: &Self| {
+                        !pm_shell::restore_arranging()
+                            && pm_shell::window_shown(&v.host.borrow().window)
+                    };
+                    for _ in 0..FRONT_WAIT_LOOKS {
+                        if pm_shell::front_restoring().is_none()
+                            || matches!(this.update(cx, |v, _| shown(v)), Ok(true))
+                        {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                    }
+                    // Then its turn: one decision and, when it opens, the open
+                    // itself in one update, so nothing (a quit beginning, a
+                    // Recover question) can come between them.
+                    let deferred = std::time::Instant::now();
+                    loop {
+                        let step = this.update(cx, |v, cx| {
+                            let step = restore_step(RestoreNow {
+                                shown: shown(v),
+                                quitting: crate::lifecycle::quitting(cx),
+                                busy: v.mcp.operation_in_progress(),
+                                quiet: pm_engine_service::jobs::app_quiet_for(RESTORE_QUIET),
+                                waited: deferred.elapsed(),
+                                spaced: restore_spaced(false),
+                            });
+                            if step == RestoreStep::Open {
+                                restore_spaced(true);
+                                v.open_restored(&id, &name, false, cx);
+                            }
+                            step
+                        });
+                        match step {
+                            Ok(RestoreStep::Open) | Err(_) => return,
+                            Ok(RestoreStep::Wait) => {}
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(250))
+                            .await;
+                    }
+                }
+                // The front tab: every restored window reopens its project,
+                // one open at a time (an open holds the project-operation
+                // fence): it waits for the one before it instead of giving
+                // up.
+                for _ in 0..300 {
+                    let busy = this.update(cx, |v, _| v.mcp.operation_in_progress());
+                    if !matches!(busy, Ok(true)) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                }
+                let _ = this.update(cx, |v, cx| v.open_restored(&id, &name, true, cx));
+            }
+        })
+        .detach();
+    }
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_publication(true, cx);
+    }
+
+    fn refresh_publication(&mut self, force_panels: bool, cx: &mut Context<Self>) {
+        let _span = crate::diag::span("refresh");
+        let Some(session) = &self.session else {
+            self.linked_sync = Default::default();
+            cx.notify();
+            return;
+        };
+        let Some(mut p) = self.kernel.published(&session.project) else {
+            return;
+        };
+        let previous = self.published.clone();
+        let document_changed = previous.as_ref().is_none_or(|old| {
+            old.snapshot.doc_id != p.snapshot.doc_id || old.revision() != p.revision()
+        });
+        let view_only = !force_panels
+            && previous.as_ref().is_some_and(|old| {
+                !Arc::ptr_eq(old, &p)
+                    && !document_changed
+                    && old.selection == p.selection
+                    && old.workspace == p.workspace
+                    && old.entry == p.entry
+                    && old.history == p.history
+                    && old.metadata_revision == p.metadata_revision
+                    && old.saving == p.saving
+                    && old.dirty == p.dirty
+                    && old.fault == p.fault
+                    && old.media.shares_entries_with(&p.media)
+                    && old.ui_state.session == p.ui_state.session
+                    && old.ui_state != p.ui_state
+            });
+        let render_changed = document_changed
+            || previous.as_ref().is_none_or(|old| {
+                old.entry.is_some() != p.entry.is_some()
+                    || old.ui_state.viewer.get("studioTier") != p.ui_state.viewer.get("studioTier")
+            });
+        let timeline_changed = !view_only
+            || previous
+                .as_ref()
+                .is_some_and(|old| old.ui_state.timeline != p.ui_state.timeline);
+        let gizmos_changed = !view_only
+            || previous.as_ref().is_some_and(|old| {
+                old.ui_state.viewer != p.ui_state.viewer || old.ui_state.tool != p.ui_state.tool
+            });
+        if self.telemetry_open.as_ref().is_some_and(|o| o.settled)
+            && let Some(opening) = self.telemetry_open.take()
+        {
+            crate::telemetry::project_opened(opening, p.clone());
+        }
+        let switched = self.published.as_ref().is_some_and(|old| {
+            old.snapshot.doc_id == p.snapshot.doc_id
+                && old.snapshot.open_comp() != p.snapshot.open_comp()
+        });
+        if switched {
+            self.host.borrow_mut().close_flowchart();
+            if let Some(old) = &self.published
+                && let Some(id) = old.snapshot.open_comp()
+            {
+                self.composition_views.insert(
+                    (old.snapshot.doc_id, id),
+                    CompositionView {
+                        time: left_at(
+                            self.viewer
+                                .as_ref()
+                                .and_then(|v| v.status().clock)
+                                .map(|c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64),
+                            old.ui_state.transport.get("time").and_then(|v| v.as_f64()),
+                        ),
+                        timeline: old.ui_state.timeline.clone(),
+                        viewer: old.ui_state.viewer.clone(),
+                    },
+                );
+            }
+            let key = (
+                p.snapshot.doc_id,
+                p.snapshot.open_comp().unwrap_or_default(),
+            );
+            let saved = self.composition_views.get(&key).cloned();
+            let mut next = (*p).clone();
+            let time = if let Some(saved) = saved {
+                next.ui_state.timeline = saved.timeline;
+                next.ui_state.viewer = saved.viewer;
+                saved.time
+            } else {
+                0.
+            };
+            self.view.written();
+            self.view_write = None;
+            if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&next.ui_state) {
+                self.view.adopt(&chrome.navigation);
+            }
+            p = Arc::new(next);
+            self.published = Some(p.clone());
+            self.builtins.natives.published.replace(Some(p.clone()));
+            self.bind_composition();
+            self.apply_viewer_options();
+            self.rebuild_popout_viewer();
+            self.seek(time);
+        } else if self.viewer.is_some() && published_rate(&p) != self.rate {
+            // The composition's frame rate changed (Project Settings): the
+            // viewer is bound again on the new frame grid, so stepping,
+            // playing and snapping follow at once, where the playhead was;
+            // a run in progress carries on at its speed.
+            let time = self.time();
+            let playing = self.running().then(|| {
+                self.viewer
+                    .as_ref()
+                    .and_then(|v| v.status().clock)
+                    .map(|c| c.rate)
+                    .filter(|rate| *rate != PlaybackRate::STOPPED)
+                    .unwrap_or(PlaybackRate::NORMAL)
+            });
+            self.published = Some(p.clone());
+            self.builtins.natives.published.replace(Some(p.clone()));
+            self.bind_composition();
+            self.apply_viewer_options();
+            self.rebuild_popout_viewer();
+            self.seek(time);
+            if let Some(rate) = playing {
+                self.transport(TransportCommand::Play { rate });
+            }
+        }
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            if self.linked_sync.update(&p, runtime) {
+                self.media_refresh.reset();
+            }
+        }
+        self.refresh_media(cx);
+        // Raster override answers are for one revision; frames ask afresh.
+        if render_changed {
+            crate::raster_overrides::published(&self.engine, &p);
+        }
+        if render_changed && let Some(viewer) = &self.viewer {
+            let _span = crate::diag::span("refresh.publish");
+            if let Err(e) = viewer.publish(&p) {
+                self.message = e.to_string();
+            }
+        }
+        if render_changed
+            && let Some(popout) = &self.popout
+            && let Some(viewer) = &*popout.viewer.borrow()
+            && let Err(e) = viewer.publish(&p)
+        {
+            self.message = format!("Popout viewer: {e}");
+        }
+        if document_changed {
+            self.publish_studio_panes(&p);
+        }
+        self.sync_rows(&p, cx);
+        if p.fault.is_some() && self.stop_offered != Some(p.snapshot.doc_id) {
+            self.stop_offered = Some(p.snapshot.doc_id);
+            self.offer_reopen(&p, cx);
+        }
+        self.follow_project_output();
+        self.settle_message(p.revision());
+        let saving = p.saving || (self.save_pending && !self.choosing_save_path);
+        if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
+            self.message = note.into();
+        }
+        self.saving_note = saving;
+        self.selected = p.selection.primary().map(str::to_owned);
+        let mut viewer_changed = false;
+        if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
+            self.view.adopt(&chrome.navigation);
+            // Preview Resolution in the viewer bar: the engine renders at it.
+            let quality = crate::viewer2::engine_quality(chrome.quality);
+            if self.quality != quality {
+                self.quality = quality;
+                viewer_changed = true;
+            }
+        }
+        let focus_group = if document_changed || previous.as_ref().is_some_and(|old| {
+            pm_panel_timeline::focused_group_from_ui(&old.ui_state)
+                != pm_panel_timeline::focused_group_from_ui(&p.ui_state)
+        }) {
+            crate::gizmo::focused_group(&p)
+        } else {
+            self.focus_group.clone()
+        };
+        if self.focus_group != focus_group {
+            self.focus_group = focus_group;
+            viewer_changed = true;
+        }
+        if viewer_changed {
+            self.apply_viewer_options();
+        }
+        self.path = p.session.as_ref().and_then(|s| match &s.destination {
+            SessionDestination::File(path) => Some(path.clone()),
+            _ => None,
+        });
+        let title = p
+            .snapshot
+            .document
+            .root()
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled");
+        // Named as its Home card names it: a project still "Untitled" saved
+        // as "RC Edit.pmv" reads "RC Edit" in its tab, the window title and
+        // the menus from the moment the save lands.
+        let title = crate::library_surface::model::shown_name(title, self.path.as_deref());
+        self.host.borrow().set_document_metadata(
+            &title,
+            &copy_subtitle(
+                p.session.as_ref().map(|s| &s.metadata),
+                if self.unprotected && !saving {
+                    "Not protected: save now"
+                } else {
+                    pm_shell::document_subtitle(p.dirty, saving)
+                },
+            ),
+            p.dirty,
+            self.path.as_deref(),
+        );
+        // The menu bar is the app's: only the editor last in front names
+        // its Undo and Redo (a tab behind publishing its own history left
+        // a bare "Undo" over the front project's, PM-396).
+        if !view_only && menu_editor_is(cx.entity_id()) {
+            history_menu(&p.history);
+        }
+        self.builtins.natives.published.replace(Some(p.clone()));
+        let shape = (self.duration(), self.work_area());
+        if let Some(previous) = &self.published {
+            self.workspace_json
+                .follow(&mut self.panel_builds, &previous.workspace, &p.workspace);
+        }
+        let selection_changed = previous
+            .as_ref()
+            .is_none_or(|old| old.selection != p.selection);
+        let selection_payload = selection_changed.then(|| {
+            serde_json::json!({
+                "layers": p.selection.layers(),
+                "primary": p.selection.primary(),
+                "keys": p.selection.keys(),
+            })
+        });
+        let doc_payload = document_changed.then(|| {
+            serde_json::json!({
+                "docId": p.snapshot.doc_id,
+                "revision": p.revision(),
+                "composition": p.snapshot.open_comp(),
+            })
+        });
+        // An Undo or a save waits for an agent's edit still applying (PM-718).
+        let was_waiting = self.published.as_ref().is_some_and(|q| q.history.waiting);
+        if p.history.waiting && !was_waiting {
+            self.message = UNDO_WAITING.into();
+        } else if !p.history.waiting && self.message == UNDO_WAITING {
+            self.message.clear();
+        }
+        self.published = Some(p);
+        if document_changed {
+            self.reconcile_missing_definitions();
+        }
+        if let Some(runtime) = &self.builtins.runtime {
+            if let Some(payload) = doc_payload {
+                runtime.emit_event("document", &payload);
+            }
+            if let Some(payload) = selection_payload {
+                runtime.emit_event("selection", &payload);
+            }
+        }
+        // A run in progress follows a changed duration or work area at once
+        // (its loop, or where it stops), as the timeline does.
+        if shape != (self.duration(), self.work_area()) && self.running() {
+            self.shape_run();
+        }
+        // A changed Views setting splits the viewer now, not at the next
+        // frame (a paused viewer has none): read from the publication just stored.
+        self.sync_studio_panes(cx);
+        if view_only {
+            self.update_view_builtins(cx);
+        } else {
+            self.update_builtins(cx);
+        }
+        if timeline_changed && let Some(timeline) = &self.builtins.timeline {
+            timeline.update(cx, |t, cx| t.published(cx));
+        }
+        if (gizmos_changed || viewer_changed) && let Some(gizmos) = &self.builtins.gizmos {
+            gizmos.update(cx, |g, cx| g.refresh(cx));
+        }
+        if !view_only {
+            self.update_disabled();
+        }
+        cx.notify();
+    }
+    pub fn layers(&self) -> &[LayerInfo] {
+        &self.rows.rows
+    }
+    /// Rows follow the newest publication; large lists are built on a worker.
+    fn sync_rows(&mut self, p: &Published, cx: &mut Context<Self>) {
+        use crate::rows::{self, Plan};
+        self.rows.follow_transform_values(p);
+        let key = rows::key(&p.snapshot);
+        match self.rows.plan(key, || rows::layer_count(&p.snapshot)) {
+            Plan::Current => {}
+            Plan::Inline => {
+                let _span = crate::diag::span("refresh.rows");
+                if self.rows.accept(key, rows::list(&p.snapshot), Some(key)) {
+                    // O(keyframes): a baked project holds hundreds of thousands.
+                    let snapshot = p.snapshot.clone();
+                    cx.spawn(async move |this, cx| {
+                        let count = cx
+                            .background_executor()
+                            .spawn(async move { rows::keyframe_count(&snapshot) })
+                            .await;
+                        let _ = this.update(cx, |v, cx| {
+                            if v.published.as_ref().map(|p| rows::key(&p.snapshot)) == Some(key) {
+                                v.keyframes = count;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Plan::Worker => {
+                let snapshot = p.snapshot.clone();
+                cx.spawn(async move |this, cx| {
+                    let list = cx
+                        .background_executor()
+                        .spawn(
+                            async move { (rows::list(&snapshot), rows::keyframe_count(&snapshot)) },
+                        )
+                        .await;
+                    let _ = this.update(cx, |v, cx| {
+                        let latest = v.published.as_ref().map(|p| rows::key(&p.snapshot));
+                        let (list, keyframes) = list;
+                        if v.rows.finish(key, list, latest) {
+                            v.keyframes = keyframes;
+                            // Menus and keys follow the rows they were built
+                            // from: a layer added to a large project is
+                            // selectable before its rows land, and its Layer
+                            // menu stayed off until something else changed.
+                            v.update_disabled();
+                            cx.notify();
+                        }
+                        if let Some(p) = v.published.clone() {
+                            v.sync_rows(&p, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+    /// The person is not editing: no pointer button is down (a drag, a
+    /// scrub) and no text is being typed. An edit the kernel still holds
+    /// open then is one its owner left open; the kernel decides that when
+    /// the call runs (and waits for an agent's edit that is applying).
+    pub fn not_editing(&self, cx: &App) -> bool {
+        objc2_app_kit::NSEvent::pressedMouseButtons() == 0
+            && !self
+                .builtins
+                .gizmos
+                .as_ref()
+                .is_some_and(|g| g.read(cx).text_open().is_some())
+    }
+    pub fn call(&mut self, call: Call, cx: &mut Context<Self>) {
+        let input = pm_engine_service::trace::enabled().then(Self::event_time);
+        self.call_at(call, input, cx);
+    }
+    /// `input`: the edit's input time for the viewer trace, if traced.
+    pub fn call_at(&mut self, call: Call, input: Option<f64>, cx: &mut Context<Self>) {
+        if self.close_pending {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        if let Some(input) = input
+            && matches!(
+                call,
+                Call::Transact { .. } | Call::Gesture(GestureCall::Step { .. })
+            )
+            && let Some(viewer) = &self.viewer
+        {
+            viewer.input_event(input);
+        }
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| {
+                match result {
+                    Some(Ok(ack)) => {
+                        if let Reply::Throw(e) = ack.reply {
+                            v.message = e.to_string();
+                        }
+                    }
+                    other => v.edit_failed(other.and_then(Result::err)),
+                }
+                v.refresh(cx);
+            });
+        })
+        .detach();
+    }
+    /// Plans off the main thread: nudging reads layer matrices. Whether a plan
+    /// exists is known only there, after the key is spent, so an empty one says so.
+    fn run_plan(&mut self, name: &str, args: &[serde_json::Value], cx: &mut Context<Self>) -> bool {
+        let Some(published) = self.published.clone() else {
+            return false;
+        };
+        if name == "palette.selectLayer"
+            && let Some(timeline) = self.builtins.timeline.as_ref()
+        {
+            return timeline.update(cx, |t, cx| t.palette_select_layer(&published, args, cx));
+        }
+        if name == "nudgeSelection" {
+            self.extend_nudge_burst(cx);
+        }
+        let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
+        cx.spawn(async move |this, cx| {
+            let (plan, reason) = cx
+                .background_executor()
+                .spawn(async move {
+                    let plan = crate::layer_commands::command_plan(&name, &args, &published, time);
+                    let reason = plan
+                        .is_none()
+                        .then(|| crate::layer_commands::nothing_reason(&name, &published))
+                        .flatten();
+                    (plan, reason)
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| match plan {
+                Some(plan) => v.run_layer_plan(plan, cx),
+                None => {
+                    v.message = reason.unwrap_or("Nothing to change").into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        true
+    }
+    /// The first nudge of a burst marks history before its own write reaches
+    /// the kernel (calls run in order); every nudge restarts the rest timer.
+    fn extend_nudge_burst(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        if self.nudge_idle.is_none() {
+            self.nudge_mark = None;
+            let mark = self.kernel.call(
+                &session.project,
+                Request::new(Caller::native(), HistoryCall::Mark),
+            );
+            cx.spawn(async move |this, cx| {
+                if let Some(Ok(Ack {
+                    reply: Reply::Mark(mark),
+                    ..
+                })) = mark.await
+                {
+                    let _ = this.update(cx, |v, _| v.nudge_mark = Some(mark));
+                }
+            })
+            .detach();
+        }
+        self.nudge_idle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NUDGE_IDLE).await;
+            let _ = this.update(cx, |v, cx| v.close_nudge_burst(cx));
+        }));
+    }
+    /// Squashes the burst into one "Nudge Selection" step. The kernel refuses
+    /// when anything else wrote since the mark; the nudges then stay separate.
+    fn close_nudge_burst(&mut self, cx: &mut Context<Self>) {
+        self.nudge_idle = None;
+        let (Some(mark), Some(session)) = (self.nudge_mark.take(), &self.session) else {
+            return;
+        };
+        let (kernel, project) = (self.kernel.clone(), session.project.clone());
+        cx.background_spawn(async move {
+            let Some(published) = kernel.published(&project) else {
+                return;
+            };
+            let squash = HistoryCall::Squash {
+                mark,
+                label: "Nudge Selection".into(),
+                expected_revision: published.revision(),
+            };
+            let _ = kernel
+                .call(&project, Request::new(Caller::native(), squash))
+                .await;
+        })
+        .detach();
+    }
+    /// Selected keyframes take precedence over their layers, as Delete does.
+    fn copy_selection(&mut self, cut: bool, pressed: Option<&str>, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::{self, Clipboard};
+        let Some(published) = self.published.clone() else {
+            return false;
+        };
+        let keys = self
+            .builtins
+            .timeline
+            .as_ref()
+            .filter(|_| pressed.is_none())
+            .map(|t| t.read(cx).copied_keys())
+            .unwrap_or_default();
+        let (clipboard, text, cut_layers) = if keys.is_empty() {
+            let Some((copied, ids)) = layer_commands::copy_layers(
+                &published, pressed, cut, &self.media.originals,
+            ) else {
+                return false;
+            };
+            let text = copied.layers.iter()
+                .filter_map(|layer| layer.get("name").and_then(pm_model::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (Clipboard::Layers(Arc::new(copied)), text, Some(ids))
+        } else {
+            if cut && self.disabled.contains("cutLayers") {
+                return false;
+            }
+            (Clipboard::Keys(keys), "Powermove keyframes".to_owned(), None)
+        };
+        layer_commands::set_clipboard(clipboard);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        if cut {
+            if let Some(layer_ids) = cut_layers {
+                let time = self.time();
+                self.run_layer_plan(layer_commands::Plan {
+                    label: "Cut".into(),
+                    commands: vec![pm_kernel::LayerCommand::DeleteAt { layer_ids, time }.into()],
+                    select: Some(Vec::new()),
+                    count_keys: None,
+                }, cx);
+            } else if let Some(timeline) = self.builtins.timeline.clone() {
+                let time = self.time();
+                timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+            }
+        }
+        true
+    }
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::Clipboard;
+        // Figma's layers claim the paste ahead of the app's own clipboard.
+        if self.paste_figma(cx) {
+            return true;
+        }
+        // Then media copied elsewhere. Copying layers or keyframes here
+        // replaces it on the pasteboard, so the newest copy is what pastes.
+        if self.paste_media(cx) {
+            return true;
+        }
+        let time = self.time();
+        match crate::layer_commands::shared_clipboard() {
+            Clipboard::Empty => false,
+            Clipboard::Keys(tracks) => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.paste_keys(tracks, time, cx));
+                true
+            }
+            Clipboard::Layers(layers) => {
+                let Some(plan) = self.published.as_ref().and_then(|p| layers.paste(p, time)) else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
+                true
+            }
+        }
+    }
+    /// Menus, palette and toolbar enablement for the current document state.
+    pub fn update_disabled(&mut self) {
+        let rows = &self.rows.rows;
+        if self
+            .command_rows
+            .as_ref()
+            .is_none_or(|(cached, _)| !Arc::ptr_eq(cached, rows))
+        {
+            self.command_rows = Some((rows.clone(), crate::layer_commands::CommandRows::new(rows)));
+        }
+        let studio = self
+            .published
+            .as_ref()
+            .is_some_and(|p| self.studio_eligibility.supported(p));
+        self.disabled = crate::layer_commands::disabled_indexed(
+            self.published.as_deref(),
+            rows,
+            &self.command_rows.as_ref().unwrap().1,
+            studio,
+        );
+    }
+    /// One Undo step, then the selection it leads to.
+    /// Project items as layers at the playhead, the first on top, in one
+    /// Undo step (Add Layer from Asset, Add Composition to Timeline, a
+    /// double-click in the Project panel).
+    pub(crate) fn add_to_timeline(
+        &mut self,
+        assets: &[String],
+        comps: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(published) = &self.published else {
+            return;
+        };
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None, still) {
+            Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
+                crate::layer_commands::Plan {
+                    label: "Add to Timeline".into(),
+                    commands,
+                    select: Some(layers),
+                    count_keys: None,
+                },
+                cx,
+            ),
+            Err(why) => {
+                self.message = why;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+    /// The Project panel asks before removing unused media or deleting media
+    /// with layer references. It applies approval in one Undo step.
+    pub(crate) fn confirm_delete_media(
+        &mut self,
+        owner: pm_panel_media::Stamp,
+        token: u64,
+        assets: &[String],
+        references: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let name = assets
+            .first()
+            .filter(|_| assets.len() == 1 && references > 0)
+            .and_then(|id| self.asset_names().get(id).cloned());
+        let rx = delete_media_alert(name.as_deref(), assets.len(), references)
+            .sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            let approved = rx.recv().await == Ok(Some(true));
+            let pending = cx
+                .background_executor()
+                .spawn(async move { runtime.project_confirm_delete(owner, token, approved) })
+                .await;
+            let failed = match pending {
+                Ok(Some(pending)) => match pending.await {
+                    Some(Ok(ack)) => match ack.reply {
+                        Reply::Throw(e) => Some(e.to_string()),
+                        _ => None,
+                    },
+                    Some(Err(e)) => Some(format!("{e:?}")),
+                    None => None,
+                },
+                Ok(None) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(message) = failed {
+                let _ = this.update(cx, |v, cx| {
+                    v.message = message;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+    /// Project panel ▸ New Comp from Selection: a composition matching the
+    /// media, holding it, opened (`media_import::comp_from_asset`).
+    pub(crate) fn new_comp_from_asset(&mut self, asset: &str, cx: &mut Context<Self>) {
+        let (Some(published), Some(session)) = (&self.published, &self.session) else {
+            return;
+        };
+        let (comp_id, layers, commands) =
+            match pm_builtins::media_import::comp_from_asset(published, asset) {
+                Ok(plan) => plan,
+                Err(why) => {
+                    self.message = why;
+                    cx.notify();
+                    return;
+                }
+            };
+        let plan = crate::layer_commands::Plan {
+            label: "New Comp from Selection".into(),
+            commands,
+            select: None,
+            count_keys: None,
+        };
+        let Some(call) = crate::layer_commands::transaction(&plan, Some(published.revision()))
+        else {
+            return;
+        };
+        let document = published.snapshot.doc_id;
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Some(Ok(ack)) => {
+                    if let Reply::Throw(e) = ack.reply {
+                        v.message = e.to_string();
+                        cx.notify();
+                        return;
+                    }
+                    v.call(Call::OpenComposition { comp_id, document }, cx);
+                    v.call(SelectionCall::Layers { ids: layers, add: false }.into(), cx);
+                }
+                Some(Err(e)) => {
+                    v.message = format!("{e:?}");
+                    cx.notify();
+                }
+                None => {}
+            });
+        })
+        .detach();
+    }
+    pub(crate) fn run_layer_plan(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        cx: &mut Context<Self>,
+    ) {
+        let revision = self.published.as_ref().map(|p| p.revision());
+        self.run_layer_plan_at(plan, revision, cx);
+    }
+    /// A plan made from a publication newer than the window's (an import that
+    /// just landed): it is checked against that revision instead.
+    pub(crate) fn run_layer_plan_at(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        revision: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
+            if let Some(ids) = plan.select {
+                self.call(
+                    SelectionCall::User(Box::new(SelectionCall::Layers { ids, add: false })).into(),
+                    cx,
+                );
+            }
+            return;
+        };
+        let transitions = crate::layer_commands::transition_requests(&plan);
+        let Some(session) = &self.session else { return };
+        let counted = plan
+            .count_keys
+            .zip(self.published.clone())
+            .map(|(ids, p)| (crate::layer_commands::key_count(&p, &ids), ids));
+        let project = session.project.clone();
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Some(Ok(ack)) => {
+                    if let Reply::Throw(e) = ack.reply {
+                        let msg = e.to_string();
+                        if msg.to_ascii_lowercase().contains("locked") {
+                            v.show_locked_status_toast(msg, cx);
+                        } else {
+                            v.message = msg;
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    if let Some(published) = v.kernel.published(&project)
+                        && let Some(message) =
+                            crate::layer_commands::transition_notice(&published, &transitions)
+                    {
+                        v.note(message, cx);
+                    }
+                    // Simplify Keyframes says what it did, as the shipped app.
+                    if let Some((before, ids)) = counted
+                        && let Some(after) = v.kernel.published(&project)
+                    {
+                        let after = crate::layer_commands::key_count(&after, &ids);
+                        v.note(format!("{before} → {after} keyframes"), cx);
+                    }
+                }
+                other => v.edit_failed(other.and_then(Result::err)),
+            });
+        })
+        .detach();
+    }
+    pub fn time(&self) -> f64 {
+        self.viewer
+            .as_ref()
+            .and_then(|v| v.status().clock)
+            .map_or(0., |c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64)
+    }
+    pub(crate) fn event_time() -> f64 {
+        if let Some(t) = DISPATCHING.get() {
+            return if t > 0. {
+                t
+            } else {
+                pm_engine_service::trace::now()
+            };
+        }
+        objc2::MainThreadMarker::new()
+            .and_then(|main| objc2_app_kit::NSApplication::sharedApplication(main).currentEvent())
+            .map(|e| e.timestamp())
+            .filter(|t| t.is_finite() && *t > 0.)
+            .unwrap_or_else(pm_engine_service::trace::now)
+    }
+    pub fn seek(&mut self, seconds: f64) {
+        self.seek_at(seconds, Self::event_time());
+    }
+    pub fn seek_at(&mut self, seconds: f64, input: f64) {
+        let mut target = None;
+        if let Some(v) = &self.viewer
+            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration()))
+        {
+            target = Some(time as f64 / TICKS_PER_SECOND as f64);
+            if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
+                self.message = e.to_string();
+            }
+        }
+        // The viewer's clock lands later (always so for a viewer bound a
+        // moment ago, as on open): record the time asked for, so MCP's
+        // playhead and the saved transport never read the old one. A ruler
+        // scrub writes it once it ends: each write republishes every panel
+        // that shows the time (PM-310), and the viewer, the playhead and
+        // timecode layers, extensions and Properties follow the scrub as it
+        // goes.
+        let time = target.unwrap_or_else(|| self.time());
+        if self.builtins.scrubbing {
+            self.builtins.scrub_time = Some(time);
+            if let Some(wake) = &self.playback_wake {
+                let _ = wake.try_send(());
+            }
+        } else {
+            let _ = self.write_ui_at(time);
+        }
+    }
+    /// A ruler scrub ended: the kernel records where it left the time.
+    pub fn finish_scrub(&mut self) {
+        if let Some(time) = self.builtins.scrub_time.take() {
+            let _ = self.write_ui_at(time);
+        }
+    }
+    pub fn persist_ui(&self) {
+        let _ = self.write_ui();
+    }
+    /// Resolves once the kernel has taken the write.
+    pub(crate) fn write_ui(
+        &self,
+    ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
+    {
+        self.write_ui_at(self.time())
+    }
+    fn write_ui_at(
+        &self,
+        time: f64,
+    ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
+    {
+        let (Some(s), Some(p)) = (&self.session, &self.published) else {
+            return None;
+        };
+        let mut ui = p.ui_state.clone();
+        // A project saved without viewer or transport state still records them.
+        for value in [&mut ui.transport, &mut ui.viewer] {
+            if !matches!(value, pm_model::Value::Object(_)) {
+                *value = pm_model::Value::Object(Default::default());
+            }
+        }
+        if let pm_model::Value::Object(m) = &mut ui.transport {
+            m.insert("time", pm_model::Value::from(time));
+            m.insert(
+                "playing",
+                pm_model::Value::from(
+                    self.viewer
+                        .as_ref()
+                        .and_then(|v| v.status().clock)
+                        .is_some_and(|c| c.state != TransportState::Stopped),
+                ),
+            );
+        }
+        if let pm_model::Value::Object(m) = &mut ui.viewer {
+            m.insert("zoom", pm_model::Value::from(self.view.zoom.unwrap_or(1.)));
+            m.insert("fit", pm_model::Value::from(self.view.zoom.is_none()));
+            m.insert(
+                "pan",
+                pm_model::Value::Array(vec![self.view.pan[0].into(), self.view.pan[1].into()]),
+            );
+        }
+        Some(self.kernel.state_transaction(StateTransaction {
+            ops: vec![StateOp::Ui {
+                project: s.project.clone(),
+                next: ui,
+            }],
+            ..Default::default()
+        }))
+    }
+    pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.open(SessionSource::File(path), cx);
+    }
+    fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        self.open_named(source, None, cx);
+    }
+    fn open_named(&mut self, source: SessionSource, name: Option<String>, cx: &mut Context<Self>) {
+        if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
+            self.message = "Finish the active edit or recovery decision first".into();
+            return;
+        }
+        crate::telemetry::note_source(&mut self.telemetry_open, &source);
+        let received = match &source {
+            SessionSource::File(path) => {
+                gpui_macos::ReceivedDrop::for_paths(std::slice::from_ref(path))
+            }
+            _ => None,
+        };
+        // One project per window: an open replaces the project shown, which
+        // closes first as any close does (asking about unsaved work).
+        if self.session.is_some() {
+            match source {
+                SessionSource::File(path) => {
+                    let pending = match received {
+                        Some(received) => crate::entry::Pending::ReceivedFile(path, received),
+                        None => crate::entry::Pending::File(path),
+                    };
+                    self.replace_project(pending, cx);
+                }
+                SessionSource::Library { project, .. } => {
+                    self.replace_project(crate::entry::Pending::Library(project), cx)
+                }
+                _ => self.message = "Close this project before opening another here.".into(),
+            }
+            cx.notify();
+            return;
+        }
+        let Some(operation) = self.mcp.try_operation() else {
+            self.message =
+                "A project operation is in progress. Try opening again when it finishes.".into();
+            cx.notify();
+            return;
+        };
+        let open_id = match &source {
+            SessionSource::Library { project, .. } => project.clone(),
+            SessionSource::File(p) => stable_id(p),
+            SessionSource::New(_) => pm_kernel::new_id("app"),
+        };
+        let name = name.unwrap_or_else(|| match &source {
+            SessionSource::File(path) => path
+                .file_stem()
+                .map_or("Untitled".into(), |n| n.to_string_lossy().into_owned()),
+            SessionSource::Library { project, .. } => self
+                .recent
+                .iter()
+                .find(|(id, _)| id == project)
+                .map_or("Untitled".into(), |(_, name)| name.clone()),
+            SessionSource::New(_) => "Untitled".into(),
+        });
+        let path = match &source {
+            SessionSource::File(path) => Some(path.clone()),
+            _ => None,
+        };
+        let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        self.stage_open(&open_id);
+        // The extensions start now, while the project opens: their realm and
+        // bundle take seconds that need no project, and the first picture
+        // waits for the extensions the project draws with (PM-384).
+        if matches!(source, SessionSource::Library { .. }) {
+            self.start_extensions_for(open_id.clone(), cx);
+        }
+        let call = ShellCall::PrepareOpen {
+            id: open_id,
+            source,
+            electron_profile,
+        };
+        // A file in a folder macOS guards: its question is answered before
+        // the kernel reads (`access`), so a Yes opens it the first time.
+        let (kernel, worker, file) = (
+            self.kernel.clone(),
+            cx.background_executor().clone(),
+            path.clone(),
+        );
+        let pending = async move {
+            if let Some(file) = file {
+                let access = worker
+                    .spawn(async move {
+                        crate::access::wait_for_read(
+                            &file,
+                            crate::access::ANSWER,
+                            crate::access::read_start,
+                        )
+                    })
+                    .await;
+                if access == crate::access::Access::Refused {
+                    return Some(Err(KernelFailure::Storage(
+                        "Operation not permitted (os error 1)".into(),
+                    )));
+                }
+            }
+            kernel.shell(call).await
+        };
+        let saved = path.as_ref().is_none_or(|p| p.exists());
+        self.settle_open(operation, name, path, saved, pending, received, cx);
+    }
+    /// The ghost's picture goes (its own frame is retired at the next draw).
+    pub(crate) fn ghost_retire(&mut self) {
+        if self.ghost_picture.is_some() {
+            crate::diag::line(serde_json::json!({"poster": "retired"}));
+        }
+        self.ghost_retired.extend(self.ghost_picture.take());
+    }
+    /// `project` opening: the picture its viewer last showed stands in the
+    /// opening viewer until its first real frame (Home's poster where none
+    /// was kept), and the window lays out its saved workspace (PM-384).
+    pub(crate) fn stage_open(&mut self, project: &str) {
+        self.stage_open_with(project, true);
+    }
+    /// [`Self::stage_open`]; without `picture`, its layout alone (a restored
+    /// tab behind the front one while that one opens: the picture comes
+    /// with its own open, so the tab shown never has another's).
+    fn stage_open_with(&mut self, project: &str, picture: bool) {
+        let poster = picture
+            .then(|| crate::poster::opening_poster(&self.profile, project))
+            .flatten();
+        // Decoded here, so the ghost shows it from its first frame (a path
+        // loads after it: the frame was empty white at first).
+        self.ghost_retire();
+        self.ghost_picture = poster
+            .as_deref()
+            .and_then(crate::poster::decode)
+            .and_then(|(w, h, rgba)| pm_shell::symbol::picture(w, h, rgba));
+        crate::diag::line(serde_json::json!({"poster": "staged", "project": project,
+            "picture": picture, "file": poster.as_ref().map(|p| p.display().to_string()),
+            "decoded": self.ghost_picture.is_some()}));
+        self.viewer_poster = poster;
+        self.last_frame_watch.shown = None;
+        // Its own panels at their sizes, the viewer's slot included, not
+        // the layout another window saved last (a few kilobytes: read here
+        // so the first frame already has them).
+        self.opening_workspace =
+            pm_kernel::library::LibraryStore::open(&self.profile).saved_workspace(project);
+    }
+    /// A project the Library's worker already opened.
+    pub fn adopt_reply(
+        &mut self,
+        reply: ShellReply,
+        name: String,
+        file: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        // This window shows a project (or is opening one): the opened one
+        // replaces it once it has closed (one project per window).
+        if self.session.is_some() || self.opening {
+            let reply = Box::new(reply);
+            self.replace_project(crate::entry::Pending::Adopt { reply, name, file }, cx);
+            return;
+        }
+        let Some(operation) = self.mcp.try_operation() else {
+            // Another tab's open holds the fence (its recovery question,
+            // say): this project, already open in the kernel, waits its
+            // turn in its window. Dropped, the new tab stayed Home and the
+            // project had to be found on its Home card (PM-454).
+            self.message = format!("“{name}” opens when the other project has opened.");
+            self.begin_ghost(&name, None, cx);
+            cx.notify();
+            let (mcp, kernel) = (self.mcp.clone(), self.kernel.clone());
+            let reply = std::rc::Rc::new(std::cell::RefCell::new(Some((reply, name, file))));
+            cx.spawn(async move |this, cx| {
+                let operation = crate::mcp::take_fence(&mcp, cx.background_executor()).await;
+                let held = reply.clone();
+                let adopted = this.update(cx, move |v, cx| {
+                    let Some((reply, name, file)) = held.borrow_mut().take() else {
+                        return;
+                    };
+                    // It took another project meanwhile: this one opens
+                    // beside it as v1's tabs do.
+                    if v.session.is_some() || v.opening {
+                        drop(operation);
+                        v.adopt_reply(reply, name, file, cx);
+                    } else {
+                        v.adopt_with(operation, reply, name, file, cx);
+                    }
+                });
+                // The window went: nothing will adopt the session.
+                if adopted.is_err()
+                    && let Some((ShellReply::Opened { session, .. }, _, _)) = reply.borrow_mut().take()
+                {
+                    drop(kernel.shell(ShellCall::Close(session)).await);
+                }
+            })
+            .detach();
+            return;
+        };
+        self.adopt_with(operation, reply, name, file, cx);
+    }
+    fn adopt_with(
+        &mut self,
+        operation: crate::mcp::Operation,
+        reply: ShellReply,
+        name: String,
+        file: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if let ShellReply::Opened { session, .. } = &reply {
+            self.stage_open(&session.project);
+        }
+        // A library project's saved version is in the library, wherever its file went.
+        self.settle_open(
+            operation,
+            name,
+            file,
+            true,
+            async move { Some(Ok(reply)) },
+            None,
+            cx,
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn settle_open(
+        &mut self,
+        operation: crate::mcp::Operation,
+        name: String,
+        path: Option<PathBuf>,
+        saved: bool,
+        pending: impl std::future::Future<Output = Option<Result<ShellReply, KernelFailure>>> + 'static,
+        received: Option<gpui_macos::ReceivedDrop>,
+        cx: &mut Context<Self>,
+    ) {
+        // Only a window without a project opens one (`open_named`,
+        // `adopt_reply`): nothing is closed or saved to make room.
+        debug_assert!(self.session.is_none());
+        let kernel = self.kernel.clone();
+        let after_stop = std::mem::take(&mut self.reopening_stopped);
+        // Commands still waiting on an earlier open never reach this project.
+        let (open, dropped) = self.after_open.begin(&name);
+        self.opening = true;
+        self.busy = Some(crate::platform::Busy::begin("Opening a project"));
+        self.message = dropped.map_or_else(
+            || format!("Opening “{name}”…"),
+            |note| format!("{note} Opening “{name}”…"),
+        );
+        self.begin_ghost(&name, None, cx);
+        cx.spawn(async move |this, cx| {
+            let _operation = operation;
+            let mut cancelled = false;
+            let mut result = pending.await;
+            if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
+                let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
+                    reply, &name, false, saved,
+                )
+                .map(|mut r| {
+                    let asks = r
+                        .alert
+                        .buttons
+                        .iter()
+                        .any(|b| b.action == crate::surfaces::recovery::Action::Recover);
+                    if after_stop && asks {
+                        r.alert = crate::surfaces::recovery::after_stop(r.alert, &name);
+                    }
+                    r
+                });
+                if let Some(recovery) = recovery {
+                    let ticket = match reply {
+                        ShellReply::RecoveryRequired { ticket, .. } => ticket.clone(),
+                        _ => unreachable!(),
+                    };
+                    let (cancel, cancellation) = async_channel::bounded(1);
+                    let answer = this.update(cx, |v, cx| {
+                        if let ShellReply::RecoveryRequired {
+                            recovery: RecoveryResult::Unrecoverable { reason, .. },
+                            ..
+                        } = &reply
+                        {
+                            // The log has what the alert leaves out: why.
+                            v.errors.borrow_mut().push(
+                                "Project",
+                                &format!(
+                                    "{} {} The recovery data could not be replayed: {reason}.",
+                                    recovery.alert.message, recovery.alert.informative
+                                ),
+                            );
+                        }
+                        v.recovery_pending = true;
+                        v.recovery_cancel = Some(cancel);
+                        let kind = match reply {
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Recovered { .. }, .. } => "recover",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::OfferCopy { .. }, .. } => "offer_copy",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Unrecoverable { .. }, .. } => "unrecoverable",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::FromOtherFile { .. }, .. } => "other_file",
+                            _ => "none",
+                        };
+                        v.open_timer.mark("recovery_question", serde_json::json!({"kind":kind}));
+                        v.mcp.awaiting_recovery(Some(name.clone()));
+                        // Mark the project while its question waits for the front.
+                        let hidden = !v.host.borrow().window.isKeyWindow();
+                        if hidden {
+                            v.host.borrow().set_attention(true);
+                        }
+                        let answer = recovery.alert.clone().background_sheet(&v.host.borrow().window, cx);
+                        (answer, hidden)
+                    });
+                    // ... and the window in front says so, once.
+                    if let Ok((_, true)) = &answer {
+                        let asking = this.entity_id();
+                        let _ = cx.update(|cx| tell_front_waiting(asking, &name, cx));
+                    }
+                    let response = match answer {
+                        Ok((rx, _)) => match recovery_answer(&rx, &cancellation).await {
+                            Ok(answer) => answer,
+                            Err(()) => {
+                                cancelled = true;
+                                // Await acknowledgement before releasing the fence:
+                                // no prepared file lock can outlive this open.
+                                let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                                None
+                            }
+                        },
+                        Err(_) => {
+                            let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                            None
+                        },
+                    };
+                    let _ = this.update(cx, |v, _| {
+                        v.mcp.awaiting_recovery(None);
+                        v.host.borrow().set_attention(false);
+                    });
+                    if let Some(call) = response.and_then(|action| recovery.decision(action)) {
+                        result = kernel.shell(call).await;
+                    } else if !cancelled {
+                        let _ = kernel.shell(ShellCall::CancelRecovery { ticket }).await;
+                    }
+                }
+            }
+            let mut extension_scope = None;
+            let mut extension_failures = vec![];
+            if let Some(Ok(ShellReply::Opened { session, info, .. })) = &result
+                && !info.extension_bundle.is_empty()
+                && let Some(document) = kernel
+                    .published(&session.project)
+                    .map(|p| p.snapshot.doc_id)
+                && let Ok(profile) = this.update(cx, |v, _| v.profile.clone())
+            {
+                let extra = info.extension_bundle.clone();
+                let scan_profile = profile.clone();
+                let prepared = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::project_extensions::Open::prepare(&extra, &scan_profile)
+                    })
+                    .await;
+                let decision = if let Some(frame) = prepared.frame() {
+                    let window = this
+                        .update(cx, |v, _| {
+                            v.recovery_pending = true;
+                            v.mcp.awaiting_recovery(Some(name.clone()));
+                            (v.close_window, v.host.borrow().tokens.clone())
+                        })
+                        .ok();
+                    let rx = window.and_then(|(parent, tokens)| {
+                        crate::project_extensions::sheet(frame, tokens, parent?, cx)
+                    });
+                    let choice = match rx {
+                        Some(rx) => rx.recv().await.ok(),
+                        None => None,
+                    };
+                    let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
+                    choice.unwrap_or(crate::project_extensions::Choice::Without)
+                } else {
+                    crate::project_extensions::Choice::Without
+                };
+                let project = name.clone();
+                let (scope, failures) = cx
+                    .background_executor()
+                    .spawn(async move { prepared.install(decision, &profile, &project) })
+                    .await;
+                extension_scope = Some((document, scope));
+                extension_failures = failures;
+            }
+            // Keep the operation fence through this final state update. The
+            // quit retries after the task has finished and released it.
+            let _ = this.update(cx, |v, cx| {
+                v.opening = false;
+                v.recovery_pending = false;
+                v.recovery_cancel = None;
+                if cancelled {
+                    v.busy = None;
+                    v.settling = None;
+                    v.open_timer.mark("cancelled", serde_json::json!({}));
+                    v.mcp.awaiting_recovery(None);
+                    v.after_open.fail();
+                    v.end_ghost(cx);
+                    v.reset_extensions();
+                    v.message = "Opening cancelled. Recovery data is kept.".into();
+                    cx.notify();
+                    return;
+                }
+                // Panels say it's opening until they've mounted for the project.
+                v.settling = match &result {
+                    Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
+                    _ => None,
+                };
+                v.settling_open = open;
+                // Held until the panels have drawn the project (`settled`).
+                if v.settling.is_none() {
+                    v.opening_name = None;
+                    v.busy = None;
+                    // No project arrived; its open failure says why. The
+                    // ghost gives way to it (and to Home).
+                    if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
+                        v.after_open.fail();
+                        v.end_ghost(cx);
+                        // The extensions started for it with the open go too.
+                        v.reset_extensions();
+                    }
+                }
+                match result {
+                    Some(Ok(ShellReply::Opened {
+                        session,
+                        recovery: _,
+                        decision,
+                        info,
+                    })) => {
+                        v.open_timer.mark("opened", serde_json::json!({}));
+                        if let Some(opening) = &mut v.telemetry_open {
+                            opening.settled = true;
+                        }
+                        v.restoring = false;
+                        if let Some((document, scope)) = &extension_scope {
+                            v.reset_extensions();
+                            v.mcp.set_project_extensions(
+                                *document,
+                                pm_mcp::app_host::ProjectExtensions {
+                                    root: scope.root.as_ref().map(|root| root.path().to_owned()),
+                                    excluded: scope.excluded.clone(),
+                                    report: serde_json::Value::Null,
+                                },
+                            );
+                        }
+                        v.project_extension_scope = extension_scope;
+                        // Media resolves on a worker after the project shows.
+                        let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
+                        v.adopt(session, decision, info.history_rejected, cx);
+                        if let (Some(received), Some(path)) = (&received, &path) {
+                            received.keep(std::slice::from_ref(path));
+                        }
+                        v.report_first_frame(cx);
+                        v.load_recent(cx);
+                        v.offer_stranded_copies(cx);
+                        v.tell_kept_beside(cx);
+                        if !extension_failures.is_empty() {
+                            v.message = extension_failures.join(" ");
+                            v.errors.borrow_mut().push("Project extensions", &v.message);
+                        }
+                        // No lock reaches another computer through a sync
+                        // client: say what does guard the file.
+                        if in_place && v.path.as_deref().is_some_and(pm_kernel::locks::is_synced) {
+                            v.message = SYNCED_FOLDER.into();
+                        }
+                    }
+                    // Already open in a window: that window comes forward.
+                    // A restored window whose project another restored
+                    // window holds goes, without taking the front.
+                    Some(Err(KernelFailure::AlreadyOpen(project))) => {
+                        v.telemetry_open = None;
+                        v.message = String::new();
+                        if std::mem::take(&mut v.restoring) {
+                            if pm_shell::live_window_ids().len() > 1 {
+                                let window = v.host.borrow().window.clone();
+                                cx.defer(move |_| pm_shell::request_close(&window));
+                            }
+                        } else {
+                            v.focus_project(&project, cx);
+                        }
+                    }
+                    Some(Err(error)) => {
+                        v.telemetry_open = None;
+                        v.open_timer
+                            .mark("failed", serde_json::json!({"message": error.to_string()}));
+                        v.report_open_failure(&name, path, &error, cx)
+                    }
+                    Some(Ok(ShellReply::RecoveryRequired { .. })) => {
+                        v.restoring = false;
+                        v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
+                    }
+                    other => {
+                        v.telemetry_open = None;
+                        v.restoring = false;
+                        v.message = format!("“{name}” couldn’t be opened.");
+                        v.errors.borrow_mut().push(
+                            "Project",
+                            &format!(
+                                "“{name}” couldn’t be opened: {}",
+                                crate::lifecycle::reason(other)
+                            ),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// A file that opened in place: if the library holds copies with work
+    /// for it that the person hasn't been told about, say so once and offer
+    /// the newest (it opens as a tab; the file stays open here). A file that
+    /// opened as a new copy because an earlier copy under its name was made
+    /// of another file is told about that earlier copy the same way.
+    fn offer_stranded_copies(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let asked = self.kernel.shell(ShellCall::CopiesOf(session.clone()));
+        cx.spawn(async move |this, cx| {
+            let Some(Ok(ShellReply::Copies(rows))) = asked.await else {
+                return;
+            };
+            let field = |row: &pm_model::Value, key: &str| {
+                row.get(key).and_then(pm_model::Value::as_str).map(str::to_owned)
+            };
+            let names: Vec<String> = rows.iter().filter_map(|r| field(r, "name")).collect();
+            let Some(newest) = rows.first().and_then(|r| field(r, "id")) else {
+                return;
+            };
+            let different = rows.iter().any(|r| r.get("different").is_some());
+            let named = rows.first().and_then(|r| field(r, "file"));
+            let Ok(Some(answer)) = this.update(cx, |v, cx| {
+                if v.session.as_ref() != Some(&session) {
+                    return None;
+                }
+                let file = named
+                    .or_else(|| {
+                        v.path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_default();
+                if different {
+                    v.errors.borrow_mut().push(
+                        "Project",
+                        &format!(
+                            "“{file}” isn’t the file an earlier copy was made from. That copy is still in your projects: “{}”.",
+                            names.join("”, “")
+                        ),
+                    );
+                    return Some(
+                        earlier_copy_alert(&file, &names)
+                            .background_sheet(&v.host.borrow().window, cx),
+                    );
+                }
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!(
+                        "Your projects hold a copy of “{file}” with work that isn’t in the file: “{}”.",
+                        names.join("”, “")
+                    ),
+                );
+                Some(
+                    stranded_copies_alert(&file, &names)
+                        .background_sheet(&v.host.borrow().window, cx),
+                )
+            }) else {
+                return;
+            };
+            if answer.recv().await.ok().flatten() == Some(true) {
+                let _ = this.update(cx, |v, cx| {
+                    if v.session.as_ref() == Some(&session) {
+                        v.replace_project(crate::entry::Pending::Library(newest), cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    /// The person has been shown, and has answered, the notice about the
+    /// kept files `paths` (and, with `restored`, the ones about no file):
+    /// the kernel stops reporting exactly those. `session` is the one the
+    /// notice was about, captured before the sheet went up: never whatever
+    /// the window shows by the time the sheet is answered.
+    fn kept_seen(
+        &self,
+        session: SessionHandle,
+        paths: Vec<PathBuf>,
+        restored: bool,
+        other: bool,
+    ) -> pm_kernel::Pending<Result<ShellReply, KernelFailure>> {
+        self.kernel.shell(ShellCall::KeptSeen {
+            session,
+            paths,
+            restored,
+            other,
+        })
+    }
+    /// Files kept beside this project's file that nobody was told about: a
+    /// version that arrived during a save no window showed the end of (at
+    /// quit), or what a save that was cut short left. Said in a sheet with
+    /// a way to them, and in the Error Log. Only a sheet the person
+    /// answered counts as seen, and only for the rows it told; what it had
+    /// no room for is told in the next one.
+    fn tell_kept_beside(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session.clone()));
+        cx.spawn(async move |this, cx| {
+            let Some(Ok(ShellReply::Kept(rows))) = asked.await else {
+                return;
+            };
+            let rows: Vec<(String, Option<PathBuf>)> = rows
+                .iter()
+                .filter_map(|row| {
+                    let text = |key: &str| row.get(key).and_then(pm_model::Value::as_str);
+                    Some((text("why")?.to_owned(), text("path").map(PathBuf::from)))
+                })
+                .collect();
+            let Ok(Some((answer, reveal, told))) = this.update(cx, |v, cx| {
+                // The window shows another project by now: not its notice.
+                if v.session.as_ref() != Some(&session) {
+                    return None;
+                }
+                let file = v.path.as_deref().map(file_name).unwrap_or_default();
+                let named: Vec<_> = rows
+                    .iter()
+                    .map(|(why, path)| (why.clone(), path.as_deref().map(file_name)))
+                    .collect();
+                let alert = crate::surfaces::documents::kept_beside(&file, &named)?;
+                let told: Vec<_> = crate::surfaces::documents::kept_beside_told(&named)
+                    .into_iter()
+                    .map(|at| rows[at].clone())
+                    .collect();
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!("{} {}", alert.message, alert.informative),
+                );
+                // A file that went to the Trash is not where it was.
+                let reveal = told
+                    .iter()
+                    .find_map(|(why, path)| path.clone().filter(|_| why != "trashed"))
+                    .or(v.path.clone());
+                Some((alert.background_sheet(&v.host.borrow().window, cx), reveal, told))
+            }) else {
+                return;
+            };
+            // A sheet that went away unanswered (its window closed) was not
+            // seen: the next open tells it again.
+            let Some(answered) = answer.recv().await.ok().flatten() else {
+                return;
+            };
+            let Ok(seen) = this.update(cx, |v, _| {
+                v.kept_seen(
+                    session,
+                    told.iter().filter_map(|(_, path)| path.clone()).collect(),
+                    told.iter().any(|(_, path)| path.is_none()),
+                    true,
+                )
+            }) else {
+                return;
+            };
+            let _ = seen.await;
+            if answered == crate::surfaces::documents::Action::ShowInFinder
+                && let Some(path) = reveal
+            {
+                platform::reveal(&path);
+            }
+            if told.len() < rows.len() {
+                let _ = this.update(cx, |v, cx| v.tell_kept_beside(cx));
+            }
+        })
+        .detach();
+    }
+    /// `PM_NATIVE_MAIN_TRACE`: when the viewer first presents the opened project.
+    fn report_first_frame(&mut self, cx: &mut Context<Self>) {
+        if !self.open_timer.active() {
+            return;
+        }
+        let Some(doc) = self.published.as_ref().map(|p| p.snapshot.doc_id) else {
+            return;
+        };
+        let timer = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..24_000 {
+                let shown = this.update(cx, |v, _| {
+                    let status = v.viewer.as_ref().map(|v| v.status());
+                    let frame = status.as_ref().and_then(|s| s.frame.as_ref());
+                    if let Some(f) = frame.filter(|f| f.stamp.doc_id == doc && f.gpu_ok) {
+                        v.open_timer
+                            .mark("first_frame", serde_json::json!({"cache_hit": f.cache_hit}));
+                        return true;
+                    }
+                    if let Some(error) = status.and_then(|s| s.error) {
+                        v.open_timer
+                            .mark("viewer_error", serde_json::json!({"message": error}));
+                        return true;
+                    }
+                    false
+                });
+                if shown.unwrap_or(true) {
+                    break;
+                }
+                timer.timer(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .detach();
+    }
+    /// Brings forward the window that shows `project` (this one, or another).
+    /// Opening a project that's already open does this, as on every Mac app.
+    pub fn focus_project(&mut self, project: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.mcp.window_of(project) else {
+            return;
+        };
+        if key == self.window_key {
+            gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
+            return;
+        }
+        // Only while the app is active, as for this window: activating the
+        // window activates the app, which would bring a background app (a
+        // launch restoring its windows that is also handed one of their
+        // files, an agent's open) in front of the one the person is using.
+        if let Some(editor) = crate::entry::editor(key, cx) {
+            gpui_macos::child_window::raise_if_active(&editor.read(cx).host.borrow().window);
+        }
+    }
+    /// An internal error stopped this window's project: the kernel takes no
+    /// more edits or saves for it. Reopen closes it (nothing is written) and
+    /// opens it again, where the recovery prompt brings back every change
+    /// made before the error.
+    fn offer_reopen(&mut self, p: &pm_kernel::Published, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, stopped};
+        let name = p
+            .snapshot
+            .root()
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled")
+            .to_owned();
+        self.message = format!("“{name}” stopped after an internal error. Reopen it to recover.");
+        let session = self.session.clone();
+        let rx = stopped(&name).background_sheet(&self.host.borrow().window, cx);
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await.ok().flatten() == Some(Action::Reopen) {
+                let _ = this.update(cx, |v, cx| {
+                    if v.session == session {
+                        v.reopen_stopped(name, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    /// Closes the stopped project (the kernel writes nothing and keeps its
+    /// journal) and opens it again through the recovery prompt.
+    pub(crate) fn reopen_stopped(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(p) = self
+            .kernel
+            .published(&session.project)
+            .filter(|p| p.fault.is_some())
+        else {
+            return;
+        };
+        let Some(source) = reopen_source(&p, &self.profile) else {
+            return;
+        };
+        if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
+            self.message = "Finish the active open or recovery decision first".into();
+            cx.notify();
+            return;
+        }
+        let closing = self.kernel.shell(ShellCall::Close(session));
+        cx.spawn(async move |this, cx| {
+            let closed = matches!(closing.await, Some(Ok(ShellReply::Closed { .. })));
+            let _ = this.update(cx, |v, cx| {
+                if !closed {
+                    v.message = format!(
+                        "“{name}” couldn’t be closed to reopen it; its recovery data is kept."
+                    );
+                    cx.notify();
+                    return;
+                }
+                if let Some(viewer) = v.viewer.take() {
+                    viewer.retire();
+                }
+                v.session = None;
+                v.published = None;
+                v.builtins.natives.published.replace(None);
+                v.mcp.bind_window(v.window_key, None);
+                v.reopening_stopped = true;
+                v.open_named(source, Some(name), cx);
+            });
+        })
+        .detach();
+    }
+    /// A file that did not open may have whole versions beside it that a
+    /// save's record proves (a save cut short, a sync client that changed
+    /// the file it left): the newest is offered first (which, when, how
+    /// large; Open This One / Show in Finder / Cancel). Otherwise, or after
+    /// Cancel, the plain open error.
+    fn report_open_failure(
+        &mut self,
+        name: &str,
+        path: Option<PathBuf>,
+        error: &KernelFailure,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
+        let Some(file) = path.clone() else {
+            return self.report_open_error(name, path, error, cx);
+        };
+        let asked = self.kernel.shell(ShellCall::Leftovers(file.clone()));
+        let (name, error) = (name.to_owned(), error.clone());
+        cx.spawn(async move |this, cx| {
+            let rows = match asked.await {
+                Some(Ok(ShellReply::Leftovers(rows))) => rows,
+                _ => Vec::new(),
+            };
+            let text = |row: &pm_model::Value, key: &str| {
+                row.get(key)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            // Only a file read and found to be a whole version is offered
+            // as one, and never one of a save that is going on right now.
+            // Of those: the newest save's, and of one save the version it
+            // was writing before the one it replaced.
+            let at = |row: &pm_model::Value| {
+                row.get("at")
+                    .and_then(pm_model::Value::as_f64)
+                    .unwrap_or(0.0)
+            };
+            let offered = rows
+                .iter()
+                .filter(|r| {
+                    r.get("proven") == Some(&pm_model::Value::Bool(true))
+                        && text(r, "why").as_deref() != Some("active")
+                })
+                .max_by(|a, b| {
+                    at(a).total_cmp(&at(b)).then_with(|| {
+                        let saving =
+                            |r: &pm_model::Value| text(r, "role").as_deref() == Some("saving");
+                        saving(a).cmp(&saving(b))
+                    })
+                });
+            let Some(row) = offered else {
+                // Files a save left that could not be identified are said
+                // to be there; none is offered as a version.
+                let unidentified = rows
+                    .iter()
+                    .filter(|r| text(r, "why").as_deref() != Some("active"))
+                    .count();
+                let _ = this.update(cx, |v, cx| {
+                    if unidentified == 0 {
+                        return v.report_open_error(&name, path, &error, cx);
+                    }
+                    let alert = crate::surfaces::documents::unidentified_leftovers(
+                        &name,
+                        &file_name(&file),
+                        unidentified,
+                    );
+                    v.errors.borrow_mut().push(
+                        "Project",
+                        &format!("{} {} ({error})", alert.message, alert.informative),
+                    );
+                    v.message = String::new();
+                    let answer = alert.background_sheet(&v.host.borrow().window, cx);
+                    cx.spawn(async move |_, _| {
+                        if answer.recv().await.ok().flatten()
+                            == Some(crate::surfaces::documents::Action::ShowInFinder)
+                        {
+                            platform::reveal(&file);
+                        }
+                    })
+                    .detach();
+                });
+                return;
+            };
+            let leftover = PathBuf::from(text(row, "path").unwrap_or_default());
+            let saving = text(row, "role").as_deref() == Some("saving");
+            // Another computer's save: it may still be going on there.
+            let computer =
+                text(row, "computer").filter(|_| text(row, "why").as_deref() == Some("elsewhere"));
+            let at = row
+                .get("at")
+                .and_then(pm_model::Value::as_f64)
+                .map_or_else(String::new, |ms| {
+                    pm_kernel::project_io::local_time((ms / 1000.0) as u64)
+                });
+            let bytes = row
+                .get("size")
+                .and_then(pm_model::Value::as_f64)
+                .unwrap_or(0.0) as u64;
+            let Ok(answer) = this.update(cx, |v, cx| {
+                let alert = crate::surfaces::documents::version_offer(
+                    &name,
+                    &file_name(&file),
+                    &crate::surfaces::documents::OfferedVersion {
+                        saving,
+                        at: &at,
+                        bytes,
+                        computer: computer.as_deref(),
+                    },
+                );
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!("{} {}", alert.message, alert.informative),
+                );
+                alert.background_sheet(&v.host.borrow().window, cx)
+            }) else {
+                return;
+            };
+            use crate::surfaces::documents::Action;
+            match answer.recv().await.ok().flatten() {
+                Some(Action::OpenThisOne) => {
+                    let Ok(used) = this.update(cx, |v, _| {
+                        v.kernel.shell(ShellCall::UseLeftover {
+                            path: file.clone(),
+                            leftover: leftover.clone(),
+                            unproven: false,
+                        })
+                    }) else {
+                        return;
+                    };
+                    let used = used.await;
+                    let _ = this.update(cx, |v, cx| match used {
+                        Some(Ok(_)) => v.open_named(SessionSource::File(file), Some(name), cx),
+                        Some(Err(e)) => v.report_open_error(&name, Some(file), &e, cx),
+                        None => {}
+                    });
+                }
+                Some(Action::ShowInFinder) => platform::reveal(&leftover),
+                _ => {}
+            }
+        })
+        .detach();
+    }
+    /// A project restored at launch that did not open is left out without
+    /// an alert (its file was deleted or moved since): logged, and its
+    /// window goes when another window is open, else it stays on Home.
+    fn drop_restored(&mut self, name: &str, error: &KernelFailure, cx: &mut Context<Self>) {
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("“{name}” was not reopened: {error}"));
+        self.message = String::new();
+        if pm_shell::live_window_ids().len() > 1 {
+            let window = self.host.borrow().window.clone();
+            cx.defer(move |_| pm_shell::request_close(&window));
+        }
+        cx.notify();
+    }
+    /// S004: an alert naming the file, with Show in Finder when it still exists.
+    fn report_open_error(
+        &mut self,
+        name: &str,
+        path: Option<PathBuf>,
+        error: &KernelFailure,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
+        use crate::surfaces::documents::{self, Action};
+        let exists = path.as_ref().is_some_and(|p| p.exists());
+        let failure = open_failure(error);
+        let alert = documents::open_error(name, failure, exists).notice();
+        // Where the file that replaced the choice is: the kernel's words.
+        let logged = match failure {
+            documents::OpenFailure::ChoiceReplaced => format!("{} ({error})", alert.message),
+            _ => alert.message.clone(),
+        };
+        self.errors.borrow_mut().push("Project", &logged);
+        self.message = String::new();
+        let rx = alert.background_sheet(&self.host.borrow().window, cx);
+        cx.spawn(async move |_, _| {
+            if rx.recv().await.ok().flatten() == Some(Action::ShowInFinder)
+                && let Some(path) = path
+            {
+                platform::reveal(&path);
+            }
+        })
+        .detach();
+    }
+    /// A project opened here has a poster for Home's card from now on, even
+    /// if it is never saved in this app (a save draws a new one): once its
+    /// open has settled and its extensions' effects are in, so the poster
+    /// shows what the project looks like. Off the screen, so a window that
+    /// is not drawing gets one too.
+    fn poster_once_open(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            for _ in 0..120 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let Ok(ready) = this.update(cx, |v, _| {
+                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                    (shown == Some(project.as_str()))
+                        .then(|| v.settling.is_none() && !v.awaiting_extension_effects())
+                }) else {
+                    return;
+                };
+                match ready {
+                    None => return,
+                    Some(false) => {}
+                    Some(true) => {
+                        let _ = this.update(cx, |v, cx| v.write_poster(cx));
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+    fn adopt(
+        &mut self,
+        session: SessionHandle,
+        decision: pm_kernel::locks::OpenDecision,
+        history_rejected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(g) = self.builtins.gizmos.clone() {
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
+        }
+        if let Some(viewer) = self.viewer.take() {
+            viewer.retire();
+        }
+        self.host.borrow_mut().close_flowchart();
+        self.composition_views.clear();
+        self.rows.clear();
+        self.keyframes = 0;
+        self.end_region_pick();
+        self.session = Some(session);
+        self.poster_once_open(cx);
+        self.media_refresh.reset();
+        self.thumbs.reset();
+        self.media = MediaCatalog::default();
+        self.media_base = MediaCatalog::default();
+        self.media_resolved = false;
+        self.selected = None;
+        self.refresh(cx);
+        // The status bar shows document state and counts; only exceptions get words.
+        let notice = self.errors.borrow_mut().take_notice();
+        self.message = [
+            copy_notice(&decision).map(str::to_owned),
+            history_rejected
+                .then(|| "Undo history from the last session couldn’t be restored.".to_owned()),
+            notice,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        self.bind_composition();
+        self.apply_viewer_options();
+        self.rebuild_popout_viewer();
+        if let Some(ui) = self.published.as_ref().map(|p| p.ui_state.clone()) {
+            let time = ui
+                .transport
+                .get("time")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.);
+            self.seek(time);
+        }
+        self.mcp.bind_window(self.window_key, self.session.clone());
+    }
+    /// Opens the restored project `id` in this window, unless it has one or
+    /// is opening one already, or a quit has begun.
+    fn open_restored(&mut self, id: &str, name: &str, front: bool, cx: &mut Context<Self>) {
+        if self.session.is_some() || self.opening || crate::lifecycle::quitting(cx) {
+            return;
+        }
+        crate::diag::line(serde_json::json!({"restore": "open", "front": front}));
+        self.restoring = true;
+        self.open_named(
+            SessionSource::Library {
+                profile: self.profile.clone(),
+                project: id.to_owned(),
+            },
+            Some(name.to_owned()),
+            cx,
+        );
+        // It could not start: the ghost gives way to Home.
+        if !self.opening && self.session.is_none() && self.opening_name.as_deref() == Some(name) {
+            self.end_ghost(cx);
+        }
+    }
+    /// A window restored as a tab behind the front one whose project has not
+    /// started opening yet: its work waits for its turn (see the restore in
+    /// `reopen_restored`), or for the person to select it.
+    pub(crate) fn restore_waiting(&self) -> bool {
+        let host = self.host.borrow();
+        host.restored_project.is_some()
+            && !host.restored_front
+            && self.session.is_none()
+            && !self.opening
+            && !(!pm_shell::restore_arranging() && pm_shell::window_shown(&host.window))
+    }
+    /// Tells the viewer whether its window can be seen: a tab behind
+    /// another (or a minimized window) draws nothing until it is shown.
+    pub(crate) fn follow_shown(&mut self, cx: &mut Context<Self>) {
+        self.present_busy_prompt(cx);
+        let shown = pm_shell::window_shown(&self.host.borrow().window);
+        // Its extensions' panels count as not showing while it cannot be
+        // seen: they get no animation frames.
+        if let Some(host) = &self.extensions.host {
+            let now = (host.view(), shown);
+            if self.extensions_shown != Some(now) {
+                host.set_window_shown(shown);
+                self.extensions_shown = Some(now);
+            }
+        }
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let now = (viewer.identity(), shown);
+        if self.viewer_shown == Some(now) {
+            return;
+        }
+        // Hidden, the viewer gives its settled still up: the project's last
+        // frame is kept from it first (the writer holds its own copy).
+        if !shown {
+            self.keep_last_frame(None, cx);
+        }
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        if viewer.set_shown(shown).is_ok() {
+            self.viewer_shown = Some(now);
+        }
+    }
+    fn bind_composition(&mut self) {
+        // The viewer before this one changes places with the next in one
+        // step (`replace_viewer`): retired first, its document would be
+        // without a view for a moment, and the engine closes a document
+        // without views (its override answers, caches and programs go).
+        let old = self.viewer.take();
+        let retire = |old: Option<Viewer>| {
+            if let Some(viewer) = old {
+                viewer.retire();
+            }
+        };
+        let Some(p) = self.published.clone() else {
+            return retire(old);
+        };
+        let comp = p.snapshot.render_comp();
+        // A document without a root has nothing to view.
+        let Some(root) = p.snapshot.document.root() else {
+            return retire(old);
+        };
+        let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
+        let number = |key: &str, default| {
+            composition
+                .get(key)
+                .and_then(crate::node_number)
+                .unwrap_or(default)
+        };
+        self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
+        self.rate = composition_rate(composition);
+        pm_telemetry::note_playback_target(self.rate.to_f64() as f32);
+        let media = self.media.clone();
+        self.background = composition
+            .get("bg")
+            .and_then(crate::node_string)
+            .and_then(panels::parse_background);
+        let config = ViewerConfig {
+            snapshot: p.snapshot.clone(),
+            composition: comp,
+            media,
+            output: pm_engine_service::Output {
+                width: 640,
+                height: 360,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+            layer: Some(self.host.borrow().viewer_layer()),
+            rate: self.rate,
+            end: Some((self.duration() * TICKS_PER_SECOND as f64) as i64),
+            audio: true,
+        };
+        // Placed with the window's resources, so its first frame already
+        // holds while the window's extensions load.
+        let placed = match &old {
+            Some(old) => self
+                .engine
+                .replace_viewer_fed(old, config, &self.resource_feed),
+            None => self.engine.viewer_fed(config, &self.resource_feed),
+        };
+        match placed {
+            Ok(viewer) => {
+                // The editor's viewer drags a slow project at reduced resolution.
+                let _ = viewer.adapt_drags(true);
+                let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
+                self.skimming.at = None;
+                self.viewer = Some(viewer)
+            }
+            Err(e) => {
+                retire(old);
+                self.message = format!("Viewer failed: {e}")
+            }
+        }
+    }
+    /// MCP placed a project in this window (open_project, create_project): an
+    /// empty window shows it; a window that shows a project keeps it and the
+    /// placed one joins its tabs, as opening from the window does. Other
+    /// windows' projects are theirs; this never follows them.
+    pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            let events = self.mcp.take_presence(&session.project);
+            if !events.is_empty() {
+                if let Some(timeline) = &self.builtins.timeline {
+                    timeline.update(cx, |t, cx| t.agent_presence(events, cx));
+                }
+            }
+        }
+        if self.opening || self.close_pending {
+            return;
+        }
+        // Taken atomically: an MCP open racing this one can't close it now.
+        let Some(session) = self.mcp.claim_placed(self.window_key) else {
+            return;
+        };
+        if Some(&session) == self.session.as_ref() {
+            return;
+        }
+        if self.kernel.published(&session.project).is_none() {
+            // Gone before the window took it: keep showing what it showed.
+            self.mcp.bind_window(self.window_key, self.session.clone());
+            return;
+        }
+        if self.session.is_some() {
+            // This window still shows its own project; an agent's project
+            // opens in a window of its own (one project per window), never
+            // in place of the one the person is working on.
+            self.mcp.bind_window(self.window_key, self.session.clone());
+            if pm_shell::tabs_mode() {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            } else {
+                crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            }
+            return;
+        }
+        self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+        cx.notify();
+    }
+    pub fn load_recent(&mut self, cx: &mut Context<Self>) {
+        let pending = self.kernel.shell(ShellCall::Recent);
+        cx.spawn(async move |this, cx| {
+            if let Some(Ok(ShellReply::Recent(rows))) = pending.await {
+                let _ = this.update(cx, |v, cx| {
+                    v.recent = rows
+                        .iter()
+                        .filter_map(|r| {
+                            Some((
+                                r.get("id")?.as_str()?.into(),
+                                r.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Untitled")
+                                    .into(),
+                            ))
+                        })
+                        .collect();
+                    cx.notify();
+                });
+                // P-LAUNCH-TRACE: Home's list is its content.
+                static FIRST: std::sync::Once = std::sync::Once::new();
+                FIRST.call_once(|| {
+                    gpui_macos::launch::mark("recent");
+                    gpui_macos::launch::arm_present("recent");
+                });
+            }
+        })
+        .detach();
+    }
+    pub fn save(&mut self, as_path: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.recovery_pending || self.save_pending {
+            self.message = "Finish the recovery decision or current save first".into();
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
+            return;
+        }
+        // An edit left open (its owner never ended it: no button is held,
+        // nothing is typed) would refuse the save: it is finished first, as
+        // Undo does, and the save takes it. The kernel seals what is open
+        // when the call runs; an agent's edit still applying is waited for,
+        // at most `UNDO_WAIT_LIMIT` (under the 3 s the save waits), so the
+        // save always finishes.
+        if self.not_editing(cx) {
+            self.call(Call::History(HistoryCall::Seal), cx);
+        }
+        if as_path.is_none()
+            && self.session.is_some()
+            && crate::document_paths::needs_panel(self.has_file(), false)
+        {
+            self.save_dialog(cx);
+            return;
+        }
+        let path = as_path.clone();
+        if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
+            return;
+        };
+        self.save_pending = true;
+        self.saving_note = true;
+        self.message = SAVING.into();
+        cx.notify();
+        self.persist_ui();
+        let kernel = self.kernel.clone();
+        let file_save = as_path.is_some()
+            || self.published.as_ref().is_some_and(|p| {
+                p.session
+                    .as_ref()
+                    .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
+            });
+        let profile = self.profile.clone();
+        let remembered_path = as_path.clone().or_else(|| self.path.clone());
+        let old_path = self.path.clone();
+        let export_id = session.project.clone();
+        let started = crate::diag::enabled().then(std::time::Instant::now);
+        let save_began = std::time::Instant::now();
+        cx.spawn(async move |this, cx| {
+            let result = if file_save {
+                // The save panel already confirmed replacing an existing file.
+                let prepared = match as_path.clone() {
+                    Some(path) => kernel.prepare_save_replacing(session, path),
+                    None => kernel.prepare_save(session, None),
+                };
+                match prepared.await {
+                    Some(Ok(save)) => {
+                        let completion = cx
+                            .background_executor()
+                            .spawn(async move { save.run() })
+                            .await;
+                        kernel.finish_save(completion).await
+                    }
+                    Some(Err(e)) => Some(Err(e)),
+                    None => None,
+                }
+            } else {
+                kernel.shell(ShellCall::Save(session)).await
+            };
+            if matches!(&result, Some(Ok(ShellReply::Saved { recovery_copy: None, .. })))
+                && let Some(path) = remembered_path {
+                cx.background_executor().spawn(async move {
+                    crate::document_paths::carry_export_folder(&profile, &export_id, old_path.as_deref(), &path);
+                    crate::document_paths::remember(&profile, None, &path);
+                }).await;
+            }
+            if let Some(started) = started {
+                crate::diag::line(serde_json::json!({
+                    "save": (started.elapsed().as_secs_f64() * 1000.).round(),
+                    "file": file_save,
+                    "ok": matches!(&result, Some(Ok(ShellReply::Saved { .. }))),
+                }));
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.save_pending = false;
+                let close = v.close_after_save.take();
+                // A save that kept another version beside the file has
+                // something to say first: the window stays.
+                let saved = matches!(
+                    &result,
+                    Some(Ok(ShellReply::Saved {
+                        recovery_copy: None,
+                        displaced: None,
+                        ..
+                    }))
+                );
+                match result {
+                    Some(Ok(ShellReply::Saved {
+                        session,
+                        recovery_copy,
+                        displaced,
+                    })) => {
+                        v.session = Some(session);
+                        crate::telemetry::project_saved(
+                            save_began.elapsed().as_millis() as u64,
+                            if file_save { as_path.clone().or_else(|| v.path.clone()) } else { None },
+                        );
+                        let chosen = as_path.is_some();
+                        if chosen {
+                            v.path = as_path;
+                        }
+                        v.unprotected = false;
+                        v.message = recovery_copy.map_or(String::new(), |_| {
+                            "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
+                        });
+                        // Saved to a place chosen now: where it went is said.
+                        if v.message.is_empty()
+                            && let Some(path) = &v.path
+                            && chosen
+                        {
+                            let note = saved_where(path);
+                            v.note(note, cx);
+                        }
+                        v.load_recent(cx);
+                        if let Some(kept) = displaced {
+                            v.other_version_kept(kept, cx);
+                        }
+                        v.write_poster(cx);
+                        v.keep_or_watch_last_frame(cx);
+                    }
+                    other => {
+                        // A Save As whose folder is gone by now (its disk
+                        // was disconnected) failed for that, whatever the
+                        // write that hit it reported.
+                        let gone = as_path
+                            .as_deref()
+                            .and_then(std::path::Path::parent)
+                            .is_some_and(|folder| !folder.exists());
+                        v.save_failed(&crate::lifecycle::reason(other), gone, cx)
+                    }
+                }
+                v.refresh(cx);
+                if let Some(intent) = close {
+                    if saved {
+                        v.complete_close(intent, cx);
+                    } else {
+                        v.cancel_close(cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+    pub(crate) fn project_name(&self) -> String {
+        self.published
+            .as_ref()
+            .and_then(|p| p.snapshot.document.root())
+            .and_then(|r| r.get("name"))
+            .and_then(crate::node_string)
+            .unwrap_or("Untitled")
+            .to_owned()
+    }
+    /// The save went through and kept a file beside the project. Why is in
+    /// the save's record: a version that arrived during this save gets the
+    /// sheet that says so; anything else (an earlier version found changed
+    /// when it was to go) is told as what it is.
+    fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let name = self.project_name();
+        self.message = format!("“{name}” was saved. Another version of its file was kept.");
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session.clone()));
+        cx.spawn(async move |this, cx| {
+            let arrived = match asked.await {
+                Some(Ok(ShellReply::Kept(rows))) => rows.iter().any(|row| {
+                    let text = |key: &str| row.get(key).and_then(pm_model::Value::as_str);
+                    text("why") == Some("arrived")
+                        && text("path").map(PathBuf::from) == Some(kept.clone())
+                }),
+                _ => false,
+            };
+            let _ = this.update(cx, |v, cx| {
+                if arrived {
+                    v.tell_arrived(kept, session, cx)
+                } else {
+                    v.tell_kept_beside(cx)
+                }
+            });
+        })
+        .detach();
+    }
+    /// A version that arrived while this save ran was kept beside the
+    /// file: a sheet that names it, a way to it, an Error Log row.
+    fn tell_arrived(&mut self, kept: PathBuf, session: SessionHandle, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, other_version_kept};
+        let name = self.project_name();
+        let file = self.path.as_deref().map(file_name).unwrap_or_default();
+        self.errors.borrow_mut().push(
+            "Save",
+            &format!(
+                "While “{name}” was being saved, another version of its file arrived. It was kept at {}",
+                kept.display()
+            ),
+        );
+        let answer = other_version_kept(&name, &file, &file_name(&kept))
+            .background_sheet(&self.host.borrow().window, cx);
+        cx.spawn(async move |this, cx| {
+            // Shown and answered: only then was the notice about this file
+            // seen, by the session it was about.
+            let Some(answered) = answer.recv().await.ok().flatten() else {
+                return;
+            };
+            if let Ok(seen) = this.update(cx, |v, _| {
+                v.kept_seen(session, vec![kept.clone()], false, false)
+            }) {
+                let _ = seen.await;
+            }
+            if answered == Action::ShowInFinder {
+                platform::reveal(&kept);
+            }
+        })
+        .detach();
+    }
+    /// A save that did not happen is a sheet in plain words (S5): Save As
+    /// and Show in Finder are one press away, and the kernel's own account
+    /// is an Error Log row, never copy.
+    fn save_failed(&mut self, detail: &str, destination_gone: bool, cx: &mut Context<Self>) {
+        use crate::surfaces::documents::{Action, WriteFailure, save_failed, saved_beside};
+        let failure = if destination_gone {
+            WriteFailure::Missing
+        } else {
+            WriteFailure::of(detail)
+        };
+        let name = self.project_name();
+        self.message = format!("“{name}” couldn’t be saved.");
+        self.errors
+            .borrow_mut()
+            .push("Save", &format!("“{name}” couldn’t be saved: {detail}"));
+        let path = self.path.clone().filter(|p| p.exists());
+        // The save's own file, kept next to a version that took the name.
+        let (alert, path) = match pm_kernel::project_io::kept_beside(detail) {
+            Some(kept) => {
+                let file = self.path.as_deref().map(file_name).unwrap_or_default();
+                self.message = format!("“{name}” was saved next to its file.");
+                (saved_beside(&name, &file, &file_name(&kept)), Some(kept))
+            }
+            None => (save_failed(&name, failure, path.is_some()), path),
+        };
+        let kept = pm_kernel::project_io::kept_beside(detail);
+        let answer = alert.background_sheet(&self.host.borrow().window, cx);
+        let session = self.session.clone();
+        cx.spawn(async move |this, cx| {
+            let answered = answer.recv().await.ok().flatten();
+            // The save's own kept file was shown and the sheet answered:
+            // seen. Whatever else that save kept (another version it found
+            // on the way) is told next.
+            if let (Some(kept), Some(session), Some(_)) = (kept, session.clone(), &answered) {
+                if let Ok(seen) =
+                    this.update(cx, |v, _| v.kept_seen(session, vec![kept], false, false))
+                {
+                    let _ = seen.await;
+                }
+                let _ = this.update(cx, |v, cx| v.tell_kept_beside(cx));
+            }
+            match answered {
+                Some(Action::SaveAs) => {
+                    let _ = this.update(cx, |v, cx| {
+                        if v.session == session {
+                            v.save_dialog(cx);
+                        }
+                    });
+                }
+                Some(Action::ShowInFinder) => {
+                    if let Some(path) = path {
+                        platform::reveal(&path);
+                    }
+                }
+                _ => {}
+            }
+        })
+        .detach();
+    }
+    /// An edit the kernel refused or could not answer: plain words in the
+    /// status bar, the kernel's account in the Error Log.
+    pub(crate) fn edit_failed(&mut self, error: Option<KernelFailure>) {
+        self.message = "That change couldn’t be made.".into();
+        let detail =
+            error.map_or_else(|| "the project didn’t answer".to_owned(), |e| e.to_string());
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("A change couldn’t be made: {detail}"));
+    }
+    /// What the kernel says about this window's project, in the person's
+    /// words. A change that could not be written to the recovery data is the
+    /// one moment unsaved work isn't protected: a sheet, an Error Log row,
+    /// and the subtitle until a save succeeds.
+    fn notice(&mut self, notice: pm_kernel::Notice, cx: &mut Context<Self>) {
+        use pm_kernel::Notice::*;
+        match notice {
+            NotDurable { message } => {
+                use crate::surfaces::documents::{Action, WriteFailure, not_protected};
+                let name = self.project_name();
+                self.errors.borrow_mut().push(
+                    "Recovery",
+                    &format!(
+                        "A change to “{name}” couldn’t be written to its recovery data: {message}"
+                    ),
+                );
+                self.message =
+                    format!("Powermove couldn’t protect your latest change to “{name}”. Save now.");
+                if std::mem::replace(&mut self.unprotected, true) {
+                    // Already said, and still showing in the subtitle.
+                    return;
+                }
+                let session = self.session.clone();
+                let answer = not_protected(&name, WriteFailure::of(&message))
+                    .background_sheet(&self.host.borrow().window, cx);
+                cx.spawn(async move |this, cx| {
+                    if answer.recv().await.ok().flatten() == Some(Action::Save) {
+                        let _ = this.update(cx, |v, cx| {
+                            if v.session == session {
+                                v.save(None, cx);
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
+            CommitWithNotice { label, reason } => {
+                self.message =
+                    format!("“{label}” was kept: cancelling it would have removed later work.");
+                self.errors
+                    .borrow_mut()
+                    .push("Project", &format!("“{label}” was kept: {reason}"));
+            }
+            ForeignSplit { label, writes } => {
+                self.message = format!(
+                    "“{label}” was cancelled. {writes} change{} made meanwhile by something else {} kept as a separate undo step.",
+                    if writes == 1 { "" } else { "s" },
+                    if writes == 1 { "was" } else { "were" }
+                );
+            }
+            Sealed { label, .. } => {
+                self.message = format!("“{label}” was finished for an extension that stopped.");
+            }
+            Barrier { label } => {
+                self.message = format!(
+                    "Undo stopped at “{label}”: the extension that made it is no longer running."
+                );
+            }
+        }
+    }
+    /// Whether the project saves to a file of its own (not only kept in
+    /// the library).
+    fn has_file(&self) -> bool {
+        self.published.as_ref().is_some_and(|p| {
+            p.session
+                .as_ref()
+                .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
+        })
+    }
+    pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.recovery_pending || self.save_pending || self.session.is_none() {
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
+            return;
+        }
+        self.save_pending = true;
+        self.choosing_save_path = true;
+        let profile = self.profile.clone();
+        let current_path = self.path.clone();
+        let name = current_path
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| save_name(&self.project_name()));
+        let session = self.session.clone();
+        cx.spawn(async move |this, cx| {
+            let folder = cx
+                .background_executor()
+                .spawn(async move {
+                    // V1 Save As starts beside the existing file; only a
+                    // first save uses the last project folder / Movies.
+                    match current_path.as_deref().and_then(std::path::Path::parent) {
+                        Some(folder) => folder.to_path_buf(),
+                        None => crate::document_paths::save_folder(&profile),
+                    }
+                })
+                .await;
+            let rx = this
+                .update(cx, |v, _| platform::paths_named_in(
+                    &v.host.borrow().window,
+                    true,
+                    &name,
+                    Some(&folder),
+                ))
+                .ok();
+            let Some(rx) = rx else {
+                let _ = this.update(cx, |v, cx| {
+                    v.save_pending = false;
+                    v.choosing_save_path = false;
+                    if v.close_after_save.take().is_some() {
+                        v.cancel_close(cx);
+                    }
+                });
+                return;
+            };
+            let path = rx.recv().await.ok().flatten();
+            let _ = this.update(cx, |v, cx| {
+                v.save_pending = false;
+                v.choosing_save_path = false;
+                cx.notify();
+                if v.session != session {
+                    if v.close_after_save.take().is_some() {
+                        v.cancel_close(cx);
+                    }
+                    return;
+                }
+                if let Some(path) = path {
+                    v.save(Some(path), cx);
+                } else if v.close_after_save.take().is_some() {
+                    v.cancel_close(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// The launcher's task switch. The main thread never waits on the Agent
+    /// panel's state (a launch can hold it while its completion waits behind
+    /// an agent's project check): busy, it tries again on the next frame.
+    fn switch_agent_task(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self
+            .builtins
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.agent_launcher_try_switch(&id) == Ok(false));
+        if busy {
+            let this = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                let _ = this.update(cx, |s, cx| s.switch_agent_task(id, window, cx));
+            });
+            return;
+        }
+        self.open_agent_from_launcher(window, cx);
+    }
+
+    pub fn command(
+        &mut self,
+        cmd: &ShellCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(runtime) = &self.builtins.runtime {
+            runtime.emit_event(
+                "command",
+                &serde_json::json!({ "name": &cmd.name, "args": &cmd.args }),
+            );
+        }
+        if cmd.name == crate::v4_quote::CITE_COMMAND {
+            return self
+                .builtins
+                .views
+                .get("agent")
+                .cloned()
+                .is_some_and(|view| view.update(cx, |v, cx| v.cite_selection(window, cx)));
+        }
+        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") && cmd.args.is_empty() {
+            if self.builtins.views.get("agent").cloned().is_some_and(|view| {
+                view.update(cx, |v, cx| v.copy_selection(window, cx))
+            }) {
+                return true;
+            }
+        }
+        // Flying (Shift+`) holds every shortcut: Escape/cancel ends the
+        // flight where it began, the rest wait (no play, scrub or edits).
+        if let Some(g) = self.builtins.gizmos.clone()
+            && g.read(cx).studio_flying()
+        {
+            if matches!(cmd.name.as_str(), "deselect" | "cancel") {
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
+            }
+            return true;
+        }
+        if crate::generated_panel::pick(self, &cmd.name, cx) {
+            return true;
+        }
+        if let Some(family) = cmd.name.strip_prefix("fontPick:") {
+            self.font_picked(family);
+            return true;
+        }
+        if let Some(key) = cmd.name.strip_prefix("partPick:") {
+            self.part_picked(key, cx);
+            return true;
+        }
+        if let Some(action) = cmd.name.strip_prefix("partFilter:") {
+            self.part_filter(action);
+            return true;
+        }
+        if let Some(spec) = cmd.name.strip_prefix("partHover:") {
+            self.part_hovered(spec, cx);
+            return true;
+        }
+        if let Some(id) = cmd
+            .name
+            .strip_prefix("dismissPartPicker:")
+            .and_then(|id| id.parse().ok())
+        {
+            self.dismiss_part_picker(id, cx);
+            return true;
+        }
+        if let Some(id) = cmd.name.strip_prefix("dismissAgentPicker:").and_then(|id| id.parse().ok()) {
+            self.dismiss_agent_picker(id);
+            return true;
+        }
+        if let Some(id) = cmd.name.strip_prefix("dismissFontPicker:").and_then(|id| id.parse().ok()) {
+            self.dismiss_font_picker(id);
+            return true;
+        }
+        if let Some(index) = cmd.name.strip_prefix("agentPick:") {
+            self.agent_picked(index);
+            return true;
+        }
+        if let Some(index) = cmd.name.strip_prefix("agentPickDelete:") {
+            self.agent_picked_delete(index);
+            return true;
+        }
+        if cmd.name == "palette.addEffect" {
+            if let (Some(published), Some(runtime), Some(id)) = (
+                self.published.as_deref(),
+                self.builtins.runtime.as_ref(),
+                cmd.args.first().and_then(|a| a.as_str()),
+            ) {
+                let state = self.kernel.state();
+                if let Some((_, label)) = crate::layer_commands::palette_effects(&state)
+                    .into_iter()
+                    .find(|(key, _)| key == id)
+                {
+                    let plan =
+                        crate::layer_commands::palette_effect_plan(published, &label, |layer| {
+                            runtime.effect_commands("viewer", layer, id, self.time())
+                        });
+                    match plan {
+                        Ok(Some(plan)) => self.run_layer_plan(plan, cx),
+                        Ok(None) => {}
+                        Err(why) => {
+                            self.message = why;
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        match cmd.name.as_str() {
+            "timeline.parentMenu" => {
+                let Some(id) = cmd
+                    .args
+                    .first()
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.as_str())
+                else {
+                    return false;
+                };
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let rows = crate::layer_commands::layer_menu(published, id, self.time(), crate::layer_commands::can_paste());
+                let items = rows
+                    .iter()
+                    .find(|row| row["label"] == "Parent")
+                    .and_then(|row| row["children"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let choices = items.clone();
+                let ids = cmd.args.first().cloned().unwrap_or_default();
+                let host = self.host.clone();
+                crate::v4_native::menu(
+                    window,
+                    &items,
+                    cx,
+                    Box::new(move |choice: Option<usize>, _: &mut App| {
+                        if let Some(row) = choice.and_then(|i| choices.get(i)) {
+                            host.borrow().send_command("timeline.propertyEdit", vec![serde_json::json!({"type":"parent","ids":ids,"parent":row["args"][0]})]);
+                        }
+                    }),
+                );
+                return true;
+            }
+            "timeline.propertyEdit" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(action) = cmd.args.first().cloned() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.timeline_action(action) else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
+                return true;
+            }
+            "shortcuts" => {
+                let action = cmd.args.first().cloned().unwrap_or_default();
+                self.shortcuts_action(&action, window, cx);
+                return true;
+            }
+            "shortcuts.recorded" => {
+                let chord = cmd
+                    .args
+                    .first()
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default();
+                self.shortcut_recorded(chord, cx);
+                return true;
+            }
+            // V (or A in the Final Cut and Resolve keys) is the Selection tool
+            // everywhere: the timeline's edit tool goes back to Selection too.
+            "toolSelect" => {
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    timeline.update(cx, |t, cx| {
+                        t.command("timeline.tool:selection", time, None, false, cx)
+                    });
+                }
+            }
+            _ => {}
+        }
+        if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
+            self.restore_take(id, cx);
+            return true;
+        }
+        if let Some(id) = cmd.name.strip_prefix("takeDelete:") {
+            self.delete_take(id, cx);
+            return true;
+        }
+        if cmd.name == "toolShape" {
+            // The segment menu names a variant; Q again on the Shape tool
+            // cycles them; a toolbar click keeps the current one.
+            let variants = pm_shell::SHAPES.map(|(v, _, _)| v);
+            let at = variants
+                .iter()
+                .position(|v| *v == self.shape_variant)
+                .unwrap_or(0);
+            if let Some(v) = cmd.args.first().and_then(|v| v.as_str())
+                && variants.contains(&v)
+            {
+                self.shape_variant = v.into();
+            } else if cmd.token.is_some() && self.tool == "toolShape" {
+                self.shape_variant = variants[(at + 1) % variants.len()].into();
+            }
+            self.host.borrow().select_shape(&self.shape_variant);
+        }
+        if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
+            if self.tool != cmd.name {
+                crate::telemetry::tool_selected(&cmd.name);
+            }
+            self.tool = cmd.name.clone();
+            if let Some(runtime) = &self.builtins.runtime {
+                runtime.set_active_tool(None);
+                runtime.emit_event("tool", &serde_json::json!({ "tool": self.tool }));
+            }
+            // The Pen tool shows the selection's paths; others hide them.
+            if let Some(gizmos) = self.builtins.gizmos.clone() {
+                gizmos.update(cx, |g, cx| g.refresh(cx));
+            }
+            // The `tool` service names it as v1 did: toolSelect is "select".
+            if let Some(host) = &self.extensions.host {
+                let name = &cmd.name[4..];
+                let tool = name[..1].to_lowercase() + &name[1..];
+                host.shell_state(serde_json::json!({ "tool": tool }));
+            }
+            return false;
+        }
+        // The menu or a launch argument during a long open: the project is
+        // coming, so the command waits for it rather than finding none.
+        if (self.opening || self.settling.is_some())
+            && crate::layer_commands::waits_for_project(&cmd.name)
+        {
+            self.after_open.defer(cmd.name.clone(), cmd.args.clone());
+            return true;
+        }
+        if self.extension_command(cmd, cx) {
+            return true;
+        }
+        // Edit menu items reach a focused text field before the document.
+        // Under a sheet, one that no field took goes nowhere.
+        if cmd.name.starts_with("context")
+            && (self.host.borrow().system(&cmd.name)
+                || self.host.borrow().window.attachedSheet().is_some())
+        {
+            return true;
+        }
+        // Escape on Home clears its search, then returns to the project (v1).
+        if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.home_visible {
+            match self.library.clone() {
+                Some(library) if !library.read(cx).controller.query.text.is_empty() => {
+                    library.update(cx, |v, cx| v.clear_search(cx));
+                }
+                _ => self.hide_home(cx),
+            }
+            return true;
+        }
+        if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {
+            return true;
+        }
+        // View ▸ 3D ▸ Frame and the viewer bar's Frame: Free View fits the
+        // selection, or everything.
+        // F reveals a mask's Feather in 2D (AE); with nothing or only 3D
+        // layers selected in a 3D composition it frames the view (§4).
+        if cmd.name == "timeline.revealProperty:f"
+            && cmd.args.is_empty()
+            && let (Some(g), Some(p)) = (self.builtins.gizmos.clone(), self.published.clone())
+            && g.read(cx).studio_active()
+            && p.selection
+                .layers()
+                .iter()
+                .all(|id| crate::gizmo::is_studio(&p, id))
+        {
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            return true;
+        }
+        // Blender-inspired Shift+A: opens the categorized 3D Add menu (meshes,
+        // lights, cameras, 3D null, environments & nature) when 3D mode is on.
+        if cmd.name == "timeline.revealProperty:a"
+            && cmd.args.first().and_then(|v| v.as_bool()) == Some(true)
+            && let Some(g) = self.builtins.gizmos.clone()
+            && g.read(cx).studio_active()
+        {
+            self.open_studio_add_menu();
+            return true;
+        }
+        if cmd.name == "studio.addMenu" {
+            self.open_studio_add_menu();
+            return true;
+        }
+        match cmd.name.as_str() {
+            // The Light panel's sliders: one Undo per pull ("Light Brightness").
+            "studio.light" => {
+                let Some(p) = self.published.clone() else {
+                    return true;
+                };
+                let key = cmd.args.first().and_then(|a| a.as_str()).unwrap_or("");
+                let value = cmd.args.get(1).cloned().unwrap_or_default();
+                match pm_panel_studio3d::properties::command(
+                    &p,
+                    self.time(),
+                    &format!("light.adjust.{key}"),
+                    value,
+                ) {
+                    Ok((label, commands)) => self.run_layer_plan(
+                        crate::layer_commands::Plan {
+                            label,
+                            commands,
+                            select: None,
+                            count_keys: None,
+                        },
+                        cx,
+                    ),
+                    Err(e) => {
+                        self.message = e.to_string();
+                        cx.notify();
+                    }
+                }
+                return true;
+            }
+            // View ▸ 3D: the viewer's 3D group as menu items.
+            "studio.view" => {
+                let arg = |i: usize| {
+                    cmd.args
+                        .get(i)
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                let (group, value) = (arg(0), arg(1));
+                if cmd.token.is_some() {
+                    let canvas = self.host.borrow().canvas_focus.get();
+                    let takes = self
+                        .builtins
+                        .gizmos
+                        .as_ref()
+                        .is_some_and(|g| g.read(cx).studio_takes_key(&group, canvas, window));
+                    if !takes {
+                        return false;
+                    }
+                }
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    let host = self.host.clone();
+                    let capture = host.borrow().studio_flying.clone();
+                    defer_studio_view(
+                        gizmos,
+                        group,
+                        value,
+                        capture,
+                        move || host.borrow_mut().focus_canvas(),
+                        window,
+                        cx,
+                    );
+                }
+                return true;
+            }
+            _ => {}
+        }
+        if cmd.name == "studio.frame" {
+            // The gizmo reads the Controller, so it runs after this update.
+            if let Some(g) = self.builtins.gizmos.clone() {
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            }
+            return true;
+        }
+        // The viewer's context menu names its New 3D kind in the command.
+        if let Some(kind) = cmd.name.strip_prefix("new3d:") {
+            if kind == "import" {
+                self.pick_models(cx);
+                return true;
+            }
+            return self.run_plan("new3d", &[serde_json::json!(kind)], cx);
+        }
+        if cmd.name == "new3d" && cmd.args.first().and_then(|a| a.as_str()) == Some("import") {
+            self.pick_models(cx);
+            return true;
+        }
+        if matches!(cmd.name.as_str(), "selectAll" | "contextSelectAll")
+            && let Some(timeline) = self.builtins.timeline.clone()
+            && timeline.update(cx, |timeline, cx| timeline.select_all(cx))
+        {
+            return true;
+        }
+        if cmd.name == "delete"
+            && cmd.args.is_empty()
+            && ["inspector", "layer-effects"].into_iter().any(|panel| {
+                self.builtins.views.get(panel).cloned().is_some_and(|view| {
+                    view.update(cx, |view, cx| view.delete_focused_effect(window, cx))
+                })
+            })
+        {
+            return true;
+        }
+        use crate::layer_commands::Route;
+        match crate::layer_commands::route(&cmd.name, &cmd.args) {
+            Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
+            Some(Route::Copy { cut }) => {
+                return self.copy_selection(cut, cmd.args.first().and_then(serde_json::Value::as_str), cx);
+            }
+            Some(Route::Paste) => return self.paste_clipboard(cx),
+            Some(Route::Timeline { frames, shift }) => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return false;
+                };
+                // A property's keyframe key with no layer selected has
+                // nothing to key: the chord goes on to its next meaning.
+                if cmd.name.starts_with("timeline.keyProperty:")
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.layers().is_empty())
+                {
+                    return false;
+                }
+                // Option-Command-H holds keyframes when some are selected;
+                // otherwise it is the system's Hide Others.
+                if cmd.name == "timeline.toggleHold"
+                    && cmd.token.is_some()
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.keys().is_empty())
+                {
+                    return false;
+                }
+                let time = self.time();
+                timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
+                return true;
+            }
+            None => {}
+        }
+        match cmd.name.as_str() {
+            "v4.platform" => self.builtin_platform(window, cx),
+            "text.editSelected" => {
+                let Some(gizmos) = self.builtins.gizmos.clone() else {
+                    return false;
+                };
+                return crate::gizmo::text::edit_selected_text_after(gizmos, window, cx);
+            }
+            // The viewer's View-menu actions, for the palette and for keys.
+            "viewer.safeAreas"
+            | "viewer.guides"
+            | "viewer.showRGB"
+            | "viewer.showRed"
+            | "viewer.showGreen"
+            | "viewer.showBlue"
+            | "viewer.showAlpha"
+            | "viewer.showAlphaOverlay"
+            | "viewer.showRangeOverlay"
+            | "viewer.rulers"
+            | "viewer.grid"
+            | "viewer.snapping"
+            | "viewer.lockGuides"
+            | "viewer.clearGuides"
+            | "viewer.popout"
+            | "viewer.toggleProxies"
+            | "viewer.renderSelection"
+            | "viewer.keepRendered"
+            | "viewer.deleteRendered"
+            | "viewer.applyLut" => {
+                let Some(action) = crate::viewer2::command_action(&cmd.name) else {
+                    return false;
+                };
+                if self.viewer.is_none() {
+                    return false;
+                }
+                self.viewer_action(action, cx);
+            }
+            "toggleSkimming" => self.toggle_skimming(cx),
+            "toggleAudioSkimming" => self.toggle_audio_skimming(cx),
+            "toggleLayerControls" => {
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    let shown = gizmos.update(cx, |g, cx| {
+                        g.toggle_controls(cx);
+                        g.controls()
+                    });
+                    if let Some(host) = &self.extensions.host {
+                        host.shell_state(serde_json::json!({ "showControls": shown }));
+                    }
+                }
+            }
+            // The gear and ⌘, toggle: Settings showing closes, back to the
+            // tab it came forward over; open behind another tab, it comes
+            // forward. Its rows have saved as they changed (as its × closes).
+            // ⌘, with Settings in front closes it.
+            "settings" if self.settings_in_front(cx) => self.close_settings(cx),
+            "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent.launcher.open" => self.open_agent_from_launcher(window, cx),
+            "agent.launcher.task" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    self.switch_agent_task(id.to_owned(), window, cx);
+                }
+            }
+            "agent.stop" => {
+                let Some(session) = &self.session else {
+                    return false;
+                };
+                self.mcp.resume_project(&session.project);
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(thread) = runtime.agent_current_thread() else {
+                    return false;
+                };
+                if !runtime.agent_status().0 {
+                    return false;
+                }
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime.agent_thread_control(
+                                "thread_cancel",
+                                &serde_json::json!({"threadId":thread,"callerAccess":"project"}),
+                            )
+                        })
+                        .await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.message = match result {
+                            Ok(_) => "Agent stopped".into(),
+                            Err(error) => error,
+                        };
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            "agent.undoTurn" => self.undo_agent_turn(cx),
+            "agent.steer" => self.open_agent_steer(window, cx),
+            "agent.pause" => {
+                let Some(session) = &self.session else {
+                    return false;
+                };
+                let Some(runtime) = self.builtins.runtime.as_ref() else {
+                    return false;
+                };
+                if !runtime.agent_status().0 {
+                    return false;
+                }
+                let paused = self.mcp.toggle_pause(&session.project);
+                self.message = if paused {
+                    "Agent paused · ⇧⌘. to resume"
+                } else {
+                    "Agent resumed"
+                }
+                .into();
+            }
+            "agent" => self.toggle_agent(window, cx),
+            "bringWorkspace" => self.bring_workspace(window, cx),
+            "quit" => cx.defer(crate::lifecycle::begin_quit),
+            // Close Project always closes the open project and returns this
+            // window to Home (even if a page like Settings is showing). On
+            // Home, keep the editor open.
+            "closeProject" => {
+                if self.session.is_some() {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Project, cx);
+                }
+            }
+            "closeTab" => match close_tab_target(
+                self.pages.shown.is_some(),
+                self.session.is_some(),
+                pm_shell::tabs_mode(),
+                crate::entry::editors(cx).len(),
+            ) {
+                CloseTab::Page => {
+                    if let Some(id) = self.pages.shown.clone() {
+                        self.close_tab_page(&id, cx);
+                    }
+                }
+                CloseTab::Project => {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Project, cx)
+                }
+                CloseTab::Window => {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Window, cx)
+                }
+            },
+            "closeWindow" => {
+                gpui_macos::feel::note_now("tab.close");
+                self.request_close(crate::lifecycle::Intent::Window, cx)
+            }
+            // The project name's menu.
+            name if name.starts_with("openRecentProject:") => {
+                let id = name["openRecentProject:".len()..].to_owned();
+                self.replace_project(crate::entry::Pending::Library(id), cx);
+            }
+            // Rename Project… is the Name row of Settings › Project.
+            "renameProject" => {
+                self.builtins.settings_page = Some("project".into());
+                self.show_builtin("settings", window, cx);
+            }
+            "revealProject" => match self.path.clone() {
+                Some(path) => crate::platform::reveal(&path),
+                None => {
+                    self.message =
+                        "This project is kept in your library, not in a file of its own.".into();
+                    cx.notify();
+                }
+            },
+            "cancelImport" | "cancel" | "deselect" if self.importing.is_some() => {
+                if let Some(cancel) = &self.importing {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            // A Properties row's Show in Graph Editor: the Timeline comes
+            // forward with its graph on that property.
+            "timeline.showGraph" => {
+                let text = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(layer), Some(channel), Some(timeline)) =
+                    (text(0), text(1), self.builtins.timeline.clone())
+                else {
+                    return false;
+                };
+                let keys = cmd
+                    .args
+                    .get(2)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.host
+                    .borrow()
+                    .send_command("panel:show:timeline", vec![]);
+                timeline.update(cx, |t, cx| t.show_graph(layer, channel, keys, cx));
+            }
+            // A Properties diamond keyed a property: the graph plots it.
+            "timeline.focusGraph" => {
+                let text = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(layer), Some(channel), Some(timeline)) =
+                    (text(0), text(1), self.builtins.timeline.clone())
+                else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.focus_graph(layer, channel, cx));
+            }
+            "properties.expression" => {
+                let Some(input) = cmd.args.first() else {
+                    return false;
+                };
+                self.expression_sheet(input, cx);
+            }
+            "import" => self.pick_media(None, true, cx),
+            "importFolder" => self.pick_media_folder(None, cx),
+            "importSequence" => self.pick_sequence(cx),
+            "addCaption" | "importCaptions" | "exportCaptions" | "generateCaptions"
+            | "deleteCaptions" | "splitCaption" => {
+                return self.captions_command(&cmd.name, window, cx);
+            }
+            "speechDelete" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    self.confirm_speech_delete(id, cx);
+                }
+            }
+            "shader.compile" => return self.shader_command(&cmd.name, cx),
+            name if name.starts_with("shader.preset:") => return self.shader_command(name, cx),
+            name if name.starts_with("captions.cue:") => {
+                return self.captions_command(name, window, cx);
+            }
+            name if name.starts_with("captions.layer:") => {
+                return self.captions_command(name, window, cx);
+            }
+            "open" => {
+                let rx = platform::paths(&self.host.borrow().window, false);
+                cx.spawn(async move |this, cx| {
+                    if let Ok(Some(path)) = rx.recv().await {
+                        let _ = this.update(cx, |v, cx| v.open_file(path, cx));
+                    }
+                })
+                .detach();
+            }
+            // v1: the first save of a project with no file of its own asks
+            // where it goes, named for the project; later saves go there.
+            "save" => self.save(None, cx),
+            "native.saveTake" => {
+                crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
+            }
+            "native.addCompositionToTimeline" | "native.addLayerFromAsset" => {
+                if let Some(runtime) = &self.builtins.runtime {
+                    let (assets, comps) = runtime
+                        .project_timeline_items(cmd.name == "native.addCompositionToTimeline");
+                    self.add_to_timeline(&assets, &comps, cx);
+                }
+            }
+            "saveAs" => self.save_dialog(cx),
+            "renderPending" => self.render_pending(cx),
+            "export" => self.show_builtin("export", window, cx),
+            "undo" | "contextUndo" => {
+                let seal_left_open = self.not_editing(cx);
+                self.call(
+                    Call::History(HistoryCall::EditorUndo { seal_left_open }),
+                    cx,
+                );
+            }
+            "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
+            "precompose" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                let Some(draft) = crate::layer_commands::precompose_draft(&published) else {
+                    return false;
+                };
+                let time = self.time();
+                let sheet = crate::dialogs::appkit::precompose_sheet(
+                    &self.host.borrow().window,
+                    &draft,
+                    &pm_shell::tokens(),
+                    objc2::MainThreadMarker::new().expect("menu commands run on the main thread"),
+                );
+                cx.spawn(async move |this, cx| {
+                    let answer = sheet.result.recv().await;
+                    drop(sheet.target);
+                    if let Ok(Some(draft)) = answer {
+                        let _ = this.update(cx, |v, cx| {
+                            let plan =
+                                crate::layer_commands::precompose_plan(&published, &draft, time);
+                            v.run_layer_plan(plan, cx);
+                        });
+                    }
+                })
+                .detach();
+            }
+            "composition.flowchart" => {
+                let mut host = self.host.borrow_mut();
+                if cmd.token.is_some()
+                    && !host.composition_canvas_focused()
+                    && !host.flowchart_open()
+                {
+                    return false;
+                }
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let Some(chart) = pm_kernel::navigation::Flowchart::read(&published.snapshot)
+                else {
+                    return false;
+                };
+                use pm_shell::FlowchartRow;
+                let mut rows = vec![FlowchartRow::Heading("Used In".into())];
+                let mut group = |items: Vec<pm_kernel::navigation::Composition>, empty: &str| {
+                    if items.is_empty() {
+                        rows.push(FlowchartRow::Empty(empty.into()));
+                    }
+                    for item in items {
+                        rows.push(FlowchartRow::Composition {
+                            id: item.id,
+                            name: item.name,
+                            current: false,
+                        });
+                    }
+                };
+                group(chart.parents, "Not nested anywhere");
+                rows.push(FlowchartRow::Composition {
+                    id: chart.current.id,
+                    name: chart.current.name,
+                    current: true,
+                });
+                rows.push(FlowchartRow::Heading("Contains".into()));
+                if chart.children.is_empty() {
+                    rows.push(FlowchartRow::Empty("No nested compositions".into()));
+                }
+                for child in chart.children {
+                    rows.push(FlowchartRow::Composition {
+                        id: child.id,
+                        name: child.name,
+                        current: false,
+                    });
+                }
+                return host.toggle_flowchart(rows, published.snapshot.doc_id);
+            }
+            "composition.open" => {
+                let Some(id) = cmd.args.first().and_then(|a| a.as_str()) else {
+                    return false;
+                };
+                let Some(document) = cmd.args.get(1).and_then(|a| a.as_u64()) else {
+                    return false;
+                };
+                if self
+                    .published
+                    .as_ref()
+                    .is_none_or(|p| p.snapshot.doc_id != document)
+                {
+                    return false;
+                }
+                if self
+                    .published
+                    .as_ref()
+                    .and_then(|p| p.snapshot.open_comp())
+                    .as_deref()
+                    == Some(id)
+                {
+                    return true;
+                }
+                if let Some(viewer) = &self.viewer {
+                    let _ = viewer.command(TransportCommand::Pause);
+                }
+                self.call(
+                    Call::OpenComposition {
+                        comp_id: id.into(),
+                        document,
+                    },
+                    cx,
+                );
+            }
+            // v1: Return (and the row menu's Rename…) opens the selected
+            // layer's name field in the timeline; a text layer's Return edits
+            // its text first (text.editSelected steps aside otherwise).
+            "saveAnimationPreset" => {
+                if let Some(runtime) = self.builtins.runtime.clone() {
+                    let _ = runtime
+                        .preset_sheet(cmd.args.first().cloned().unwrap_or(serde_json::json!({})));
+                    self.host
+                        .borrow()
+                        .send_command("panel:show:fxbrowser", vec![]);
+                    self.drain_builtins(cx);
+                }
+            }
+            "renameLayer" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(p) = self.published.clone() else {
+                    return false;
+                };
+                let [id] = p.selection.layers() else {
+                    return false;
+                };
+                let row =
+                    pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(id.clone()));
+                let Ok(ticket) =
+                    runtime.timeline_action(serde_json::json!({"type":"rename","id":row}))
+                else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
+            }
+            "toggleLayerStrips" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.reveal_masks() else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let result = ticket.await;
+                    let _ = this.update(cx, |v, cx| {
+                        if !v
+                            .builtins
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+                        {
+                            return;
+                        }
+                        if let Err(error) = result {
+                            v.message = format!("Mask properties could not be shown: {error}");
+                        }
+                        v.drain_builtins(cx);
+                    });
+                })
+                .detach();
+            }
+            "fit" | "fitComp" | "fitComposition" | "viewer.fit" => {
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
+            }
+            // The whole composition in the viewer and its whole length in
+            // the timeline.
+            "fitView" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
+                // Each view saves the project's whole view state. The
+                // timeline fits once the viewer's save has landed, so its
+                // own save does not carry the old viewer zoom back.
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(crate::gizmo::NAVIGATION_IDLE)
+                            .await;
+                        let _ = this.update(cx, |_, cx| {
+                            timeline.update(cx, |t, cx| {
+                                t.command("timeline.fit", time, None, false, cx)
+                            })
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // Settings, at the open project's own page.
+            // The agent's transport, work area and the edits whose menu rows
+            // ask with a sheet (run_command; list_commands describes them).
+            "transport.play" | "transport.pause" => {
+                if self.running() != (cmd.name == "transport.play") {
+                    let play = ShellCommand {
+                        name: "play".into(),
+                        args: vec![],
+                        token: None,
+                    };
+                    return self.command(&play, window, cx);
+                }
+            }
+            "transport.seek" => {
+                let Some(seconds) = cmd.args.first().and_then(|v| v.as_f64()) else {
+                    return false;
+                };
+                if self.running() {
+                    self.end_run();
+                }
+                self.seek(seconds);
+            }
+            // Import/Export CDL…: a person picks the file; the agent names it.
+            "color.importCdl"
+            | "color.importCdlFile"
+            | "color.exportCdl"
+            | "color.exportCdlFile" => {
+                let path = cmd.args.first().and_then(|v| v.as_str()).map(PathBuf::from);
+                if cmd.name.ends_with("File") && path.is_none() {
+                    self.message = "Give the CDL file’s path.".into();
+                    return false;
+                }
+                if cmd.name.starts_with("color.import") {
+                    self.import_cdl(path, cx);
+                } else {
+                    self.export_cdl(path, cx);
+                }
+            }
+            "transport.loop" => {
+                let on = cmd.args.first().and_then(|v| v.as_bool()) != Some(false);
+                if self.playback.looping != on {
+                    self.toggle_loop(cx);
+                }
+            }
+            "footage.interpret" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                match crate::agent_commands::interpret(&cmd.args, &published) {
+                    Ok(plan) => self.run_layer_plan(plan, cx),
+                    Err(message) => {
+                        self.message = message;
+                        cx.notify();
+                        return false;
+                    }
+                }
+            }
+            "workArea.set" | "precompose.selection" | "composition.new" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                let Some(plan) =
+                    crate::agent_commands::plan(&cmd.name, &cmd.args, &published, self.time())
+                else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
+            }
+            // First run's Bring My Workspace (v1's onboarding handoff): it
+            // needs a project, so with none open a blank one comes first.
+            "firstRunWorkspace" => {
+                if self.session.is_some() {
+                    self.bring_workspace(window, cx);
+                } else if let Some(library) = self.library(cx) {
+                    self.workspace_after_open = true;
+                    library.update(cx, |v, cx| {
+                        let _ = v.controller.refresh();
+                        let _ = v.controller.begin_new(
+                            String::new(),
+                            None,
+                            &crate::project_library::default_format(),
+                        );
+                        let _ = v.controller.create();
+                        v.pump(cx);
+                    });
+                }
+            }
+            // Settings › Account (the billing return link, Aero's Subscribe).
+            "accountSettings" => {
+                self.builtins.settings_page = Some("account".into());
+                self.show_builtin("settings", window, cx);
+            }
+            // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
+            "keyboardShortcuts" => {
+                self.builtins.settings_page = Some("shortcuts".into());
+                self.show_builtin("settings", window, cx);
+            }
+            "projectSettings" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.builtins.settings_page = Some("project".into());
+                self.show_builtin("settings", window, cx);
+            }
+            "actualSize" => self.step_zoom(1., Some(1.), window, cx),
+            "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),
+            "zoomIn" => self.step_zoom(1.25, None, window, cx),
+            "zoomOut" => self.step_zoom(0.8, None, window, cx),
+            "shuttleBackward" | "shuttleStop" | "shuttleForward" | "shuttleRelease" => {
+                use crate::shuttle::Press;
+                use pm_engine_service::transport::ShuttleKey;
+                let Some(key) = crate::shuttle::key(&cmd.name, &cmd.args) else {
+                    return false;
+                };
+                if cmd.name == "shuttleRelease" {
+                    if let Some(command) = self.shuttle.release(key) {
+                        self.transport(command);
+                        self.tick_builtins(cx);
+                    }
+                    return true;
+                }
+                // A menu row or the palette starts from a stop; a key does
+                // when its binding says so, and otherwise leaves a stopped
+                // J, K or L to its other meaning.
+                let from_pause =
+                    cmd.token.is_none() || cmd.args.first().and_then(|a| a.as_bool()) == Some(true);
+                let handled = match self.shuttle.press(key) {
+                    Press::Speeds => {
+                        let stopped = !self.running();
+                        if stopped && from_pause && key != ShuttleKey::K {
+                            self.shape_run();
+                        }
+                        let acted = self
+                            .viewer
+                            .as_ref()
+                            .is_some_and(|v| v.shuttle(key, from_pause).unwrap_or(false));
+                        if key == ShuttleKey::K && acted {
+                            self.end_run();
+                        }
+                        if acted {
+                            self.tick_builtins(cx);
+                        }
+                        acted || (from_pause && key == ShuttleKey::K)
+                    }
+                    Press::Send(command) => {
+                        let accepted = self.transport(command);
+                        if accepted {
+                            self.tick_builtins(cx);
+                        }
+                        accepted
+                    }
+                    Press::Held => true,
+                };
+                if handled
+                    && let Some(token) = cmd.token
+                    && self.host.borrow().on_release(
+                        token,
+                        "shuttleRelease",
+                        vec![cmd.name.clone().into()],
+                    )
+                {
+                    self.shuttle.hold(key);
+                }
+                return handled;
+            }
+            "toggleLoop" => self.toggle_loop(cx),
+            // The button came up somewhere in the window (after the views
+            // heard it): a pointer gesture whose own view never did ends now.
+            "pointerReleased" => {
+                // Ending its gesture reads the controller (the tool, the
+                // frame): after this update (PM-480).
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    window.defer(cx, move |window, cx| {
+                        g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    });
+                }
+                for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
+                    view.update(cx, |v, cx| v.release_unheard(window, cx));
+                }
+            }
+            // Space came up after arming the hand over the viewer: it plays
+            // only if the hand did not pan (After Effects' rule).
+            "viewer.spaceUp" => {
+                let panned = self
+                    .builtins
+                    .gizmos
+                    .clone()
+                    .is_some_and(|g| g.update(cx, |g, cx| g.release_space(window, cx)));
+                if !panned {
+                    self.host.borrow().send_command("play", vec![]);
+                }
+            }
+            // Space on a Project item a click left with the keyboard is the
+            // item's (Quick Look, as in Finder): Play declines and the key
+            // reaches it. Everywhere else Space plays.
+            "play"
+                if cmd.token.is_some()
+                    && self
+                        .builtins
+                        .views
+                        .get("assets")
+                        .is_some_and(|v| v.read(cx).focused_takes_keys(window)) =>
+            {
+                return false;
+            }
+            // Space held over the viewer is the hand when paused: Play waits for
+            // the key to come up (no drag) instead of starting on the way down.
+            // While playing, Space pauses immediately without arming the hand.
+            "play"
+                if !self.running()
+                    && cmd.token.is_some()
+                    && self.viewer.is_some()
+                    && self
+                        .builtins
+                        .gizmos
+                        .as_ref()
+                        .is_some_and(|g| g.read(cx).pointer_over(window))
+                    && self.host.borrow().on_release(
+                        cmd.token.unwrap(),
+                        "viewer.spaceUp",
+                        vec![],
+                    ) =>
+            {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.arm_space(cx));
+                }
+            }
+            "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd" => {
+                // Final Cut: Space plays from the skimmer, only while the
+                // pointer is over the timeline now; otherwise from the playhead.
+                let over = self
+                    .builtins
+                    .timeline
+                    .as_ref()
+                    .is_some_and(|t| t.read(cx).pointer_over(window));
+                if cmd.name == "play" && !over && self.skimming.at.is_some() {
+                    self.skim(None, Self::event_time());
+                    if let Some(t) = self.builtins.timeline.clone() {
+                        // The surface calls back into this controller.
+                        cx.defer(move |cx| t.update(cx, |t, cx| t.skimming_changed(cx)));
+                    }
+                }
+                if cmd.name == "play"
+                    && !self.running()
+                    && over
+                    && let Some(at) = self.skimming.at
+                    && self.viewer.as_ref().is_some_and(|v| {
+                        v.status()
+                            .clock
+                            .is_some_and(|c| c.state == TransportState::Stopped)
+                    })
+                {
+                    self.seek(at);
+                }
+                if self.viewer.is_none() {
+                    return false;
+                }
+                let command = match cmd.name.as_str() {
+                    "play" => {
+                        if self.running() {
+                            TransportCommand::Pause
+                        } else {
+                            pm_telemetry::note_playback_target(self.rate.to_f64() as f32);
+                            TransportCommand::Play {
+                                rate: PlaybackRate::NORMAL,
+                            }
+                        }
+                    }
+                    "prevFrame" => TransportCommand::Step { frames: -1 },
+                    "nextFrame" => TransportCommand::Step { frames: 1 },
+                    "stepFrames" => TransportCommand::Step {
+                        frames: cmd.args.first().and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    },
+                    "gotoStart" => {
+                        self.seek(0.);
+                        return true;
+                    }
+                    "gotoEnd" => {
+                        self.seek((self.duration() - 1. / self.rate.to_f64()).max(0.));
+                        return true;
+                    }
+                    _ => return false,
+                };
+                // A step never leaves the composition: past its first or
+                // last frame it lands on that frame.
+                if let TransportCommand::Step { frames } = command {
+                    let frame = 1. / self.rate.to_f64();
+                    let last = (self.duration() - frame).max(0.);
+                    let target = self.time() + f64::from(frames) * frame;
+                    if target < -frame / 2. || target > last + frame / 2. {
+                        self.end_run();
+                        self.seek(target.clamp(0., last));
+                        return true;
+                    }
+                }
+                self.transport(command);
+                self.tick_builtins(cx);
+            }
+            name => return self.surface_command(name, cx),
+        }
+        cx.notify();
+        true
+    }
+}
+/// Where an open project comes from, to open it again.
+pub(crate) fn reopen_source(
+    p: &pm_kernel::Published,
+    profile: &std::path::Path,
+) -> Option<SessionSource> {
+    Some(match &p.session.as_ref()?.destination {
+        SessionDestination::File(path) => SessionSource::File(path.clone()),
+        SessionDestination::Library(slot) => SessionSource::Library {
+            profile: profile.to_owned(),
+            project: slot.clone(),
+        },
+    })
+}
+/// Why the open failed, in the words the open alert has for it.
+fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailure {
+    use crate::surfaces::documents::OpenFailure;
+    use pm_services::ServiceErrorCode::*;
+    OpenFailure::Service(match error {
+        KernelFailure::NoProject(_) => NotFound,
+        // Unsaved work can't be protected without its journal: say so.
+        KernelFailure::Journal(_) => return OpenFailure::Journal,
+        // An open never faults a project; a stopped one only refuses edits.
+        KernelFailure::Faulted(_) => Unavailable,
+        KernelFailure::Storage(text) if text.contains(pm_kernel::error::STILL_COPYING) => {
+            return OpenFailure::StillCopying;
+        }
+        KernelFailure::Storage(text) if text.contains(pm_kernel::error::CHOICE_REPLACED) => {
+            return OpenFailure::ChoiceReplaced;
+        }
+        KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
+            let text = error.to_string().to_lowercase();
+            if crate::access::refused_text(&text) {
+                return OpenFailure::AccessRefused;
+            } else if text.contains("permission") {
+                PermissionDenied
+            } else if text.contains("not found") || text.contains("no such file") {
+                NotFound
+            } else if text.contains("no space") {
+                DiskFull
+            } else if crate::access::os_text(&text) {
+                // The system failed the read: nothing says the file is damaged.
+                Unavailable
+            } else {
+                InvalidData
+            }
+        }
+    })
+}
+pub const SAVING: &str = "Saving…";
+/// `fpsRational`, else the stored float snapped to its exact rate: a project
+/// saved at 29.97 plays on the 30000/1001 grid the engine draws.
+/// The open composition's duration in seconds as the publication has it
+/// now (Project Settings, the Properties field and agents change it under a
+/// bound viewer), at least a millisecond.
+/// The frame rate of the composition shown, as it is now.
+pub fn published_rate(p: &Published) -> pm_time::Rate {
+    p.snapshot.root().map_or(pm_time::Rate::FPS_30, |root| {
+        composition_rate(
+            pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp())).unwrap_or(root),
+        )
+    })
+}
+pub fn composition_duration(p: &Published) -> f64 {
+    p.snapshot
+        .root()
+        .and_then(|root| {
+            pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp()))
+                .unwrap_or(root)
+                .get("dur")
+        })
+        .and_then(crate::node_number)
+        .unwrap_or(1.)
+        .max(0.001)
+}
+impl Controller {
+    /// The open composition's duration now ([`composition_duration`]).
+    pub fn duration(&self) -> f64 {
+        self.published.as_deref().map_or(1., composition_duration)
+    }
+}
+fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
+    let rational = composition.get("fpsRational").map(|n| n.to_value());
+    pm_model::ingest::IngestRate::from_document(
+        pm_model::ingest::fps_rational_of(rational.as_ref()),
+        composition.get("fps").and_then(crate::node_number),
+    )
+    .map_or(pm_time::Rate::FPS_30, |r| r.rate)
+}
+
+/// Status note for a save in flight, including saves started by MCP or the
+/// kernel. Returns a replacement message on a transition only, so other
+/// notes (refusals, errors) set during the save are kept until it ends.
+pub fn save_note(was: bool, now: bool, dirty: bool, message: &str) -> Option<&'static str> {
+    // Close/quit refusals explain why the window stayed open; keep them.
+    let refusal = message.starts_with("Saving in progress")
+        || message.starts_with("A project operation is in progress");
+    match (was, now) {
+        (false, true) if !refusal => Some(SAVING),
+        (true, false) if message == SAVING || refusal => Some(if dirty {
+            "Save did not complete; recovery data retained"
+        } else {
+            "Saved"
+        }),
+        _ => None,
+    }
+}
+pub(crate) fn stable_id(path: &std::path::Path) -> String {
+    // Stable across crashes; no random per-open journal namespace.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .hash(&mut h);
+    format!("file-{:016x}", h.finish())
+}
+/// What ⌘W (closeTab) closes.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CloseTab {
+    Page,
+    Project,
+    Window,
+}
+/// A page showing (Settings, the Store) closes back to the project; else in
+/// separate-windows mode (or the last editor tab) the project closes and the
+/// window shows Home; otherwise, and on Home, the tab or window closes.
+pub(crate) fn close_tab_target(page: bool, project: bool, tabs: bool, editors: usize) -> CloseTab {
+    if page {
+        CloseTab::Page
+    } else if project && (!tabs || editors <= 1) {
+        CloseTab::Project
+    } else {
+        CloseTab::Window
+    }
+}
+impl Drop for Controller {
+    fn drop(&mut self) {
+        crate::diag::EDITORS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.end_region_pick();
+        if let Some(v) = &self.viewer {
+            v.retire();
+        }
+        if let Some(p) = self.popout.take() {
+            p.shutdown();
+        }
+    }
+}
+/// Points the engine's disk render cache at Storage › Renders (and finds its
+/// frames again after Clear…), off the main thread.
+pub(crate) fn sync_render_storage(
+    pro_media: &Arc<crate::pro_media::ProMedia>,
+    engine: &Arc<EngineService>,
+) {
+    let (pro_media, disk) = (pro_media.clone(), engine.render_cache());
+    std::thread::Builder::new()
+        .name("pm-render-storage".into())
+        .spawn(move || {
+            disk.set_content_named(Some(pro_media.objects().to_owned()));
+            let _ = disk.set_storage(pro_media.render_frames());
+        })
+        .ok();
+}
+/// The start tick of the frame on screen at `seconds`. Seconds round to the
+/// nearest tick, never truncate: a frame start written in seconds is often a
+/// hair under its tick (frame 247 at 30 fps is 5,809,439,999.99… ticks), and
+/// truncating lands on the frame before.
+pub(crate) fn frame_start_at(rate: pm_time::Rate, seconds: f64) -> Option<i64> {
+    let tick = (seconds * TICKS_PER_SECOND as f64).round() as i64;
+    rate.frame_start(rate.frame_of(tick)).ok()
+}
+
+#[cfg(test)]
+mod close_tab_tests {
+    use super::{CloseTab, close_tab_target};
+    /// Separate Windows' ⌘W is closeTab too (w83 P1-3): a page closes
+    /// first, a project returns the window to Home, Home closes the window.
+    #[test]
+    fn command_w_closes_the_page_then_the_project_then_the_window() {
+        for tabs in [false, true] {
+            assert_eq!(close_tab_target(true, true, tabs, 2), CloseTab::Page);
+            assert_eq!(close_tab_target(true, false, tabs, 1), CloseTab::Page);
+            assert_eq!(close_tab_target(false, false, tabs, 1), CloseTab::Window);
+            assert_eq!(close_tab_target(false, true, tabs, 1), CloseTab::Project);
+        }
+        assert_eq!(close_tab_target(false, true, false, 3), CloseTab::Project);
+        assert_eq!(close_tab_target(false, true, true, 3), CloseTab::Window);
+    }
+}
+
+#[cfg(test)]
+mod save_note_tests {
+    use super::*;
+    /// A file macOS kept the app from reading (a folder it guards, the
+    /// person said No) is never called damaged; nor is any other OS failure.
+    #[::core::prelude::v1::test]
+    fn a_refused_or_failed_read_is_never_called_damaged() {
+        use crate::surfaces::documents::OpenFailure;
+        use pm_services::ServiceErrorCode;
+        let failure = |text: &str| open_failure(&KernelFailure::Storage(text.into()));
+        assert_eq!(
+            failure("Cannot read /Users/x/Downloads/p.pmv: Operation not permitted (os error 1)"),
+            OpenFailure::AccessRefused
+        );
+        assert_eq!(
+            failure("Cannot read /Volumes/x/p.pmv: Input/output error (os error 5)"),
+            OpenFailure::Service(ServiceErrorCode::Unavailable)
+        );
+        assert_eq!(
+            failure("Permission denied (os error 13)"),
+            OpenFailure::Service(ServiceErrorCode::PermissionDenied)
+        );
+        // Only the container's own verdict says the contents are bad.
+        assert_eq!(
+            failure("Invalid project container: truncated entry"),
+            OpenFailure::Service(ServiceErrorCode::InvalidData)
+        );
+        let alert = crate::surfaces::documents::open_error("p", OpenFailure::AccessRefused, true);
+        assert_eq!(alert.message, "Powermove isn’t allowed to open “p”.");
+    }
+    // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn a_typed_timecode_lands_on_its_frame() {
+        use pm_time::Rate;
+        for rate in [Rate::FPS_30, Rate::FPS_29_97, Rate::FPS_24, Rate::FPS_59_94] {
+            let fps = rate.num() as f64 / rate.den() as f64;
+            for frame in 0..2000 {
+                let typed = format!(
+                    "00:{:02}:{:02}:{:02}",
+                    frame / 30 / 60,
+                    frame / 30 % 60,
+                    frame % 30
+                );
+                let nominal = fps.round();
+                let n = (frame / 30) as f64 * nominal + (frame % 30) as f64;
+                let seconds = pm_panel_timeline::v4::parse_timecode(&typed, fps).unwrap();
+                assert_eq!(
+                    frame_start_at(rate, seconds),
+                    rate.frame_start(n as i64).ok(),
+                    "{typed} at {fps} fps"
+                );
+            }
+        }
+    }
+    #[::core::prelude::v1::test]
+    fn a_copy_says_what_it_is_for_as_long_as_its_window_shows_it() {
+        let meta = pm_model::json::parse(
+            r#"{"copyOf":{"path":"/Volumes/Share/job/cut.pmv","reason":"ReadOnly"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            copy_subtitle(Some(&meta), ""),
+            "Copy of cut.pmv (the file is read-only)"
+        );
+        assert_eq!(
+            copy_subtitle(Some(&meta), "Edited"),
+            "Copy of cut.pmv (the file is read-only) — Edited"
+        );
+        let plain = pm_model::json::parse("{}").unwrap();
+        assert_eq!(copy_subtitle(Some(&plain), "Edited"), "Edited");
+        assert_eq!(copy_subtitle(None, ""), "");
+    }
+    #[::core::prelude::v1::test]
+    fn a_file_with_stranded_copies_offers_the_copy_and_keeps_the_file() {
+        let alert = stranded_copies_alert("cut.pmv", &["cut — Native".to_owned()]);
+        assert_eq!(
+            alert.labels(),
+            ["Open the Copy", "Keep Working in This File"]
+        );
+        assert!(alert.buttons[0].default && alert.buttons[0].action);
+        assert!(!alert.buttons[1].action);
+        assert!(alert.message.contains("a copy of “cut.pmv”"));
+        assert!(alert.informative.contains("“cut — Native”"));
+        let two = stranded_copies_alert("cut.pmv", &["a".to_owned(), "b".to_owned()]);
+        assert!(two.message.contains("copies of") && two.informative.contains("“a” and 1 more"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_different_file_under_a_copied_name_is_told_about_the_earlier_copy() {
+        let alert = earlier_copy_alert("cut.pmv", &["cut — Native".to_owned()]);
+        assert_eq!(alert.labels(), ["Keep This One", "Open the Earlier Copy"]);
+        // The file just opened stays unless the person asks for the other.
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(alert.message.contains("“cut.pmv” isn’t the file"));
+        assert!(alert.informative.contains("“cut — Native”"));
+        assert!(alert.informative.contains("stays in your projects"));
+    }
+    #[::core::prelude::v1::test]
+    fn a_background_recovery_failure_concerns_the_window_of_its_project() {
+        assert!(unprotects("file-1", Some("file-1")));
+        assert!(!unprotects("file-1", Some("file-2")));
+        assert!(!unprotects("file-1", None));
+    }
+    #[::core::prelude::v1::test]
+    fn a_composition_is_laid_out_at_a_positive_size_whatever_is_stored() {
+        assert_eq!(composition_size(1920., 1080.), [1920., 1080.]);
+        assert_eq!(composition_size(0., 1080.), [1., 1080.]);
+        assert_eq!(composition_size(-5., f64::NAN), [1., 1.]);
+        assert_eq!(composition_size(f64::INFINITY, 0.5), [1., 1.]);
+    }
+    #[::core::prelude::v1::test]
+    fn a_composition_left_before_its_first_frame_keeps_the_time_asked_for() {
+        // A viewer that reported a clock is where it says (playing included).
+        assert_eq!(left_at(Some(3.5), Some(12.)), 3.5);
+        // One bound a moment ago has none yet: the seek that restored it.
+        assert_eq!(left_at(None, Some(12.)), 12.);
+        assert_eq!(left_at(None, None), 0.);
+    }
+    #[::core::prelude::v1::test]
+    fn ntsc_projects_get_the_exact_rate_the_viewer_needs() {
+        let rate = |json: &str| {
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(json).unwrap()), 1);
+            composition_rate(doc.root().unwrap())
+        };
+        assert_eq!(
+            rate(r#"{"fps":29.97}"#),
+            pm_time::Rate::new(30000, 1001).unwrap()
+        );
+        assert_eq!(
+            rate(r#"{"fps":23.976}"#),
+            pm_time::Rate::new(24000, 1001).unwrap()
+        );
+        assert_eq!(
+            rate(r#"{"fps":30,"fpsRational":[60000,1001]}"#),
+            pm_time::Rate::new(60000, 1001).unwrap()
+        );
+        assert_eq!(rate(r#"{"fps":25}"#), pm_time::Rate::new(25, 1).unwrap());
+        assert!(rate(r#"{"fps":29.97}"#).exact_frame_ticks().is_some());
+    }
+    #[::core::prelude::v1::test]
+    fn save_note_shows_progress_keeps_refusals_and_reports_the_outcome() {
+        assert_eq!(save_note(false, true, true, "Opened"), Some(SAVING));
+        assert_eq!(save_note(true, true, true, SAVING), None);
+        let refusal = "Saving in progress. Please wait for it to finish before closing.";
+        assert_eq!(save_note(false, true, true, refusal), None);
+        let fence = "A project operation is in progress. Try closing again when it finishes.";
+        assert_eq!(save_note(false, true, true, fence), None);
+        assert_eq!(save_note(true, false, false, refusal), Some("Saved"));
+        assert_eq!(save_note(true, false, false, fence), Some("Saved"));
+        assert_eq!(
+            save_note(true, false, true, SAVING),
+            Some("Save did not complete; recovery data retained")
+        );
+        // Other notes set during the save (errors, UI save results) stay.
+        assert_eq!(save_note(true, false, false, "Saved"), None);
+        assert_eq!(save_note(true, false, false, "Edit failed"), None);
+        assert_eq!(save_note(false, false, false, "Opened"), None);
+    }
+}
+
+#[cfg(test)]
+mod open_failure_tests {
+    use super::*;
+    /// A window's open failure always says what went wrong: never the generic
+    /// "operation couldn't be completed" (the codes once missed the wire names).
+    #[::core::prelude::v1::test]
+    fn window_open_failures_are_worded() {
+        for (failure, words) in [
+            (KernelFailure::NoProject("p".into()), "can’t be found"),
+            (KernelFailure::Journal("disk".into()), "couldn’t be opened"),
+            (
+                KernelFailure::Storage("Permission denied (os error 13)".into()),
+                "permission",
+            ),
+            (
+                KernelFailure::Storage("No such file or directory".into()),
+                "can’t be found",
+            ),
+            (
+                KernelFailure::Storage("No space left on device".into()),
+                "disk space",
+            ),
+            (
+                KernelFailure::Storage("unexpected end of input".into()),
+                "couldn’t be read",
+            ),
+            (
+                KernelFailure::Storage(format!(
+                    "{}, so it was not opened.",
+                    pm_kernel::error::CHOICE_REPLACED
+                )),
+                "wasn’t opened",
+            ),
+            // The start of a copy still arriving is not called damaged.
+            (
+                KernelFailure::Storage(pm_kernel::error::STILL_COPYING.into()),
+                "still being copied",
+            ),
+        ] {
+            let alert =
+                crate::surfaces::documents::open_error("Film", open_failure(&failure), false);
+            assert!(
+                !alert.message.contains("operation couldn’t be completed"),
+                "{failure:?}: {}",
+                alert.message
+            );
+            assert!(
+                alert.message.contains(words),
+                "{failure:?}: {}",
+                alert.message
+            );
+        }
+    }
+}
+
+thread_local! {
+    /// The editor whose window was last in front: the Edit menu's Undo and
+    /// Redo name its history.
+    static MENU_EDITOR: std::cell::Cell<Option<gpui::EntityId>> = const { std::cell::Cell::new(None) };
+}
+/// Whether `editor` names the Edit menu's Undo and Redo (none chosen yet:
+/// any, so the first window's do).
+pub(crate) fn menu_editor_is(editor: gpui::EntityId) -> bool {
+    MENU_EDITOR.with(|m| m.get().is_none_or(|e| e == editor))
+}
+/// `editor`'s window came to the front: its history names the menu.
+pub(crate) fn set_menu_editor(editor: gpui::EntityId) {
+    MENU_EDITOR.with(|m| m.set(Some(editor)));
+}
+/// Undo and Redo named by `history` (each disabled when there is none).
+pub(crate) fn history_menu(history: &pm_kernel::actor::HistorySummary) {
+    platform::history_labels(
+        history.undo_label.as_deref().filter(|_| history.can_undo),
+        history.redo_label.as_deref().filter(|_| history.can_redo),
+    );
+}
+
+#[cfg(test)]
+mod menu_editor_tests {
+    /// PM-396: Undo and Redo name the history of the editor last in front;
+    /// another tab's publication leaves them as they are.
+    #[test]
+    fn only_the_editor_last_in_front_names_undo_and_redo() {
+        let (front, behind) = (gpui::EntityId::from(1u64), gpui::EntityId::from(2u64));
+        // Before any window comes to the front, the first editor's do.
+        assert!(super::menu_editor_is(behind));
+        super::set_menu_editor(front);
+        assert!(super::menu_editor_is(front));
+        assert!(!super::menu_editor_is(behind));
+        super::set_menu_editor(behind);
+        assert!(!super::menu_editor_is(front));
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::{RESTORE_POSTPONE, RestoreNow, RestoreStep, restore_step};
+    use std::time::Duration;
+    fn now() -> RestoreNow {
+        RestoreNow {
+            shown: false,
+            quitting: false,
+            busy: false,
+            quiet: false,
+            waited: Duration::ZERO,
+            spaced: true,
+        }
+    }
+    /// A restored tab behind the front one opens on its spaced turn once the
+    /// app is quiet, and after a bounded postponement even if quiet never
+    /// comes (the front project looping, the person editing, its viewer
+    /// retrying missing media); never two inside the spacing (PM-453
+    /// review).
+    #[test]
+    fn a_deferred_tab_opens_when_quiet_or_after_its_postponement() {
+        assert_eq!(restore_step(now()), RestoreStep::Wait);
+        assert_eq!(restore_step(RestoreNow { quiet: true, ..now() }), RestoreStep::Open);
+        let late = RestoreNow { waited: RESTORE_POSTPONE, ..now() };
+        assert_eq!(restore_step(late), RestoreStep::Open, "quiet never came");
+        assert_eq!(
+            restore_step(RestoreNow { spaced: false, ..late }),
+            RestoreStep::Wait,
+            "inside another's spacing"
+        );
+        // Selected, it opens at once, quiet or not, spaced or not.
+        assert_eq!(
+            restore_step(RestoreNow { shown: true, spaced: false, ..now() }),
+            RestoreStep::Open
+        );
+    }
+    /// A quit beginning holds every deferred open, its Review Changes
+    /// question up or not; cancelled, they go on. A Recover question (or
+    /// another open) defers them until it is answered (PM-453 review).
+    #[test]
+    fn a_quit_or_a_recover_question_holds_deferred_opens() {
+        let ready = RestoreNow { quiet: true, waited: RESTORE_POSTPONE, ..now() };
+        for held in [
+            RestoreNow { quitting: true, ..ready },
+            RestoreNow { quitting: true, shown: true, ..ready },
+            RestoreNow { busy: true, ..ready },
+            RestoreNow { busy: true, shown: true, ..ready },
+        ] {
+            assert_eq!(restore_step(held), RestoreStep::Wait);
+        }
+        assert_eq!(restore_step(ready), RestoreStep::Open, "the quit was cancelled");
+    }
+}
+
+fn delete_media_alert(
+    name: Option<&str>,
+    count: usize,
+    references: usize,
+) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let (title, detail, action) = if references == 0 {
+        let items = if count == 1 { "item" } else { "items" };
+        (
+            format!("Remove {count} unused {items} from the project?"),
+            "Files on disk aren't deleted.".into(),
+            "Remove",
+        )
+    } else {
+        let (title, detail) = delete_media_question(name, count, references);
+        (title, detail, "Delete")
+    };
+    Alert::new(
+        title,
+        detail,
+        vec![
+            Button::new(action, true).default().destructive(),
+            Button::new("Cancel", false).cancel(),
+        ],
+    )
+}
+
+/// v1's Delete Media question: one item by name, several by count, and how
+/// many layers go with them.
+fn delete_media_question(name: Option<&str>, count: usize, references: usize) -> (String, String) {
+    match name {
+        Some(name) => (
+            format!("Delete “{name}”?"),
+            format!(
+                "This also removes {references} {} this media. You can undo this.",
+                if references == 1 { "layer that uses" } else { "layers that use" }
+            ),
+        ),
+        None => (
+            format!("Delete {count} media files?"),
+            "This also removes layers that use the selected media. You can undo this.".into(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod delete_media_question_tests {
+    #[test]
+    fn unused_confirmation_states_that_files_remain_on_disk() {
+        for (count, message) in [
+            (1, "Remove 1 unused item from the project?"),
+            (2, "Remove 2 unused items from the project?"),
+        ] {
+            let alert = super::delete_media_alert(None, count, 0);
+            assert_eq!(alert.message, message);
+            assert_eq!(alert.informative, "Files on disk aren't deleted.");
+            assert_eq!(alert.labels(), ["Remove", "Cancel"]);
+            assert!(alert.buttons[0].destructive);
+            assert_eq!(alert.buttons[1].key, crate::alert::Key::Escape);
+        }
+    }
+    /// v1's question: one item by name with its layer count, several by
+    /// count.
+    #[test]
+    fn delete_media_asks_as_v1_did() {
+        assert_eq!(
+            super::delete_media_question(Some("Sky.png"), 1, 1),
+            (
+                "Delete “Sky.png”?".to_owned(),
+                "This also removes 1 layer that uses this media. You can undo this.".to_owned()
+            )
+        );
+        assert_eq!(
+            super::delete_media_question(Some("Sky.png"), 1, 3).1,
+            "This also removes 3 layers that use this media. You can undo this."
+        );
+        assert_eq!(super::delete_media_question(None, 4, 2).0, "Delete 4 media files?");
+    }
+}

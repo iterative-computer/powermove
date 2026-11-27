@@ -1,0 +1,20 @@
+{
+ "name": "texture-uniform-tile",
+ "kind": "shader",
+ "covers": [
+  "sampler2D-uniform",
+  "uv"
+ ],
+ "prompt": "Tile pattern that samples a sampler2D uniform called uPattern (unbound for now) and mixes it over a procedural base so it still looks good without a texture.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "10a2d66dc06e61ad6ba8bc665d8efd14ff483a7dfa986560d167edb27b535854",
+  "seconds": 28.001,
+  "generated": "2026-10-17T07:32:47.206Z"
+ },
+ "code": "// Tile pattern: offset brick tiles with Truchet arcs + bevel, optional uPattern texture per tile.\n// uPattern is a plain sampler2D (no @param). If it is unbound/empty, the procedural base shows alone.\nuniform sampler2D uPattern;\nuniform float uTiles;       // @param 6.0 1 24\nuniform float uSpeed;       // @param 0.15 0 2\nuniform float uPatternMix;  // @param 0.75 0 1\nuniform float uGrout;       // @param 0.05 0 0.3\nuniform float uArcWidth;    // @param 0.09 0.01 0.3\nuniform vec3  uColorA;      // @param #1E3A5F\nuniform vec3  uColorB;      // @param #E8B04A\nuniform vec3  uGroutColor;  // @param #0B0C10\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = uv * vec2(aspect, 1.0) * uTiles;\n  p.x += iTime * uSpeed;\n  p.x += 0.5 * mod(floor(p.y), 2.0);          // brick offset\n  vec2 id = floor(p);\n  vec2 f = fract(p);\n  float h = hash(id);\n  float h2 = hash(id + 17.31);\n\n  // Procedural base: per-tile color + Truchet arcs\n  vec3 tileCol = mix(uColorA, uColorB, smoothstep(0.15, 0.95, h) * 0.55);\n  vec2 q = f - 0.5;\n  if (h2 > 0.5) q.x = -q.x;\n  float d = min(abs(length(q - 0.5) - 0.5), abs(length(q + 0.5) - 0.5));\n  float aa = fwidth(d) + 1e-4;\n  float arc = 1.0 - smoothstep(uArcWidth - aa, uArcWidth + aa, d);\n  float glow = exp(-d * 18.0) * 0.25;\n  vec3 base = mix(tileCol, uColorB, arc) + uColorB * glow;\n\n  // Optional texture, sampled per tile with continuous gradients (no mip seams)\n  vec4 tex = textureGrad(uPattern, f, dFdx(p), dFdy(p));\n  vec4 probe = textureLod(uPattern, vec2(0.5), 0.0) + textureLod(uPattern, vec2(0.2, 0.7), 0.0)\n             + textureLod(uPattern, vec2(0.8, 0.3), 0.0);\n  float hasTex = smoothstep(0.002, 0.02, dot(probe, vec4(1.0)));\n  vec3 texCol = tex.rgb * (0.65 + 0.7 * luma(base)) + base * 0.15;\n  vec3 col = mix(base, texCol, clamp(uPatternMix * hasTex * tex.a, 0.0, 1.0));\n\n  // Bevel + grout\n  vec2 e2 = min(f, 1.0 - f);\n  float e = min(e2.x, e2.y);\n  float ea = fwidth(e) + 1e-4;\n  float tileMask = smoothstep(uGrout - ea, uGrout + ea, e);\n  float bevel = 1.0 - smoothstep(uGrout, uGrout + 0.08, e);\n  float light = (f.y - f.x) * 0.5;              // light from top-left\n  col *= 1.0 + bevel * light * 0.6;\n  col *= 0.9 + 0.1 * h;\n  col = mix(uGroutColor, col, tileMask);\n\n  vec2 c = uv - 0.5;\n  col *= 1.0 - 0.45 * dot(c, c);\n  fragColor = vec4(col, 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a tile-pattern shader layer but didn't apply it or compile it, because no Powermove tools were attached to this run. The base is offset brick tiles with Truchet arcs, bevels and grout. `uPattern` is sampled per tile and mixed in by `uPatternMix`; when the texture reads as empty or unbound, only the procedural base shows. A fully black texture will also be read as empty, and if the renderer leaves another texture bound to unit 0, the shader will sample that one."
+}

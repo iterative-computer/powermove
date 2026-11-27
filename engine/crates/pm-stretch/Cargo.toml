@@ -1,0 +1,14 @@
+[package]
+name = "pm-stretch"
+description = "Pitch-preserving time stretch: our binding to Signalsmith Stretch (section 16)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+links = "pm_signalsmith_stretch"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1.8"

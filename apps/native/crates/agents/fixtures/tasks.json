@@ -1,0 +1,133 @@
+{
+  "baseline": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "sources": [
+    {
+      "file": "apps/desktop/src/main/agent-orchestrator.ts",
+      "sha256": "42e06abb24d70c271d84758d99e95cac2b4fda80c1f6a8a6a65c99631335ecca"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-orchestration.ts",
+      "sha256": "bf6443643e7232369a89387dfcddf348d11cc9563a017526de5fca75872e4dc6"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-tools/orchestration-inputs.ts",
+      "sha256": "e488feb54941d869afbbc72ee4930c33df8a771886c2b65e11f19a3bb7ad723c"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-thread-monitor.ts",
+      "sha256": "a3388120e33d4c51a95b6ad3edb78e83603136bfbe6cbdf80955bfff7e7f20ef"
+    }
+  ],
+  "captureSha256": "5046016cee4a9c4fd49857dfb4e8b7739c385a39499a22071f6f2f63d1c8d4da",
+  "root": {
+    "id": "root",
+    "threadId": "root-thread",
+    "projectId": "project",
+    "provider": "chatgpt",
+    "mode": "autonomous",
+    "access": "project",
+    "prompt": "Original authored intent",
+    "planning": true,
+    "images": [
+      "image"
+    ],
+    "attachments": [
+      {
+        "id": "a"
+      }
+    ],
+    "future": {
+      "preserve": true
+    }
+  },
+  "input": {
+    "task": " Complete child brief ",
+    "role": "test",
+    "clientRequestId": "one",
+    "target": {
+      "providerInstanceId": "claude",
+      "model": "fixture-model",
+      "options": {
+        "reasoningEffort": "high"
+      }
+    }
+  },
+  "ids": {
+    "task": "11111111-1111-4111-8111-111111111111",
+    "thread": "22222222-2222-4222-8222-222222222222",
+    "run": "subagent-33333333-3333-4333-8333-333333333333"
+  },
+  "path": "Agent Tasks/244210e48437b6556980a70249a99369934a352429034cef9d7bd253b3bf2c01/f63b0f747c0124a145942e5485bcc91bdbb2845fc7f24b792cb530f5de086fe5.json",
+  "queued": {
+    "taskId": "11111111-1111-4111-8111-111111111111",
+    "parentThreadId": "root-thread",
+    "childThreadId": "22222222-2222-4222-8222-222222222222",
+    "childRunId": "subagent-33333333-3333-4333-8333-333333333333",
+    "parentTaskId": null,
+    "requestId": "root",
+    "title": "Complete child brief",
+    "providerInstanceId": "claude",
+    "model": "fixture-model",
+    "reasoningEffort": "high",
+    "status": "queued",
+    "workState": "working",
+    "hasPendingChildRuns": false,
+    "summary": null,
+    "progress": "",
+    "startedAt": 1,
+    "waitTimedOut": false
+  },
+  "request": {
+    "id": "subagent-33333333-3333-4333-8333-333333333333",
+    "threadId": "22222222-2222-4222-8222-222222222222",
+    "projectId": "project",
+    "provider": "claude",
+    "mode": "autonomous",
+    "access": "project",
+    "prompt": "Complete child brief",
+    "planning": true,
+    "images": [
+      "image"
+    ],
+    "attachments": [
+      {
+        "id": "a"
+      }
+    ],
+    "future": {
+      "preserve": true
+    },
+    "model": "fixture-model",
+    "reasoningEffort": "high"
+  },
+  "archive": {
+    "version": 1,
+    "rootThreadId": "root-thread",
+    "records": [
+      {
+        "task": {
+          "taskId": "11111111-1111-4111-8111-111111111111",
+          "parentThreadId": "root-thread",
+          "childThreadId": "22222222-2222-4222-8222-222222222222",
+          "childRunId": "subagent-33333333-3333-4333-8333-333333333333",
+          "parentTaskId": null,
+          "requestId": "root",
+          "title": "Complete child brief",
+          "providerInstanceId": "claude",
+          "model": "fixture-model",
+          "reasoningEffort": "high",
+          "status": "queued",
+          "workState": "working",
+          "hasPendingChildRuns": false,
+          "summary": null,
+          "progress": "",
+          "startedAt": 1,
+          "waitTimedOut": false
+        },
+        "acknowledged": false,
+        "fingerprint": "d33e02b6a1cc9896f6f5a03a36cd6dd8a95af707b4b4426b49d4c79cc07519df",
+        "clientRequestId": "one"
+      }
+    ]
+  }
+}

@@ -1,0 +1,3096 @@
+//! Real V8 panel, real kernel actor, real provider pipes; the provider is fake.
+use super::*;
+use pm_agents::{Provider, launch::Environment};
+use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+use pm_surface::events::EventDetail;
+use serde_json::json;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
+fn wait(ticket: Ticket<Evaluation>) -> pm_runtime_v8::Result<Evaluation> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            return result;
+        }
+        assert!(Instant::now() < deadline, "v4 ticket timed out");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+fn finish(ticket: Ticket<Evaluation>) {
+    wait(ticket).expect("v4 worker execution");
+}
+fn actor() -> KernelActor {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(
+        r##"{"id":"synthetic","name":"Synthetic","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+    )
+    .unwrap();
+    actor
+        .handle()
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    actor
+}
+fn environment(profile: &Path, mode: &str) -> Environment {
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake-provider.py");
+    let bundled = profile.join("Resources/codex/bin");
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::copy(&fake, bundled.join("codex")).unwrap();
+    Environment {
+        profile: profile.into(),
+        resources: Some(profile.join("Resources")),
+        app_version: "test".into(),
+        executable: PathBuf::from("/bin/false"),
+        vars: BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            ("PM_FAKE_PROVIDER".into(), mode.into()),
+            ("CLAUDE_BINARY".into(), fake.to_string_lossy().into_owned()),
+        ]),
+        tools: vec!["get_project_state".into()],
+        composition_tools: vec!["get_project_state".into()],
+        compatible: None,
+        aero: None,
+        powermove: None,
+        secrets: None,
+        net: None,
+        keychain_prefix: String::new(),
+    }
+}
+struct Agent {
+    panels: Builtins,
+    latest: Option<Publication>,
+    typed: String,
+}
+impl Agent {
+    /// A browser that only remembers what it was asked to open.
+    fn mount_recording(
+        actor: &KernelActor,
+        environment: Environment,
+        opened: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+        panels.set_agent_environment(
+            environment,
+            std::sync::Arc::new(move |url| {
+                opened.lock().unwrap().push(url.to_owned());
+                Ok(())
+            }),
+        );
+        // Text-only peers never edit a project. Supply the new host seam as
+        // a fake too; completion-specific tests replace it with their checks.
+        panels.set_agent_completion(std::sync::Arc::new(|_, _, _, _| {
+            Ok(json!({"changed":false,"errors":[],"images":[]}))
+        }));
+        finish(panels.mount("agent").unwrap());
+        finish(panels.show("agent").unwrap());
+        let mut panel = Self {
+            panels,
+            latest: None,
+            typed: String::new(),
+        };
+        // Status checks can replace the composer with sign-in UI. Let them
+        // finish before deciding whether its access control is available.
+        panel.account_checks_finished();
+        // These protocol fixtures exercise the Editor/app-server transport.
+        // Fresh-chat Auto defaults are covered by the panel model tests.
+        panel.text();
+        if panel.surface().surface.nodes().values().any(|node|
+            node.props.get("id").and_then(Value::as_str) == Some("agent-add"))
+            && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
+            panel.choose("agent-add", "editor");
+        }
+        panel
+    }
+    fn mount(actor: &KernelActor, environment: Environment) -> Self {
+        Self::mount_recording(actor, environment, Default::default())
+    }
+    /// The panel shown with no project open.
+    fn mount_application(
+        actor: &KernelActor,
+        environment: Environment,
+        carry: Option<AgentCarry>,
+    ) -> Self {
+        let panels = Builtins::application(actor.handle(), || {}, carry).unwrap();
+        panels.set_agent_environment(environment, std::sync::Arc::new(|_| Ok(())));
+        let mut panels = panels;
+        // Text-only peers never edit a project. Supply the new host seam as
+        // a fake too; completion-specific tests replace it with their checks.
+        panels.set_agent_completion(std::sync::Arc::new(|_, _, _, _| {
+            Ok(json!({"changed":false,"errors":[],"images":[]}))
+        }));
+        finish(panels.mount("agent").unwrap());
+        finish(panels.show("agent").unwrap());
+        let mut panel = Self {
+            panels,
+            latest: None,
+            typed: String::new(),
+        };
+        // Status checks can replace the composer with sign-in UI. Let them
+        // finish before deciding whether its access control is available.
+        panel.account_checks_finished();
+        // These protocol fixtures exercise the Editor/app-server transport.
+        // Fresh-chat Auto defaults are covered by the panel model tests.
+        panel.text();
+        if panel.surface().surface.nodes().values().any(|node|
+            node.props.get("id").and_then(Value::as_str) == Some("agent-add"))
+            && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
+            panel.choose("agent-add", "editor");
+        }
+        panel
+    }
+    fn account_checks_finished(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while [Provider::Chatgpt, Provider::Claude].into_iter().any(|provider|
+            self.panels.broker.agent.connection(provider).0 == "checking") {
+            assert!(Instant::now() < deadline, "account status check timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// Sign-in status arrives from a worker; a run needs it.
+    fn connected(&mut self, provider: Provider) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.panels.broker.agent.available(provider) {
+            assert!(
+                Instant::now() < deadline,
+                "{:?}",
+                self.panels.broker.agent.connection(provider)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.text();
+    }
+    /// Acts on the publication last seen, as a click does: a streaming run may
+    /// publish again before the event arrives.
+    fn press(&mut self, id: &str, event: &str, detail: EventDetail) {
+        self.text();
+        self.press_seen(id, event, detail);
+    }
+    fn press_seen(&mut self, id: &str, event: &str, detail: EventDetail) {
+        let target = self.node(id);
+        let (generation, revision) = {
+            let p = self.latest.as_ref().expect("agent publication");
+            (p.generation, p.surface.revision())
+        };
+        // As the app's SurfaceView::send does: by the node's semantic id, so a
+        // republish between seeing the button and the press still lands.
+        let driven = self.panels.activate(
+            "agent",
+            generation,
+            revision,
+            target,
+            Some(id),
+            event,
+            detail,
+        );
+        match driven.map(wait) {
+            Ok(Ok(_)) => {
+                self.text();
+            }
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+    fn revision(&self) -> u64 {
+        self.panels
+            .status()
+            .iter()
+            .find(|p| p["panel"] == "agent")
+            .and_then(|p| p["surfaceRevision"].as_u64())
+            .unwrap()
+    }
+    fn click(&mut self, id: &str) {
+        self.press(id, "click", EventDetail::default());
+    }
+    fn send(&mut self, text: &str) {
+        self.type_text(text);
+        self.key("Enter", false);
+        self.typed.clear();
+    }
+    fn surface(&mut self) -> &Publication {
+        if let Some(latest) = self.panels.take_publications().pop() {
+            self.latest = Some(latest);
+        }
+        self.latest.as_ref().expect("agent publication")
+    }
+    fn node(&mut self, id: &str) -> u64 {
+        let surface = &self.surface().surface;
+        surface
+            .nodes()
+            .iter()
+            .find(|(_, n)| n.props.get("id").and_then(Value::as_str) == Some(id))
+            .map(|(key, _)| *key)
+            .unwrap_or_else(|| panic!("no node {id}"))
+    }
+    fn key(&mut self, key: &str, shift: bool) {
+        self.press(
+            "agent-composer-text",
+            "keydown",
+            EventDetail {
+                key: Some(key.into()),
+                shift_key: Some(shift),
+                ..Default::default()
+            },
+        );
+    }
+    /// The native composer reports its whole text as it changes.
+    fn type_text(&mut self, text: &str) {
+        self.typed.push_str(text);
+        let value = self.typed.clone();
+        self.press(
+            "agent-composer-text",
+            "input",
+            EventDetail {
+                value: Some(json!(value)),
+                ..Default::default()
+            },
+        );
+    }
+    fn agent(&self) -> agent_host::SharedAgent {
+        let backend = self
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let backend = backend.lock().unwrap();
+        backend.native.agent.clone().unwrap()
+    }
+    fn wait(&self, until: impl Fn(&agent_host::AgentState) -> bool) {
+        let agent = self.agent();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !until(&agent.lock().unwrap()) {
+            assert!(Instant::now() < deadline, "agent run timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn text(&mut self) -> String {
+        for (_, ticket) in self.panels.publish() {
+            finish(ticket.unwrap());
+        }
+        let errors = self.panels.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        self.surface()
+            .surface
+            .nodes()
+            .values()
+            .map(|n| n.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+impl Agent {
+    /// The panel's next request of the window (a menu, a confirmation),
+    /// as the app takes it.
+    fn request(&mut self, operation: &str) -> crate::PlatformRequest {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            self.text();
+            let mut found = None;
+            for r in self.panels.take_platform_requests() {
+                // New rows for a menu still open after a provider pick: the
+                // app puts them in that menu; here the person closes it.
+                if r.operation == "agentMenu" && r.input["update"] == true {
+                    self.panels.platform_reply(r.id, Ok(Value::Null));
+                    continue;
+                }
+                if found.is_none() && r.operation == operation {
+                    found = Some(r);
+                }
+            }
+            if let Some(r) = found {
+                return r;
+            }
+            assert!(Instant::now() < deadline, "no {operation} request");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// Answers an open menu with a row's value and lets the panel act on it.
+    fn pick(
+        &mut self,
+        menu: &crate::PlatformRequest,
+        value: &str,
+        until: impl Fn(&mut Self) -> bool,
+    ) {
+        self.panels.platform_reply(menu.id, Ok(json!(value)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !until(self) {
+            assert!(Instant::now() < deadline, "the pick of {value} did nothing");
+            thread::sleep(Duration::from_millis(5));
+            self.text();
+        }
+    }
+    /// Chooses a row of the menu a trigger opens (model, access), as a
+    /// person does, and waits for the panel to show the choice.
+    fn choose(&mut self, trigger: &str, value: &str) {
+        self.click(trigger);
+        let menu = self.request("agentMenu");
+        let before = self.revision();
+        self.pick(&menu, value, move |panel| panel.revision() > before);
+    }
+    fn labels(menu: &crate::PlatformRequest) -> Vec<String> {
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap().to_owned())
+            .collect()
+    }
+}
+fn thread_id(agent: &agent_host::SharedAgent) -> String {
+    agent.lock().unwrap().panel.active_id().to_owned()
+}
+fn idle(state: &agent_host::AgentState) -> bool {
+    state.runs.is_empty()
+}
+#[test]
+fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    assert!(!panel.text().contains("Connect ChatGPT"));
+    panel.send("Hi");
+    panel.wait(idle);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    {
+        let state = agent.lock().unwrap();
+        let session = state.panel.session(&thread).unwrap();
+        assert!(session.run.is_none());
+        assert_eq!(session.draft.text(), "");
+    }
+    let text = panel.text();
+    assert!(
+        text.contains("Saw: Hi"),
+        "{text}\n{}",
+        agent.lock().unwrap().panel.raw_archive()
+    );
+    let archive = actor.handle().state().settings["agentThreads.synthetic"].clone();
+    drop(agent);
+    panel.panels.close();
+    let stored = pm_model::json::to_canonical_string(&archive);
+    assert!(stored.contains("Saw: Hi"), "{stored}");
+    assert!(
+        stored.contains("\"lastRunStatus\":\"completed\""),
+        "{stored}"
+    );
+    let mut reopened = Agent::mount(&actor, environment(root.path(), "reply"));
+    reopened.connected(Provider::Chatgpt);
+    assert!(reopened.text().contains("Saw: Hi"));
+    reopened.panels.close();
+}
+#[test]
+fn typing_lands_after_the_panel_republished_for_something_else() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.text();
+    // A status or a streaming run republishes before the keystroke arrives.
+    panel.panels.broker.agent.touch();
+    panel.press_seen(
+        "agent-composer-text",
+        "input",
+        EventDetail {
+            value: Some(json!("Hi")),
+            ..Default::default()
+        },
+    );
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let text = agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .draft
+        .text();
+    assert_eq!(text, "Hi");
+    drop(agent);
+    panel.panels.close();
+}
+/// PM-506: typed into the composer during a run and sent with Return, a
+/// steer shows in the conversation and reaches the provider (App Server
+/// `turn/steer`); the composer empties only for what was sent.
+#[test]
+fn steering_a_held_run_reaches_the_provider_and_the_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut environment = environment(root.path(), "hold");
+    let log = root.path().join("provider.log");
+    environment
+        .vars
+        .insert("PM_FAKE_LOG".into(), log.to_string_lossy().into_owned());
+    let mut panel = Agent::mount(&actor, environment);
+    panel.connected(Provider::Chatgpt);
+    panel.send("Wait");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_some());
+    // The run's turn has started (its id known) before the steer.
+    thread::sleep(Duration::from_millis(300));
+    panel.send("Steer: use blue instead");
+    panel.wait(|state| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .conversation
+            .values()
+            .any(|m| {
+                m["role"] == "user"
+                    && m["text"] == "Steer: use blue instead"
+                    && m["steering"] == true
+            })
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(&log).unwrap_or_default().contains("steer Steer: use blue instead") {
+        assert!(Instant::now() < deadline, "the provider never received the steer");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let state = agent.lock().unwrap();
+    let session = state.panel.session(&thread).unwrap();
+    assert!(session.run.is_some(), "the run goes on");
+    assert!(session.draft.legacy().0.is_empty(), "the composer is empty after the send");
+    drop(state);
+    panel.wait(|state| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .conversation
+            .values()
+            .any(|row| row["text"] == "Steer: use blue instead" && row["delivery"].is_null())
+    });
+    let direction = "Steer: keep the logo";
+    assert!(!panel.panels.agent_quick_prompt(&thread, direction).unwrap());
+    panel.wait(|state| {
+        let session = state.panel.session(&thread).unwrap();
+        assert!(session.run.is_some());
+        let mut rows = session
+            .conversation
+            .values()
+            .filter(|row| row["text"] == direction);
+        rows.next().is_some_and(|row| row["delivery"].is_null()) && rows.next().is_none()
+    });
+    let wrote = format!("steer {direction}");
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .matches(wrote.as_str())
+            .count(),
+        1
+    );
+    panel.click("agent-stop");
+    panel.wait(idle);
+    panel.panels.close();
+}
+#[test]
+fn stop_cancels_a_held_run_through_the_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Wait");
+    panel.click("agent-stop");
+    panel.wait(idle);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let state = agent.lock().unwrap();
+    assert!(state.panel.session(&thread).unwrap().run.is_none());
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    drop(state);
+    panel.panels.close();
+}
+#[test]
+fn stop_lands_while_a_stream_republishes_the_panel() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    panel.send("Go");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !panel.text().contains("token") {
+        assert!(Instant::now() < deadline, "no stream");
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The user sees this revision; the stream publishes past it before the click.
+    let seen = panel.latest.as_ref().unwrap().surface.revision();
+    while panel.revision() < seen + 3 {
+        assert!(Instant::now() < deadline, "stream stopped publishing");
+        thread::sleep(Duration::from_millis(5));
+    }
+    panel.press_seen("agent-stop", "click", EventDetail::default());
+    panel.wait(idle);
+    let agent = panel.agent();
+    let state = agent.lock().unwrap();
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    let receipts = &state.panel.raw_archive()["threads"][0]["nativeRunEvents"];
+    assert!(receipts.as_array().unwrap().len() < 10, "{receipts}");
+    drop(state);
+    panel.panels.close();
+}
+#[test]
+fn an_application_run_outlives_its_window_and_shows_on_return() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut home = Agent::mount_application(&actor, environment(root.path(), "slow"), None);
+    home.connected(Provider::Chatgpt);
+    home.send("Make a project");
+    // The run opens a project: the application window goes, its run stays.
+    let carry = home.panels.carry_agent().expect("a live run");
+    home.panels.close();
+    drop(home);
+    let state = carry.0.as_ref().unwrap().1.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !state.lock().unwrap().runs.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the carried run stopped delivering"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(state);
+    let mut back = Agent::mount_application(&actor, environment(root.path(), "slow"), Some(carry));
+    back.connected(Provider::Chatgpt);
+    assert!(
+        back.text().contains("Saw: Make a project"),
+        "{}",
+        back.text()
+    );
+    let agent = back.agent();
+    assert_eq!(
+        agent.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "completed"
+    );
+    drop(agent);
+    back.panels.close();
+}
+#[test]
+fn dropping_a_carried_run_cancels_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut home = Agent::mount_application(&actor, environment(root.path(), "hold"), None);
+    home.connected(Provider::Chatgpt);
+    home.send("Wait");
+    let state = home.agent();
+    let carry = home.panels.carry_agent().expect("a live run");
+    home.panels.close();
+    drop(home);
+    assert!(
+        !state.lock().unwrap().runs.is_empty(),
+        "closing kept the run"
+    );
+    drop(carry);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !state.lock().unwrap().runs.is_empty() {
+        assert!(Instant::now() < deadline, "the run was not cancelled");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        state.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+}
+#[test]
+fn signing_out_during_a_run_keeps_its_conversation_and_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    panel.send("Wait");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_some());
+    let link = panel.panels.broker.agent.clone();
+    link.accounts().unwrap().disconnect(Provider::Chatgpt);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while link.connection(Provider::Chatgpt).0 != "unavailable" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!panel.text().contains("Connect ChatGPT"));
+    panel.click("agent-stop");
+    panel.wait(idle);
+    assert_eq!(
+        agent.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    assert!(panel.text().contains("Connect ChatGPT"));
+    panel.panels.close();
+}
+#[test]
+fn claude_question_is_answered_with_the_cards_own_buttons() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Claude);
+    panel.choose("agent-model", "provider:claude");
+    panel.connected(Provider::Claude);
+    panel.send("Style");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let open =
+        |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
+    panel.wait(open);
+    assert!(panel.text().contains("Choose a style?"));
+    // thread_read sees the live run: its trace and the open question.
+    let live = panel.panels.agent_thread_live(&thread).unwrap();
+    assert_eq!(live["busy"], true, "{live}");
+    assert!(live["runId"].is_string(), "{live}");
+    let question = &live["questions"][0];
+    assert_eq!(question["blocking"], true, "{live}");
+    assert!(question["itemId"].is_string(), "{live}");
+    assert!(
+        question["questions"]
+            .to_string()
+            .contains("Choose a style?"),
+        "{live}"
+    );
+    assert!(panel.panels.agent_thread_live("no-such-thread").is_none());
+    panel.click("live:question-question-0-Soft");
+    panel.click("live:question-answer");
+    panel.wait(idle);
+    assert!(panel.text().contains("Using Soft"));
+    let settled = panel.panels.agent_thread_live(&thread).unwrap();
+    assert_eq!(settled["busy"], false);
+    assert_eq!(settled["activity"], "");
+    assert_eq!(settled["questions"], json!([]));
+    panel.panels.close();
+}
+#[test]
+fn supervised_approval_reaches_the_process_and_deny_too() {
+    for (choice, reply) in [("Allow once", "Using allow"), ("Deny", "Using deny")] {
+        let root = tempfile::tempdir().unwrap();
+        let actor = actor();
+        let mut panel = Agent::mount(&actor, environment(root.path(), "approval"));
+        panel.connected(Provider::Claude);
+        panel.choose("agent-model", "provider:claude");
+        panel.choose("agent-add", "supervised");
+        panel.connected(Provider::Claude);
+        panel.send("Build");
+        let agent = panel.agent();
+        let thread = thread_id(&agent);
+        let open =
+            |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
+        panel.wait(open);
+        assert!(panel.text().contains("Run this command?"));
+        let answer = agent
+            .lock()
+            .unwrap()
+            .panel
+            .session(&thread)
+            .unwrap()
+            .trace
+            .rows
+            .values()
+            .find(|row| row["kind"] == "question")
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .unwrap();
+        panel.click(&format!("live:{answer}-decision-{choice}"));
+        panel.click(&format!("live:{answer}-answer"));
+        panel.wait(idle);
+        assert!(panel.text().contains(reply), "{}", panel.text());
+        panel.panels.close();
+    }
+}
+#[test]
+fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut environment = environment(root.path(), "reply");
+    let record = root.path().join("argv.json");
+    environment.vars.insert(
+        "PM_FAKE_RECORD".into(),
+        record.to_string_lossy().into_owned(),
+    );
+    environment.tools = pm_mcp_tools();
+    environment.composition_tools = vec![
+        "start_session".into(),
+        "apply_commands".into(),
+        "get_project_state".into(),
+    ];
+    let mut panel = Agent::mount(&actor, environment);
+    panel.connected(Provider::Claude);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    panel.choose("agent-model", "provider:claude");
+    panel.choose("agent-model", "model:fixture");
+    panel.choose("agent-effort", "high");
+    panel.connected(Provider::Claude);
+    panel.send("Go");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let open =
+        |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
+    panel.wait(open);
+    let args: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    let value = |flag: &str| {
+        let at = args.iter().position(|a| a == flag).unwrap();
+        args[at + 1].clone()
+    };
+    assert_eq!(value("--model"), "fixture");
+    assert_eq!(value("--effort"), "high");
+    let allowed = value("--allowedTools");
+    assert!(
+        allowed.contains("mcp__powermove__start_session"),
+        "{allowed}"
+    );
+    assert!(
+        allowed.contains("mcp__powermove__apply_commands"),
+        "{allowed}"
+    );
+    assert!(
+        !allowed.contains("mcp__powermove__export_video"),
+        "{allowed}"
+    );
+    // The tool server gets the run's grant token, never its id; the token
+    // names this run while it lives.
+    let config: Value = serde_json::from_str(&value("--mcp-config")).unwrap();
+    let server = config["mcpServers"]["powermove"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let token = server[server.iter().position(|a| *a == "--agent-run").unwrap() + 1];
+    let run = agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .run
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(token, run);
+    assert_eq!(
+        pm_agents::launch::grants::resolve(token).map(|(r, _)| r),
+        Some(run)
+    );
+    panel.panels.close();
+}
+fn pm_mcp_tools() -> Vec<String> {
+    vec![
+        "start_session".into(),
+        "apply_commands".into(),
+        "export_video".into(),
+    ]
+}
+#[test]
+fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let opened = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let mut panel = Agent::mount_recording(
+        &actor,
+        environment(root.path(), "signed-out"),
+        opened.clone(),
+    );
+    finish(panel.panels.mount("settings").unwrap());
+    let accounts = panel.panels.broker.agent.clone();
+    let read = |accounts: &agent_host::AgentLink| accounts.connection(Provider::Chatgpt);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while read(&accounts).0 == "checking" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(read(&accounts).1, "Sign in to ChatGPT in Settings.");
+    assert!(panel.text().contains("Connect ChatGPT"));
+    let backend = |panel: &Agent| {
+        panel
+            .panels
+            .broker
+            .entry("settings")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone()
+    };
+    // What the Settings window holds: the publication its subscription last
+    // delivered.
+    let publication = |panel: &Agent| backend(panel).lock().unwrap().settings_snapshot().unwrap();
+    // A row button pressed as the Settings window does: with the revision of
+    // the publication it showed, which an account check finishing on a
+    // worker may have replaced since.
+    let press = |panel: &Agent, seen: &Value, id: &str, action: &str| {
+        let backend = backend(panel);
+        let mut backend = backend.lock().unwrap();
+        match backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":seen["revision"],"action":{"type":"row","id":id,"action":action}}),
+            )
+            .unwrap()
+        {
+            models::NativeCommand::Value(value) => value,
+            _ => panic!("settings value"),
+        }
+    };
+    let row = |publication: &Value, id: &str| {
+        publication["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let before = publication(&panel);
+    assert_eq!(row(&before, "account.chatgpt")["actionLabel"], "Sign In…");
+    press(&panel, &before, "account.chatgpt", "account.connect");
+    panel.connected(Provider::Chatgpt);
+    assert_eq!(
+        opened.lock().unwrap().as_slice(),
+        ["https://chatgpt.com/auth"]
+    );
+    let after = publication(&panel);
+    let chatgpt = row(&after, "account.chatgpt");
+    assert_eq!(chatgpt["actionLabel"], "Sign Out");
+    assert_eq!(chatgpt["detail"], "user@example.invalid · Plus");
+    assert!(!panel.text().contains("Connect ChatGPT"));
+    panel.choose("agent-model", "model:fixture-5");
+    panel.send("Hi");
+    panel.wait(idle);
+    assert!(panel.text().contains("Saw: Hi"));
+    press(&panel, &after, "account.chatgpt", "account.disconnect");
+    while read(&accounts).0 == "connected" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(panel.text().contains("Connect ChatGPT"));
+    panel.panels.close();
+}
+#[test]
+fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut environment = environment(root.path(), "reply");
+    environment.resources = None;
+    let mut panel = Agent::mount(&actor, environment);
+    let accounts = panel.panels.broker.agent.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while accounts.connection(Provider::Chatgpt).0 == "checking" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(panel.text().contains("Connect ChatGPT"));
+    panel.panels.close();
+}
+#[test]
+fn the_thread_picker_lists_switches_and_deletes_after_asking() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Animate the title");
+    panel.wait(idle);
+    let agent = panel.agent();
+    let first = thread_id(&agent);
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["picker"], "threads");
+    assert_eq!(menu.input["search"], true);
+    let (agent_new, first_id) = (agent.clone(), first.clone());
+    panel.pick(&menu, "new", move |_| thread_id(&agent_new) != first_id);
+    let second = thread_id(&agent);
+    assert_ne!(first, second);
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["placeholder"], "Search threads…");
+    let labels = Agent::labels(&menu);
+    assert_eq!(labels[0], "New Thread");
+    assert!(
+        labels.iter().any(|l| l == "Animate the title"),
+        "{labels:?}"
+    );
+    let current = menu.input["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["checked"] == true)
+        .unwrap();
+    assert_eq!(current["value"], json!(format!("thread:{second}")));
+    let (agent2, wanted) = (agent.clone(), first.clone());
+    panel.pick(&menu, &format!("thread:{first}"), move |_| {
+        thread_id(&agent2) == wanted
+    });
+    // Hover trashcan delete asks first (the window's alert), then the history goes.
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert!(
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["deleteValue"] == json!(format!("delete:{first}"))),
+        "each thread row carries a hover delete value: {:?}",
+        menu.input["options"]
+    );
+    panel
+        .panels
+        .platform_reply(menu.id, Ok(json!(format!("delete:{first}"))));
+    let ask = panel.request("agent.delete");
+    assert_eq!(ask.input["thread"], json!(first));
+    assert_eq!(ask.input["title"], "Animate the title");
+    assert!(
+        agent
+            .lock()
+            .unwrap()
+            .panel
+            .summaries()
+            .iter()
+            .any(|t| t.id == first),
+        "nothing is deleted before the answer"
+    );
+    panel.panels.agent_delete_thread(&first).unwrap();
+    assert!(
+        !agent
+            .lock()
+            .unwrap()
+            .panel
+            .summaries()
+            .iter()
+            .any(|t| t.id == first)
+    );
+    panel.panels.close();
+}
+#[test]
+fn the_model_access_and_slash_menus_change_the_run_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let settings = move |agent: &agent_host::SharedAgent| {
+        let state = agent.lock().unwrap();
+        let s = state.panel.session(state.panel.active_id()).unwrap();
+        (
+            s.settings.model.clone(),
+            s.settings.effort.clone(),
+            s.settings.access,
+        )
+    };
+    // The model menu groups the signed-in provider's choices under its name.
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    let categories: Vec<_> = menu.input["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["category"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(categories.contains(&"ChatGPT".to_owned()));
+    assert_eq!(menu.input["search"], false);
+    assert!(
+        Agent::labels(&menu).contains(&"Fixture 5".to_owned()),
+        "{:?}",
+        Agent::labels(&menu)
+    );
+    let a = agent.clone();
+    panel.pick(&menu, "model:fixture-5", move |_| {
+        settings(&a).0 == "fixture-5"
+    });
+    panel.click("agent-effort");
+    let menu = panel.request("agentMenu");
+    assert_eq!(Agent::labels(&menu), ["Low", "High"]);
+    let a = agent.clone();
+    panel.pick(&menu, "low", move |_| settings(&a).1 == "low");
+    // Access: v1's four modes, the Approvals section of "+"; Full access
+    // asks first.
+    panel.click("agent-add");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["picker"], "add");
+    assert_eq!(
+        Agent::labels(&menu),
+        [
+            "Add Files…",
+            "Select Part of the Screen",
+            "Composition only",
+            "Supervised",
+            "Auto",
+            "Full access"
+        ]
+    );
+    assert!(
+        menu.input["options"].as_array().unwrap()[2..]
+            .iter()
+            .all(|o| o["category"] == "Approvals")
+    );
+    let a = agent.clone();
+    panel.pick(&menu, "auto", move |_| {
+        settings(&a).2 == pm_agents::Access::Project
+    });
+    panel.click("agent-add");
+    let menu = panel.request("agentMenu");
+    panel.panels.platform_reply(menu.id, Ok(json!("full")));
+    let ask = panel.request("agent.consent");
+    assert_eq!(
+        settings(&agent).2,
+        pm_agents::Access::Project,
+        "not before consent"
+    );
+    panel
+        .panels
+        .agent_consent(ask.input["effect"].as_u64().unwrap(), true)
+        .unwrap();
+    assert_eq!(settings(&agent).2, pm_agents::Access::Computer);
+    // Slash: typing "/" opens the menu of v1's commands; /new starts a
+    // thread (an empty one is reused, so this one has a message).
+    panel.send("Hi");
+    panel.wait(idle);
+    let before = thread_id(&agent);
+    panel.type_text("/");
+    let menu = panel.request("agentMenu");
+    let labels = Agent::labels(&menu);
+    assert!(
+        // Each row names its command, then what it does (the original's
+        // copy): "/new — Start a new conversation".
+        labels.iter().any(|l| l.starts_with("/new"))
+            && labels.iter().any(|l| l.starts_with("/model")),
+        "{labels:?}"
+    );
+    let a = agent.clone();
+    panel.pick(&menu, "new", move |_| thread_id(&a) != before);
+    panel.panels.close();
+}
+impl Agent {
+    /// A node's accessible label, from the publication last seen.
+    fn label(&mut self, id: &str) -> Option<String> {
+        self.latest
+            .as_ref()?
+            .surface
+            .nodes()
+            .values()
+            .find_map(|n| {
+                (n.props.get("id").and_then(Value::as_str) == Some(id))
+                    .then(|| {
+                        n.props
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            })
+    }
+    /// Answers the open menu, then waits for the panel to show `shown` on
+    /// `id` with nothing asking it to publish: the window doesn't republish
+    /// after a menu pick, the open popover must still follow it.
+    fn pick_and_see(&mut self, menu: &crate::PlatformRequest, value: &str, id: &str, shown: &str) {
+        self.panels.platform_reply(menu.id, Ok(json!(value)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(latest) = self.panels.take_publications().pop() {
+                self.latest = Some(latest);
+            }
+            if self.label(id).as_deref() == Some(shown) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "after {value}, {id} still reads {:?}",
+                self.label(id)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+#[test]
+fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // Nothing chosen: the pickers name the provider's default model and
+    // effort. The model's default badge is separate from the selection tick.
+    panel.text();
+    assert_eq!(
+        panel.label("agent-model").as_deref(),
+        Some("Model, Fixture 5")
+    );
+    assert_eq!(
+        panel.label("agent-effort").as_deref(),
+        Some("Reasoning effort, High")
+    );
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    let ticked = |menu: &crate::PlatformRequest| -> Vec<String> {
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["checked"] == true && o["stays"] != true)
+            .map(|o| o["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let labels = Agent::labels(&menu);
+    assert!(!labels.iter().any(|l| l.contains("Default")), "{labels:?}");
+    assert!(
+        !labels.contains(&"High".to_owned()),
+        "effort has its own menu"
+    );
+    let defaults = |menu: &crate::PlatformRequest| -> Vec<String> {
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["default"] == true)
+            .map(|o| o["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(ticked(&menu), ["Fixture 5"]);
+    assert_eq!(defaults(&menu), ["Fixture 5"]);
+    // A pick shows at once: label, and the tick when the menu opens again.
+    panel.pick_and_see(&menu, "model:fixture-6", "agent-model", "Model, Fixture 6");
+    // High isn't Fixture 6's: it runs at its own default.
+    assert_eq!(
+        panel.label("agent-effort").as_deref(),
+        Some("Reasoning effort, Medium")
+    );
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    assert_eq!(ticked(&menu), ["Fixture 6"]);
+    assert_eq!(defaults(&menu), ["Fixture 5"]);
+    panel.panels.platform_reply(menu.id, Ok(Value::Null));
+    panel.click("agent-effort");
+    let menu = panel.request("agentMenu");
+    assert_eq!(Agent::labels(&menu), ["Low", "Medium", "Extra high"]);
+    assert_eq!(ticked(&menu), ["Medium"]);
+    panel.pick_and_see(
+        &menu,
+        "xhigh",
+        "agent-effort",
+        "Reasoning effort, Extra high",
+    );
+    panel.click("agent-effort");
+    let menu = panel.request("agentMenu");
+    assert_eq!(ticked(&menu), ["Extra high"]);
+    panel.panels.platform_reply(menu.id, Ok(Value::Null));
+    // A model with no effort levels has no effort picker.
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    panel.pick_and_see(
+        &menu,
+        "model:fixture-plain",
+        "agent-model",
+        "Model, Fixture Plain",
+    );
+    assert_eq!(panel.label("agent-effort"), None);
+    panel.panels.close();
+}
+#[test]
+fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
+    // The reported bug: every Full access send failed with "Computer access
+    // requires fresh approval for this run", and Try Again looped it.
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    panel.click("agent-add");
+    let menu = panel.request("agentMenu");
+    panel.panels.platform_reply(menu.id, Ok(json!("full")));
+    let ask = panel.request("agent.consent");
+    panel
+        .panels
+        .agent_consent(ask.input["effect"].as_u64().unwrap(), true)
+        .unwrap();
+    {
+        let state = agent.lock().unwrap();
+        let s = state.panel.session(state.panel.active_id()).unwrap();
+        assert_eq!(s.settings.access, pm_agents::Access::Computer);
+        assert!(
+            s.computer_consent,
+            "the card's answer is kept for the thread"
+        );
+    }
+    panel.send("Hi");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Saw: Hi"),
+        "the run reached the provider: {text}"
+    );
+    assert!(
+        !text.contains("fresh approval"),
+        "no dead-end refusal: {text}"
+    );
+    // Leaving Full access drops the consent; choosing it again asks again.
+    panel.choose("agent-add", "auto");
+    assert!({
+        let state = agent.lock().unwrap();
+        !state
+            .panel
+            .session(state.panel.active_id())
+            .unwrap()
+            .computer_consent
+    });
+    panel.click("agent-add");
+    let menu = panel.request("agentMenu");
+    panel.panels.platform_reply(menu.id, Ok(json!("full")));
+    panel.request("agent.consent");
+    panel.panels.close();
+}
+#[test]
+fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply_with_work"));
+    panel.connected(Provider::Chatgpt);
+    // Project Auto uses the App Server and still shows the work it performed.
+    panel.choose("agent-add", "auto");
+    {
+        let agent = panel.agent();
+        let state = agent.lock().unwrap();
+        let settings = &state
+            .panel
+            .session(state.panel.active_id())
+            .unwrap()
+            .settings;
+        assert_eq!(settings.access, pm_agents::Access::Project);
+        assert_eq!(settings.approval, pm_agents::ApprovalMode::Auto);
+    }
+    panel.send("Hi");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Saw: Hi"),
+        "{text}\n{}",
+        panel.agent().lock().unwrap().panel.raw_archive()
+    );
+    // A finished turn folds its work behind "Worked for …" (the original
+    // panel); opened, its step says what was run, not only that something ran.
+    let worked = panel
+        .surface()
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+        .find(|id| id.starts_with("work-"))
+        .map(str::to_owned);
+    if let Some(worked) = worked {
+        panel.click(&worked);
+    }
+    let text = panel.text();
+    assert!(text.contains("1 tool call"), "{text}");
+    let work = panel
+        .surface()
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+        .find(|id| id.ends_with("-work"))
+        .expect("the turn's work line")
+        .to_owned();
+    panel.click(&work);
+    let text = panel.text();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    assert!(
+        lines.contains(&"Run") && lines.contains(&"ls -la"),
+        "{text}"
+    );
+    panel.panels.close();
+}
+#[test]
+fn a_quiet_run_still_republishes_its_working_time() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    panel.send("Make the headline");
+    panel.wait(|s| !s.runs.is_empty());
+    // The original's timer copy: "Working for 0s".
+    assert!(panel.text().contains("Working for 0s"));
+    // The held run sends nothing; only the clock moves.
+    let before = panel.revision();
+    thread::sleep(Duration::from_millis(2300));
+    assert!(
+        panel.revision() >= before + 2,
+        "{} -> {}",
+        before,
+        panel.revision()
+    );
+    panel.click("agent-stop");
+    panel.wait(idle);
+    panel.panels.close();
+}
+#[test]
+fn the_panel_republishes_as_a_popover_when_its_window_opens() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.text();
+    let has_pin = |panel: &mut Agent| {
+        panel
+            .surface()
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.props.get("id").and_then(Value::as_str) == Some("agent-presentation"))
+    };
+    assert!(!has_pin(&mut panel), "docked: no Pin to Workspace");
+    // The app's facts once the popover window opens: nothing else changed,
+    // so only the presentation fact can republish the panel.
+    panel.panels.update_facts(json!({"agentPopover": true}));
+    panel.text();
+    assert!(has_pin(&mut panel), "the popover shows Pin to Workspace");
+    panel.panels.update_facts(json!({"agentPopover": false}));
+    panel.text();
+    assert!(!has_pin(&mut panel), "docked again");
+    panel.panels.close();
+}
+#[test]
+fn an_agent_tool_launches_sends_to_and_cancels_a_background_thread() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let visible = thread_id(&agent);
+    let launched = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"Side task","message":"Hi from a tool"}),
+        )
+        .unwrap();
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    assert_ne!(thread, visible, "launch never takes the visible thread");
+    let finished = |state: &agent_host::AgentState| {
+        state
+            .panel
+            .session(&thread)
+            .is_ok_and(|s| s.run.is_none() && s.conversation.len() > 1)
+    };
+    panel.wait(finished);
+    assert_eq!(thread_id(&agent), visible);
+    let reply = |state: &agent_host::AgentState, text: &str| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .conversation
+            .values()
+            .any(|m| m.to_string().contains(text))
+    };
+    assert!(reply(&agent.lock().unwrap(), "Saw: Hi from a tool"));
+    panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"And again"}),
+        )
+        .unwrap();
+    panel.wait(|state| {
+        reply(state, "Saw: And again") && state.panel.session(&thread).unwrap().run.is_none()
+    });
+    let idle_cancel = panel
+        .panels
+        .agent_thread_control("thread_cancel", &json!({"threadId":thread}))
+        .unwrap();
+    assert_eq!(idle_cancel["busy"], false);
+    let missing = panel
+        .panels
+        .agent_thread_control("thread_send", &json!({"threadId":"none","message":"x"}))
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        "This thread does not exist in the current project."
+    );
+    panel.panels.close();
+}
+#[test]
+fn a_signed_out_provider_refuses_a_thread_launch_before_anything_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    // Once the bundled providers have answered, the compatible one (never
+    // configured here) is the signed-out provider.
+    panel.connected(Provider::Chatgpt);
+    assert!(!panel.panels.broker.agent.available(Provider::Compatible));
+    let agent = panel.agent();
+    let before = agent.lock().unwrap().panel.summaries().len();
+    let refused = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"t","message":"m","target":{"providerInstanceId":"compatible"},"callerAccess":"project"}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "Sign in to your compatible provider in Settings › Agents before starting a run."
+    );
+    assert_eq!(agent.lock().unwrap().panel.summaries().len(), before);
+    panel.panels.close();
+}
+#[test]
+fn a_planning_caller_launches_planning_threads_and_retries_are_deduplicated() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let request = json!({"title":"Plan","message":"Look only","callerAccess":"editor",
+        "callerRunId":"caller-1","clientRequestId":"req-1"});
+    let first = panel
+        .panels
+        .agent_thread_control("thread_launch", &request)
+        .unwrap();
+    assert_eq!(first["access"], "editor", "{first}");
+    let thread = first["threadId"].as_str().unwrap().to_owned();
+    let again = panel
+        .panels
+        .agent_thread_control("thread_launch", &request)
+        .unwrap();
+    assert_eq!(
+        again["threadId"], first["threadId"],
+        "a retry returns the first launch"
+    );
+    let mut reused = request.clone();
+    reused["message"] = json!("Something else");
+    assert_eq!(
+        panel
+            .panels
+            .agent_thread_control("thread_launch", &reused)
+            .unwrap_err(),
+        "This clientRequestId belongs to another thread launch."
+    );
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    // A planning caller's new turn stays at planning access.
+    let sent = panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"More","callerAccess":"editor"}),
+        )
+        .unwrap();
+    assert_eq!(sent["access"], "editor", "{sent}");
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+#[test]
+fn reconfiguring_a_running_thread_restarts_it_and_cancel_stops_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let launched = panel
+        .panels
+        .agent_thread_control("thread_launch", &json!({"title":"Hold","message":"Wait"}))
+        .unwrap();
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    let first_run = launched["runId"].as_str().unwrap().to_owned();
+    assert_eq!(launched["busy"], true, "{launched}");
+    // A different effort can't steer the live turn: it stops and restarts.
+    let effort = if agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .settings
+        .effort
+        == "high"
+    {
+        "low"
+    } else {
+        "high"
+    };
+    let sent = panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"Go on","target":{"options":{"reasoningEffort":effort}}}),
+        )
+        .unwrap();
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    assert_eq!(sent["reasoningEffort"], effort, "{sent}");
+    assert_ne!(sent["runId"], json!(first_run), "{sent}");
+    assert_eq!(sent["busy"], true, "{sent}");
+    let cancelled = panel
+        .panels
+        .agent_thread_control("thread_cancel", &json!({"threadId":thread}))
+        .unwrap();
+    assert_eq!(cancelled["threadId"], json!(thread));
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+/// The composer's Select part of the screen (v1's, PM-399): the panel asks
+/// the window for the crosshair; what is selected comes back as an
+/// attachment through `agent_attach`.
+#[test]
+fn select_part_of_the_screen_asks_the_window_for_a_pick() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.panels.take_platform_requests();
+    // It is a row of the composer's "+" menu.
+    panel.click("agent-add");
+    let menu = panel.request("agentMenu");
+    panel
+        .panels
+        .platform_reply(menu.id, Ok(json!("pickRegion")));
+    let pick = panel.request("agent.pickRegion");
+    let again = panel.panels.take_platform_requests();
+    assert!(
+        again.iter().all(|r| r.operation != "agent.pickRegion"),
+        "one pick: {:?}",
+        again.iter().map(|r| &r.operation).collect::<Vec<_>>()
+    );
+    assert_eq!(pick.input["project"], "synthetic");
+    assert_eq!(pick.input["thread"], thread_id(&panel.agent()));
+    panel.panels.close();
+}
+#[test]
+fn attached_files_reach_the_provider_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // A 1×1 PNG and a text note, as Add Attachments records them.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    panel
+        .panels
+        .agent_attach(vec![
+            json!({"id":"a1","name":"frame.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}")}),
+            json!({"id":"a2","name":"notes.txt","type":"text/plain","size":5,"content":"hello"}),
+        ])
+        .unwrap();
+    panel.send("Use these");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(text.contains("notes.txt"), "{text}");
+    let written: Vec<_> = walk(root.path())
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "reference-0.png"))
+        .collect();
+    assert_eq!(
+        written.len(),
+        1,
+        "the image is a file the provider can open"
+    );
+    assert_eq!(&std::fs::read(&written[0]).unwrap()[1..4], b"PNG");
+    panel.panels.close();
+}
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+/// A slow fake provider: each turn answers after `delay` seconds.
+fn slow_environment(profile: &Path, delay: &str) -> Environment {
+    let mut environment = environment(profile, "slow");
+    environment
+        .vars
+        .insert("PM_FAKE_DELAY".into(), delay.into());
+    environment
+}
+fn live_run(agent: &agent_host::SharedAgent, thread: &str) -> String {
+    agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(thread)
+        .unwrap()
+        .run
+        .as_ref()
+        .unwrap()
+        .id
+        .clone()
+}
+fn said(state: &agent_host::AgentState, thread: &str, text: &str) -> bool {
+    state
+        .panel
+        .session(thread)
+        .unwrap()
+        .conversation
+        .values()
+        .any(|m| m.to_string().contains(text))
+}
+/// The latest delegate_task row: live in the trace, or kept with the reply.
+fn task_row(state: &agent_host::AgentState, thread: &str) -> Option<Value> {
+    let session = state.panel.session(thread).unwrap();
+    let kept = session
+        .conversation
+        .values()
+        .flat_map(|m| m["steps"].as_array().cloned().unwrap_or_default());
+    session
+        .trace
+        .rows
+        .values()
+        .cloned()
+        .chain(kept)
+        .filter(|row| row["toolName"] == "delegate_task")
+        .last()
+}
+const RESUMED: &str = "Saw: Review these results, verify changes where needed";
+#[test]
+fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let release = root.path().join("child-release");
+    let mut environment = slow_environment(root.path(), "1.0");
+    environment.vars.insert("PM_FAKE_CHILD_RELEASE".into(), release.to_string_lossy().into_owned());
+    let mut panel = Agent::mount(&actor, environment);
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Make a title card");
+    let run = live_run(&agent, &thread);
+    // What the run's own MCP session sends (`--agent-run`).
+    let capabilities = panel
+        .panels
+        .agent_orchestrate("orchestrator_capabilities", &json!({"agentRunId":run}))
+        .unwrap();
+    assert_eq!(
+        capabilities["parentThreadId"],
+        json!(thread),
+        "{capabilities}"
+    );
+    assert_eq!(capabilities["features"]["maxParallelTasks"], 8);
+    let chatgpt = &capabilities["providers"][0];
+    assert_eq!(chatgpt["canRunChildTask"], true, "{capabilities}");
+    assert_eq!(chatgpt["models"][0]["id"], "fixture-5", "{capabilities}");
+    assert_eq!(
+        chatgpt["models"][0]["options"][0]["options"][1]["label"],
+        "High"
+    );
+    let delegated = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Child brief","title":"Child","clientRequestId":"round-1"}),
+        )
+        .unwrap();
+    assert_eq!(delegated["status"], "running", "{delegated}");
+    let task = delegated["taskId"].as_str().unwrap().to_owned();
+    // A retry with the same key is the same task; another brief is refused.
+    let again = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Child brief","title":"Child","clientRequestId":"round-1"}),
+        )
+        .unwrap();
+    assert_eq!(again["taskId"], json!(task));
+    assert!(
+        panel
+            .panels
+            .agent_orchestrate(
+                "delegate_task",
+                &json!({"agentRunId":run,"task":"Other","clientRequestId":"round-1"}),
+            )
+            .unwrap_err()
+            .contains("already belongs to a different task")
+    );
+    // The root's turn ends before the child's: it waits, then resumes.
+    panel.wait(|state| {
+        state.runs.held(&run)
+            && state.panel.session(&thread).unwrap().activity == "Waiting for 1 subagent to finish…"
+    });
+    std::fs::write(&release, b"continue").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let agent2 = agent.clone();
+    while !{
+        let state = agent2.lock().unwrap();
+        said(&state, &thread, RESUMED) && state.panel.session(&thread).unwrap().run.is_none()
+    } {
+        assert!(Instant::now() < deadline, "the run never resumed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let state = agent.lock().unwrap();
+    let row = task_row(&state, &thread).expect("task row");
+    assert_eq!(row["status"], "done", "{row}");
+    assert_eq!(row["output"], "Saw: Child brief", "{row}");
+    assert!(state.tasks.idle());
+    drop(state);
+    // Main's archive layout, with the result delivered (acknowledged).
+    let archives = walk(&root.path().join("Agent Tasks"));
+    assert_eq!(archives.len(), 1, "{archives:?}");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&archives[0]).unwrap()).unwrap();
+    let record = &saved["records"][0];
+    assert_eq!(record["task"]["status"], "completed", "{saved}");
+    assert_eq!(record["task"]["summary"], "Saw: Child brief");
+    assert_eq!(record["acknowledged"], true);
+    assert_eq!(record["clientRequestId"], "round-1");
+    // The run is over: its tools answer as main's do.
+    assert_eq!(
+        panel
+            .panels
+            .agent_orchestrate("task_status", &json!({"agentRunId":run,"taskId":task}))
+            .unwrap_err(),
+        "This agent run is no longer active."
+    );
+    panel.panels.close();
+}
+#[test]
+fn wait_mode_status_cancel_and_send_follow_mains_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.6"));
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    // Its turn holds, as a real provider's does while it waits on a tool
+    // call: the run can't settle between these calls.
+    panel.send("Hold: Plan it");
+    let run = live_run(&agent, &thread);
+    let call = |tool: &str, args: Value| {
+        let mut args = args;
+        args["agentRunId"] = json!(run);
+        panel.panels.agent_orchestrate(tool, &args)
+    };
+    // wait returns the finished result and acknowledges it.
+    let waited = call(
+        "delegate_task",
+        json!({"task":"Quick look","mode":"wait","timeoutMs":20000}),
+    )
+    .unwrap();
+    assert_eq!(waited["status"], "completed", "{waited}");
+    assert_eq!(waited["summary"], "Saw: Quick look");
+    assert_eq!(waited["waitTimedOut"], false);
+    // Cancelling a finished task keeps its result.
+    let kept = call("task_cancel", json!({"taskId":waited["taskId"]})).unwrap();
+    assert_eq!(kept["status"], "completed", "{kept}");
+    assert!(
+        call("task_status", json!({"taskId":"nope"}))
+            .unwrap_err()
+            .contains("does not belong")
+    );
+    // A wait that times out never cancels: the task goes on.
+    let short = call(
+        "delegate_task",
+        json!({"task":"Longer look","mode":"wait","timeoutMs":0}),
+    )
+    .unwrap();
+    assert_eq!(short["waitTimedOut"], true, "{short}");
+    let id = short["taskId"].as_str().unwrap().to_owned();
+    let status = call("task_status", json!({"taskId":id})).unwrap();
+    assert_eq!(status["workState"], "working", "{status}");
+    assert_eq!(status["questions"], json!([]));
+    // App Server takes new direction live; new settings interrupt and resume.
+    let sent = call(
+        "task_send",
+        json!({"taskId":id,"message":"Also check the end","clientRequestId":"u1"}),
+    )
+    .unwrap();
+    assert_eq!(sent["delivery"], "live", "{sent}");
+    let resumed = call(
+        "task_send",
+        json!({"taskId":id,"target":{"options":{"reasoningEffort":"high"}}}),
+    )
+    .unwrap();
+    assert_eq!(resumed["delivery"], "resumed", "{resumed}");
+    assert_eq!(resumed["reasoningEffort"], "high", "{resumed}");
+    let repeat = call(
+        "task_send",
+        json!({"taskId":id,"message":"Also check the end","clientRequestId":"u1"}),
+    )
+    .unwrap();
+    assert_eq!(repeat["delivery"], "already_sent");
+    assert!(
+        call("task_send", json!({"taskId":id}))
+            .unwrap_err()
+            .contains("Supply message")
+    );
+    let cancelled = call("task_cancel", json!({"taskId":id,"reason":"Not needed"})).unwrap();
+    assert_eq!(cancelled["status"], "cancel_requested", "{cancelled}");
+    panel.wait(|state| {
+        task_row(state, &thread)
+            .is_some_and(|r| r["task"]["taskId"] == json!(id) && r["task"]["status"] == "cancelled")
+    });
+    panel.click("agent-stop");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    panel.panels.close();
+}
+#[test]
+fn a_watched_thread_run_resumes_the_watcher_with_its_result() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Coordinate");
+    let run = live_run(&agent, &thread);
+    let side = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"Side","message":"Side work","callerAccess":"editor"}),
+        )
+        .unwrap();
+    let side_thread = side["threadId"].as_str().unwrap().to_owned();
+    assert!(
+        panel
+            .panels
+            .agent_orchestrate("thread_watch", &json!({"agentRunId":run,"threadId":thread}))
+            .unwrap_err()
+            .contains("cannot watch its own run")
+    );
+    let watched = panel
+        .panels
+        .agent_orchestrate(
+            "thread_watch",
+            &json!({"agentRunId":run,"threadId":side_thread}),
+        )
+        .unwrap();
+    assert_eq!(watched["watching"], true, "{watched}");
+    assert_eq!(watched["status"], "running");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !{
+        let state = agent.lock().unwrap();
+        said(&state, &thread, RESUMED) && state.panel.session(&thread).unwrap().run.is_none()
+    } {
+        assert!(Instant::now() < deadline, "the watcher never resumed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(said(&agent.lock().unwrap(), &side_thread, "Saw: Side work"));
+    panel.panels.close();
+}
+#[test]
+fn stopping_a_run_that_waits_for_its_subagent_stops_both() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.3"));
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Go");
+    let run = live_run(&agent, &thread);
+    // A child that never answers.
+    panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Hold: forever"}),
+        )
+        .unwrap();
+    panel.wait(|state| state.runs.held(&run));
+    panel.click("agent-stop");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    let state = agent.lock().unwrap();
+    let row = task_row(&state, &thread).expect("task row");
+    assert_eq!(row["task"]["status"], "cancelled", "{row}");
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    drop(state);
+    panel.panels.close();
+}
+#[test]
+fn a_run_publishes_a_visual_reply_that_opens_in_its_viewer() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Chart the timing");
+    let run = live_run(&agent, &thread);
+    let refused = panel
+        .panels
+        .agent_visual_reply(&json!({"agentRunId":run,"title":"x","html":"<iframe></iframe>"}))
+        .unwrap_err();
+    assert!(refused.contains("cannot embed pages"), "{refused}");
+    let published = panel
+        .panels
+        .agent_visual_reply(&json!({"agentRunId":run,"title":"Timing chart",
+            "html":"<html><body><svg width=10 height=10></svg></body></html>","height":420}))
+        .unwrap();
+    assert_eq!(published["saved"], true);
+    assert_eq!(published["threadId"], json!(thread));
+    let id = published["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("visual-"), "{id}");
+    // Main's limit: four per run.
+    for _ in 0..3 {
+        panel
+            .panels
+            .agent_visual_reply(&json!({"agentRunId":run,"title":"More","html":"<p>x</p>"}))
+            .unwrap();
+    }
+    assert_eq!(
+        panel
+            .panels
+            .agent_visual_reply(&json!({"agentRunId":run,"title":"Fifth","html":"<p>x</p>"}))
+            .unwrap_err(),
+        "This run already published four visual replies. Continue in a follow-up message."
+    );
+    assert!(panel.text().contains("Timing chart"));
+    // Saved with the thread, in main's shape.
+    let saved = agent
+        .lock()
+        .unwrap()
+        .panel
+        .visual_reply(&thread, &id)
+        .unwrap();
+    assert_eq!(
+        saved["html"],
+        "<!doctype html><html><head></head><body><svg width=10 height=10></svg></body></html>"
+    );
+    assert_eq!(saved["runId"], json!(run));
+    assert_eq!(saved["height"], 420);
+    // Open queues the viewer for the window.
+    let open = panel
+        .surface()
+        .surface
+        .nodes()
+        .values()
+        .find_map(|n| {
+            n.props
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| s.ends_with(&id))
+                .map(str::to_owned)
+        })
+        .expect("Open button");
+    panel.panels.take_platform_requests();
+    panel.click(&open);
+    let requests = panel.panels.take_platform_requests();
+    let request = requests
+        .iter()
+        .find(|r| r.operation == "agent.visual")
+        .expect("viewer request");
+    assert_eq!(request.input["title"], "Timing chart");
+    assert_eq!(
+        request.input["id"],
+        json!(id),
+        "the viewer is kept per reply"
+    );
+    assert_eq!(request.input["height"], 420);
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    assert!(
+        panel
+            .panels
+            .agent_visual_reply(&json!({"agentRunId":run,"title":"Late","html":"<p>x</p>"}))
+            .unwrap_err()
+            .contains("no longer active")
+    );
+    panel.panels.close();
+}
+
+#[test]
+fn a_private_answer_reaches_the_subagent_but_never_its_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Hold: Coordinate");
+    let run = live_run(&agent, &thread);
+    let call = |tool: &str, args: Value| {
+        let mut args = args;
+        args["agentRunId"] = json!(run);
+        panel.panels.agent_orchestrate(tool, &args)
+    };
+    let task = call("delegate_task", json!({"task":"Secret: unlock the asset"})).unwrap();
+    let id = task["taskId"].as_str().unwrap().to_owned();
+    let child = task["childRunId"].as_str().unwrap().to_owned();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        let status = call("task_status", json!({"taskId":id})).unwrap();
+        if status["questions"]
+            .as_array()
+            .is_some_and(|q| !q.is_empty())
+        {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "{status}");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        status["questions"][0]["questions"][0]["secret"], true,
+        "{status}"
+    );
+    let sent = call("task_send", json!({"taskId":id,"message":"4921"})).unwrap();
+    assert_eq!(sent["delivery"], "answered", "{sent}");
+    let prompt = agent
+        .lock()
+        .unwrap()
+        .tasks
+        .child_request(&child)
+        .unwrap()
+        .prompt
+        .clone();
+    assert!(!prompt.contains("4921"), "{prompt}");
+    assert!(
+        prompt.ends_with("A private answer was delivered to your held question."),
+        "{prompt}"
+    );
+    // The subagent itself got the answer.
+    panel
+        .wait(|state| task_row(state, &thread).is_some_and(|r| r["task"]["status"] == "completed"));
+    let row = task_row(&agent.lock().unwrap(), &thread).unwrap();
+    assert!(row["output"].as_str().unwrap().contains("4921"), "{row}");
+    panel.click("agent-stop");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    panel.panels.close();
+}
+#[test]
+fn subagents_inherit_the_runs_attachments() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    panel
+        .panels
+        .agent_attach(vec![
+            json!({"id":"a1","name":"frame.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}")}),
+            json!({"id":"a2","name":"notes.txt","type":"text/plain","size":5,"content":"hello"}),
+        ])
+        .unwrap();
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Look at these");
+    let run = live_run(&agent, &thread);
+    let task = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Check the frame"}),
+        )
+        .unwrap();
+    let child = task["childRunId"].as_str().unwrap().to_owned();
+    let request = agent
+        .lock()
+        .unwrap()
+        .tasks
+        .child_request(&child)
+        .unwrap()
+        .clone();
+    assert_eq!(request.images.len(), 1, "{request:?}");
+    assert!(
+        request.images[0].ends_with("reference-0.png"),
+        "{request:?}"
+    );
+    assert_eq!(request.files.len(), 1, "{request:?}");
+    assert_eq!(request.files[0]["name"], "notes.txt");
+    // The provider was told: its prompt ends with main's ATTACHED FILES.
+    panel
+        .wait(|state| task_row(state, &thread).is_some_and(|r| r["task"]["status"] == "completed"));
+    let row = task_row(&agent.lock().unwrap(), &thread).unwrap();
+    assert!(
+        row["output"].as_str().unwrap().contains("notes.txt"),
+        "{row}"
+    );
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    panel.panels.close();
+}
+#[test]
+fn a_result_that_cant_be_saved_is_kept_until_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Make a card");
+    let run = live_run(&agent, &thread);
+    panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Child brief"}),
+        )
+        .unwrap();
+    // The task archive's folder stops taking writes before the child ends.
+    let folder = walk(&root.path().join("Agent Tasks"))[0]
+        .parent()
+        .unwrap()
+        .to_owned();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    panel.wait(|state| {
+        task_row(state, &thread).is_some_and(|r| {
+            r["task"]["progress"]
+                == "The task result could not be saved yet. Powermove keeps trying."
+        })
+    });
+    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        agent.lock().unwrap().runs.held(&run),
+        "the parent still waits"
+    );
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !{
+        let state = agent.lock().unwrap();
+        said(&state, &thread, RESUMED) && state.panel.session(&thread).unwrap().run.is_none()
+    } {
+        assert!(Instant::now() < deadline, "the run never resumed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let saved: Value = serde_json::from_slice(&std::fs::read(&walk(&folder)[0]).unwrap()).unwrap();
+    assert_eq!(
+        saved["records"][0]["task"]["status"], "completed",
+        "{saved}"
+    );
+    panel.panels.close();
+}
+#[test]
+fn media_a_reply_names_gets_a_card_that_opens_only_that_file() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // The fake provider answers "Saw: <last line>".
+    panel.send("![Before](/tmp/before.png) and https://example.com/a.png and /tmp/take.wav");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Before") && text.contains("Image"),
+        "{text}\n{}",
+        panel.agent().lock().unwrap().panel.raw_archive()
+    );
+    assert!(
+        text.contains("take.wav") && text.contains("Sound"),
+        "{text}"
+    );
+    // A web address written as a link (not an image) is no card.
+    assert!(!text.contains("Image on the web"), "{text}");
+    let open = |panel: &mut Agent, suffix: &str| {
+        let id = panel
+            .surface()
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+            .find(|id| id.ends_with(suffix))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("no {suffix}"));
+        panel.panels.take_platform_requests();
+        panel.click(&id);
+        panel.panels.take_platform_requests()
+    };
+    let requests = open(&mut panel, "-media-0");
+    let request = requests
+        .iter()
+        .find(|r| r.operation == "agent.media")
+        .expect("open request");
+    assert_eq!(
+        request.input,
+        json!({"path":"/tmp/before.png","remote":false,"reveal":false})
+    );
+    let requests = open(&mut panel, "-media-1-reveal");
+    assert_eq!(
+        requests
+            .iter()
+            .find(|r| r.operation == "agent.media")
+            .unwrap()
+            .input,
+        json!({"path":"/tmp/take.wav","remote":false,"reveal":true})
+    );
+    // Only a file a reply names: anything else is refused, nothing opens.
+    let refused = {
+        let backend = panel
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut backend = backend.lock().unwrap();
+        backend
+            .native_command(
+                "panel.agent.dispatch",
+                &json!({"action":{"type":"openMedia","path":"/tmp/elsewhere.png","reveal":false}}),
+            )
+            .err()
+    };
+    assert_eq!(
+        refused.as_deref(),
+        Some("This file can't be opened from here.")
+    );
+    assert!(
+        !panel
+            .panels
+            .take_platform_requests()
+            .iter()
+            .any(|r| r.operation == "agent.media")
+    );
+    panel.panels.close();
+}
+
+/// The fake OpenAI-compatible server (fixtures/fake-openai.py), recording
+/// each request; killed on drop.
+struct FakeModel {
+    child: std::process::Child,
+    port: u16,
+    record: PathBuf,
+}
+impl FakeModel {
+    fn start(root: &Path) -> Self {
+        use std::io::BufRead;
+        let record = root.join("requests.jsonl");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake-openai.py");
+        let mut child = std::process::Command::new(script)
+            .env("PM_FAKE_OPENAI_RECORD", &record)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        Self {
+            child,
+            port: line.trim().parse().unwrap(),
+            record,
+        }
+    }
+    fn requests(&self) -> Vec<Value> {
+        std::fs::read_to_string(&self.record)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+}
+impl Drop for FakeModel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+/// A plain-HTTP stand-in for the app's NSURLSession chat host.
+#[derive(Debug)]
+struct TestChat {
+    saved: pm_agents::compatible::Saved,
+}
+impl pm_agents::compatible::ChatHost for TestChat {
+    fn saved(&self) -> Option<pm_agents::compatible::Saved> {
+        Some(self.saved.clone())
+    }
+    fn key(&self, _: &str) -> Option<String> {
+        Some("fixture-key".into())
+    }
+    fn stream(
+        &self,
+        url: &str,
+        key: Option<&str>,
+        body: Vec<u8>,
+        stop: &std::sync::atomic::AtomicBool,
+        sink: &mut dyn FnMut(&[u8]) -> std::result::Result<(), String>,
+    ) -> std::result::Result<u16, String> {
+        use std::io::{Read, Write};
+        let rest = url.strip_prefix("http://").unwrap();
+        let (address, path) = rest.split_at(rest.find('/').unwrap());
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
+        write!(socket, "POST {} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n", path, body.len()).unwrap();
+        socket.write_all(&body).unwrap();
+        let (mut head, mut status, mut buffer) = (true, 0, [0; 4096]);
+        let mut pending = Vec::new();
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("Stopped.".into());
+            }
+            let n = match socket.read(&mut buffer) {
+                Ok(0) => return Ok(status),
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+            if head {
+                pending.extend_from_slice(&buffer[..n]);
+                let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                status = String::from_utf8_lossy(&pending[9..12]).parse().unwrap();
+                head = false;
+                let rest = pending.split_off(end + 4);
+                if (200..300).contains(&status) {
+                    sink(&rest)?;
+                }
+            } else if (200..300).contains(&status) {
+                sink(&buffer[..n])?;
+            }
+        }
+    }
+}
+fn compatible_environment(root: &Path, model: &FakeModel) -> Environment {
+    let mut environment = environment(root, "reply");
+    environment.executable = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake-mcp.py");
+    environment.tools = pm_mcp_tools();
+    environment.composition_tools = vec!["get_project_state".into()];
+    environment.compatible = Some(std::sync::Arc::new(TestChat {
+        saved: pm_agents::compatible::Saved {
+            base_url: format!("http://127.0.0.1:{}/v1", model.port),
+            model: "fixture-model".into(),
+            vision: false,
+            models: vec!["fixture-model".into(), "other-model".into()],
+        },
+    }));
+    environment
+}
+#[test]
+fn a_connected_model_runs_with_the_powermove_tools_and_streams_its_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let model = FakeModel::start(root.path());
+    let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
+    panel.choose("agent-model", "provider:compatible");
+    panel.connected(Provider::Compatible);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-add", "editor");
+    assert!(!panel.text().contains("Connect ChatGPT"));
+    panel.send("Use a tool please");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Tool said: get_project_state ran: Synthetic, 0 layers"),
+        "{text}"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[0]["auth"], "Bearer fixture-key");
+    let first = &requests[0]["body"];
+    assert_eq!(first["model"], "fixture-model");
+    assert_eq!(first["stream"], true);
+    // Composition only: the Composition tools, nothing else.
+    let offered = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(offered, ["get_project_state"]);
+    assert!(
+        first["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("powermove tools")
+    );
+    let second = &requests[1]["body"]["messages"];
+    let calls = &second[2]["tool_calls"][0];
+    assert_eq!(calls["function"]["name"], "get_project_state");
+    assert_eq!(second[3]["role"], "tool");
+    assert_eq!(second[3]["tool_call_id"], "call_1");
+    let agent = panel.agent();
+    let archive = agent.lock().unwrap().panel.raw_archive().clone();
+    assert_eq!(archive["threads"][0]["lastRunStatus"], "completed");
+    let stored = archive.to_string();
+    assert!(stored.contains("get_project_state"), "{stored}");
+    drop(agent);
+    panel.panels.close();
+}
+#[test]
+fn a_connected_model_streams_and_stop_cancels_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let model = FakeModel::start(root.path());
+    let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
+    panel.choose("agent-model", "provider:compatible");
+    panel.connected(Provider::Compatible);
+    panel.send("Answer slow");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !panel.text().contains("token1") {
+        assert!(Instant::now() < deadline, "no stream");
+        thread::sleep(Duration::from_millis(20));
+    }
+    panel.click("agent-stop");
+    panel.wait(idle);
+    let agent = panel.agent();
+    let state = agent.lock().unwrap();
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    drop(state);
+    panel.panels.close();
+}
+#[test]
+fn choosing_another_listed_model_sends_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let model = FakeModel::start(root.path());
+    let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
+    panel.choose("agent-model", "provider:compatible");
+    panel.connected(Provider::Compatible);
+    panel.choose("agent-model", "model:other-model");
+    panel.send("Hello there");
+    panel.wait(idle);
+    assert!(panel.text().contains("Saw: Hello there"));
+    assert_eq!(model.requests()[0]["body"]["model"], "other-model");
+    panel.panels.close();
+}
+
+#[test]
+fn send_latency_status_never_waits_for_provider_or_storage_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Go");
+    let agent = panel.agent();
+    let cached = panel.panels.agent_status();
+    // Reproduce the old UI stack: drain_builtins -> agent_status ->
+    // agent_state/backend lock -> AgentState lock. Worker I/O owns this lock.
+    let hold = |probe: &dyn Fn()| {
+        let (ready, received) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let _guard = agent.lock().unwrap();
+                ready.send(()).unwrap();
+                thread::sleep(Duration::from_millis(24));
+            });
+            received.recv().unwrap();
+            let start = Instant::now();
+            probe();
+            start.elapsed()
+        })
+    };
+    let before = hold(&|| {
+        drop(agent.lock().unwrap());
+    });
+    let after = hold(&|| {
+        assert_eq!(panel.panels.agent_status(), cached);
+    });
+    eprintln!(
+        "send_latency blocking_status_before_ms={:.3} cached_status_after_ms={:.3} stack=drain_builtins/agent_status/AgentState::lock",
+        before.as_secs_f64() * 1000.,
+        after.as_secs_f64() * 1000.
+    );
+    assert!(before >= Duration::from_millis(8));
+    assert!(after < Duration::from_millis(8));
+    // Backend is also held during prompt assembly/admission, before AgentState.
+    let backend = panel
+        .panels
+        .broker
+        .entry("agent")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    {
+        let _held = backend.lock().unwrap();
+        let start = Instant::now();
+        assert_eq!(panel.panels.agent_status(), cached);
+        assert!(start.elapsed() < Duration::from_millis(8));
+    }
+    let mut worst = Duration::ZERO;
+    for _ in 0..12 {
+        let start = Instant::now();
+        panel.panels.agent_status();
+        worst = worst.max(start.elapsed());
+        thread::sleep(Duration::from_millis(16));
+    }
+    // Composer input still reaches the controller during the token stream.
+    panel.type_text("Next idea");
+    let thread = thread_id(&agent);
+    assert_eq!(
+        agent
+            .lock()
+            .unwrap()
+            .panel
+            .session(&thread)
+            .unwrap()
+            .draft
+            .text(),
+        "Next idea"
+    );
+    eprintln!(
+        "send_latency streaming_frames=12 worst_status_ms={:.3}",
+        worst.as_secs_f64() * 1000.
+    );
+    assert!(worst < Duration::from_millis(8));
+    panel.click("agent-stop");
+    panel.wait(idle);
+}
+
+#[test]
+fn async_attachments_keep_the_accepting_thread_and_reject_another_project() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let (project, original) = {
+        let mut state = agent.lock().unwrap();
+        let target = (
+            state.panel.project().to_owned(),
+            state.panel.active_id().to_owned(),
+        );
+        // New reuses an empty thread by design; retain a real draft so this
+        // exercises a switch to a distinct thread while attachment I/O finishes.
+        state
+            .panel
+            .draft_mut(&target.1)
+            .unwrap()
+            .insert_text("Original draft", 1, false);
+        let other = state
+            .panel
+            .new_thread("other-attachment-thread", 2)
+            .unwrap();
+        assert_eq!(other, "other-attachment-thread");
+        assert_eq!(state.panel.active_id(), other);
+        target
+    };
+    panel.panels.agent_attach_for(&project, &original, vec![json!({"id":"delayed-file", "name":"Note.txt", "type":"text/plain", "content":"hello"})]).unwrap();
+    {
+        let state = agent.lock().unwrap();
+        assert_eq!(
+            state.panel.inspect(&original).unwrap()["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.panel.inspect("other-attachment-thread").unwrap()["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+    assert!(
+        panel
+            .panels
+            .agent_attach_for("foreign-project", &original, vec![])
+            .is_err()
+    );
+    panel.panels.close();
+}
+
+#[test]
+fn steering_a_held_parent_retains_the_direction_after_child_results() {
+    for original_brief in ["Original brief", agent_host::WORKSPACE_IMPORT_LABEL] {
+        let markers = (0..6)
+            .map(|index| format!("[Attachment: original-{index}.png]"))
+            .collect::<String>();
+        let expected_original = format!("{markers}{}", agent_host::expand_request(original_brief));
+        let expected_direction = "[Attachment: latest.png]Make it blue";
+        let root = tempfile::tempdir().unwrap();
+        let actor = actor();
+        let requests = root.path().join("requests.jsonl");
+        let mut environment = slow_environment(root.path(), "1.0");
+        environment.vars.insert(
+            "PM_FAKE_REQUESTS".into(),
+            requests.to_string_lossy().into_owned(),
+        );
+        let mut panel = Agent::mount(&actor, environment);
+        panel.connected(Provider::Chatgpt);
+        // The fixture observes the parent and child through App Server.
+        panel.choose("agent-add", "editor");
+        let agent = panel.agent();
+        let thread = thread_id(&agent);
+        let document = actor
+            .handle()
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .doc_id;
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        panel.panels.agent_attach((0..6).map(|index| json!({
+            "id":format!("original-{index}"),"name":format!("original-{index}.png"),"type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}"),
+            "targetContext":{"projectId":"synthetic","documentId":document,"panelId":"viewer","selection":[format!("original-{index}")]}
+        })).collect()).unwrap();
+        panel.send(original_brief);
+        let run = live_run(&agent, &thread);
+        let recorded = || -> Vec<Value> {
+            std::fs::read_to_string(&requests)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        };
+        let original_request = || {
+            recorded().into_iter().find(|record| {
+                record["request"]["params"]["input"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(expected_original.as_str()))
+            })
+        };
+        // The composer publishes the run before the provider accepts its
+        // request. Delegation is available once the provider is running.
+        panel.wait(|_| original_request().is_some());
+        let original = original_request().expect("original request recorded");
+        let task = panel
+            .panels
+            .agent_orchestrate(
+                "delegate_task",
+                &json!({"agentRunId":run,"task":"Hold: forever"}),
+            )
+            .unwrap();
+        panel.wait(|state| state.runs.held(&run));
+        let workspace = original["cwd"].clone();
+        panel.panels.agent_attach(vec![json!({
+            "id":"latest-pick","name":"latest.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}"),
+            "targetContext":{"projectId":"synthetic","documentId":document,"panelId":"viewer","selection":["new-target"],"compositionTime":1.5}
+        })]).unwrap();
+        panel.send("Make it blue");
+        panel.wait(|state| {
+            assert!(state.panel.session(&thread).unwrap().run.is_some());
+            recorded().iter().any(|record| {
+                record["cwd"] == workspace
+                    && record["request"]["params"]["input"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| {
+                            text.contains(&format!("NEW DIRECTION\n{expected_direction}"))
+                        })
+            })
+        });
+        // The person's Stop task delivers the outcome to its parent. The
+        // agent's task_cancel acknowledges it, so it intentionally does not.
+        agent
+            .lock()
+            .unwrap()
+            .tasks
+            .stop_task(
+                &panel.panels.broker.agent,
+                &run,
+                task["taskId"].as_str().unwrap(),
+            )
+            .unwrap();
+        panel.wait(|state| {
+            state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle()
+        });
+        let turns: Vec<_> = recorded()
+            .into_iter()
+            .filter(|record| record["cwd"] == workspace)
+            .collect();
+        assert_eq!(
+            turns.len(),
+            3,
+            "original, steered restart, then child-result continuation: {turns:?}"
+        );
+        for turn in &turns[1..] {
+            let text = turn["request"]["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap();
+            assert!(
+                text.contains(&format!("ORIGINAL REQUEST\n{expected_original}")),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("NEW DIRECTION\n{expected_direction}")),
+                "{text}"
+            );
+            assert!(text.contains("original-0"), "{text}");
+            assert!(text.contains("original-5"), "{text}");
+            assert!(text.contains("new-target"), "{text}");
+            let images = turn["request"]["params"]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|part| part["type"] == "localImage")
+                .count();
+            assert_eq!(images, 7, "all original and new images survive: {turn}");
+        }
+        panel.panels.close();
+    }
+}
+
+#[test]
+fn child_composer_directions_and_attachments_route_to_the_task_owned_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Hold the parent");
+    let agent = panel.agent();
+    let parent_thread = thread_id(&agent);
+    let parent_run = live_run(&agent, &parent_thread);
+    let task = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":parent_run,"task":"Hold the child","title":"Layout"}),
+        )
+        .unwrap();
+    let child_thread = task["childThreadId"].as_str().unwrap().to_owned();
+    let child_run = task["childRunId"].as_str().unwrap().to_owned();
+    {
+        let mut state = agent.lock().unwrap();
+        assert!(state.tasks.owns_live_run(&child_run));
+        assert!(
+            !state.runs.steerable(&child_run),
+            "ProviderRuns does not own task children"
+        );
+        assert_eq!(state.panel.active_id(), parent_thread);
+        state.panel.switch(&child_thread).unwrap();
+    }
+    panel.panels.broker.agent.touch();
+    panel.text();
+    panel.panels.agent_attach(vec![json!({"id":"child-note","name":"Direction.txt","type":"text/plain","content":"Keep the heading","size":16})]).unwrap();
+    panel.send("Move it left");
+    panel.wait(|state| {
+        state
+            .tasks
+            .child_request(&child_run)
+            .is_some_and(|r| r.prompt.contains("Move it left"))
+    });
+    {
+        let state = agent.lock().unwrap();
+        let request = state.tasks.child_request(&child_run).unwrap();
+        assert!(request.prompt.contains("NEW DIRECTION"));
+        assert_eq!(request.files.last().unwrap()["name"], "Direction.txt");
+        assert_eq!(
+            state
+                .panel
+                .session(&child_thread)
+                .unwrap()
+                .run
+                .as_ref()
+                .unwrap()
+                .id,
+            child_run
+        );
+        assert_eq!(
+            state
+                .panel
+                .session(&parent_thread)
+                .unwrap()
+                .run
+                .as_ref()
+                .unwrap()
+                .id,
+            parent_run
+        );
+    }
+    panel.panels.agent_delete_thread(&parent_thread).unwrap();
+    panel.wait(|state| {
+        state.panel.session(&parent_thread).is_err() && state.panel.session(&child_thread).is_err()
+    });
+    {
+        let state = agent.lock().unwrap();
+        let archived = state.panel.raw_archive()["archivedThreads"]
+            .as_array()
+            .unwrap();
+        assert!(archived.iter().any(|r| r["id"] == parent_thread));
+        assert!(archived.iter().any(|r| r["id"] == child_thread));
+    }
+    panel.panels.close();
+}
+
+#[test]
+fn completion_verifies_before_settling_and_bounds_failed_repairs() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    panel.panels.set_agent_completion(std::sync::Arc::new(move |operation, _, _, _| {
+        recorded.lock().unwrap().push(operation.to_owned());
+        Ok(json!({"changed":true,"revision":1,"errors":["Synthetic capture failure"],"images":[]}))
+    }));
+    panel.send("Synthetic completion request");
+    panel.wait(idle);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.first().map(String::as_str), Some("begin"));
+    assert_eq!(
+        calls.iter().filter(|op| *op == "verify").count(),
+        4,
+        "initial verification plus three bounded repair turns"
+    );
+    let shared = panel.agent();
+    let state = shared.lock().unwrap();
+    let session = state.panel.session(state.panel.active_id()).unwrap();
+    assert!(
+        session.result.as_ref().unwrap()["verificationError"]
+            .as_str()
+            .unwrap()
+            .contains("three-pass")
+    );
+    drop(state);
+    panel.panels.close();
+}
+
+#[test]
+fn completion_result_actions_reach_the_native_service_and_keep_preserves_history() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let fail_undo = std::sync::atomic::AtomicBool::new(true);
+    panel
+        .panels
+        .set_agent_completion(std::sync::Arc::new(move |operation, _, _, _| {
+            recorded.lock().unwrap().push(operation.to_owned());
+            if operation == "undo" && fail_undo.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                return Err("Synthetic later human edit: nothing was restored.".into());
+            }
+            Ok(json!({"changed":false,"revision":1,"errors":[],"images":[]}))
+        }));
+    panel.send("Synthetic native plan");
+    panel.wait(idle);
+    let shared = panel.agent();
+    let thread = thread_id(&shared);
+    let run = shared
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .last_run()
+        .unwrap()
+        .to_owned();
+    {
+        let mut state = shared.lock().unwrap();
+        state
+            .panel
+            .host_plan(&thread, &run, json!({"revision":0,"commands":[]}))
+            .unwrap();
+    }
+    let backend = panel
+        .panels
+        .broker
+        .entry("agent")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let dispatch = |kind: &str| {
+        backend.lock().unwrap().native_command(
+            "panel.agent.dispatch",
+            &json!({
+                "target":{"project":"synthetic","thread":thread,"run":null},
+                "action":{"type":kind}
+            }),
+        )
+    };
+    dispatch("applyPlan").unwrap();
+    panel.wait(|state| !state.panel.session(&thread).unwrap().applying);
+    dispatch("undoResult").unwrap();
+    panel.wait(|state| !state.panel.session(&thread).unwrap().applying);
+    {
+        let state = shared.lock().unwrap();
+        let session = state.panel.session(&thread).unwrap();
+        assert!(session.result.is_some());
+        assert!(!session.applying);
+        assert!(session.conversation.values().any(|row| {
+            row["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("nothing was restored"))
+        }));
+    }
+    dispatch("undoResult").unwrap();
+    panel.wait(|state| !state.panel.session(&thread).unwrap().applying);
+    assert!(
+        shared
+            .lock()
+            .unwrap()
+            .panel
+            .session(&thread)
+            .unwrap()
+            .result
+            .is_none()
+    );
+    shared
+        .lock()
+        .unwrap()
+        .panel
+        .host_result(
+            &thread,
+            &run,
+            json!({"summary":"Keep fixture","changed":true}),
+        )
+        .unwrap();
+    let keeps_before = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|op| *op == "keep")
+        .count();
+    dispatch("keepResult").unwrap();
+    panel.wait(|_| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| *op == "keep")
+            .count()
+            > keeps_before
+    });
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|op| op == "apply"));
+    assert!(calls.iter().any(|op| op == "undo"));
+    assert!(calls.iter().any(|op| op == "keep"));
+    drop(calls);
+    panel.panels.close();
+}
+
+#[test]
+fn completion_does_not_restore_revoked_computer_consent() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let shared = panel.agent();
+    let thread = thread_id(&shared);
+    {
+        let mut state = shared.lock().unwrap();
+        let consent = state.panel.set_access(&thread, "full").unwrap().unwrap();
+        state.panel.acknowledge(consent.id, true).unwrap();
+    }
+    let (started, observed) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let resume = std::sync::Mutex::new(resume);
+    let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = checks.clone();
+    panel
+        .panels
+        .set_agent_completion(std::sync::Arc::new(move |operation, _, _, _| {
+            if operation == "verify" {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = started.send(());
+                resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+            Ok(json!({"changed":true,"revision":1,"errors":[],"images":[]}))
+        }));
+    panel.send("Synthetic Full Access completion");
+    observed.recv_timeout(Duration::from_secs(10)).unwrap();
+    // A check does not hold the panel lock, and revocation remains authoritative.
+    {
+        let mut state = shared.lock().unwrap();
+        assert!(
+            state.panel.session(&thread).unwrap().run.is_some(),
+            "verification must precede terminal completion"
+        );
+        state.panel.set_access(&thread, "editor").unwrap();
+    }
+    release.send(()).unwrap();
+    panel.wait(idle);
+    let state = shared.lock().unwrap();
+    let session = state.panel.session(&thread).unwrap();
+    assert!(!session.computer_consent);
+    assert!(
+        session.result.as_ref().unwrap()["verificationError"]
+            .as_str()
+            .unwrap()
+            .contains("consent was revoked")
+    );
+    assert_eq!(checks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    drop(state);
+    panel.panels.close();
+}
+
+#[test]
+fn completion_service_unavailability_is_a_readable_limit_not_lost_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    *panel.panels.broker.agent.completion.lock().unwrap() = None;
+    panel.send("Synthetic service gap");
+    panel.wait(idle);
+    let shared = panel.agent();
+    let state = shared.lock().unwrap();
+    let session = state.panel.session(state.panel.active_id()).unwrap();
+    let text = session
+        .conversation
+        .values()
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Saw: Synthetic service gap"), "{text}");
+    assert!(text.contains("Final verification is unavailable"), "{text}");
+    drop(state);
+    panel.panels.close();
+}
+
+/// PM-730: the launcher's task switch never waits on the Agent state. Here
+/// an agent's project check holds the shared tool host, and a launch holds
+/// the Agent state while its completion waits for that host: the switch
+/// answers "busy" at once, and switches once the launch lets go.
+#[test]
+fn the_launcher_task_switch_never_waits_behind_a_check() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    let agent = panel.agent();
+    let id = thread_id(&agent);
+    let host = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let (checking, check_held) = std::sync::mpsc::channel();
+    let check = {
+        let host = host.clone();
+        thread::spawn(move || {
+            let _check = host.lock().unwrap();
+            checking.send(()).unwrap();
+            thread::sleep(Duration::from_millis(600));
+        })
+    };
+    check_held.recv().unwrap();
+    let (launching, launch_held) = std::sync::mpsc::channel();
+    let launch = {
+        let (agent, host) = (agent.clone(), host.clone());
+        thread::spawn(move || {
+            let _state = agent.lock().unwrap();
+            launching.send(()).unwrap();
+            let _host = host.lock().unwrap();
+        })
+    };
+    launch_held.recv().unwrap();
+    let started = Instant::now();
+    let switched = panel.panels.agent_launcher_try_switch(&id);
+    let waited = started.elapsed();
+    assert_eq!(switched, Ok(false));
+    assert!(
+        waited < Duration::from_millis(100),
+        "the switch waited {waited:?}"
+    );
+    check.join().unwrap();
+    launch.join().unwrap();
+    assert_eq!(panel.panels.agent_launcher_try_switch(&id), Ok(true));
+}

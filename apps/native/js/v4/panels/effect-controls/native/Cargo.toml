@@ -1,0 +1,26 @@
+[package]
+name = "pm-effect-controls-wire"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+pm-surface = { path = "../../../../../crates/surface" }
+pm-design = { path = "../../../../../crates/design" }
+serde_json = "1"
+
+pm-panel-inspector = { path = "../../../../../crates/panel-inspector" }
+pm-kernel = { path = "../../../../../crates/kernel" }
+pm-model = { path = "../../../../../../../engine/crates/pm-model" }
+
+[[bin]]
+name = "effect-controls-wire"
+path = "src.rs"
+
+[[bin]]
+name = "effect-controls-model-wire"
+path = "model_wire.rs"
+
+[[test]]
+name = "adapter"
+path = "adapter.rs"

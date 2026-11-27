@@ -1,0 +1,109 @@
+{
+  "baseline": "v1.2.0",
+  "source": "apps/desktop/src/main/codex/__fixtures__/recorded-transcript.ndjson; CodexEventParser",
+  "frames": [
+    {
+      "kind": "in",
+      "value": {
+        "type": "thread.started",
+        "thread_id": "thread-recorded-1"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "item.started",
+        "item": {
+          "id": "0",
+          "type": "command_execution",
+          "command": "pwd"
+        }
+      }
+    },
+    {
+      "kind": "progress",
+      "value": "Working with project files and shell tools…"
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "0",
+        "toolName": "bash",
+        "label": "Run",
+        "detail": "pwd"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "item.completed",
+        "item": {
+          "id": "0",
+          "type": "command_execution",
+          "command": "pwd",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "0",
+        "isError": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "item.completed",
+        "item": {
+          "id": "1",
+          "type": "reasoning",
+          "text": "Reviewing the café timeline"
+        }
+      }
+    },
+    {
+      "kind": "progress",
+      "value": "Reviewing the café timeline"
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "thought",
+        "text": "Reviewing the café timeline"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "thread.started",
+        "thread_id": "thread-recorded-duplicate"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "item.completed",
+        "item": {
+          "id": "2",
+          "type": "agent_message",
+          "text": "{\"command\":\"never expose this\",\"summary\":\"Preparing the final animation\"}"
+        }
+      }
+    },
+    {
+      "kind": "progress",
+      "value": "Preparing the final animation"
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "answer",
+        "text": "Preparing the final animation"
+      }
+    }
+  ]
+}

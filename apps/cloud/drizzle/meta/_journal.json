@@ -64,6 +64,20 @@
       "when": 1790472625333,
       "tag": "0008_admins",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795750767859,
+      "tag": "0009_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795758088322,
+      "tag": "0010_billing_hardening",
+      "breakpoints": true
     }
   ]
 }

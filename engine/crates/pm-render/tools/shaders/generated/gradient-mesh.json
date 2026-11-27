@@ -1,0 +1,62 @@
+{
+ "name": "gradient-mesh",
+ "kind": "extension",
+ "covers": [
+  "extension-color",
+  "extension-number",
+  "iProgress"
+ ],
+ "prompt": "Extension layer: a four-corner gradient mesh with four color parameters and a slider for how much it animates over the layer's progress.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "24acad086ef7a3f7ac596ad950f1d283f54b085dc3f0881013cb5c6caff906e4",
+  "seconds": 31.49,
+  "generated": "2026-10-17T07:34:34.204Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.corner-mesh-gradient",
+  "label": "Corner Mesh Gradient",
+  "version": 1,
+  "params": [
+   {
+    "k": "topLeft",
+    "label": "Top Left",
+    "type": "color",
+    "def": "#ff5a36"
+   },
+   {
+    "k": "topRight",
+    "label": "Top Right",
+    "type": "color",
+    "def": "#ffc53d"
+   },
+   {
+    "k": "bottomLeft",
+    "label": "Bottom Left",
+    "type": "color",
+    "def": "#5b2bd6"
+   },
+   {
+    "k": "bottomRight",
+    "label": "Bottom Right",
+    "type": "color",
+    "def": "#1fb5c9"
+   },
+   {
+    "k": "motion",
+    "label": "Motion",
+    "def": 0.5,
+    "min": 0,
+    "max": 1
+   }
+  ],
+  "renderer": {
+   "kind": "fragment",
+   "fragment": "void main(){\n  float m = clamp(u_motion, 0.0, 1.0);\n  float ph = iProgress * 6.28318;\n  vec2 q = uv;\n  float asp = iResolution.x / max(iResolution.y, 1.0);\n  vec2 w = vec2(sin(q.y * 3.1 + ph) + 0.6 * sin(q.y * 5.3 - ph * 0.5 + 1.7),\n                cos(q.x * 2.7 - ph) + 0.6 * cos(q.x * 4.9 + ph * 0.5 + 0.9));\n  w.x /= asp;\n  q += w * 0.06 * m;\n  vec2 c = vec2(0.5) + rot(ph * 0.25 * m) * (q - 0.5);\n  vec2 f = smoothstep(0.0, 1.0, clamp(c, 0.0, 1.0));\n  vec3 top = mix(u_topLeft, u_topRight, f.x);\n  vec3 bot = mix(u_bottomLeft, u_bottomRight, f.x);\n  vec3 col = mix(bot, top, f.y);\n  col += (hash(uv * iResolution + float(iFrame)) - 0.5) / 255.0;\n  fragColor = vec4(col, 1.0);\n}"
+  }
+ },
+ "summary": "I wrote `gen.corner-mesh-gradient`, a fragment layer that blends four corner colors. Motion (0–1) sets how much the gradient warps and rotates as the layer's progress goes from 0 to 1, and 0 holds it still. It hasn't been compiled or rendered: no live tools were attached, and the API docs don't list the fragment uniforms, so it assumes the shader-layer header (`uv`, `iProgress`, `iResolution`, `iFrame`, `rot`, `hash`) and `u_<key>` uniforms."
+}

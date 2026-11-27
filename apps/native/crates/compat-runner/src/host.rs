@@ -1,0 +1,6845 @@
+//! The application's extension host, one per project window. A dedicated owner
+//! thread talks to V8; the main thread only enqueues and reads published copies,
+//! so a slow, hung or failing extension can never stall AppKit (N8).
+//!
+//! The kernel is app-wide. The realm is a writer generation: rebuilding it seals
+//! the old generation and starts a new one, with a new page behind its panels.
+use crate::{
+    adapter::KernelAdapter,
+    compile::{self, ModuleGraph},
+    discovery::{self, Discovered},
+    recorder::{CanvasText, NativeHost, RealmEvents, SyncLayout},
+    store_kernel::{StoreAuthority, update_state},
+    transport::{Transport, TransportOwner},
+};
+use crate::{store_host::StoreExtension, store_runtime::StoreViews};
+use pm_compat_host::{AdmittedDomBatch, CanvasFrame, RemoteDomPanel};
+use pm_kernel::{
+    KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer,
+    state::{Registration, StateOp, StateTransaction},
+};
+use pm_remote_dom::{TrySink, protocol::Session};
+use pm_runtime_v8::*;
+use pm_store_host::adapter::StoreSession;
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
+    thread,
+    time::Duration,
+};
+
+mod export;
+
+/// Every host gets its own kernel writer; one window's retirement is its own.
+static NEXT_REALM: AtomicU32 = AtomicU32::new(1000);
+const PANEL: u64 = 1;
+const GENERATION: u32 = 1;
+/// The page document of a realm starts its own session, whatever the writer's
+/// generation: a rebuilt realm always gets a new page.
+const PAGE_SESSION: u32 = 1;
+/// A realm that fails this often in one session stays off until reopened.
+const MAX_RESTARTS: usize = 2;
+/// Admitted batches waiting for a page. Past this, batches wait in the realm,
+/// whose document coalesces them, so memory stays bounded with no page at all.
+const PAGE_QUEUE: usize = 256;
+/// How often an idle owner looks for extensions changed on disk.
+const DISK_POLL: Duration = Duration::from_secs(3);
+/// How long a synchronous layout read waits for the page, and for a page
+/// that has not started reading yet.
+const SYNC_LAYOUT_WAIT: Duration = Duration::from_millis(250);
+const SYNC_LAYOUT_FIRST_WAIT: Duration = Duration::from_secs(3);
+/// The same without a window (the headless services' page pump): no person
+/// waits on the realm, and a busy machine starts and answers a hidden page
+/// slower than a window's, so a read waits longer rather than draw a layout
+/// the page never measured.
+const HEADLESS_LAYOUT_WAIT: Duration = Duration::from_secs(5);
+const HEADLESS_LAYOUT_FIRST_WAIT: Duration = Duration::from_secs(20);
+/// Realm sources the owner holds while the realm's queue is full.
+const MAX_DEFERRED: usize = 4096;
+const TIME_MOVED: u8 = 1;
+const PLAY_MOVED: u8 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Presence {
+    Present,
+    /// Its parent directory lists and it isn't there.
+    Gone,
+    /// It can't be checked: the parent is missing or unreadable (an
+    /// unmounted volume, a permission or I/O error).
+    Unreachable,
+}
+fn folder_presence(folder: &Path) -> Presence {
+    match fs::symlink_metadata(folder) {
+        Ok(_) => return Presence::Present,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Presence::Unreachable;
+        }
+        Err(_) => {}
+    }
+    let (Some(parent), Some(name)) = (folder.parent(), folder.file_name()) else {
+        return Presence::Unreachable;
+    };
+    let Ok(listing) = fs::read_dir(parent) else {
+        return Presence::Unreachable;
+    };
+    let mut listed = false;
+    for entry in listing {
+        match entry {
+            Ok(entry) if entry.file_name() == name => listed = true,
+            Ok(_) => {}
+            Err(_) => return Presence::Unreachable,
+        }
+    }
+    if listed {
+        Presence::Unreachable
+    } else {
+        Presence::Gone
+    }
+}
+
+/// The folder an installed, not archived (Delete…) entry was published from.
+fn recorded_folder(e: &pm_kernel::state::ExtensionEntry) -> Option<&str> {
+    let record = e.source.get("hostRecord")?;
+    let archived = record.get("archived").and_then(pm_model::Value::as_bool) == Some(true);
+    (e.installed && !archived)
+        .then(|| record.get("folder")?.as_str())
+        .flatten()
+}
+/// Removes each entry in `forget` (id → the folder found gone) only while
+/// `state` still records that folder for it, no root of this host provides
+/// it, and the folder is still positively gone.
+fn forget_ops(
+    state: &pm_kernel::state::StateSnapshot,
+    forget: &BTreeMap<String, String>,
+    provided: &BTreeMap<String, PathBuf>,
+) -> Vec<StateOp> {
+    forget
+        .iter()
+        .filter(|(id, folder)| {
+            !provided.contains_key(*id)
+                && state
+                    .extensions
+                    .get(*id)
+                    .and_then(recorded_folder)
+                    .is_some_and(|f| f == folder.as_str())
+                && folder_presence(Path::new(folder.as_str())) == Presence::Gone
+        })
+        .map(|(id, _)| StateOp::RemoveExtension { id: id.clone() })
+        .collect()
+}
+
+/// Every running host's inbox; a closed one drops out on the next send.
+static HOSTS: Mutex<Vec<Sender<Input>>> = Mutex::new(Vec::new());
+/// Extensions changed on disk (an agent published, Undo restored): every
+/// window rescans now instead of at its next disk poll.
+pub fn rescan_all() {
+    HOSTS
+        .lock()
+        .unwrap()
+        .retain(|inbox| inbox.send(Input::Rescan).is_ok());
+}
+
+/// Settings uses the same per-extension recovery as the panel's Reload.
+pub fn reload_all(id: &str) {
+    HOSTS.lock().unwrap().retain(|inbox| {
+        inbox.send(Input::ReloadExtension(id.to_owned())).is_ok()
+    });
+}
+
+// Weak handles fence a window's owner without retaining or replacing its realm.
+type DefinitionBarrier = (KernelHandle, String, std::sync::Weak<Shared>, Sender<Input>);
+static DEFINITION_BARRIERS: Mutex<Vec<DefinitionBarrier>> = Mutex::new(Vec::new());
+
+/// Wait for existing owners of a document before taking a window resource pin.
+/// A windowless document with no host is started by the caller's normal loader.
+pub fn settle_document(
+    document: u64,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Publication>> {
+    let barriers = {
+        let mut all = DEFINITION_BARRIERS.lock().unwrap();
+        all.retain(|(_, _, shared, _)| shared.strong_count() > 0);
+        all.iter()
+            .filter_map(|(kernel, project, shared, inbox)| {
+                shared
+                    .upgrade()
+                    .filter(|shared| !shared.closing.load(Ordering::Acquire))
+                    .map(|shared| (kernel.clone(), project.clone(), shared, inbox.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut publication = None;
+    for (kernel, project, shared, inbox) in barriers {
+        // Windows can start their host before the project finishes opening.
+        // Resolve its document now, rather than losing that owner at startup.
+        if kernel.published(&project).is_some_and(|p| p.snapshot.doc_id == document) {
+            publication = Some(wait_definitions(&inbox, &shared, timeout, stop)?);
+        }
+    }
+    Ok(publication)
+}
+/// Wait for the same load barrier the renderer uses, then read activation
+/// records for every live owner of the isolated extension roots.
+pub fn extension_health(roots: &[PathBuf], timeout: Duration) -> Result<Vec<Value>> {
+    let owners = {
+        let mut all = DEFINITION_BARRIERS.lock().unwrap();
+        all.retain(|(_, _, shared, _)| shared.strong_count() > 0);
+        all.iter().filter_map(|(_, project, shared, inbox)| {
+            let shared = shared.upgrade()?;
+            (shared.roots == roots && !shared.closing.load(Ordering::Acquire))
+                .then(|| (project.clone(), shared, inbox.clone()))
+        }).collect::<Vec<_>>()
+    };
+    if owners.is_empty() {
+        return Err(Error::Host("There are no live extension owners for this profile.".into()));
+    }
+    let mut rows = BTreeMap::<String, Value>::new();
+    let deadline = std::time::Instant::now() + timeout;
+    for (ordinal, (project, owner, inbox)) in owners.into_iter().enumerate() {
+        let window = format!("{project}/{ordinal}");
+        wait_definitions(&inbox, &owner, deadline.saturating_duration_since(std::time::Instant::now()), &|| false)?;
+        let published = owner.published.lock().unwrap();
+        for (id, record) in &published.records {
+            let row = rows.entry(id.clone()).or_insert_with(|| json!({
+                "id":id, "version":record["manifest"]["version"], "enabled":record["enabled"],
+                "health":{}
+            }));
+            row["health"][&window] = record["health"].clone();
+        }
+        for row in rows.values_mut() {
+            if row["health"][&window].is_null() {
+                row["health"][&window] = json!({"state":"unavailable","error":"Extension was not loaded in this window"});
+            }
+        }
+    }
+    // Extensions first seen in a later owner must still have a record for
+    // the earlier owners.
+    let windows: std::collections::BTreeSet<_> = rows.values()
+        .flat_map(|row| row["health"].as_object().into_iter().flat_map(|health| health.keys().cloned()))
+        .collect();
+    for row in rows.values_mut() {
+        for window in &windows {
+            if row["health"][window].is_null() {
+                row["health"][window] = json!({"state":"unavailable","error":"Extension was not loaded in this window"});
+            }
+        }
+    }
+    Ok(rows.into_values().collect())
+}
+
+fn wait_definitions(
+    inbox: &Sender<Input>,
+    shared: &Shared,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+) -> Result<Publication> {
+    const POLL: Duration = Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + timeout;
+    let unfinished = |loading: &[(String, String)]| -> Result<()> {
+        if stop() {
+            return Err(Error::Host(WAIT_STOPPED.into()));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::Host(not_finished(loading)));
+        }
+        Ok(())
+    };
+    // Fence saved enable changes and disk reloads on the owner before
+    // reading its publication. A request immediately after Disable must
+    // not pin the definitions from before that change.
+    let (tx, rx) = mpsc::channel();
+    inbox
+        .send(Input::Sync(tx))
+        .map_err(|_| Error::Host("The extension host stopped".into()))?;
+    loop {
+        match rx.recv_timeout(POLL) {
+            Ok(()) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                unfinished(&shared.published.lock().unwrap().publication().loading)?
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Host("The extension host stopped".into()));
+            }
+        }
+    }
+    let mut published = shared.published.lock().unwrap();
+    loop {
+        if let Some(failure) = &published.failed {
+            return Err(Error::Host(failure.clone()));
+        }
+        // Ready, and nothing still loading (a Store helper, a reload).
+        if published.ready && published.publication().settled {
+            break;
+        }
+        unfinished(&published.publication().loading)?;
+        published = shared.changed.wait_timeout(published, POLL).unwrap().0;
+    }
+    // The cancel may have come as the load settled.
+    if stop() {
+        return Err(Error::Host(WAIT_STOPPED.into()));
+    }
+    Ok(published.publication())
+}
+
+pub struct HostConfig {
+    pub kernel: KernelHandle,
+    pub project: String,
+    /// Extension folders; later roots replace earlier ones.
+    pub roots: Vec<PathBuf>,
+    /// Compiled module graphs, keyed by source digest.
+    pub cache: PathBuf,
+    /// The app's clock. Every realm generation asks the same owner.
+    pub owner: Option<Arc<dyn TransportOwner>>,
+    /// Canvas text against the app's font service, built on the owner thread.
+    pub text: Option<Box<dyn Fn() -> CanvasText + Send>>,
+    /// Published state changed. Runs on any thread; must only schedule.
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+    /// The open composition rendered by the engine at a time and size, as PNG
+    /// (`render.renderFrameTo`, `PM.Export.snapshot`).
+    pub frames: Option<crate::FrameRenderer>,
+    /// The app's base rasters and override answers (`render.raster`).
+    pub rasters: Option<crate::RasterHooks>,
+    /// Values for extensions' declared `vars`.
+    pub vars: Option<crate::VarsSource>,
+    /// The app's pasteboard for `navigator.clipboard` (none: refused).
+    pub clipboard: Option<crate::TextClipboard>,
+}
+
+enum Input {
+    Kernel,
+    Sync(Sender<()>),
+    Viewport(f32, f32, f32),
+    /// Whether the person can see the window (a tab behind another cannot).
+    WindowShown(bool),
+    Realm(Writer, RealmEnvelope),
+    Moved,
+    /// The viewer presented a frame; the latest waits in `presented`.
+    Presented,
+    Run(String, Value),
+    Panel(String, bool),
+    Place(String, Option<[f32; 4]>),
+    Page(u64, Value),
+    /// A fresh page for generation `u64`: everything again (PM-509).
+    ReplayPage(u64),
+    Answer(u64, Value),
+    /// A batch of layers the viewer or an export needs override answers for:
+    /// `{needs, ask}`.
+    Rasters(u64, Value),
+    /// An export's first override: its own realm starts (`export.rs`).
+    Export(
+        String,
+        Arc<pm_kernel::Published>,
+        Arc<AtomicBool>,
+        (Sender<export::RunInput>, Receiver<export::RunInput>),
+    ),
+    /// The shell's tool and the viewer's navigation, for built-in services.
+    Shell(Value),
+    Menu(String, Value, u64),
+    StorePage(String, u64, Value),
+    StoreDom(String),
+    ReloadStore(String, Writer),
+    ReloadExtension(String),
+    Dom,
+    Canvases,
+    Health(String, Value),
+    Enabled(String, bool),
+    Booted(u32),
+    Rescan,
+    Failed(u32),
+    /// The watchdog's question about one running task, and the user's answer.
+    Unresponsive(u32, u64),
+    StopTask(u64, bool),
+    /// The realm's page settled these faces (`family|weight|italic` keys).
+    FontsLoaded(Value),
+    Close,
+}
+
+/// A contribution list is the realm's plus every confined helper's.
+fn merge_store(value: &mut Value, store: &Value) {
+    for (kind, items) in store.as_object().into_iter().flatten() {
+        if let (Some(list), Some(items)) = (value[kind.as_str()].as_array_mut(), items.as_array()) {
+            list.extend(items.iter().cloned());
+        } else if value[kind.as_str()].is_null() {
+            value[kind.as_str()] = items.clone();
+        }
+    }
+}
+
+#[derive(Default)]
+struct Published {
+    contributions: Option<Arc<Value>>,
+    records: BTreeMap<String, Value>,
+    toasts: Vec<String>,
+    /// Admitted view batches of each confined helper run, for its own page.
+    store_batches: BTreeMap<(String, u64), VecDeque<AdmittedDomBatch>>,
+    /// Questions only the main thread can answer: menus, sheets, panel reveals.
+    requests: Vec<Value>,
+    batches: VecDeque<AdmittedDomBatch>,
+    /// The latest frame of each bound canvas; a newer version replaces it.
+    canvases: BTreeMap<(u64, String), CanvasFrame>,
+    surfaces: Vec<Value>,
+    ready: bool,
+    /// Store helpers starting (id, name): their registrations are not
+    /// published yet, so nothing has settled.
+    starting: Vec<(String, String)>,
+    activations: usize,
+    /// Why no realm will finish the load (a restart that could not start,
+    /// repeated failures): what a job waiting for it is told.
+    failed: Option<String>,
+    /// The realm generation drawing now, 0 with none. Its page is keyed by this.
+    view: u64,
+    revision: u64,
+}
+impl Published {
+    fn publication(&self) -> Publication {
+        let realm = self
+            .contributions
+            .as_ref()
+            .and_then(|c| c["loading"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let id = entry["id"].as_str()?;
+                Some((
+                    id.to_owned(),
+                    entry["name"].as_str().unwrap_or(id).to_owned(),
+                ))
+            });
+        Publication {
+            native_surfaces: !self.surfaces.is_empty(),
+            revision: self.revision,
+            settled: self.starting.is_empty()
+                && match &self.contributions {
+                    Some(contributions) => contributions["settled"] != false,
+                    None => self.ready,
+                },
+            loading: self.starting.iter().cloned().chain(realm).collect(),
+            contributions: self.contributions.clone(),
+            unavailable: self.records.values().filter_map(unavailable).collect(),
+            provides: self
+                .records
+                .iter()
+                .filter_map(|(id, record)| {
+                    let ids: Vec<String> = record["provides"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|d| d.as_str().map(str::to_owned))
+                        .collect();
+                    (!ids.is_empty()).then(|| (id.clone(), ids))
+                })
+                .collect(),
+        }
+    }
+}
+/// An installed extension that provides nothing now, as (id, name, why),
+/// with `why` read after its name; `None` while it runs or loads.
+fn unavailable(record: &Value) -> Option<(String, String, String)> {
+    let id = record["id"].as_str()?;
+    let name = record["manifest"]["name"].as_str().unwrap_or(id);
+    let health = &record["health"];
+    let why = match health["state"].as_str().unwrap_or("ok") {
+        // A D11 Stop: off for this run, whatever the saved preference.
+        _ if record["enabled"] == false && health["error"] == "Stopped responding" => {
+            "is off until Powermove restarts"
+        }
+        _ if record["enabled"] == false => "is turned off",
+        "disabled" => "is turned off",
+        "runtime-error" => "stopped working",
+        "activation-error" => "couldn't start",
+        "build-error" | "manifest-error" => "couldn't be loaded",
+        "needs-trust" => "needs your permission to run",
+        "needs-update" => "needs an update",
+        "needs-setup" => "needs setting up",
+        "replaced" => "is replaced by another extension",
+        _ => return None,
+    };
+    Some((id.to_owned(), name.to_owned(), why.to_owned()))
+}
+/// What a job told its extensions did not finish starting hears: who.
+fn not_finished(loading: &[(String, String)]) -> String {
+    let mut names: Vec<&str> = vec![];
+    for (_, name) in loading {
+        if !names.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    let head = "Extensions did not finish starting";
+    match names.as_slice() {
+        [] => head.to_owned(),
+        [one] => format!("{head}: {one} is still loading"),
+        [a, b] => format!("{head}: {a} and {b} are still loading"),
+        [a, b, rest @ ..] => format!("{head}: {a}, {b} and {} more are still loading", rest.len()),
+    }
+}
+/// One moment of what a host publishes. A reader takes everything it pins
+/// from one of these: definitions read at one moment and a flag read at
+/// another could pair a finished-looking list with a load still running.
+#[derive(Clone, Debug, Default)]
+pub struct Publication {
+    /// Native v4 isolates still have to mount after their graphs load.
+    pub native_surfaces: bool,
+    pub revision: u64,
+    /// `None` until the first activation pass publishes (or with no
+    /// extension to run).
+    pub contributions: Option<Arc<Value>>,
+    /// No load pass is running: every extension has registered what it
+    /// registers, or has failed. Until then an effect the project uses that
+    /// no definition provides yet may still arrive, so it is not "not installed".
+    pub settled: bool,
+    /// The extensions still loading, as (id, name): the realm's load pass's
+    /// and the Store helpers starting. Empty once settled.
+    pub loading: Vec<(String, String)>,
+    /// Installed extensions that provide nothing now, as (id, name, why):
+    /// `why` reads after the name ("is turned off"). They are named beside
+    /// the effects they would provide.
+    pub unavailable: Vec<(String, String, String)>,
+    /// The definitions (effects, layer types, transitions) each installed
+    /// extension published when it last ran, by extension id: what an
+    /// unavailable one would provide, whatever its ids are named
+    /// (`macos-cursor` provides `macos.cursor`). Kept across launches.
+    pub provides: BTreeMap<String, Vec<String>>,
+}
+
+struct Shared {
+    roots: Vec<PathBuf>,
+    /// Set by `ExtensionHost::close` itself: an owner still waiting for
+    /// isolate admission (its boot or the Svelte compiler) stops waiting
+    /// at once, before it could read the queued close.
+    closing: AtomicBool,
+    watchdog: Mutex<Option<(u64, Realm)>>,
+    published: Mutex<Published>,
+    changed: Condvar,
+    /// What the confined helpers registered, in contribution-list form.
+    store: Mutex<Value>,
+    sessions: Mutex<BTreeMap<String, StoreSession>>,
+    /// The generation whose page is reading batches. Canvases encode only for it.
+    reader: AtomicU64,
+    /// Its pages are shown without a window (the headless services' page
+    /// pump): an export waits for its page as in a window, and a layout read
+    /// waits the headless waits.
+    paged: AtomicBool,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// Running exports' realms and their pages.
+    exports: Mutex<export::Exports>,
+    /// The window's effect clipboard, for every realm generation.
+    effects: crate::EffectsSlot,
+    /// Every value handed to an extension in this run (see [`Self::hide`]).
+    handed: Mutex<BTreeSet<String>>,
+}
+/// What stands for a value in text the host records.
+const HIDDEN: &str = "[hidden value]";
+impl Shared {
+    /// Values now in extensions' hands: `staged` is `{id: {key: value}}`.
+    /// Shorter than four characters they are not told apart from prose.
+    fn handed(&self, staged: &Value) {
+        let mut handed = self.handed.lock().unwrap();
+        for values in staged.as_object().into_iter().flat_map(|all| all.values()) {
+            let values = values.as_object().into_iter().flat_map(|v| v.values());
+            handed.extend(
+                values
+                    .filter_map(Value::as_str)
+                    .filter(|value| value.chars().count() >= 4)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    /// `text` an extension supplied (an error, a notice) as the host records
+    /// it: any value handed to an extension is hidden, so an extension that
+    /// throws or says its own key does not publish it to Settings, other
+    /// extensions, the saved state or a trace.
+    fn hide(&self, text: &str) -> String {
+        let handed = self.handed.lock().unwrap();
+        // Longest first: a value that contains another is hidden whole.
+        let mut values: Vec<&String> = handed.iter().filter(|v| text.contains(*v)).collect();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values
+            .into_iter()
+            .fold(text.to_owned(), |text, value| text.replace(value, HIDDEN))
+    }
+    /// [`Self::hide`] for every string of a health entry.
+    fn hide_health(&self, mut health: Value) -> Value {
+        for value in health
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|h| h.values_mut())
+        {
+            if let Some(text) = value.as_str() {
+                *value = Value::String(self.hide(text));
+            }
+        }
+        health
+    }
+    fn update(&self, change: impl FnOnce(&mut Published)) {
+        {
+            let mut published = self.published.lock().unwrap();
+            change(&mut published);
+            published.revision += 1;
+        }
+        self.changed.notify_all();
+        (self.wake)();
+    }
+}
+
+/// The extensions a project draws with, by every `type` (an effect's, a
+/// layer's) in its compositions and layers: an effect's type is often its
+/// extension's id itself (`progressive-blur`), else `<extension>.<name>`
+/// (`deep-glow.effect`). Reading only the second form left most of a real
+/// project's extensions loading in name order (PM-384).
+fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
+    use pm_model::NodeKind;
+    let mut used = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            NodeKind::Object(map) => {
+                for (key, value) in map.iter() {
+                    if key.as_str() == Some("type")
+                        && let NodeKind::String(ty) = value.kind()
+                        && let Some(ty) = ty.as_str()
+                    {
+                        let extension = ty.split_once('.').map_or(ty, |(extension, _)| extension);
+                        used.insert(extension.to_owned());
+                    }
+                    // Keyframes and values hold no types: not walked.
+                    if !matches!(key.as_str(), Some("kf" | "p" | "v" | "d" | "assets")) {
+                        stack.push(value);
+                    }
+                }
+            }
+            NodeKind::Array(items) => stack.extend(items.iter()),
+            _ => {}
+        }
+    }
+    used
+}
+
+/// Native surfaces read these registries: Effects, Properties, MCP and the kernel's
+/// layer commands see a contribution exactly as they see a built-in.
+fn registrations(value: &Value, owner: Writer, project: &str) -> Vec<StateOp> {
+    let mut ops = vec![StateOp::DisposeOwner { owner }];
+    for (kind, registry) in [
+        ("effects", "effects"),
+        ("transitions", "transitions"),
+        ("layers", "layerTypes"),
+        ("panels", "panels"),
+        ("commands", "commands"),
+        ("inspector", "inspectorSections"),
+        ("themes", "themes"),
+        ("status", "status"),
+    ] {
+        for item in value[kind].as_array().into_iter().flatten() {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
+            let Ok(definition) = pm_model::json::parse(&item.to_string()) else {
+                continue;
+            };
+            ops.push(StateOp::Register {
+                registry: registry.into(),
+                entry: Registration {
+                    project: Some(project.into()),
+                    token: format!("{}.{}.{registry}.{id}", owner.realm, owner.generation),
+                    owner,
+                    id: id.into(),
+                    definition,
+                },
+            });
+        }
+    }
+    ops
+}
+
+struct Events {
+    shared: Arc<Shared>,
+    kernel: KernelHandle,
+    writer: Writer,
+    project: String,
+    inbox: Sender<Input>,
+    /// The extension whose activation is on the stack, for failure attribution.
+    activating: Mutex<Option<String>>,
+    /// Synchronous layout reads and the page's answers to them.
+    measuring: Mutex<Measures>,
+    /// A read already waited for a page that never started reading.
+    page_missed: AtomicBool,
+    dom_pending: AtomicBool,
+    canvas_pending: AtomicBool,
+}
+/// The declared keys that have a value, as the shipped loader delivered them.
+pub(crate) fn vars_of(source: Option<&crate::VarsSource>, id: &str, keys: &[String]) -> Value {
+    let Some(source) = source.filter(|_| !keys.is_empty()) else {
+        return json!({});
+    };
+    let values: serde_json::Map<String, Value> = source(id, keys)
+        .into_iter()
+        .filter(|(key, value)| keys.contains(key) && !value.is_empty())
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect();
+    Value::Object(values)
+}
+/// The keys an extension's manifest declares, as the host read it from disk.
+pub(crate) fn declared_keys(manifest: &Value) -> Vec<String> {
+    manifest["vars"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|decl| decl["key"].as_str().map(str::to_owned))
+        .collect()
+}
+/// What a trusted realm's load receives: for each of `records` that
+/// declares keys, the declared keys that have a value. Chosen here, by the
+/// host, from the manifests it read; the realm selects nothing.
+pub(crate) fn staged_vars(source: Option<&crate::VarsSource>, records: &Value) -> Value {
+    let mut all = serde_json::Map::new();
+    for record in records.as_array().into_iter().flatten() {
+        let Some(id) = record["id"].as_str() else {
+            continue;
+        };
+        let values = vars_of(source, id, &declared_keys(&record["manifest"]));
+        if values.as_object().is_some_and(|values| !values.is_empty()) {
+            all.insert(id.to_owned(), values);
+        }
+    }
+    Value::Object(all)
+}
+impl RealmEvents for Arc<Events> {
+    fn health(&self, id: &str, health: &Value) {
+        let _ = self
+            .inbox
+            .send(Input::Health(id.to_owned(), health.clone()));
+    }
+    fn toast(&self, text: &str, _: &Value) {
+        let text = self.shared.hide(text);
+        self.shared.update(|p| p.toasts.push(text));
+    }
+    fn request(&self, request: Value) {
+        self.shared.update(|p| p.requests.push(request));
+    }
+    fn set_enabled(&self, id: &str, enabled: bool) {
+        let _ = self.inbox.send(Input::Enabled(id.to_owned(), enabled));
+    }
+    fn contributions(&self, mut value: Value) {
+        drop(self.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: registrations(&value, self.writer, &self.project),
+        }));
+        merge_store(&mut value, &self.shared.store.lock().unwrap());
+        self.shared
+            .update(|p| p.contributions = Some(Arc::new(value)));
+    }
+    fn dom_ready(&self) {
+        if !self.dom_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.inbox.send(Input::Dom);
+        }
+    }
+    fn canvases_ready(&self) {
+        if !self.canvas_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.inbox.send(Input::Canvases);
+        }
+    }
+    fn ready(&self) {
+        let _ = self.inbox.send(Input::Booted(self.writer.generation));
+    }
+    fn activating(&self, id: Option<&str>) {
+        *self.activating.lock().unwrap() = id.map(str::to_owned);
+    }
+    fn unresponsive(&self, execution: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Unresponsive(self.writer.generation, execution));
+    }
+    /// The owner routes the page's answer here (`Owner::page`) while the
+    /// realm waits; the main thread never waits for it.
+    fn measure_sync(&self, request: u64, _answering: bool) -> SyncLayout {
+        let rx = match self.measuring.lock().unwrap().wait(request) {
+            Ok(answer) => return SyncLayout::Answer(answer),
+            Err(rx) => rx,
+        };
+        self.dom_ready();
+        // A page still loading (the window just opened) answers once it
+        // starts reading; a read answered with nothing would be remembered
+        // by the extension as the layout.
+        // Without a window or a page pump no page ever comes: only one read
+        // waits.
+        let reading =
+            self.shared.reader.load(Ordering::Acquire) == u64::from(self.writer.generation);
+        let missed = self.page_missed.load(Ordering::Acquire);
+        let headless = self.shared.paged.load(Ordering::Acquire);
+        let wait = match (reading, missed, headless) {
+            (false, true, _) => Duration::ZERO,
+            (false, false, false) => SYNC_LAYOUT_FIRST_WAIT,
+            (false, false, true) => HEADLESS_LAYOUT_FIRST_WAIT,
+            (true, _, false) => SYNC_LAYOUT_WAIT,
+            (true, _, true) => HEADLESS_LAYOUT_WAIT,
+        };
+        let answer = rx.recv_timeout(wait);
+        self.measuring.lock().unwrap().waiting = None;
+        match answer {
+            Ok(answer) => SyncLayout::Answer(answer),
+            Err(_) if reading => SyncLayout::TimedOut,
+            Err(_) => {
+                self.page_missed.store(true, Ordering::Release);
+                SyncLayout::NoPage
+            }
+        }
+    }
+}
+
+/// The first extension entries this process publishes drop the last run's
+/// D11 stops.
+static FIRST_ENTRIES: AtomicBool = AtomicBool::new(true);
+/// Whether D11 Stop turned the extension off for this run.
+/// Synchronous layout reads: the read waiting for the page, and answers that
+/// came before their read started waiting (the request goes out with the
+/// realm's batch first, so the page can answer before the wait begins).
+#[derive(Default)]
+struct Measures {
+    waiting: Option<(u64, std::sync::mpsc::SyncSender<Value>)>,
+    early: VecDeque<(u64, Value)>,
+}
+impl Measures {
+    /// The answer, when it is already here; else where it will arrive.
+    fn wait(
+        &mut self,
+        request: u64,
+    ) -> std::result::Result<Value, std::sync::mpsc::Receiver<Value>> {
+        if let Some(index) = self.early.iter().position(|(r, _)| *r == request) {
+            return Ok(self.early.remove(index).unwrap().1);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.waiting = Some((request, tx));
+        Err(rx)
+    }
+    fn answer(&mut self, request: u64, message: &Value) {
+        match &self.waiting {
+            Some((waiting, reply)) if *waiting == request => {
+                let _ = reply.try_send(message.clone());
+            }
+            _ => {
+                // Only the latest few: a read waits for its own, just sent.
+                if self.early.len() >= 8 {
+                    self.early.pop_front();
+                }
+                self.early.push_back((request, message.clone()));
+            }
+        }
+    }
+}
+
+/// A confined helper's views: its batches wait here for the owner to admit them.
+struct ViewEvents {
+    id: String,
+    owner: Writer,
+    shared: Arc<Shared>,
+    inbox: Sender<Input>,
+    pending: Mutex<VecDeque<Value>>,
+    /// A batch was refused; the helper's document holds it until asked again.
+    refused: AtomicBool,
+}
+impl StoreViews for ViewEvents {
+    fn batch(&self, batch: Value) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.len() >= 64 {
+            self.refused.store(true, Ordering::Release);
+            return false;
+        }
+        pending.push_back(batch);
+        let _ = self.inbox.send(Input::StoreDom(self.id.clone()));
+        true
+    }
+    fn reload(&self) {
+        let _ = self.inbox.send(Input::ReloadStore(self.id.clone(), self.owner));
+    }
+    fn panel(&self, id: &str, open: bool) {
+        let request = json!({"kind":"panel","id":id,"open":open});
+        self.shared.update(|p| p.requests.push(request));
+    }
+}
+
+/// Bounded handoff to AppKit: a full queue is backpressure, never a dropped batch.
+struct PageQueue<'a>(&'a Shared);
+struct StorePageQueue<'a>(&'a Shared, (String, u64));
+impl TrySink<AdmittedDomBatch> for StorePageQueue<'_> {
+    fn try_send(
+        &mut self,
+        batch: AdmittedDomBatch,
+    ) -> std::result::Result<(), pm_remote_dom::Error> {
+        let mut published = self.0.published.lock().unwrap();
+        let queue = published.store_batches.entry(self.1.clone()).or_default();
+        if queue.len() >= PAGE_QUEUE {
+            return Err(pm_remote_dom::Error::Backpressure);
+        }
+        queue.push_back(batch);
+        drop(published);
+        (self.0.wake)();
+        Ok(())
+    }
+}
+impl TrySink<AdmittedDomBatch> for PageQueue<'_> {
+    fn try_send(
+        &mut self,
+        batch: AdmittedDomBatch,
+    ) -> std::result::Result<(), pm_remote_dom::Error> {
+        let mut published = self.0.published.lock().unwrap();
+        if published.batches.len() >= PAGE_QUEUE {
+            return Err(pm_remote_dom::Error::Backpressure);
+        }
+        published.batches.push_back(batch);
+        Ok(())
+    }
+}
+
+/// Override asks for one realm. While the realm waits for a capture of its own
+/// project, they go to that wait (it answers inline); otherwise to its inbox.
+#[derive(Clone)]
+pub struct RasterInbox {
+    inbox: Arc<Mutex<Sender<Input>>>,
+    native: Arc<Mutex<Option<Arc<NativeHost>>>>,
+    shared: Arc<Shared>,
+}
+impl RasterInbox {
+    /// `needs`: `[{composition, layer, seconds, scale, crop?}]`; `ask`:
+    /// `{revision}` (viewer) or `{job}` (an export started with
+    /// [`Self::export`]). Answered through `RasterHooks::answers` with `batch`.
+    pub fn ask(&self, batch: u64, needs: Value, ask: Value) {
+        if let Some(job) = ask["job"].as_str() {
+            let route = self.shared.exports.lock().unwrap().route(job);
+            if let Some((inbox, capturing)) = route {
+                // A capture its realm waits for: answered inline there.
+                let wire = json!({"needs": needs, "ask": {}});
+                let pending = match capturing {
+                    Some(host) => host.nested_ask(batch, wire).err(),
+                    None => Some(wire),
+                };
+                if let Some(wire) = pending {
+                    let _ = inbox.send(export::RunInput::Ask(batch, wire["needs"].clone()));
+                }
+            } else if let Some(native) = self.native.lock().unwrap().clone() {
+                // A capture the window's realm waits for (`export` kept no
+                // route for it): answered inline there; otherwise the job is over.
+                let _ = native.nested_ask(batch, json!({"needs": needs, "ask": {}}));
+            }
+            return;
+        }
+        let wire = json!({"needs": needs, "ask": ask});
+        let native = self.native.lock().unwrap().clone();
+        let wire = match native {
+            Some(native) => match native.nested_ask(batch, wire) {
+                Ok(()) => return,
+                Err(wire) => wire,
+            },
+            None => wire,
+        };
+        let _ = self.inbox.lock().unwrap().send(Input::Rasters(batch, wire));
+    }
+    /// Steps export `job`'s realm has taken and what it waits for
+    /// ([`export::ExportProgress`]), while it runs.
+    pub fn export_progress(&self, job: &str) -> Option<(u64, String)> {
+        let progress = self.shared.exports.lock().unwrap().progress(job)?;
+        Some(progress.read())
+    }
+    /// The export `job` froze `published`: its overrides are answered by a
+    /// realm of its own (`export.rs`), started now, until `cancel` is set
+    /// (the export ended) or the window's extensions stop.
+    pub fn export(
+        &self,
+        job: &str,
+        published: Arc<pm_kernel::Published>,
+        cancel: Arc<AtomicBool>,
+    ) -> std::result::Result<(), String> {
+        // A capture the window's realm is waiting for, at its own revision
+        // (`renderFrameTo`, a snapshot): that realm answers inline.
+        let native = self.native.lock().unwrap().clone();
+        if native.and_then(|n| n.capturing_at())
+            == Some((published.snapshot.doc_id, published.revision()))
+        {
+            return Ok(());
+        }
+        let mut exports = self.shared.exports.lock().unwrap();
+        let at = (published.snapshot.doc_id, published.revision());
+        if exports.inbox(job).is_some() || exports.adopt_capture(job, at) {
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::channel();
+        exports.insert(
+            job.to_owned(),
+            export::Route {
+                inbox: tx.clone(),
+                view: export::next_view(),
+                batches: VecDeque::new(),
+                host: None,
+                progress: Arc::default(),
+            },
+        );
+        drop(exports);
+        // The window makes the realm's page when it next looks.
+        (self.shared.wake)();
+        self.inbox
+            .lock()
+            .unwrap()
+            .send(Input::Export(job.to_owned(), published, cancel, (tx, rx)))
+            .map_err(|_| {
+                self.shared.exports.lock().unwrap().remove(job);
+                "The project's extensions stopped".to_owned()
+            })
+    }
+}
+
+/// What [`ExtensionHost::wait_contributions`] answers when its caller stopped it.
+pub const WAIT_STOPPED: &str = "The wait for extensions was stopped";
+
+/// Opt-in load timings on stderr (`PM_NATIVE_MAIN_TRACE=1`), seconds since
+/// this process's first trace line.
+pub(crate) fn trace(value: Value) {
+    static ON: std::sync::LazyLock<Option<std::time::Instant>> = std::sync::LazyLock::new(|| {
+        (std::env::var("PM_NATIVE_MAIN_TRACE").as_deref() == Ok("1")).then(std::time::Instant::now)
+    });
+    if let Some(start) = *ON {
+        let mut value = value;
+        value["s"] = json!((start.elapsed().as_secs_f64() * 1000.).round() / 1000.);
+        value["w"] = json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64)
+        );
+        eprintln!("PM_EXT {value}");
+    }
+}
+
+pub struct ExtensionHost {
+    inbox: Sender<Input>,
+    shared: Arc<Shared>,
+    transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
+    moved: Arc<AtomicU8>,
+    presented: Arc<Mutex<Option<Value>>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+/// Extra roots are private to one document and live only as long as its
+/// extension hosts. An excluded id cannot fall back to a Library version.
+#[derive(Clone, Default)]
+pub struct ProjectScope {
+    pub root: Option<Arc<tempfile::TempDir>>,
+    pub installed: BTreeSet<String>,
+    pub excluded: BTreeSet<String>,
+}
+impl ProjectScope {
+    pub fn roots(&self, library: &[PathBuf]) -> Vec<PathBuf> {
+        library
+            .iter()
+            .cloned()
+            .chain(self.root.iter().map(|root| root.path().to_owned()))
+            .collect()
+    }
+    fn scan(&self, library: &[PathBuf]) -> Vec<Discovered> {
+        discovery::scan(&self.roots(library))
+            .into_iter()
+            .filter(|found| !self.excluded.contains(&found.id))
+            .collect()
+    }
+}
+impl ExtensionHost {
+    pub fn start(config: HostConfig) -> Self {
+        Self::start_scoped(config, ProjectScope::default())
+    }
+    pub fn start_scoped(mut config: HostConfig, scope: ProjectScope) -> Self {
+        if let Some(vars) = config.vars.take() {
+            let installed = scope.installed.clone();
+            config.vars = Some(Arc::new(move |id, keys| {
+                if installed.contains(id) {
+                    Default::default()
+                } else {
+                    vars(id, keys)
+                }
+            }));
+        }
+        let (inbox, input) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            roots: config.roots.clone(),
+            published: Mutex::default(),
+            changed: Condvar::new(),
+            closing: AtomicBool::new(false),
+            watchdog: Mutex::default(),
+            store: Mutex::new(json!({})),
+            sessions: Mutex::default(),
+            reader: AtomicU64::new(0),
+            paged: AtomicBool::new(false),
+            wake: config.wake.clone(),
+            exports: Mutex::default(),
+            effects: Arc::default(),
+            handed: Mutex::default(),
+        });
+        let transport = Arc::new(Mutex::new(None));
+        let moved = Arc::new(AtomicU8::new(0));
+        let presented = Arc::new(Mutex::new(None));
+        let writer = Writer {
+            realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
+            generation: GENERATION,
+        };
+        forward_kernel(&config.kernel, inbox.clone());
+        forward_mailbox(&config.kernel, writer, inbox.clone());
+        HOSTS.lock().unwrap().push(inbox.clone());
+        DEFINITION_BARRIERS.lock().unwrap().push((
+            config.kernel.clone(),
+            config.project.clone(),
+            Arc::downgrade(&shared),
+            inbox.clone(),
+        ));
+
+        let owner = Owner {
+            writer,
+            retired: false,
+            stores: vec![],
+            confined: BTreeMap::new(),
+            open: BTreeMap::new(),
+            viewport: None,
+            window_hidden: false,
+            shared: shared.clone(),
+            inbox: inbox.clone(),
+            transport: transport.clone(),
+            moved: moved.clone(),
+            presented: presented.clone(),
+            shell: serde_json::Map::new(),
+            restarts: 0,
+            asking: None,
+            asking_culprit: None,
+            running: None,
+            realm: None,
+            router: None,
+            records: vec![],
+            folders: BTreeMap::new(),
+            vanishing: BTreeMap::new(),
+            canvases: BTreeMap::new(),
+            dom_waiting: VecDeque::new(),
+            deferred: VecDeque::new(),
+            paced_moved: Paced::default(),
+            paced_presented: Paced::default(),
+            disk: 0,
+            store_revision: None,
+            closing: Arc::default(),
+            config,
+            scope,
+        };
+        let worker = thread::Builder::new()
+            .name("pm-compat-host".into())
+            .spawn(move || owner.run(input))
+            .expect("compat host thread");
+        Self {
+            inbox,
+            shared,
+            transport,
+            moved,
+            presented,
+            worker: Some(worker),
+        }
+    }
+    /// Latest contributions, or `None` until the first activation pass finishes.
+    pub fn contributions(&self) -> Option<Arc<Value>> {
+        self.shared.published.lock().unwrap().contributions.clone()
+    }
+    /// A worker's definition pin after activation, including confined Store
+    /// helpers. No DOM page or AppKit is needed. Never deliver a partial boot.
+    /// `stop` (a cancelled export, a stopped capture) ends the wait at once;
+    /// a load no realm will finish ends it with that failure, by name.
+    pub fn wait_contributions(
+        &self,
+        timeout: Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(u64, Arc<Value>)> {
+        let publication = wait_definitions(&self.inbox, &self.shared, timeout, stop)?;
+        Ok((
+            publication.revision,
+            publication
+                .contributions
+                .unwrap_or_else(|| Arc::new(json!({}))),
+        ))
+    }
+    pub fn is_ready(&self) -> bool {
+        self.shared.published.lock().unwrap().ready
+    }
+    /// What the host publishes now, read at one moment: definitions are only
+    /// ever paired with the flag and the names published with them.
+    pub fn publication(&self) -> Publication {
+        self.shared.published.lock().unwrap().publication()
+    }
+    /// The realm generation drawing now, 0 with none. A page belongs to one
+    /// generation: when this moves, that page is finished.
+    pub fn view(&self) -> u64 {
+        self.shared.published.lock().unwrap().view
+    }
+    pub fn records(&self) -> Vec<Value> {
+        let published = self.shared.published.lock().unwrap();
+        published.records.values().cloned().collect()
+    }
+    /// Reads the records in place, without the copy `records` makes (each
+    /// a whole manifest): for callers that look at a few fields on every
+    /// frame. `read` runs under the host's lock: keep it short.
+    pub fn read_records<R>(&self, read: impl FnOnce(&mut dyn Iterator<Item = &Value>) -> R) -> R {
+        let published = self.shared.published.lock().unwrap();
+        read(&mut published.records.values())
+    }
+    /// Enabled v4 surface extensions with their compiled graphs.
+    pub fn surfaces(&self) -> Vec<Value> {
+        self.shared.published.lock().unwrap().surfaces.clone()
+    }
+    pub fn take_toasts(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().toasts)
+    }
+    pub fn take_store_batches(&self, id: &str, view: u64) -> VecDeque<AdmittedDomBatch> {
+        let mut published = self.shared.published.lock().unwrap();
+        let taken = published
+            .store_batches
+            .remove(&(id.to_owned(), view))
+            .unwrap_or_default();
+        drop(published);
+        // Room again: whatever was held back can move.
+        if !taken.is_empty() {
+            let _ = self.inbox.send(Input::StoreDom(id.to_owned()));
+        }
+        taken
+    }
+    pub fn return_store_batches(&self, id: &str, view: u64, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut published = self.shared.published.lock().unwrap();
+        let queue = published
+            .store_batches
+            .entry((id.to_owned(), view))
+            .or_default();
+        rest.append(queue);
+        *queue = rest;
+    }
+    /// What a Store page needs: its data store and permissions.
+    pub fn store_session(&self, id: &str) -> Option<StoreSession> {
+        self.shared.sessions.lock().unwrap().get(id).cloned()
+    }
+    /// Feedback from the page of one helper run; a later run ignores it.
+    pub fn store_page_sink(&self, id: &str, view: u64) -> impl Fn(Value) + Send + 'static + use<> {
+        let (inbox, id) = (self.inbox.clone(), id.to_owned());
+        move |message| {
+            let _ = inbox.send(Input::StorePage(id.clone(), view, message));
+        }
+    }
+    pub fn take_requests(&self) -> Vec<Value> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().requests)
+    }
+    pub fn answer(&self, token: u64, value: Value) {
+        let _ = self.inbox.send(Input::Answer(token, value));
+    }
+    /// The reported execution, if the realm is still running it.
+    pub fn unresponsive_execution(&self) -> Option<u64> {
+        let report = self.shared.watchdog.lock().unwrap();
+        let (id, realm) = report.as_ref()?;
+        realm.active_execution().filter(|active| active.execution == *id).map(|_| *id)
+    }
+    /// The answer to an `unresponsive` request: stop that task (the realm is
+    /// rebuilt without the extension that was activating), or keep waiting.
+    pub fn answer_unresponsive(&self, execution: u64, stop: bool) {
+        let _ = self.inbox.send(Input::StopTask(execution, stop));
+    }
+    /// The window's effect clipboard for its extensions' inspector service.
+    pub fn set_effects(&self, hook: Option<crate::EffectsHook>) {
+        *self.shared.effects.lock().unwrap() = hook;
+    }
+    /// The shell's current tool (`{tool}`) or viewer navigation
+    /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
+    pub fn shell_state(&self, state: Value) {
+        let _ = self.inbox.send(Input::Shell(state));
+    }
+    /// The viewer presented a frame (`{time, version, quality, viewport}`):
+    /// the realm hears `frame:rendered`, then redraws `overlay`. Cheap enough
+    /// for every frame; a busy realm hears only the latest.
+    pub fn frame_presented(&self, frame: Value) {
+        if self.presented.lock().unwrap().replace(frame).is_none() {
+            let _ = self.inbox.send(Input::Presented);
+        }
+    }
+    /// Where override asks for this realm go, from any thread.
+    pub fn raster_inbox(&self) -> RasterInbox {
+        RasterInbox {
+            inbox: Arc::new(Mutex::new(self.inbox.clone())),
+            native: self.transport.clone(),
+            shared: self.shared.clone(),
+        }
+    }
+    /// Running exports' realms (job, view): each gets a hidden page in the
+    /// window for the layout reads its overrides make.
+    pub fn export_pages(&self) -> Vec<(String, u64)> {
+        self.shared.exports.lock().unwrap().pages()
+    }
+    pub fn take_export_batches(&self, job: &str) -> VecDeque<AdmittedDomBatch> {
+        let mut exports = self.shared.exports.lock().unwrap();
+        let taken = exports.batches(job).map(std::mem::take).unwrap_or_default();
+        if let Some(inbox) = exports.inbox(job) {
+            let _ = inbox.send(export::RunInput::Dom);
+        }
+        taken
+    }
+    pub fn return_export_batches(&self, job: &str, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut exports = self.shared.exports.lock().unwrap();
+        if let Some(queue) = exports.batches(job) {
+            rest.append(queue);
+            *queue = rest;
+        }
+    }
+    /// The page under `key` (`""`: the window's realm; `export:<job>`: an
+    /// export's) settled the faces `keys` (loaded, or failed to load).
+    pub fn fonts_loaded(&self, key: &str, keys: Value) {
+        match key.strip_prefix("export:") {
+            None => {
+                let _ = self.inbox.send(Input::FontsLoaded(keys));
+            }
+            Some(job) => {
+                if let Some(inbox) = self.shared.exports.lock().unwrap().inbox(job) {
+                    let _ = inbox.send(export::RunInput::FontsLoaded(keys));
+                }
+            }
+        }
+    }
+    /// Something other than a window shows this host's pages (the headless
+    /// services' page pump), so an export's page will come: the export waits
+    /// for it before drawing, as in a window, instead of measuring nothing.
+    pub fn pages_shown_without_a_window(&self) {
+        self.shared.paged.store(true, Ordering::Release);
+    }
+    /// Feedback from an export realm's page, on a forwarding thread.
+    pub fn export_page_sink(&self, job: &str) -> impl Fn(Value) + Send + 'static + use<> {
+        let inbox = self.shared.exports.lock().unwrap().inbox(job);
+        move |message| {
+            if let Some(inbox) = &inbox {
+                let _ = inbox.send(export::RunInput::Page(message));
+            }
+        }
+    }
+    /// One menu from several locations: `[[location, context], ...]`, gathered
+    /// in order and answered once with every contribution.
+    pub fn gather_menus(&self, pairs: Vec<Value>, key: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Menu(String::new(), Value::Array(pairs), key));
+    }
+    /// Contributions for one open menu. A `key` keeps the reply tied to it.
+    pub fn gather_menu(&self, location: &str, context: Value, key: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Menu(location.to_owned(), context, key));
+    }
+    /// Admitted batches of generation `view` for `AdmittedDomBatch::present`,
+    /// oldest first. Keep the front of a failed presentation and return the rest.
+    pub fn take_batches(&self, view: u64) -> VecDeque<AdmittedDomBatch> {
+        let mut published = self.shared.published.lock().unwrap();
+        let taken = if published.view == view {
+            std::mem::take(&mut published.batches)
+        } else {
+            VecDeque::new()
+        };
+        drop(published);
+        // A first reader wants canvases; a drained queue has room for more.
+        if self.shared.reader.swap(view, Ordering::AcqRel) != view || !taken.is_empty() {
+            let _ = self.inbox.send(Input::Dom);
+        }
+        taken
+    }
+    pub fn return_batches(&self, view: u64, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut published = self.shared.published.lock().unwrap();
+        if published.view == view {
+            rest.append(&mut published.batches);
+            published.batches = rest;
+        }
+    }
+    pub fn take_canvases(&self) -> Vec<CanvasFrame> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().canvases)
+            .into_values()
+            .collect()
+    }
+    pub fn run_command(&self, id: &str, args: Value) {
+        let _ = self.inbox.send(Input::Run(id.to_owned(), args));
+    }
+    pub fn set_panel(&self, id: &str, open: bool) {
+        let _ = self.inbox.send(Input::Panel(id.to_owned(), open));
+    }
+    /// The window made its page of generation `view` again: the realm sends
+    /// its whole document and every canvas to it (PM-509).
+    pub fn replay_page(&self, view: u64) {
+        let _ = self.inbox.send(Input::ReplayPage(view));
+    }
+    /// Feedback from the page of generation `view`. Called on a forwarding
+    /// thread; a later generation ignores it.
+    pub fn page_sink(&self, view: u64) -> impl Fn(Value) + Send + 'static + use<> {
+        let inbox = self.inbox.clone();
+        move |message| {
+            let _ = inbox.send(Input::Page(view, message));
+        }
+    }
+    /// Window position of a contributed panel's root, in points. `None` is a
+    /// tab behind another: open, kept, and neither painted nor hit.
+    pub fn place_panel(&self, id: &str, rect: Option<[f32; 4]>) {
+        let _ = self.inbox.send(Input::Place(id.to_owned(), rect));
+    }
+    /// The editor window's viewport, for v1–3's `window.innerWidth` & co.
+    pub fn set_viewport(&self, width: f32, height: f32, scale: f32) {
+        let _ = self.inbox.send(Input::Viewport(width, height, scale));
+    }
+    /// Whether the person can see the window: a tab behind another cannot, and
+    /// its extension panels count as not showing (they get no animation
+    /// frames) until it is selected.
+    pub fn set_window_shown(&self, shown: bool) {
+        let _ = self.inbox.send(Input::WindowShown(shown));
+    }
+    /// The app's clock moved. Cheap enough for every presented frame.
+    pub fn publish_time(&self, time: f64, playing: bool) {
+        if let Some(host) = &*self.transport.lock().unwrap() {
+            let (time_moved, play_moved) = host.transport().publish(time, playing);
+            let moved = (if time_moved { TIME_MOVED } else { 0 })
+                | (if play_moved { PLAY_MOVED } else { 0 });
+            // One message at a time; what it reports accumulates until it runs.
+            if moved != 0 && self.moved.fetch_or(moved, Ordering::AcqRel) == 0 {
+                let _ = self.inbox.send(Input::Moved);
+            }
+        }
+    }
+    pub fn close(&mut self) {
+        // Read at once by a boot still waiting for admission (it cannot read
+        // the inbox until its boot returns).
+        self.shared.closing.store(true, Ordering::Release);
+        let _ = self.inbox.send(Input::Close);
+        if let Some(worker) = self.worker.take() {
+            // The owner stops V8 and exits; joined off the main thread.
+            thread::spawn(move || {
+                let _ = worker.join();
+            });
+        }
+    }
+}
+impl Drop for ExtensionHost {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn forward_kernel(kernel: &KernelHandle, inbox: Sender<Input>) {
+    let events = kernel.subscribe();
+    thread::spawn(move || {
+        while let Ok(event) = events.recv() {
+            let relevant = matches!(
+                event,
+                KernelEvent::Published { .. }
+                    | KernelEvent::SelectionChanged { .. }
+                    | KernelEvent::WorkspaceChanged { .. }
+                    | KernelEvent::StateChanged { .. }
+            );
+            if relevant && inbox.send(Input::Kernel).is_err() {
+                break;
+            }
+        }
+    });
+}
+/// Ends when the kernel retires this generation's mailbox.
+fn forward_mailbox(kernel: &KernelHandle, writer: Writer, inbox: Sender<Input>) {
+    let mailbox = kernel.register_realm(writer);
+    thread::spawn(move || {
+        while let Ok(envelope) = mailbox.recv() {
+            if inbox.send(Input::Realm(writer, envelope)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn watchdog_can_ask(execution: u64, asking: Option<u64>) -> bool {
+    asking != Some(execution)
+}
+
+fn watchdog_after_answer(asking: Option<u64>, stop: bool) -> Option<u64> {
+    asking.filter(|_| !stop)
+}
+
+#[cfg(test)]
+#[test]
+fn watchdog_asks_once_per_unresponsive_execution_even_after_wait() {
+    assert!(watchdog_can_ask(1, None));
+    assert!(!watchdog_can_ask(1, Some(1)));
+    // Wait dismisses the sheet without clearing the host's last asked task.
+    assert!(!watchdog_can_ask(1, watchdog_after_answer(Some(1), false)));
+    assert!(watchdog_can_ask(2, Some(1)));
+}
+
+struct Live {
+    realm: Realm,
+    pool: RuntimePool,
+    host: Arc<NativeHost>,
+    events: Arc<Events>,
+}
+struct StoreLive {
+    owner: Writer,
+    /// The source this helper runs: a rescan restarts it only when this moves.
+    hash: String,
+    extension: StoreExtension,
+    views: Arc<ViewEvents>,
+    authority: Arc<dyn StoreAuthority>,
+}
+/// A notice the realm hears on every frame (the clock moved, a frame was
+/// presented). The next goes only once the realm has run the last: a realm
+/// slower than the frames would otherwise queue them faster than it runs
+/// them, and everything else asked of it (a viewer's raster batch, a
+/// panel's command) would wait behind seconds of stale notices. The newest
+/// waits in its slot (`Owner::moved`, `Owner::presented`) meanwhile.
+#[derive(Default)]
+struct Paced(Option<(std::time::Instant, Ticket<Evaluation>)>);
+impl Paced {
+    /// Whether the last notice is still running (never, unpaced: the
+    /// comparison runs keep the old behaviour behind `PM_REALM_UNPACED=1`).
+    fn running(&mut self, kind: &str) -> bool {
+        if unpaced() {
+            return false;
+        }
+        let Some((at, ticket)) = &self.0 else {
+            return false;
+        };
+        if ticket.try_take().is_none() {
+            return true;
+        }
+        trace(json!({"realm": kind, "ms": at.elapsed().as_secs_f64() * 1e3}));
+        self.0 = None;
+        false
+    }
+    fn sent(&mut self, ticket: Option<Ticket<Evaluation>>) {
+        self.0 = ticket.map(|t| (std::time::Instant::now(), t));
+    }
+}
+fn unpaced() -> bool {
+    static UNPACED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UNPACED.get_or_init(|| std::env::var("PM_REALM_UNPACED").as_deref() == Ok("1"))
+}
+struct Owner {
+    writer: Writer,
+    /// This generation is sealed; the next realm starts a new one.
+    retired: bool,
+    stores: Vec<StoreLive>,
+    /// What each Store extension would run, so a toggle can start it.
+    confined: BTreeMap<String, (Discovered, ModuleGraph)>,
+    /// Open panels and their last placement, replayed into a rebuilt realm or helper.
+    open: BTreeMap<String, Option<[f32; 4]>>,
+    /// The editor window's viewport, replayed into a rebuilt realm before boot.
+    viewport: Option<(f32, f32, f32)>,
+    window_hidden: bool,
+    config: HostConfig,
+    scope: ProjectScope,
+    shared: Arc<Shared>,
+    inbox: Sender<Input>,
+    transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
+    moved: Arc<AtomicU8>,
+    presented: Arc<Mutex<Option<Value>>>,
+    /// Every shell fact the services report, replayed into a rebuilt realm.
+    shell: serde_json::Map<String, Value>,
+    restarts: usize,
+    /// The last execution we asked about, retained after Wait.
+    asking: Option<u64>,
+    asking_culprit: Option<String>,
+    /// The last command's task and the extension that registered it.
+    running: Option<(u64, String)>,
+    realm: Option<Live>,
+    router: Option<RemoteDomPanel>,
+    records: Vec<Value>,
+    /// Where each discovered extension's folder is (recorded in its entry, so
+    /// an entry whose folder vanished outside Powermove can be forgotten).
+    folders: BTreeMap<String, PathBuf>,
+    /// Entries whose folder the last check found positively gone; a second
+    /// check in a row forgets them (a volume briefly away never removes one).
+    vanishing: BTreeMap<String, String>,
+    canvases: BTreeMap<(u64, String), u64>,
+    /// Batches taken from the realm that the page queue has no room for yet.
+    dom_waiting: VecDeque<Value>,
+    /// Realm sources waiting for room in its queue (`eval`).
+    deferred: VecDeque<String>,
+    /// The last time-moved and frame-presented notifications, while the
+    /// realm runs them ([`Paced`]).
+    paced_moved: Paced,
+    paced_presented: Paced,
+    disk: u64,
+    store_revision: Option<u64>,
+    /// Set when this window's extensions stop; its export realms end too.
+    closing: Arc<AtomicBool>,
+}
+impl Owner {
+    fn run(mut self, input: Receiver<Input>) {
+        self.disk = self.stamp();
+        self.boot();
+        loop {
+            self.retry_deferred();
+            self.send_moved();
+            self.send_presented();
+            // A notification held for the realm goes as soon as it is free.
+            let held = self.moved.load(Ordering::Acquire) != 0
+                || self.presented.lock().unwrap().is_some();
+            let wait = if self.deferred.is_empty() && !held {
+                DISK_POLL
+            } else {
+                Duration::from_millis(2)
+            };
+            let message = match input.recv_timeout(wait) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) if !self.deferred.is_empty() || held => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Extensions change on disk: an agent's edit, a manual copy.
+                    let stamp = self.stamp();
+                    if stamp != self.disk {
+                        self.disk = stamp;
+                        self.rescan();
+                    } else if !self.vanishing.is_empty() {
+                        self.forget_vanished();
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            // A burst of kernel publications is one mirror update.
+            let mut kernel = matches!(message, Input::Kernel);
+            let mut next = (!kernel).then_some(message);
+            while next.is_none() {
+                match input.try_recv() {
+                    Ok(Input::Kernel) => kernel = true,
+                    Ok(other) => next = Some(other),
+                    Err(_) => break,
+                }
+            }
+            if kernel {
+                self.eval("__compat.sync()");
+                self.follow_state();
+                self.tick_stores();
+            }
+            match next {
+                Some(Input::Close) => break,
+                Some(message) => self.handle(message),
+                None => (),
+            }
+        }
+        for store in std::mem::take(&mut self.stores) {
+            self.stop_store(store);
+        }
+        self.closing.store(true, Ordering::Release);
+        self.shared.exports.lock().unwrap().clear();
+        self.retire_realm();
+    }
+    /// Ends the current generation: its open entry is sealed, its contributions
+    /// go, and nothing later reaches or comes from it.
+    fn retire_realm(&mut self) {
+        let live = self.realm.take();
+        if let Some(live) = &live {
+            live.realm.close();
+            live.host.seal();
+        }
+        drop(live);
+        *self.transport.lock().unwrap() = None;
+        self.router = None;
+        self.asking = None;
+        self.asking_culprit = None;
+        *self.shared.watchdog.lock().unwrap() = None;
+        self.dom_waiting.clear();
+        self.deferred.clear();
+        self.canvases.clear();
+        self.shared.reader.store(0, Ordering::Release);
+        self.shared.update(|p| {
+            p.view = 0;
+            p.batches.clear();
+            p.canvases.clear();
+        });
+        drop(self.config.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::DisposeOwner { owner: self.writer }],
+        }));
+        self.config.kernel.retire_realm(self.writer);
+        self.retired = true;
+    }
+    /// The task's execution id, when it was queued. When the realm's queue
+    /// is full (a long or hung task) the source waits here, in order, and the
+    /// owner keeps handling input (Stop, Quit) instead of waiting for room.
+    fn eval(&mut self, source: &str) -> Option<u64> {
+        let live = self.realm.as_ref()?;
+        if !self.deferred.is_empty() {
+            self.defer(source.to_owned());
+            return None;
+        }
+        match live.realm.eval(source) {
+            Ok(ticket) => Some(ticket.execution),
+            Err(Error::Busy) => {
+                self.defer(source.to_owned());
+                None
+            }
+            Err(_) => {
+                let _ = self.inbox.send(Input::Failed(self.writer.generation));
+                None
+            }
+        }
+    }
+    /// The app's clock moved ([`ExtensionHost::publish_time`]): the realm
+    /// hears the latest time once it has run the last notice.
+    fn send_moved(&mut self) {
+        if self.paced_moved.running("moved") {
+            return;
+        }
+        let moved = self.moved.swap(0, Ordering::AcqRel);
+        if moved == 0 {
+            return;
+        }
+        let Some(now) = self.realm.as_ref().map(|live| live.host.transport().time()) else {
+            return;
+        };
+        let source = format!(
+            "__compat.moved({now},{},{})",
+            moved & TIME_MOVED != 0,
+            moved & PLAY_MOVED != 0
+        );
+        let ticket = self.eval_ticket(&source);
+        self.paced_moved.sent(ticket);
+    }
+    /// The viewer presented a frame ([`ExtensionHost::frame_presented`]): the
+    /// realm hears the latest once it has run the last.
+    fn send_presented(&mut self) {
+        if self.paced_presented.running("presented") {
+            return;
+        }
+        let frame = self.presented.lock().unwrap().take();
+        if let Some(frame) = frame {
+            let ticket = self.eval_ticket(&format!("__compat.presented({frame})"));
+            self.paced_presented.sent(ticket);
+        }
+    }
+    /// [`Self::eval`], keeping the ticket.
+    fn eval_ticket(&mut self, source: &str) -> Option<Ticket<Evaluation>> {
+        let live = self.realm.as_ref()?;
+        if !self.deferred.is_empty() {
+            self.defer(source.to_owned());
+            return None;
+        }
+        match live.realm.eval(source) {
+            Ok(ticket) => Some(ticket),
+            Err(Error::Busy) => {
+                self.defer(source.to_owned());
+                None
+            }
+            Err(_) => {
+                let _ = self.inbox.send(Input::Failed(self.writer.generation));
+                None
+            }
+        }
+    }
+    fn defer(&mut self, source: String) {
+        // A realm this far behind is hung; the watchdog asks about it, and a
+        // stopped realm restarts from the kernel's state, not from this queue.
+        if self.deferred.len() >= MAX_DEFERRED {
+            self.deferred.pop_front();
+        }
+        self.deferred.push_back(source);
+    }
+    /// Queues what waited for room, while the realm takes it.
+    fn retry_deferred(&mut self) {
+        while let Some(source) = self.deferred.front() {
+            let Some(live) = self.realm.as_ref() else {
+                self.deferred.clear();
+                return;
+            };
+            match live.realm.eval(source.as_str()) {
+                Err(Error::Busy) => return,
+                Ok(_) => {
+                    self.deferred.pop_front();
+                }
+                Err(_) => {
+                    self.deferred.clear();
+                    let _ = self.inbox.send(Input::Failed(self.writer.generation));
+                    return;
+                }
+            }
+        }
+    }
+    fn handle(&mut self, message: Input) {
+        match message {
+            Input::Sync(done) => {
+                self.follow_state();
+                let stamp = self.stamp();
+                if stamp != self.disk {
+                    self.disk = stamp;
+                    self.rescan();
+                }
+                let _ = done.send(());
+            }
+            Input::Run(id, args) => {
+                if !self.run_store(&id, &args) {
+                    let source = format!("__compat.run({},{args})", json!(id));
+                    let owner = self.command_owner(&id);
+                    self.running = self.eval(&source).zip(owner);
+                }
+            }
+            Input::StorePage(id, view, message) => {
+                let live = self.stores.iter_mut().find(|s| s.extension.id == id);
+                if let Some(store) = live.filter(|s| u64::from(s.owner.realm) == view) {
+                    store.extension.page(message);
+                }
+                self.drain_store_dom(&id);
+            }
+            Input::StoreDom(id) => self.drain_store_dom(&id),
+            Input::ReloadStore(id, owner) => {
+                self.reload_store(&id, Some(owner));
+            }
+            Input::ReloadExtension(id) => self.reload_extension(&id),
+            Input::Panel(id, open) => {
+                if open {
+                    self.open.entry(id.clone()).or_default();
+                } else {
+                    self.open.remove(&id);
+                }
+                self.show_panel(&id, open);
+            }
+            Input::Viewport(width, height, scale) => {
+                self.viewport = Some((width, height, scale));
+                self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+            }
+            Input::WindowShown(shown) => {
+                self.window_hidden = !shown;
+                self.eval(&format!("__compat.windowShown({shown})"));
+            }
+            Input::Place(id, rect) => {
+                if let Some(placed) = self.open.get_mut(&id) {
+                    *placed = rect;
+                }
+                self.place_panel(&id, rect);
+            }
+            Input::Answer(token, value) => {
+                self.eval(&format!("__compat.answer({token},{value})"));
+            }
+            Input::Shell(state) => {
+                if let Value::Object(facts) = &state {
+                    self.shell.extend(facts.clone());
+                }
+                self.eval(&format!("__compat.shellState({state})"));
+            }
+            Input::Presented => self.send_presented(),
+            Input::Rasters(batch, wire) => {
+                let ask = match &wire["ask"] {
+                    Value::Object(_) => wire["ask"].clone(),
+                    _ => json!({}),
+                };
+                self.eval(&format!(
+                    "__compat.answerRasters({batch},{},{ask})",
+                    wire["needs"]
+                ));
+            }
+            Input::Export(job, frozen, cancel, (tx, rx)) => {
+                let progress = self
+                    .shared
+                    .exports
+                    .lock()
+                    .unwrap()
+                    .progress(&job)
+                    .unwrap_or_default();
+                let start = export::Start {
+                    job,
+                    frozen,
+                    cancel,
+                    records: self.trusted_records(),
+                    storage: crate::adapter::storage_of(&self.config.kernel),
+                    frames: self.config.frames.clone(),
+                    viewport: self.viewport,
+                    text: self.config.text.as_ref().map(|text| text()),
+                    rasters: self.config.rasters.clone(),
+                    vars: self.config.vars.clone(),
+                    kernel: self.config.kernel.clone(),
+                    shared: self.shared.clone(),
+                    closing: self.closing.clone(),
+                    pageless: self.config.owner.is_none()
+                        && !self.shared.paged.load(Ordering::Acquire),
+                    progress,
+                };
+                let spawned = thread::Builder::new()
+                    .name("pm-compat-export".into())
+                    .spawn(move || export::run(start, tx, rx));
+                if spawned.is_err() {
+                    self.shared.update(|p| {
+                        p.toasts
+                            .push("The export's extensions could not start".into())
+                    });
+                }
+            }
+            Input::Menu(location, context, key) => {
+                self.eval(&format!(
+                    "__compat.gatherMenu({},{context},{key})",
+                    json!(location)
+                ));
+            }
+            Input::Moved => self.send_moved(),
+            Input::Realm(writer, envelope) if writer == self.writer => self.realm_message(envelope),
+            Input::Page(view, message) if view == u64::from(self.writer.generation) => {
+                self.page(message)
+            }
+            Input::ReplayPage(view) if view == u64::from(self.writer.generation) => {
+                self.replay_page()
+            }
+            Input::Dom => self.drain_dom(),
+            Input::Canvases => self.collect_canvases(),
+            Input::Health(id, health) => self.set_health(&id, health),
+            Input::Enabled(id, enabled) => self.set_enabled(&id, enabled),
+            Input::Booted(generation) if generation == self.writer.generation => {
+                self.shared.update(|p| {
+                    p.activations = p.activations.saturating_sub(1);
+                    p.ready = p.activations == 0;
+                });
+                self.reopen_panels(None);
+            }
+            Input::Rescan => self.rescan(),
+            Input::FontsLoaded(keys) => {
+                self.eval(&format!("__compat.fontsLoaded({keys})"));
+            }
+            Input::Failed(generation) if generation == self.writer.generation => {
+                let culprit = self.activating_now();
+                self.restart(culprit)
+            }
+            Input::Unresponsive(generation, execution)
+                if generation == self.writer.generation && watchdog_can_ask(execution, self.asking) =>
+            {
+                self.ask_unresponsive(execution)
+            }
+            Input::StopTask(execution, stop) if self.asking == Some(execution) => {
+                self.asking = watchdog_after_answer(self.asking, stop);
+                if stop && self.realm.as_ref().is_some_and(|l| l.realm.stop(execution)) {
+                    let culprit = self.asking_culprit.take();
+                    self.restart(culprit);
+                }
+            }
+            Input::StopTask(..) => (),
+            Input::Realm(..)
+            | Input::Page(..)
+            | Input::ReplayPage(_)
+            | Input::Booted(_)
+            | Input::Failed(_)
+            | Input::Unresponsive(..)
+            | Input::Kernel
+            | Input::Close => (),
+        }
+    }
+    fn tick_stores(&mut self) {
+        let revision = self
+            .config
+            .kernel
+            .published(&self.config.project)
+            .map(|published| published.revision());
+        if revision.is_none() || revision == self.store_revision {
+            return;
+        }
+        self.store_revision = revision;
+        for store in &self.stores {
+            store.extension.tick(revision.unwrap_or_default());
+        }
+    }
+    /// The last provider of `id` among this window's writers, and which helper it
+    /// is if it is not the realm. Other windows' helpers hold their own entries.
+    fn provider(&self, registry: &str, id: &str) -> Option<(Option<usize>, Registration)> {
+        let state = self.config.kernel.state();
+        let native = |entry: &&Registration| entry.id == id && entry.owner == self.writer;
+        for (index, store) in self.stores.iter().enumerate().rev() {
+            let scoped = store.authority.state();
+            if let Some(entry) = scoped
+                .registries
+                .get(registry)
+                .into_iter()
+                .flatten()
+                .rev()
+                .find(|entry| entry.id == id && entry.owner == store.owner)
+            {
+                return Some((Some(index), entry.clone()));
+            }
+        }
+        state
+            .registries
+            .get(registry)?
+            .iter()
+            .rev()
+            .find(native)
+            .cloned()
+            .map(|entry| (None, entry))
+    }
+    fn store_of(&self, panel: &str) -> Option<&StoreExtension> {
+        let (store, _) = self.provider("panels", panel)?;
+        Some(&self.stores[store?].extension)
+    }
+    fn show_panel(&mut self, id: &str, open: bool) {
+        if let Some(store) = self.store_of(id) {
+            if open {
+                store.open_panel(id);
+            } else {
+                store.close_panel(id);
+            }
+            return;
+        }
+        let verb = if open { "openPanel" } else { "closePanel" };
+        self.eval(&format!("__compat.{verb}({})", json!(id)));
+    }
+    fn place_panel(&mut self, id: &str, rect: Option<[f32; 4]>) {
+        if let Some(store) = self.store_of(id) {
+            store.place_panel(id, rect);
+            return;
+        }
+        let source = format!("__compat.placePanel({},{})", json!(id), json!(rect));
+        self.eval(&source);
+    }
+    /// A rebuilt realm or helper starts with no panels open. `store` is the helper
+    /// that just started; `None` is the realm.
+    fn reopen_panels(&mut self, store: Option<Writer>) {
+        for (id, rect) in self.open.clone() {
+            let owner = self
+                .provider("panels", &id)
+                .and_then(|(index, _)| index.map(|index| self.stores[index].owner));
+            if owner == store {
+                self.show_panel(&id, true);
+                if rect.is_some() {
+                    self.place_panel(&id, rect);
+                }
+            }
+        }
+    }
+    /// A full page queue leaves batches waiting. The helper's document holds what
+    /// it could not send, and an admitted batch is never dropped.
+    fn drain_store_dom(&mut self, id: &str) {
+        let Some(store) = self.stores.iter_mut().find(|s| s.extension.id == id) else {
+            return;
+        };
+        let mut queue = StorePageQueue(&self.shared, (id.to_owned(), u64::from(store.owner.realm)));
+        let mut pending = store.views.pending.lock().unwrap();
+        while let Some(batch) = pending.front() {
+            if matches!(
+                store.extension.enqueue(batch.clone(), &mut queue),
+                Err(pm_compat_host::Error::Backpressure)
+            ) {
+                return;
+            }
+            pending.pop_front();
+        }
+        drop(pending);
+        if store.views.refused.swap(false, Ordering::AcqRel) {
+            store.extension.flush();
+        }
+    }
+    /// A confined helper owns this command: its callback is a handle in there.
+    fn run_store(&self, id: &str, args: &Value) -> bool {
+        let Some((Some(store), entry)) = self.provider("commands", id) else {
+            return false;
+        };
+        if let Some(handle) = entry.definition.get("run").and_then(|run| run.as_f64()) {
+            self.stores[store].extension.run(handle as u64, args);
+        }
+        true
+    }
+    /// Publishes what a helper registered through the same path the realm uses.
+    fn publish_store(&self) {
+        let mut store = json!({});
+        let mut definitions = vec![];
+        for store_entry in &self.stores {
+            let state = store_entry.authority.state();
+            let (owner, extension) = (&store_entry.owner, &store_entry.extension);
+            let mut own = json!({"effects":[],"transitions":[],"layers":[]});
+            for (kind, registry) in [
+                ("commands", "commands"),
+                ("panels", "panels"),
+                ("effects", "effects"),
+                ("transitions", "transitions"),
+                ("layers", "layerTypes"),
+            ] {
+                let items: Vec<Value> = state
+                    .registries
+                    .get(registry)
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| entry.owner == *owner)
+                    .filter_map(|entry| {
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(
+                            &entry.definition,
+                        ))
+                        .ok()
+                    })
+                    .map(|mut item| {
+                        // Panels name the helper whose page draws them, and which run of it.
+                        if kind == "panels" {
+                            item["store"] = json!(extension.id);
+                            item["view"] = json!(owner.realm);
+                        }
+                        item
+                    })
+                    .collect();
+                own[kind] = json!(items);
+                let list = store[kind].as_array().cloned().unwrap_or_default();
+                store[kind] = json!(list.into_iter().chain(items).collect::<Vec<_>>());
+            }
+            definitions.extend(extension.definitions(&own));
+        }
+        store["definitions"] = Value::Array(definitions);
+        let mut published = self.shared.published.lock().unwrap();
+        if let Some(current) = published.contributions.take() {
+            let mut next = (*current).clone();
+            let previous = self.shared.store.lock().unwrap().clone();
+            for (kind, items) in previous.as_object().into_iter().flatten() {
+                if let (Some(list), Some(items)) =
+                    (next[kind.as_str()].as_array_mut(), items.as_array())
+                {
+                    list.retain(|item| !items.contains(item));
+                }
+            }
+            merge_store(&mut next, &store);
+            published.contributions = Some(Arc::new(next));
+        }
+        *self.shared.store.lock().unwrap() = store;
+        // What the helpers registered is published with them: they have
+        // settled in the same publication that carries their definitions.
+        published.starting.clear();
+        published.revision += 1;
+        drop(published);
+        self.shared.changed.notify_all();
+        (self.shared.wake)();
+    }
+    fn realm_message(&mut self, envelope: RealmEnvelope) {
+        if envelope.project != self.config.project {
+            return;
+        }
+        let Some(live) = &self.realm else { return };
+        let source = match envelope.message {
+            RealmMessage::RunExternal { continuation, .. } => live
+                .host
+                .continuation(&continuation)
+                .ok()
+                .map(|reply| format!("__compat.runExternal({})", reply["continuation"])),
+            RealmMessage::Cleanup { handle, .. } => live
+                .host
+                .handle_name(handle)
+                .map(|name| format!("__compat.retire({})", json!(name))),
+        };
+        if let Some(source) = source {
+            self.eval(&source);
+        }
+    }
+    fn page(&mut self, message: Value) {
+        let Some(router) = &mut self.router else {
+            return;
+        };
+        struct Realmward(Vec<Value>);
+        impl TrySink<pm_remote_dom::protocol::PageMessage> for Realmward {
+            fn try_send(
+                &mut self,
+                message: pm_remote_dom::protocol::PageMessage,
+            ) -> std::result::Result<(), pm_remote_dom::Error> {
+                self.0.push(
+                    serde_json::to_value(message)
+                        .map_err(|_| pm_remote_dom::Error::Invalid("page message"))?,
+                );
+                Ok(())
+            }
+        }
+        let mut delivered = Realmward(vec![]);
+        if router.receive(message, &mut delivered).is_err() {
+            return;
+        }
+        for message in &delivered.0 {
+            // The page could not apply a batch: its extension panels stop
+            // drawing. Say which batch and why.
+            if message["kind"] == "fault" {
+                eprintln!(
+                    "extension page fault at batch {}: {}",
+                    message["seq"], message["message"]
+                );
+            }
+            // A synchronous layout read is waiting for this answer: it goes to
+            // the blocked realm directly (and through its queue as usual).
+            if message["kind"] == "layout"
+                && let (Some(request), Some(live)) = (message["request"].as_u64(), &self.realm)
+            {
+                live.events
+                    .measuring
+                    .lock()
+                    .unwrap()
+                    .answer(request, message);
+            }
+        }
+        // The realm takes them as data, all that came meanwhile in one task
+        // and one flush, not each as a script it compiles.
+        if !delivered.0.is_empty()
+            && let Some(live) = &self.realm
+            && live.host.push_page_messages(delivered.0)
+        {
+            self.eval("__compat.receivePage()");
+        }
+        self.drain_dom();
+    }
+    /// The window's page was made again (the last one stopped applying, or its
+    /// process went): a new router, nothing queued for the old page, and the
+    /// realm's whole document and every canvas from the first batch, so no
+    /// panel stays blank (PM-509).
+    fn replay_page(&mut self) {
+        if self.realm.is_none() {
+            return;
+        }
+        let Ok(router) = RemoteDomPanel::new(
+            PANEL,
+            Session {
+                panel: "compat".into(),
+                generation: PAGE_SESSION,
+            },
+        ) else {
+            return;
+        };
+        trace(json!({"page": "replay"}));
+        self.router = Some(router);
+        self.dom_waiting.clear();
+        self.canvases.clear();
+        self.shared.update(|p| {
+            p.batches.clear();
+            p.canvases.clear();
+        });
+        // Whatever the realm's queue holds was for the old page.
+        if let Some(live) = &self.realm {
+            drop(live.host.take_dom_batches());
+        }
+        self.eval("__compat.replayDom()");
+        self.drain_dom();
+        self.collect_canvases();
+    }
+    /// Batches the page queue cannot take stay here and in the realm, whose
+    /// document coalesces later changes: nothing is dropped and nothing grows.
+    fn drain_dom(&mut self) {
+        let (Some(live), Some(router)) = (&self.realm, &mut self.router) else {
+            return;
+        };
+        live.events.dom_pending.store(false, Ordering::Release);
+        let mut queue = PageQueue(&self.shared);
+        let mut admitted = false;
+        let mut full = false;
+        loop {
+            if self.dom_waiting.is_empty() {
+                self.dom_waiting.extend(live.host.take_dom_batches());
+            }
+            let Some(batch) = self.dom_waiting.front() else {
+                break;
+            };
+            // A rejected tree is an extension fault; the page keeps its last state.
+            if matches!(
+                router.enqueue(batch.clone(), &mut queue),
+                Err(pm_compat_host::Error::Backpressure)
+            ) {
+                full = true;
+                break;
+            }
+            self.dom_waiting.pop_front();
+            admitted = true;
+        }
+        if admitted {
+            (self.shared.wake)();
+        }
+        // Also the shim's next flush: it holds a batch the realm's queue refused.
+        if !full {
+            self.eval("__compat.flushCanvases?.()");
+        }
+    }
+    /// Only a page that is reading gets pixels, and only surfaces that changed.
+    fn collect_canvases(&mut self) {
+        let Some(live) = &self.realm else { return };
+        live.events.canvas_pending.store(false, Ordering::Release);
+        let view = u64::from(self.writer.generation);
+        if self.shared.reader.load(Ordering::Acquire) != view {
+            return;
+        }
+        let frames = live
+            .host
+            .changed_canvas_frames(&self.canvases)
+            .unwrap_or_default();
+        if frames.is_empty() {
+            return;
+        }
+        for frame in &frames {
+            self.canvases
+                .insert((frame.node, frame.surface.clone()), frame.version);
+        }
+        self.shared.update(|p| {
+            for frame in frames {
+                p.canvases
+                    .insert((frame.node, frame.surface.clone()), frame);
+            }
+        });
+    }
+    fn set_health(&mut self, id: &str, health: Value) {
+        trace(json!({"extension": id, "health": health["state"]}));
+        let health = self.shared.hide_health(health);
+        for record in &mut self.records {
+            if record["id"] == id {
+                record["health"] = health.clone();
+            }
+        }
+        self.shared.update(|p| {
+            if let Some(record) = p.records.get_mut(id) {
+                record["health"] = health;
+            }
+        });
+        self.publish_entries();
+    }
+    /// The saved preference; turning an extension on also ends a D11 stop.
+    fn persist_enabled(&self, id: &str, enabled: bool) {
+        if self.scope.installed.contains(id) {
+            return;
+        }
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            Ok(state
+                .extensions
+                .get(id)
+                .filter(|entry| entry.enabled != enabled || (enabled && entry.stopped_this_run()))
+                .map(|entry| vec![StateOp::Extension(entry.switched(enabled))]))
+        });
+    }
+    fn set_enabled(&mut self, id: &str, enabled: bool) {
+        self.persist_enabled(id, enabled);
+        let mut confined = false;
+        for record in &mut self.records {
+            if record["id"] == id {
+                record["enabled"] = json!(enabled);
+                confined = record["confined"] == true;
+                // What stopped it may be gone; what it is made of has not changed.
+                let stopped = ["disabled", "runtime-error", "activation-error"]
+                    .contains(&record["health"]["state"].as_str().unwrap_or_default());
+                if enabled && stopped {
+                    record["health"] = json!({"state":"ok"});
+                }
+            }
+        }
+        if confined {
+            self.sync_stores();
+            self.publish_store();
+        } else if enabled {
+            let records = self.realm_plan();
+            self.shared.update(|p| {
+                p.activations += 1;
+                p.ready = false;
+            });
+            self.load(&records, "update", &format!(",{},\"enable\"", json!([id])));
+        } else if let Some(clock) = self.retire_for_rebuild() {
+            // Off ends everything it started (its timers, listeners and
+            // pending work), not only what it registered: the realm the
+            // trusted extensions share is rebuilt without it, as a Stop does,
+            // with nobody blamed (PM-435).
+            self.boot_realm(clock);
+        }
+        self.publish_records();
+    }
+    fn enabled(&self, id: &str) -> bool {
+        let state = self.config.kernel.state();
+        state
+            .extensions
+            .get(id)
+            .is_none_or(|entry| entry.enabled && !entry.stopped_this_run())
+    }
+    /// D11 Stop: off for this run (every window), not in the saved
+    /// preference; Settings shows it off and turning it on clears this.
+    fn stop_for_this_run(&self, id: &str) {
+        if self.scope.installed.contains(id) {
+            return;
+        }
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            Ok(state
+                .extensions
+                .get(id)
+                .filter(|e| !e.stopped_this_run())
+                .map(|entry| {
+                    let mut entry = entry.clone();
+                    if let Some(source) = entry.source.as_object_mut() {
+                        let mut record = source
+                            .get("hostRecord")
+                            .and_then(pm_model::Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        record.insert("stopped", pm_model::Value::Bool(true));
+                        source.insert("hostRecord", pm_model::Value::Object(record));
+                    }
+                    vec![StateOp::Extension(entry)]
+                }))
+        });
+    }
+    /// Settings and MCP read extensions from kernel state, as they do built-ins.
+    /// The definition ids each extension's live registrations name now
+    /// (effects, layer types, transitions), by owner.
+    fn provided_now(&self) -> BTreeMap<String, Vec<String>> {
+        let mut provided: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let contributions = self.shared.published.lock().unwrap().contributions.clone();
+        for kind in ["effects", "layers", "transitions"] {
+            for entry in contributions
+                .as_ref()
+                .and_then(|c| c[kind].as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let (Some(owner), Some(id)) = (entry["owner"].as_str(), entry["id"].as_str()) {
+                    let ids = provided.entry(owner.to_owned()).or_default();
+                    if !ids.iter().any(|known| known == id) {
+                        ids.push(id.to_owned());
+                    }
+                }
+            }
+        }
+        provided
+    }
+    fn publish_entries(&mut self) {
+        let provided = self.provided_now();
+        let mut kept: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            let ops: Vec<StateOp> = self
+                .records
+                .iter()
+                .filter_map(|record| {
+                    let id = record["id"].as_str()?;
+                    if self.scope.installed.contains(id) {
+                        return None;
+                    }
+                    let previous = state.extensions.get(id);
+                    let mut source = previous
+                        .and_then(|entry| entry.source.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    // Stopped this run: kept while the app runs, gone at the
+                    // next launch's first publication.
+                    let stopped = !FIRST_ENTRIES.load(Ordering::Acquire)
+                        && previous.is_some_and(|e| e.stopped_this_run());
+                    let mut summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],"author":record["manifest"]["author"],
+                    "health":record["health"],"trust":record["trust"],"contributes":record["manifest"]["contributes"]});
+                    if stopped {
+                        summary["stopped"] = json!(true);
+                    }
+                    if let Some(folder) = self.folders.get(id) {
+                        summary["folder"] = json!(folder.to_string_lossy());
+                        if let Some(project) = discovery::project_origin(folder) {
+                            summary["provenance"] = json!(format!("From project {project}"));
+                        }
+                    }
+                    // What it provides: its live registrations, else what it
+                    // provided when it last ran (it is off, or failing).
+                    let provides: Vec<String> = provided.get(id).cloned().unwrap_or_else(|| {
+                        source
+                            .get("hostRecord")
+                            .and_then(|r| r.get("provides"))
+                            .and_then(pm_model::Value::as_array)
+                            .map(|ids| ids.iter().filter_map(|d| d.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default()
+                    });
+                    if !provides.is_empty() {
+                        summary["provides"] = json!(provides);
+                        kept.insert(id.to_owned(), provides);
+                    }
+                    source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
+                    let next = pm_kernel::state::ExtensionEntry {
+                        id: id.to_owned(),
+                        installed: true,
+                        enabled: previous.is_none_or(|entry| entry.enabled),
+                        version: record["manifest"]["version"].as_str().unwrap_or("").to_owned(),
+                        source: pm_model::Value::Object(source),
+                    };
+                    (previous != Some(&next)).then_some(StateOp::Extension(next))
+                })
+                .collect();
+            Ok((!ops.is_empty()).then_some(ops))
+        });
+        // The published rows carry it too (`Publication::provides`).
+        let mut changed = false;
+        for record in &mut self.records {
+            let id = record["id"].as_str().unwrap_or_default().to_owned();
+            let next = kept
+                .get(&id)
+                .or_else(|| provided.get(&id))
+                .map(|ids| json!(ids))
+                .unwrap_or(Value::Null);
+            if record["provides"] != next {
+                record["provides"] = next;
+                changed = true;
+            }
+        }
+        if changed {
+            let rows = self.records.clone();
+            self.shared.update(|p| {
+                for row in rows {
+                    if let Some(id) = row["id"].as_str()
+                        && let Some(published) = p.records.get_mut(id)
+                    {
+                        published["provides"] = row["provides"].clone();
+                    }
+                }
+            });
+        }
+        FIRST_ENTRIES.store(false, Ordering::Release);
+        self.forget_vanished();
+    }
+    /// An installed extension whose recorded folder is positively gone (its
+    /// parent lists, the folder isn't in it) on two checks in a row, and that
+    /// no root still provides, was deleted outside Powermove: its entry goes,
+    /// so Settings never lists a ghost. A folder that can't be reached (an
+    /// unmounted volume, a read error) keeps its entry, marked unavailable.
+    /// Archived entries (Delete…) stay.
+    fn forget_vanished(&mut self) {
+        let state = self.config.kernel.state();
+        let mut gone = BTreeMap::new();
+        let mut unreachable = BTreeSet::new();
+        for e in state.extensions.values() {
+            if self.folders.contains_key(&e.id) {
+                continue;
+            }
+            let Some(folder) = recorded_folder(e) else {
+                continue;
+            };
+            match folder_presence(Path::new(folder)) {
+                Presence::Gone => {
+                    gone.insert(e.id.clone(), folder.to_owned());
+                }
+                Presence::Unreachable => {
+                    unreachable.insert(e.id.clone());
+                }
+                Presence::Present => {}
+            }
+        }
+        // Gone on two checks in a row, from the same recorded folder.
+        let forget: BTreeMap<String, String> = gone
+            .iter()
+            .filter(|(id, folder)| self.vanishing.get(*id) == Some(folder))
+            .map(|(id, folder)| (id.clone(), folder.clone()))
+            .collect();
+        gone.retain(|id, _| !forget.contains_key(id));
+        self.vanishing = gone;
+        let (vanishing, provided) = (&self.vanishing, &self.folders);
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            // Decided again on the state this attempt writes over: another
+            // window may have republished the id from a restored folder.
+            let mut ops = forget_ops(state, &forget, provided);
+            // Unavailable while its folder can't be reached or is about to be
+            // forgotten; publish_entries clears the mark when it comes back.
+            for e in state.extensions.values() {
+                let mark = unreachable.contains(&e.id) || vanishing.contains_key(&e.id);
+                let marked = e
+                    .source
+                    .get("hostRecord")
+                    .and_then(|r| r.get("unavailable"))
+                    .and_then(pm_model::Value::as_bool)
+                    == Some(true);
+                if !mark || marked || forget.contains_key(&e.id) {
+                    continue;
+                }
+                let mut entry = e.clone();
+                if let Some(record) = entry
+                    .source
+                    .as_object_mut()
+                    .and_then(|s| s.get_mut("hostRecord"))
+                    .and_then(pm_model::Value::as_object_mut)
+                {
+                    record.insert("unavailable", pm_model::Value::Bool(true));
+                }
+                ops.push(StateOp::Extension(entry));
+            }
+            Ok((!ops.is_empty()).then_some(ops))
+        });
+    }
+    /// A Settings toggle or an agent's edit lands in state or on disk; follow it.
+    fn follow_state(&mut self) {
+        let state = self.config.kernel.state();
+        let toggled: Vec<(String, bool)> = self
+            .records
+            .iter()
+            .filter_map(|record| {
+                let id = record["id"].as_str()?;
+                if self.scope.installed.contains(id) {
+                    return None;
+                }
+                let entry = state.extensions.get(id)?;
+                let enabled = entry.enabled && !entry.stopped_this_run();
+                (record["enabled"] != enabled).then(|| (id.to_owned(), enabled))
+            })
+            .collect();
+        for (id, enabled) in toggled {
+            self.set_enabled(&id, enabled);
+        }
+    }
+    fn stamp(&self) -> u64 {
+        discovery::stamp(&self.scope.roots(&self.config.roots))
+    }
+    /// Every found extension's record, compiled in the live realm's pool. The
+    /// compiler starts only for one missing from the compile cache.
+    fn compile_all(&mut self, found: &[Discovered]) -> Vec<Value> {
+        let live = self.realm.take().expect("a live realm to compile in");
+        self.confined.clear();
+        let records = {
+            let shared = self.shared.clone();
+            let compiler = compile::LazySvelte::new(&live.pool).stopped_by(&shared.closing);
+            found
+                .iter()
+                .map(|f| {
+                    let started = std::time::Instant::now();
+                    let record = self.compile(&compiler, f);
+                    trace(json!({"compiled": f.id, "ms": started.elapsed().as_millis() as u64}));
+                    record
+                })
+                .collect()
+        };
+        self.realm = Some(live);
+        records
+    }
+    /// The record alone. Whether a Store extension's helper runs is `sync_stores`.
+    fn compile(&mut self, compiler: &compile::LazySvelte, found: &Discovered) -> Value {
+        let enabled = self.scope.installed.contains(&found.id) || self.enabled(&found.id);
+        let graph = match &found.manifest {
+            Ok(manifest) => compile::compile(
+                &found.directory,
+                manifest["entry"].as_str().unwrap_or("index.ts"),
+                manifest["apiVersion"].as_u64().unwrap_or(1),
+                compiler,
+                Some(&self.config.cache),
+            ),
+            Err(error) => Err(error.clone()),
+        };
+        let mut record = discovery::record(
+            found,
+            enabled,
+            graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone),
+        );
+        let surface = record["manifest"]["apiVersion"].as_u64() >= Some(4);
+        if self.scope.installed.contains(&found.id) && found.store.is_some() {
+            record["trust"] = json!("store");
+        }
+        if record["trust"] != "store" {
+            // Surface extensions get their own realm from the panel host.
+            if surface {
+                record["surface"] = json!(true);
+            }
+            return record;
+        }
+        // Someone else's code: confined whatever its state, and never in the plan
+        // of the trusted realm or the panel host, so no later toggle can move it.
+        record["confined"] = json!(true);
+        if record["health"]["state"] != "ok" {
+            return record;
+        }
+        let wants_full_access = record["manifest"]["permissions"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p == "full-access"));
+        if surface {
+            // The panel host has no permission model, so it takes no Store code.
+            record["health"] = json!({"state":"build-error",
+                "error":"Store extensions run on API versions 1 to 3"});
+        } else if wants_full_access {
+            record["health"] = json!({"state":"needs-trust"});
+        } else if let Ok(graph) = graph {
+            self.confined
+                .insert(found.id.clone(), (found.clone(), graph));
+        }
+        record
+    }
+    /// Runs exactly the helpers the records want: stops those disabled, removed
+    /// or changed, starts what is missing, and leaves every other one alone.
+    fn sync_stores(&mut self) {
+        let wanted: BTreeMap<String, String> = self
+            .records
+            .iter()
+            .filter(|r| {
+                r["confined"] == true && r["enabled"] == true && r["health"]["state"] == "ok"
+            })
+            .filter_map(|r| {
+                Some((
+                    r["id"].as_str()?.to_owned(),
+                    r["graph"]["hash"].as_str()?.to_owned(),
+                ))
+            })
+            .filter(|(id, _)| self.confined.contains_key(id))
+            .collect();
+        let (keep, stop): (Vec<_>, Vec<_>) = std::mem::take(&mut self.stores)
+            .into_iter()
+            .partition(|store| wanted.get(&store.extension.id) == Some(&store.hash));
+        self.stores = keep;
+        for store in stop {
+            self.stop_store(store);
+        }
+        let starting: Vec<(String, String)> = wanted
+            .keys()
+            .filter(|id| !self.stores.iter().any(|store| store.extension.id == **id))
+            .map(|id| (id.clone(), self.name_of(id)))
+            .collect();
+        if !starting.is_empty() {
+            // Cleared by `publish_store`, which every caller runs next.
+            self.shared.update(|p| p.starting = starting);
+        }
+        for (id, hash) in wanted {
+            if !self.stores.iter().any(|store| store.extension.id == id) {
+                self.start_store(&id, hash);
+            }
+        }
+    }
+    fn name_of(&self, id: &str) -> String {
+        self.records
+            .iter()
+            .find(|r| r["id"] == id)
+            .and_then(|r| r["manifest"]["name"].as_str())
+            .unwrap_or(id)
+            .to_owned()
+    }
+    fn reload_store(&mut self, id: &str, owner: Option<Writer>) {
+        let live = self.stores.iter().position(|store| {
+            store.extension.id == id && owner.is_none_or(|owner| store.owner == owner)
+        });
+        if let Some(index) = live {
+            let store = self.stores.remove(index);
+            self.stop_store(store);
+        } else if owner.is_some() {
+            // A retired helper cannot restart a later helper of this id.
+            return;
+        }
+        self.sync_stores();
+        self.publish_store();
+    }
+    fn reload_extension(&mut self, id: &str) {
+        let Some(record) = self.records.iter_mut().find(|record| record["id"] == id) else {
+            return;
+        };
+        if record["enabled"] != true {
+            return;
+        }
+        match record["health"]["state"].as_str() {
+            Some("build-error" | "manifest-error") => self.rescan(),
+            Some("activation-error" | "runtime-error") if record["confined"] == true => {
+                record["health"] = json!({"state":"ok"});
+                self.reload_store(id, None);
+                self.publish_records();
+            }
+            Some("activation-error" | "runtime-error") => {
+                self.eval(&format!("__compat.loader.reload({})", json!(id)));
+            }
+            _ => {}
+        }
+    }
+    fn start_store(&mut self, id: &str, hash: String) {
+        let Some((found, graph)) = self.confined.get(id).cloned() else {
+            return;
+        };
+        let owner = Writer {
+            realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
+            generation: GENERATION,
+        };
+        let views = Arc::new(ViewEvents {
+            id: id.to_owned(),
+            owner,
+            shared: self.shared.clone(),
+            inbox: self.inbox.clone(),
+            pending: Mutex::default(),
+            refused: AtomicBool::new(false),
+        });
+        // As the shipped app's sandbox init: the values for its declared keys.
+        let keys = found
+            .manifest
+            .as_ref()
+            .map(declared_keys)
+            .unwrap_or_default();
+        let from_project = discovery::project_origin(&found.directory).is_some();
+        let values = if from_project {
+            json!({})
+        } else {
+            vars_of(self.config.vars.as_ref(), id, &keys)
+        };
+        self.shared.handed(&json!({ id: values.clone() }));
+        let authority: Arc<dyn StoreAuthority> =
+            if self.scope.installed.contains(id) || from_project {
+                Arc::new(crate::store_kernel::ProjectStore::new(
+                    self.config.kernel.clone(),
+                ))
+            } else {
+                Arc::new(self.config.kernel.clone())
+            };
+        let started = StoreExtension::start(
+            authority.clone(),
+            &self.config.project,
+            "native",
+            &found,
+            &graph,
+            owner,
+            views.clone(),
+            values,
+        );
+        match started {
+            Ok(extension) => {
+                self.shared
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .insert(extension.id.clone(), extension.session.clone());
+                self.stores.push(StoreLive {
+                    owner,
+                    hash,
+                    extension,
+                    views,
+                    authority,
+                });
+                self.reopen_panels(Some(owner));
+            }
+            Err(error) => {
+                let error = self.shared.hide(&error.to_string());
+                for record in &mut self.records {
+                    if record["id"] == id {
+                        record["health"] = json!({"state":"activation-error","error":error});
+                    }
+                }
+            }
+        }
+    }
+    /// Disposing the helper revokes its grants; the registrations go with its writer.
+    fn stop_store(&mut self, store: StoreLive) {
+        let (id, owner) = (store.extension.id.clone(), store.owner);
+        drop(store);
+        self.shared.sessions.lock().unwrap().remove(&id);
+        drop(self.config.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::DisposeOwner { owner }],
+        }));
+        self.shared.update(|p| {
+            p.store_batches.retain(|(store, _), _| *store != id);
+        });
+    }
+    fn publish_records(&mut self) {
+        let records: BTreeMap<_, _> = self
+            .records
+            .iter()
+            .map(|record| {
+                let mut row = record.clone();
+                if let Some(row) = row.as_object_mut() {
+                    row.remove("graph");
+                }
+                (record["id"].as_str().unwrap_or_default().to_owned(), row)
+            })
+            .collect();
+        let surfaces: Vec<Value> = self
+            .records
+            .iter()
+            .filter(|r| {
+                r["surface"] == true && r["health"]["state"] == "ok" && r["enabled"] == true
+            })
+            .cloned()
+            .collect();
+        self.shared.update(|p| {
+            p.records = records;
+            p.surfaces = surfaces;
+        });
+        self.publish_entries();
+    }
+    fn start_realm(&mut self, clock: Option<(f64, bool)>) -> Result<()> {
+        #[cfg(test)]
+        if tests::FAIL_START.lock().unwrap().as_deref() == Some(self.config.cache.as_path()) {
+            return Err(Error::Host("no realm for this test".into()));
+        }
+        if std::mem::take(&mut self.retired) {
+            self.writer.generation += 1;
+            forward_mailbox(&self.config.kernel, self.writer, self.inbox.clone());
+        }
+        let events = Arc::new(Events {
+            shared: self.shared.clone(),
+            kernel: self.config.kernel.clone(),
+            writer: self.writer,
+            project: self.config.project.clone(),
+            inbox: self.inbox.clone(),
+            activating: Mutex::default(),
+            measuring: Mutex::default(),
+            page_missed: AtomicBool::new(false),
+            dom_pending: AtomicBool::new(false),
+            canvas_pending: AtomicBool::new(false),
+        });
+        let adapter = KernelAdapter::new(
+            self.config.kernel.clone(),
+            &self.config.project,
+            crate::PROJECT,
+            self.writer,
+        );
+        let transport = Transport::new(self.config.owner.clone());
+        if let Some((time, playing)) = clock {
+            transport.publish(time, playing);
+        }
+        let host = Arc::new(NativeHost::new(
+            adapter,
+            transport,
+            Box::new(events.clone()),
+        ));
+        if let Some(text) = &self.config.text {
+            host.set_text(text());
+        }
+        host.set_frames(self.config.frames.clone());
+        host.set_rasters(self.config.rasters.clone());
+        host.set_effects(Some(self.shared.effects.clone()));
+        host.set_clipboard(self.config.clipboard.clone());
+        let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
+        let realm = pool.realm(RealmKind::Compat)?;
+        trace(json!({"realm": "pool"}));
+        // Its turn in the heap account; a window closed meanwhile withdraws it.
+        crate::admitted(&realm, &|| {
+            if self.shared.closing.load(Ordering::Acquire) {
+                realm.close();
+            }
+        })?;
+        crate::boot_realm(&realm, &host, "")?;
+        *self.transport.lock().unwrap() = Some(host.clone());
+        self.router = Some(
+            RemoteDomPanel::new(
+                PANEL,
+                Session {
+                    panel: "compat".into(),
+                    generation: PAGE_SESSION,
+                },
+            )
+            .map_err(|e| Error::Host(format!("{e:?}")))?,
+        );
+        self.realm = Some(Live {
+            realm,
+            pool,
+            host,
+            events,
+        });
+        let view = u64::from(self.writer.generation);
+        self.shared.update(|p| {
+            p.view = view;
+            p.activations = 1;
+            p.ready = false;
+            p.failed = None;
+        });
+        Ok(())
+    }
+    fn boot(&mut self) {
+        trace(json!({"extensions": "boot"}));
+        let found = self.scope.scan(&self.config.roots);
+        self.folders = found
+            .iter()
+            .map(|f| (f.id.clone(), f.directory.clone()))
+            .collect();
+        if found.is_empty() {
+            self.forget_vanished();
+            // Nothing to run: no realm, no memory, no bundle evaluation.
+            self.shared.update(|p| p.ready = true);
+            return;
+        }
+        // A realm that cannot start has definitively failed: nothing is loading.
+        if let Err(error) = self.start_realm(None) {
+            self.shared.update(|p| {
+                p.ready = true;
+                p.toasts
+                    .push(format!("Extensions could not start: {error}"))
+            });
+            return;
+        }
+        trace(json!({"extensions": "realm"}));
+        trace(json!({"extensions": "compile", "found": found.len()}));
+        self.records = self.compile_all(&found);
+        trace(json!({"extensions": "compiled"}));
+        self.sync_stores();
+        self.publish_records();
+        self.publish_store();
+        let records = self.realm_plan();
+        self.replay_window();
+        self.load(&records, "boot", "");
+        trace(json!({"extensions": "load-asked"}));
+    }
+    /// Asks the realm for a load pass (`boot`, or `update` with its
+    /// arguments) of `records`, with the values their manifests declare
+    /// staged for that pass alone.
+    fn load(&mut self, records: &Value, entry: &str, arguments: &str) {
+        let Some(live) = &self.realm else { return };
+        let staged = staged_vars(self.config.vars.as_ref(), records);
+        self.shared.handed(&staged);
+        let token = live.host.stage_vars(staged);
+        self.eval(&format!(
+            "__compatHost.{entry}({records}{arguments},\"{token}\")"
+        ));
+    }
+    /// A new realm learns the window it lives in before anything activates.
+    fn replay_window(&mut self) {
+        if let Some((width, height, scale)) = self.viewport {
+            self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+        }
+        if self.window_hidden {
+            self.eval("__compat.windowShown(false)");
+        }
+        if !self.shell.is_empty() {
+            let shell = Value::Object(self.shell.clone());
+            self.eval(&format!("__compat.shellState({shell})"));
+        }
+    }
+    /// The trusted records the window realm is about to run: its wrappers
+    /// report their code identity from them (the disk render cache keys
+    /// override frames by it; export realms pin these same records).
+    fn realm_plan(&self) -> Value {
+        let records = self.trusted_records();
+        if let Some(live) = &self.realm {
+            live.host.set_code(&records);
+        }
+        records
+    }
+    /// The plan of the trusted realm. Confined records never enter it. The
+    /// extensions this project uses come first (its effects and layer
+    /// types are named `<extension>.<name>`): they activate one after
+    /// another, and the first picture waits for exactly those (PM-384).
+    fn trusted_records(&self) -> Value {
+        let used = self
+            .config
+            .kernel
+            .published(&self.config.project)
+            .and_then(|p| p.snapshot.document.root().map(extensions_used))
+            .unwrap_or_default();
+        let mut records: Vec<Value> = self
+            .records
+            .iter()
+            .filter(|record| record["confined"] != true && record["surface"] != true)
+            .cloned()
+            .collect();
+        records.sort_by_key(|record| {
+            !record["id"]
+                .as_str()
+                .is_some_and(|id| used.contains(id))
+        });
+        Value::Array(records)
+    }
+    fn rescan(&mut self) {
+        if self.realm.is_none() {
+            self.boot();
+            return;
+        }
+        let found = self.scope.scan(&self.config.roots);
+        self.folders = found
+            .iter()
+            .map(|f| (f.id.clone(), f.directory.clone()))
+            .collect();
+        let records = self.compile_all(&found);
+        let changed: Vec<_> = records
+            .iter()
+            .filter(|next| {
+                !self.records.iter().any(|old| {
+                    old["id"] == next["id"] && old["graph"]["hash"] == next["graph"]["hash"]
+                })
+            })
+            .map(|record| record["id"].clone())
+            .collect();
+        self.records = records;
+        self.sync_stores();
+        self.publish_records();
+        self.publish_store();
+        let records = self.realm_plan();
+        self.shared.update(|p| {
+            p.activations += 1;
+            p.ready = false;
+        });
+        self.load(
+            &records,
+            "update",
+            &format!(",{},\"rescan\"", Value::Array(changed)),
+        );
+    }
+    /// D11: "not responding — Wait / Stop", named for the extension that was
+    /// activating when there is one. The task keeps running while the user decides.
+    /// The extension is the one whose code the watchdog found on the stack
+    /// (any task: a raster override, an event, a timer, a command), else the
+    /// one activating or whose command runs. Stop turns it off, so the
+    /// rebuilt realm doesn't run into the same hang again.
+    fn ask_unresponsive(&mut self, execution: u64) {
+        let Some(live) = &self.realm else { return };
+        let Some(active) = live.realm.active_execution().filter(|active| active.execution == execution) else {
+            return;
+        };
+        let activating = live.events.activating.lock().unwrap().clone();
+        let command = self
+            .running
+            .as_ref()
+            .filter(|(task, _)| *task == execution)
+            .map(|(_, owner)| owner.clone());
+        let culprit = live
+            .realm
+            .culprit(execution)
+            .or(activating)
+            .or(command)
+            .filter(|id| self.records.iter().any(|r| r["id"] == id.as_str()));
+        let name = culprit.as_ref().map(|id| {
+            self.records
+                .iter()
+                .find(|r| r["id"] == id.as_str())
+                .and_then(|r| r["manifest"]["name"].as_str())
+                .unwrap_or(id)
+                .to_owned()
+        });
+        let disables = culprit.is_some();
+        // What it was doing: its innermost frames, and for how long.
+        let place = live.realm.culprit_place(execution);
+        let seconds = (active.elapsed.as_secs_f64() * 10.).round() / 10.;
+        *self.shared.watchdog.lock().unwrap() = Some((execution, live.realm.clone()));
+        self.asking = Some(execution);
+        self.asking_culprit = culprit;
+        let request = json!({"kind":"unresponsive","execution":execution,"view":self.writer.generation,"name":name,
+            "disables":disables,"where":place,"seconds":seconds});
+        self.shared.update(|p| p.requests.push(request));
+    }
+    fn activating_now(&self) -> Option<String> {
+        let live = self.realm.as_ref()?;
+        live.events.activating.lock().unwrap().clone()
+    }
+    fn command_owner(&self, id: &str) -> Option<String> {
+        let contributions = self
+            .shared
+            .published
+            .lock()
+            .unwrap()
+            .contributions
+            .clone()?;
+        contributions["commands"]
+            .as_array()?
+            .iter()
+            .find(|c| c["id"] == id)?["owner"]
+            .as_str()
+            .map(str::to_owned)
+    }
+    /// A hung or failed realm is rebuilt without the extension that broke it. That
+    /// extension stays off until someone turns it back on, here and in every other
+    /// window, and the next launch does not run into it again.
+    fn restart(&mut self, culprit: Option<String>) {
+        let Some(clock) = self.retire_for_rebuild() else {
+            return;
+        };
+        // Repeated failures nobody can name stop the realm; a Stop that turns
+        // its culprit off is not a loop.
+        if culprit.is_none() {
+            self.restarts += 1;
+        }
+        if let Some(id) = &culprit {
+            self.stop_for_this_run(id);
+            let mut name = id.clone();
+            for record in &mut self.records {
+                if record["id"] == id.as_str() {
+                    record["enabled"] = json!(false);
+                    record["health"] =
+                        json!({"state":"runtime-error","error":"Stopped responding"});
+                    if let Some(n) = record["manifest"]["name"].as_str() {
+                        name = n.to_owned();
+                    }
+                }
+            }
+            self.shared.update(|p| {
+                p.toasts.push(format!(
+                    "“{name}” is off until Powermove restarts. Turn it on in Settings ▸ Extensions."
+                ))
+            });
+        }
+        if self.restarts > MAX_RESTARTS {
+            self.publish_without_realm(Some(
+                "Extensions stopped after repeated failures. Reopen the project to retry.".into(),
+            ));
+            self.publish_records();
+            return;
+        }
+        self.boot_realm(clock);
+    }
+    /// The live realm retired for a rebuild, with the transport's clock to
+    /// carry over. `None` with no realm.
+    fn retire_for_rebuild(&mut self) -> Option<(f64, bool)> {
+        let live = self.realm.as_ref()?;
+        live.events.activating.lock().unwrap().take();
+        let transport = live.host.transport();
+        let clock = (transport.time(), transport.playing());
+        self.retire_realm();
+        // What the retired realm contributed went with it: nothing of it is
+        // settled until the realm that replaces it has loaded.
+        self.publish_without_realm(None);
+        Some(clock)
+    }
+    /// A new realm at `clock`, booting the enabled trusted extensions.
+    fn boot_realm(&mut self, clock: (f64, bool)) {
+        match self.start_realm(Some(clock)) {
+            Ok(()) => {
+                self.publish_records();
+                let records = self.realm_plan();
+                self.replay_window();
+                self.load(&records, "boot", "");
+            }
+            // No realm will finish this load: it has failed, by name, and
+            // nothing waits for it (held frames, exports, stills).
+            Err(error) => {
+                self.publish_without_realm(Some(format!("Extensions could not start: {error}")));
+                self.publish_records();
+            }
+        }
+    }
+    /// The contributions with no trusted realm behind them: the helpers'
+    /// stay. Without a `failure` a realm that will load is starting and
+    /// nothing has settled. With one, no realm will finish the load: it is
+    /// settled and ready as it stands, in one publication, the person is
+    /// told, and a job waiting for it is answered with the failure.
+    fn publish_without_realm(&self, failure: Option<String>) {
+        let mut value = json!({"settled": failure.is_some(), "commands": [], "panels": [],
+            "effects": [], "transitions": [], "layers": [], "definitions": []});
+        merge_store(&mut value, &self.shared.store.lock().unwrap());
+        self.shared.update(|p| {
+            p.contributions = Some(Arc::new(value));
+            if let Some(failure) = failure {
+                p.ready = true;
+                p.activations = 0;
+                p.toasts.push(failure.clone());
+                p.failed = Some(failure);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_kernel::{HistoryCall, KernelActor, KernelConfig, OpenSource, Reply, Request};
+    use std::{fs, path::Path, time::Instant};
+    /// The host whose compiled-extension cache is here cannot start a realm.
+    pub(super) static FAIL_START: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+    fn extension(root: &Path, id: &str, files: &[(&str, &str)]) {
+        let directory = root.join(id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":id,"name":id,"version":"1.0.0","apiVersion":3}).to_string(),
+        )
+        .unwrap();
+        for (name, source) in files {
+            fs::write(directory.join(name), source).unwrap();
+        }
+    }
+    struct Fixture {
+        actor: Option<KernelActor>,
+        kernel: KernelHandle,
+        host: ExtensionHost,
+        _root: tempfile::TempDir,
+    }
+    impl Fixture {
+        fn start(root: tempfile::TempDir) -> Self {
+            Self::start_with(root, crate::initial()["document"].clone(), None)
+        }
+        fn start_with(
+            root: tempfile::TempDir,
+            document: Value,
+            rasters: Option<crate::RasterHooks>,
+        ) -> Self {
+            Self::start_full(root, document, rasters, None)
+        }
+        fn start_full(
+            root: tempfile::TempDir,
+            document: Value,
+            rasters: Option<crate::RasterHooks>,
+            frames: Option<crate::FrameRenderer>,
+        ) -> Self {
+            let actor = KernelActor::spawn(KernelConfig::default());
+            let kernel = actor.handle();
+            let document = pm_model::json::parse(&document.to_string()).unwrap();
+            kernel
+                .open("window", OpenSource::Untitled(document))
+                .wait()
+                .unwrap()
+                .unwrap();
+            let host = ExtensionHost::start(HostConfig {
+                kernel: kernel.clone(),
+                project: "window".into(),
+                roots: vec![root.path().join("extensions")],
+                cache: root.path().join("cache"),
+                owner: None,
+                text: None,
+                frames,
+                rasters,
+                clipboard: None,
+                vars: None,
+                wake: Arc::new(|| ()),
+            });
+            Self {
+                actor: Some(actor),
+                kernel,
+                host,
+                _root: root,
+            }
+        }
+        fn until(&self, what: &str, done: impl Fn(&ExtensionHost) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(&self.host) {
+                assert!(
+                    Instant::now() < deadline,
+                    "{what}; toasts {:?}, records {:?}",
+                    self.host.take_toasts(),
+                    self.host.records()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        /// Waits for the watchdog's question and returns the task it names.
+        fn answer_unresponsive(&self, name: Option<&str>) -> u64 {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let asked = self
+                    .host
+                    .take_requests()
+                    .into_iter()
+                    .find(|r| r["kind"] == "unresponsive");
+                if let Some(request) = asked {
+                    assert_eq!(request["name"].as_str(), name);
+                    return request["execution"].as_u64().unwrap();
+                }
+                assert!(Instant::now() < deadline, "no unresponsive prompt");
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        fn name(&self) -> String {
+            let published = self.kernel.published("window").unwrap();
+            let root = published.snapshot.root().unwrap();
+            root.get("name")
+                .and_then(|n| n.to_value().as_js_string().map(|s| s.to_string_lossy()))
+                .unwrap_or_default()
+        }
+        fn health(&self, id: &str) -> String {
+            self.host
+                .records()
+                .iter()
+                .find(|r| r["id"] == id)
+                .map(|r| r["health"]["state"].as_str().unwrap_or_default().to_owned())
+                .unwrap_or_default()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.host.close();
+            if let Some(worker) = self.host.worker.take() {
+                let _ = worker.join();
+            }
+            if let Some(actor) = self.actor.take() {
+                thread::sleep(Duration::from_millis(50));
+                actor.shutdown();
+            }
+        }
+    }
+    fn command(fixture: &Fixture, id: &str) -> bool {
+        fixture.host.contributions().is_some_and(|c| {
+            c["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["id"] == id)
+        })
+    }
+    /// A project's extensions, by its effects' and layers' types in either
+    /// form (`progressive-blur`, `deep-glow.effect`), load first (PM-384).
+    #[test]
+    fn a_projects_extensions_are_named_by_its_types_in_either_form() {
+        let doc = pm_model::Document::new(
+            Some(pm_model::json::parse(r#"{"layers":[{"type":"solid","fx":[{"type":"progressive-blur","p":{"radius":{"v":3}}}]},
+                {"type":"deep-glow.effect","kf":[{"type":"ignored-in-keyframes"}]}],"comps":{"c":{"layers":[{"type":"ascii-magic-effects.characters"}]}}}"#).unwrap()),
+            1,
+        );
+        let used = extensions_used(doc.root().unwrap());
+        for id in ["progressive-blur", "deep-glow", "ascii-magic-effects"] {
+            assert!(used.contains(id), "{id} in {used:?}");
+        }
+        assert!(!used.contains("ignored-in-keyframes"));
+    }
+
+    #[test]
+    fn appkit_answers_reach_realm_closures_and_storage_outlives_the_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-ui",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   const rename=(name)=>api.history.do('Rename',()=>{api.project.get().name=name});
+                   const round=(api.storage.get('round')||0)+1;
+                   api.storage.set('round',round);
+                   api.panels.register({id:'synthetic-ui.panel',title:'Synthetic',build(){}});
+                   api.menus.contribute('panel:context',(ctx)=>[{label:'For '+ctx.panelId,run(){rename('tab')}}]);
+                   api.commands.register({id:'synthetic-ui.round',label:'Round',run(){rename('round '+round)}});
+                   api.commands.register({id:'synthetic-ui.open',label:'Open',run(){api.panels.open('synthetic-ui.panel')}});
+                   api.commands.register({id:'synthetic-ui.icon',label:'Icon',run(){rename(api.ui.icon('plus').slice(0,4)+api.extensions.list().length)}});
+                   api.commands.register({id:'synthetic-ui.off',label:'Off',run(){api.extensions.setEnabled('synthetic-ui',false)}});
+                   api.commands.register({id:'synthetic-ui.confirm',label:'Confirm',run(){
+                     api.ui.confirm('Sure?','Body').then((yes)=>rename(yes?'confirmed':'declined'))}});
+                   api.commands.register({id:'synthetic-ui.menu',label:'Menu',run(){
+                     api.ui.toast('Choose');
+                     api.ui.menu({x:4,y:5},[{header:'Pick'},'-',{label:'Rename',run(){rename('menu')}}])}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.is_ready() && host.contributions().is_some()
+        });
+        let request = |what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(request) = fixture.host.take_requests().pop() {
+                    return request;
+                }
+                assert!(Instant::now() < deadline, "{what}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let named = |name: &str| {
+            fixture.until(name, |_| fixture.name() == name);
+        };
+        fixture.host.run_command("synthetic-ui.open", json!([]));
+        let reveal = request("panel reveal");
+        assert_eq!(
+            (&reveal["kind"], &reveal["id"], &reveal["open"]),
+            (&json!("panel"), &json!("synthetic-ui.panel"), &json!(true))
+        );
+        fixture.host.run_command("synthetic-ui.confirm", json!([]));
+        let sheet = request("confirm");
+        assert_eq!(
+            (&sheet["title"], &sheet["body"]),
+            (&json!("Sure?"), &json!("Body"))
+        );
+        fixture
+            .host
+            .answer(sheet["token"].as_u64().unwrap(), json!(true));
+        named("confirmed");
+        fixture.host.run_command("synthetic-ui.menu", json!([]));
+        let menu = request("menu");
+        assert_eq!(
+            (menu["x"].as_f64(), menu["y"].as_f64()),
+            (Some(4.), Some(5.))
+        );
+        assert_eq!(menu["items"].as_array().unwrap().len(), 3);
+        assert_eq!(fixture.host.take_toasts(), ["Choose"]);
+        fixture.host.answer(
+            menu["token"].as_u64().unwrap(),
+            menu["items"][2]["run"].clone(),
+        );
+        named("menu");
+        fixture
+            .host
+            .gather_menu("panel:context", json!({"panelId":"first"}), 7);
+        let gathered = request("gathered");
+        assert_eq!(gathered["key"], 7);
+        assert_eq!(gathered["items"][0]["label"], "For first");
+        fixture.host.answer(
+            gathered["token"].as_u64().unwrap(),
+            gathered["items"][0]["run"].clone(),
+        );
+        named("tab");
+        // Storage lives in durable `ext.*` settings, so a later window reads it.
+        fixture.until("storage", |_| {
+            fixture
+                .kernel
+                .state()
+                .settings
+                .contains_key("ext.synthetic-ui")
+        });
+        fixture.host.run_command("synthetic-ui.round", json!([]));
+        named("round 1");
+        fixture.host.run_command("synthetic-ui.icon", json!([]));
+        named("<svg1");
+        let mut later = ExtensionHost::start(HostConfig {
+            kernel: fixture.kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: fixture._root.path().join("cache-later"),
+            owner: None,
+            text: None,
+            wake: Arc::new(|| ()),
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !later.is_ready() || later.contributions().is_none() {
+            assert!(Instant::now() < deadline, "second host");
+            thread::sleep(Duration::from_millis(5));
+        }
+        later.run_command("synthetic-ui.round", json!([]));
+        named("round 2");
+        later.run_command("synthetic-ui.off", json!([]));
+        fixture.until("disabled", |_| {
+            !fixture.kernel.state().extensions["synthetic-ui"].enabled
+        });
+        later.close();
+        let _ = later.worker.take().map(thread::JoinHandle::join);
+    }
+    #[test]
+    fn an_extension_folder_deleted_outside_powermove_leaves_settings_on_rescan() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        for id in ["ghost-mod", "kept-mod"] {
+            extension(
+                &extensions,
+                id,
+                &[(
+                    "index.ts",
+                    "export default function activate(api: any): void {}",
+                )],
+            );
+        }
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let entry = |id: &str| fixture.kernel.state().extensions.get(id).cloned();
+        fixture.until("entries with their folders", |_| {
+            ["ghost-mod", "kept-mod"].iter().all(|id| {
+                entry(id).is_some_and(|e| {
+                    e.source
+                        .get("hostRecord")
+                        .and_then(|r| r.get("folder"))
+                        .is_some()
+                })
+            })
+        });
+        fs::remove_dir_all(extensions.join("ghost-mod")).unwrap();
+        rescan_all();
+        // One check is not enough: it shows unavailable until the next one.
+        fixture.until("the first check", |_| {
+            entry("ghost-mod").is_none_or(|e| unavailable(&e))
+        });
+        assert!(entry("ghost-mod").is_some(), "forgotten on a single check");
+        fixture.until("the ghost entry is forgotten", |_| {
+            entry("ghost-mod").is_none()
+        });
+        assert!(entry("kept-mod").is_some_and(|e| !unavailable(&e)));
+    }
+    fn unavailable(entry: &pm_kernel::state::ExtensionEntry) -> bool {
+        entry
+            .source
+            .get("hostRecord")
+            .and_then(|r| r.get("unavailable"))
+            .and_then(pm_model::Value::as_bool)
+            == Some(true)
+    }
+    #[test]
+    fn an_extension_on_an_unmounted_volume_keeps_its_entry_and_preference() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "away-mod",
+            &[(
+                "index.ts",
+                "export default function activate(api: any): void {}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let entry = |id: &str| fixture.kernel.state().extensions.get(id).cloned();
+        fixture.until("its entry with its folder", |_| {
+            entry("away-mod").is_some_and(|e| {
+                e.source
+                    .get("hostRecord")
+                    .and_then(|r| r.get("folder"))
+                    .is_some()
+            })
+        });
+        let mut off = entry("away-mod").unwrap();
+        off.enabled = false;
+        fixture
+            .kernel
+            .state_transaction(pm_kernel::state::StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(off)],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        // The volume goes away: the folder's parent can't be listed.
+        let unmounted = extensions.with_file_name("unmounted");
+        fs::rename(&extensions, &unmounted).unwrap();
+        for _ in 0..3 {
+            rescan_all();
+            fixture.until("a check", |_| {
+                entry("away-mod").is_none_or(|e| unavailable(&e))
+            });
+            thread::sleep(Duration::from_millis(200));
+        }
+        thread::sleep(DISK_POLL + Duration::from_millis(500));
+        let kept = entry("away-mod").expect("an unreachable folder never removes its entry");
+        assert!(unavailable(&kept) && !kept.enabled);
+        // It comes back: available again, still off.
+        fs::rename(&unmounted, &extensions).unwrap();
+        rescan_all();
+        fixture.until("available again", |_| {
+            entry("away-mod").is_some_and(|e| !unavailable(&e) && !e.enabled)
+        });
+    }
+    #[test]
+    fn a_retried_forget_never_removes_an_entry_republished_from_a_restored_folder() {
+        use crate::store_kernel::{StoreAuthority, update_state};
+        use pm_kernel::state::{ExtensionEntry, StateSnapshot, StateTransaction};
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        fs::create_dir_all(&extensions).unwrap();
+        let (old, restored) = (extensions.join("glow"), extensions.join("glow-restored"));
+        fs::create_dir_all(&restored).unwrap();
+        // As `publish_entries` writes an entry.
+        let entry = |folder: &Path| {
+            ExtensionEntry {
+            id: "glow".into(),
+            installed: true,
+            enabled: true,
+            version: "1.0.0".into(),
+            source: pm_model::json::parse(
+                &json!({"hostRecord":{"name":"Glow","trust":"local","folder":folder.to_string_lossy()}})
+                    .to_string(),
+            )
+            .unwrap(),
+        }
+        };
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(entry(&old))],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        /// Window B republishes the id from its restored folder between this
+        /// host's read and its first write.
+        struct Racing(KernelHandle, Mutex<Option<StateOp>>);
+        impl StoreAuthority for Racing {
+            fn state(&self) -> Arc<StateSnapshot> {
+                self.0.state()
+            }
+            fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+                if let Some(op) = self.1.lock().unwrap().take() {
+                    StoreAuthority::transact(
+                        &self.0,
+                        StateTransaction {
+                            expected_revision: None,
+                            ops: vec![op],
+                        },
+                    )?;
+                }
+                StoreAuthority::transact(&self.0, tx)
+            }
+            fn project(&self, _: &str) -> Option<(u64, pm_model::Value)> {
+                None
+            }
+        }
+        let racing = Racing(
+            kernel.clone(),
+            Mutex::new(Some(StateOp::Extension(entry(&restored)))),
+        );
+        let forget = BTreeMap::from([("glow".to_owned(), old.to_string_lossy().into_owned())]);
+        let mut attempts = 0;
+        update_state::<String>(&racing, |state| {
+            attempts += 1;
+            let ops = forget_ops(state, &forget, &BTreeMap::new());
+            Ok((!ops.is_empty()).then_some(ops))
+        })
+        .unwrap();
+        assert_eq!(attempts, 2, "the first write lost the race and was rebuilt");
+        let kept = kernel
+            .state()
+            .extensions
+            .get("glow")
+            .cloned()
+            .expect("B's entry was removed");
+        assert_eq!(
+            recorded_folder(&kept),
+            Some(restored.to_string_lossy().as_ref())
+        );
+        // With nothing in the way the same decision does remove it.
+        let gone = BTreeMap::from([("glow".to_owned(), restored.to_string_lossy().into_owned())]);
+        fs::remove_dir_all(&restored).unwrap();
+        assert_eq!(
+            forget_ops(&kernel.state(), &gone, &BTreeMap::new()).len(),
+            1
+        );
+        // ...unless this host's roots provide the id again.
+        let provided = BTreeMap::from([("glow".to_owned(), restored.clone())]);
+        assert!(forget_ops(&kernel.state(), &gone, &provided).is_empty());
+    }
+    #[test]
+    fn a_folder_is_gone_only_when_its_parent_lists_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("extensions");
+        fs::create_dir_all(parent.join("here")).unwrap();
+        assert_eq!(folder_presence(&parent.join("here")), Presence::Present);
+        assert_eq!(folder_presence(&parent.join("gone")), Presence::Gone);
+        assert_eq!(
+            folder_presence(&root.path().join("no-volume/extensions/x")),
+            Presence::Unreachable
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.path().join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let presence = folder_presence(&locked.join("x"));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(presence, Presence::Unreachable);
+    }
+    #[test]
+    fn discovered_typescript_and_svelte_extensions_contribute_and_edit_the_live_project() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-good",
+            &[
+                (
+                    "index.ts",
+                    "import { label } from './label';
+                     import Panel from './Panel.svelte';
+                     import type { Nothing } from './types';
+                     export default function activate(api: any): void {
+                       const unused: Nothing | null = null;
+                       api.commands.register({id:'synthetic-good.rename',label:label(),run(name: string){
+                         api.history.do('Rename',()=>{api.project.get().name=name});
+                         return name}});
+                       api.panels.register({id:'synthetic-good.panel',title:'Synthetic',component:Panel});
+                     }",
+                ),
+                ("label.ts", "export const label = (): string => 'Rename project';"),
+                ("types.ts", "export type Nothing = never;"),
+                (
+                    "Panel.svelte",
+                    "<script lang='ts'>let { api }: { api: any } = $props();</script><p class='note'>{api.project.get().name}</p><style>.note{color:red}</style>",
+                ),
+            ],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        assert_eq!(fixture.health("synthetic-good"), "ok");
+        assert!(command(&fixture, "synthetic-good.rename"));
+        let contributions = fixture.host.contributions().unwrap();
+        assert_eq!(contributions["panels"][0]["title"], "Synthetic");
+        fixture
+            .host
+            .run_command("synthetic-good.rename", json!(["Renamed by extension"]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.name() != "Renamed by extension" {
+            assert!(Instant::now() < deadline, "edit reached the kernel");
+            thread::sleep(Duration::from_millis(5));
+        }
+        // A native undo reaches the same mirror.
+        // The name publishes before the extension's history entry closes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ack = fixture
+                .kernel
+                .call_blocking(
+                    "window",
+                    Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
+                )
+                .unwrap();
+            if matches!(ack.reply, Reply::Bool(true)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "undo stayed refused");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fixture.name(), "Synthetic extension check");
+    }
+    /// While a load pass runs, a definition the project uses may still arrive:
+    /// the published contributions say so until every extension has registered
+    /// what it registers (or failed), so nothing calls it not installed.
+    #[test]
+    fn contributions_stay_unsettled_until_a_slow_extension_has_registered() {
+        let root = tempfile::tempdir().unwrap();
+        let effect = |id: &str| {
+            format!(
+                "api.effects.register({{id:'{id}',label:'{id}',group:'Stylize',params:[],frag:'o = src(v_uv);'}})"
+            )
+        };
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "a-fast",
+            &[(
+                "index.ts",
+                &format!("export default function(api){{{}}}", effect("fast.tint")),
+            )],
+        );
+        extension(
+            &extensions,
+            "b-slow",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default async function(api){{await new Promise(r=>setTimeout(r,1500));{}}}",
+                    effect("slow.tint")
+                ),
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |c: &Value, id: &str| {
+            c["definitions"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut partial = None;
+        let mut named = false;
+        loop {
+            // One publication: its definitions, its flag and its names.
+            let now = fixture.host.publication();
+            match &now.contributions {
+                Some(c) if has(c, "slow.tint") && now.settled => break,
+                Some(c) => {
+                    if has(c, "fast.tint") {
+                        partial.get_or_insert(now.clone());
+                    }
+                    // Who is still loading is named while it loads.
+                    named |= now.loading.iter().any(|(id, _)| id == "b-slow");
+                    assert!(
+                        !now.settled,
+                        "settled without slow.tint: {}",
+                        c["definitions"]
+                    );
+                }
+                None => assert!(!now.settled, "settled before anything activated"),
+            }
+            assert!(Instant::now() < deadline, "slow.tint never registered");
+            thread::sleep(Duration::from_millis(2));
+        }
+        // A publication read while the slow extension loaded still says so
+        // after the host has settled: a reader that pins it later pins a
+        // load in progress, never these definitions as the finished list.
+        let partial = partial.expect("the fast extension's effect was published first");
+        assert!(!partial.settled && !has(partial.contributions.as_ref().unwrap(), "slow.tint"));
+        assert!(named, "the slow extension was named as loading");
+        let settled = fixture.host.publication();
+        assert!(settled.loading.is_empty() && settled.revision > partial.revision);
+    }
+    /// An extension reloading through the public API (`api.extensions.reload`,
+    /// `PM.Kernel.loader.reload`) is loading: from the reload being asked for
+    /// until it has registered again (or failed), no publication calls the
+    /// effects it owns settled-and-absent, so no frame draws them bypassed
+    /// and nothing says "not installed".
+    #[test]
+    fn a_public_reload_counts_as_loading_for_the_effects_it_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        // Its first activation registers at once; a later one takes a while,
+        // as a reload that fetches or compiles does.
+        extension(
+            &extensions,
+            "a-effect",
+            &[(
+                "index.ts",
+                "export default async function(api){
+                   const round=(api.storage.get('round')||0)+1;
+                   api.storage.set('round',round);
+                   if(round>1) await new Promise(r=>setTimeout(r,1500));
+                   api.effects.register({id:'a-effect.tint',label:'Tint '+round,group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                 }",
+            )],
+        );
+        extension(
+            &extensions,
+            "b-driver",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.commands.register({id:'b-driver.reload',label:'Reload',run(){api.extensions.reload('a-effect')}});
+                   api.commands.register({id:'b-driver.raw',label:'Raw',run(){api.host.pm.Kernel.loader.reload('a-effect')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let label = |now: &Publication| {
+            now.contributions.as_ref().and_then(|c| {
+                c["effects"]
+                    .as_array()?
+                    .iter()
+                    .find(|e| e["id"] == "a-effect.tint")?["label"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        };
+        fixture.until("the first load settles", |host| {
+            let now = host.publication();
+            now.settled && label(&now).as_deref() == Some("Tint 1")
+        });
+        for (command, round) in [("b-driver.reload", "Tint 2"), ("b-driver.raw", "Tint 3")] {
+            fixture.host.run_command(command, json!([]));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut named = false;
+            loop {
+                let now = fixture.host.publication();
+                let label = label(&now);
+                if now.settled && label.as_deref() == Some(round) {
+                    break;
+                }
+                if label.as_deref() != Some(round) {
+                    // The old registration, or none: only ever while loading
+                    // once the reload has been published.
+                    named |= now.loading.iter().any(|(id, _)| id == "a-effect");
+                    assert!(
+                        !now.settled || !named && label.is_some(),
+                        "settled without the reloading effect ({command}): {label:?}"
+                    );
+                }
+                assert!(Instant::now() < deadline, "{round} never registered");
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(named, "the reloading extension was named as loading");
+            assert!(fixture.host.publication().loading.is_empty());
+        }
+    }
+    /// An effect registered after its extension's activation returned (from a
+    /// timer, or a promise the activation did not return) is still part of
+    /// the load: the contributions are not settled, and the extension is
+    /// named as loading, until the work its activation started has finished.
+    /// An extension that says so itself (`api.readiness.hold`) is loading
+    /// until it releases, however its work is driven. Work that never
+    /// finishes holds the load for a bounded time only.
+    #[test]
+    fn an_effect_registered_after_activation_returned_is_still_loading() {
+        let root = tempfile::tempdir().unwrap();
+        let effect = |id: &str| {
+            format!(
+                "api.effects.register({{id:'{id}',label:'{id}',group:'Stylize',params:[],frag:'o = src(v_uv);'}})"
+            )
+        };
+        let extensions = root.path().join("extensions");
+        let sleep = "const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));";
+        extension(
+            &extensions,
+            "a-timer",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default function(api){{setTimeout(()=>setTimeout(()=>{{{}}},400),400)}}",
+                    effect("timer.tint")
+                ),
+            )],
+        );
+        extension(
+            &extensions,
+            "b-promise",
+            &[(
+                "index.ts",
+                &format!(
+                    "{sleep}export default function(api){{(async()=>{{await sleep(300);await 0;await sleep(600);{}}})()}}",
+                    effect("promise.tint")
+                ),
+            )],
+        );
+        // Released by a command the host runs: no timer of its own is out.
+        extension(
+            &extensions,
+            "c-lease",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default function(api){{const ready=api.readiness.hold();
+                       api.commands.register({{id:'c-lease.finish',label:'Finish',run(){{{};ready.release()}}}})}}",
+                    effect("lease.tint")
+                ),
+            )],
+        );
+        // Re-arms for ever and registers nothing.
+        extension(
+            &extensions,
+            "d-poll",
+            &[(
+                "index.ts",
+                "export default function(api){const again=()=>setTimeout(again,20);again()}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |now: &Publication, id: &str| {
+            now.contributions.as_ref().is_some_and(|c| {
+                c["definitions"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+            })
+        };
+        let loading = |now: &Publication, id: &str| now.loading.iter().any(|(l, _)| l == id);
+        // Until both late effects are there, the load is never called
+        // settled, and each owner is named while its effect is missing.
+        let started = Instant::now();
+        loop {
+            let now = fixture.host.publication();
+            let (timer, promise) = (has(&now, "timer.tint"), has(&now, "promise.tint"));
+            if timer && promise {
+                break;
+            }
+            assert!(
+                !now.settled,
+                "settled without timer {timer} promise {promise}"
+            );
+            if now.contributions.is_some() && fixture.host.is_ready() {
+                assert!(timer || loading(&now, "a-timer"), "a-timer not named");
+                assert!(promise || loading(&now, "b-promise"), "b-promise not named");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never registered"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        // The lease holds the load on its own, past the bound on unfinished
+        // work (the polling extension's), and is named.
+        let bound = Instant::now() + Duration::from_secs(7);
+        fixture.until("only the lease is left", |host| {
+            let now = host.publication();
+            assert!(!now.settled && !has(&now, "lease.tint"));
+            assert!(
+                Instant::now() < bound,
+                "the polling extension held the load"
+            );
+            now.loading.len() == 1 && loading(&now, "c-lease")
+        });
+        fixture.host.run_command("c-lease.finish", json!([]));
+        fixture.until("released", |host| {
+            let now = host.publication();
+            assert!(!now.settled || has(&now, "lease.tint"));
+            now.settled && now.loading.is_empty()
+        });
+    }
+    /// A Store helper's activation is part of the load: until it has
+    /// registered its effect (at boot, or when it is installed later) the
+    /// contributions are not settled.
+    #[test]
+    fn a_store_helper_activation_counts_toward_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let store = |dir: &Path, id: &str| {
+            extension(
+                dir,
+                id,
+                &[
+                    (
+                        "index.ts",
+                        "export default async function(api: any){
+                           await new Promise(r=>setTimeout(r,800));
+                           api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                         }",
+                    ),
+                    (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
+                ],
+            )
+        };
+        store(&extensions, "synthetic-store");
+        extension(
+            &extensions,
+            "synthetic-local",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-local.run',label:'Run',run(){}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |id: &str| {
+            fixture.host.contributions().is_some_and(|c| {
+                c["definitions"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+            })
+        };
+        let watch = |id: &str| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let now = fixture.host.publication();
+                let has = now.contributions.as_ref().is_some_and(|c| {
+                    c["definitions"]
+                        .as_array()
+                        .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+                });
+                if has && now.settled {
+                    break;
+                }
+                assert!(!now.settled, "settled without {id}");
+                assert!(Instant::now() < deadline, "{id} never registered");
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        watch("synthetic-store.tint");
+        // Installed while the window is open: settled again only once it has
+        // registered.
+        store(&fixture._root.path().join("extensions"), "synthetic-later");
+        fixture.until("the rescan starts it", |host| {
+            assert!(!has("synthetic-later.tint"), "registered while settled");
+            host.publication()
+                .loading
+                .iter()
+                .any(|(id, name)| id == "synthetic-later" && name == "synthetic-later")
+        });
+        watch("synthetic-later.tint");
+    }
+    /// A project with no extensions has nothing to wait for.
+    #[test]
+    fn no_extensions_settle_at_once() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("extensions")).unwrap();
+        let fixture = Fixture::start(root);
+        fixture.until("an empty boot settles", |host| host.publication().settled);
+        assert!(fixture.host.contributions().is_none());
+    }
+    #[test]
+    fn definition_fence_finds_a_host_started_before_project_open() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "early",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'early.fx',label:'Early',group:'Test',params:[],frag:'o=src(v_uv);'})}",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![root.path().join("extensions")],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: None,
+            wake: Arc::new(|| {}),
+        });
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let doc = kernel.published("window").unwrap().snapshot.doc_id;
+        let publication = settle_document(doc, Duration::from_secs(20), &|| false)
+            .unwrap()
+            .expect("the pre-open host must fence first-frame definitions");
+        assert!(publication.settled);
+        assert!(kernel.state().provider("effects", "early.fx").is_some());
+        drop(host);
+        actor.shutdown();
+    }
+    #[test]
+    fn document_definition_fence_observes_reload_before_snapshot_pin() {
+        let root = tempfile::tempdir().unwrap();
+        let source = |label: &str| {
+            format!(
+                "export default function(api){{api.effects.register({{id:'fence.fx',label:'{label}',group:'Test',params:[],frag:'o=src(v_uv);'}})}}"
+            )
+        };
+        extension(
+            &root.path().join("extensions"),
+            "fence",
+            &[("index.ts", &source("Before"))],
+        );
+        let fixture = Fixture::start(root);
+        let doc = fixture.kernel.published("window").unwrap().snapshot.doc_id;
+        settle_document(doc, Duration::from_secs(20), &|| false).unwrap();
+        fs::write(
+            fixture._root.path().join("extensions/fence/index.ts"),
+            source("After"),
+        )
+        .unwrap();
+        fixture.host.inbox.send(Input::Rescan).unwrap();
+        let publication = settle_document(doc, Duration::from_secs(20), &|| false)
+            .unwrap()
+            .unwrap();
+        assert!(publication.settled);
+        assert_eq!(
+            fixture
+                .kernel
+                .state()
+                .provider("effects", "fence.fx")
+                .unwrap()
+                .definition
+                .get("label")
+                .unwrap()
+                .as_str(),
+            Some("After")
+        );
+        assert_eq!(
+            publication.contributions.unwrap()["effects"][0]["label"],
+            "After"
+        );
+    }
+    #[test]
+    fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'synthetic.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:2,def:1},{k:'color',label:'Color',type:'color',def:'#ff0000'}],frag:'o = src(v_uv) * u_amount;'})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let state = fixture.kernel.state();
+        let provider = state.provider("effects", "synthetic.tint").unwrap();
+        assert_eq!(
+            provider.definition.get("label").unwrap().as_str(),
+            Some("Tint")
+        );
+        let contributions = fixture.host.contributions().unwrap();
+        let definition: pm_protocol::definitions::DefinitionSnapshot =
+            serde_json::from_value(contributions["definitions"][0].clone()).unwrap();
+        let glsl = definition.glsl.unwrap();
+        assert!(glsl.source.starts_with("#version 300 es"));
+        assert!(glsl.source.contains("uniform float u_amount;"));
+        assert!(glsl.source.contains("uniform vec3 u_color;"));
+        assert_eq!(
+            glsl.source.lines().nth(glsl.body_line_offset as usize),
+            Some("o = src(v_uv) * u_amount;")
+        );
+    }
+    /// v1's `api.vars`: an extension reads the values entered for the keys its
+    /// manifest declares, delivered per activation; an undeclared key, an empty
+    /// value or another extension's value never reaches it.
+    #[test]
+    fn declared_vars_reach_api_vars_and_nothing_else_does() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("extensions").join("needs-key");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":"needs-key","name":"Needs key","version":"1.0.0","apiVersion":2,
+                "vars":[{"key":"API_KEY","label":"API key","secret":true},{"key":"MODEL","label":"Model"},{"key":"EMPTY","label":"Empty"}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("index.ts"),
+            "export default function(api){api.storage.set('seen',{key:api.vars.get('API_KEY'),model:api.vars.get('MODEL'),keys:api.vars.keys(),other:api.vars.has('OTHER'),empty:api.vars.has('EMPTY')})}",
+        )
+        .unwrap();
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![root.path().join("extensions")],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: Some(Arc::new(move |id: &str, keys: &[String]| {
+                seen.lock().unwrap().push((id.to_owned(), keys.to_vec()));
+                [
+                    ("API_KEY", "sk-synthetic"),
+                    ("MODEL", "m-1"),
+                    ("EMPTY", ""),
+                    ("OTHER", "x"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect()
+            })),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !host.is_ready() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        let storage = crate::adapter::storage_of(&kernel);
+        let stored = storage
+            .as_object()
+            .and_then(|all| {
+                all.iter().find_map(|(key, v)| {
+                    if key.ends_with(".seen") {
+                        Some(v.clone())
+                    } else {
+                        v.get("seen").cloned()
+                    }
+                })
+            })
+            .unwrap_or_else(|| panic!("no storage: {storage}"));
+        assert_eq!(
+            stored,
+            json!({"key":"sk-synthetic","model":"m-1","keys":["API_KEY","MODEL"],"other":false,"empty":false})
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![(
+                "needs-key".to_owned(),
+                vec!["API_KEY".to_owned(), "MODEL".to_owned(), "EMPTY".to_owned()]
+            )]
+        );
+        drop(host);
+        drop(actor);
+    }
+    /// The values behind every key of every extension, as a profile holds
+    /// them: whatever is asked of the source, it has.
+    fn every_value(sentinel: &'static str) -> crate::VarsSource {
+        Arc::new(move |_: &str, keys: &[String]| {
+            keys.iter()
+                .map(|key| (key.clone(), sentinel.to_owned()))
+                .collect()
+        })
+    }
+    fn needs_key(root: &Path, source: &str) {
+        let directory = root.join("needs-key");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":"needs-key","name":"Needs key","version":"1.0.0","apiVersion":2,
+                "vars":[{"key":"API_KEY","label":"API key","secret":true}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(directory.join("index.ts"), source).unwrap();
+    }
+    fn stored(kernel: &KernelHandle, name: &str) -> Option<Value> {
+        let storage = crate::adapter::storage_of(kernel);
+        storage.as_object()?.iter().find_map(|(key, v)| {
+            if key.ends_with(&format!(".{name}")) {
+                Some(v.clone())
+            } else {
+                v.get(name).cloned()
+            }
+        })
+    }
+    /// An extension receives the values of the keys its own manifest
+    /// declares and can ask the host for nothing: another extension's key, a
+    /// key of its own it did not declare, the loader's records and the
+    /// host's entry points give it no value. The host decides by the
+    /// manifests it read from disk, not by what the realm says.
+    #[test]
+    fn one_extension_cannot_read_another_extensions_vars() {
+        const SECRET: &str = "sk-another-extensions-secret";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               let undeclared = null;
+               try { undeclared = runtime.engine('extension.vars',{id:'needs-key',keys:['UNDECLARED']}) } catch(e) { undeclared = 'refused' }
+               api.storage.set('own',{has:api.vars.has('API_KEY'),length:(api.vars.get('API_KEY')||'').length,keys:api.vars.keys(),undeclared});
+             }",
+        );
+        // Declares nothing; activates after `needs-key`.
+        extension(
+            &extensions,
+            "thief",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   const tries = {};
+                   const attempt = (name, fn) => { try { tries[name] = fn() } catch(e) { tries[name] = 'refused' } };
+                   attempt('ask', () => runtime.engine('extension.vars',{id:'needs-key',keys:['API_KEY']}));
+                   attempt('token', () => runtime.engine('extension.vars',{token:''}));
+                   attempt('bare', () => runtime.engine('extension.vars',{}));
+                   attempt('records', () => JSON.stringify(api.host.pm.Kernel.loader.records()));
+                   attempt('list', () => JSON.stringify(api.extensions.list()));
+                   attempt('taker', () => typeof globalThis.__compatVars === 'function' ? String(globalThis.__compatVars()('needs-key')?.API_KEY) : 'gone');
+                   attempt('own', () => api.vars.keys());
+                   api.storage.set('loot', tries);
+                 }",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !host.publication().settled || stored(&kernel, "loot").is_none() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Its own declared key arrived, and only that.
+        let own = stored(&kernel, "own").unwrap();
+        assert_eq!(own["has"], true);
+        assert_eq!(own["length"], SECRET.len());
+        assert_eq!(own["keys"], json!(["API_KEY"]));
+        assert!(
+            !own["undeclared"].to_string().contains(SECRET),
+            "an undeclared key of its own: {own}"
+        );
+        let loot = stored(&kernel, "loot").unwrap();
+        assert!(
+            !loot.to_string().contains(SECRET),
+            "the other extension's value: {loot}"
+        );
+        assert_eq!(loot["own"], json!([]));
+        drop(host);
+        drop(actor);
+    }
+    /// A value that has been taken away (its entry removed, its declaration
+    /// gone) is gone from the extension's next load: each load replaces what
+    /// the realm holds with what the host chose for it, nothing is kept.
+    /// A window closed while its extensions' realm waits its turn for heap
+    /// leaves the queue at once: nothing behind it waits for a dead window.
+    #[test]
+    fn closing_a_window_withdraws_its_start_from_the_admission_queue() {
+        let cage = pm_runtime_v8::Admission::cage();
+        // Less than a window realm's slice left.
+        let held = cage.hold(cage.budget() - cage.used() - 16 * 1024 * 1024).unwrap();
+        let waiting = cage.waiting();
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "waits",
+            &[("index.ts", "export default function(_api: any): void {}")],
+        );
+        let mut fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cage.waiting() <= waiting {
+            assert!(Instant::now() < deadline, "its start waits its turn");
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.host.close();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cage.waiting() > waiting {
+            assert!(Instant::now() < deadline, "closing withdrew it");
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(held);
+    }
+    #[test]
+    fn a_value_removed_since_the_last_load_is_not_handed_out_again() {
+        const SECRET: &str = "sk-removed-later";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const seen=api.storage.get('seen')||[];
+               seen.push(api.vars.keys());
+               api.storage.set('seen',seen);
+             }",
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let entered = Arc::new(AtomicBool::new(true));
+        let source = entered.clone();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: Some(Arc::new(move |_: &str, keys: &[String]| {
+                keys.iter()
+                    .filter(|_| source.load(Ordering::Acquire))
+                    .map(|key| (key.clone(), SECRET.to_owned()))
+                    .collect()
+            })),
+            wake: Arc::new(|| ()),
+        });
+        let seen = |rounds: usize| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let seen = stored(&kernel, "seen").unwrap_or(json!([]));
+                if seen.as_array().is_some_and(|s| s.len() == rounds) && host.publication().settled
+                {
+                    return seen;
+                }
+                assert!(Instant::now() < deadline, "{seen} {:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert_eq!(seen(1), json!([["API_KEY"]]));
+        // The person removes the value; the extension is turned off and on.
+        entered.store(false, Ordering::Release);
+        for enabled in [false, true] {
+            let entry = kernel.state().extensions["needs-key"].clone();
+            kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                        enabled,
+                        ..entry
+                    })],
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while host.records().iter().any(|r| r["enabled"] != enabled) {
+                assert!(Instant::now() < deadline, "{:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(seen(2), json!([["API_KEY"], []]), "the removed value");
+        drop(host);
+        drop(actor);
+    }
+    /// An extension that puts its own value into an error or a notice does
+    /// not thereby publish it: what the host records of that text (health
+    /// in Settings and for other extensions, the saved extension entry,
+    /// toasts) has the value hidden.
+    #[test]
+    fn a_value_in_an_extensions_error_or_notice_is_hidden_in_what_the_host_records() {
+        const SECRET: &str = "sk-thrown-by-its-owner";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const value = api.vars.get('API_KEY');
+               api.ui.toast('Signed in with ' + value);
+               throw new Error('The service refused key ' + value + ' (401)');
+             }",
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let error = loop {
+            let error = host
+                .records()
+                .iter()
+                .find(|r| r["id"] == "needs-key")
+                .and_then(|r| r["health"]["error"].as_str().map(str::to_owned));
+            if let Some(error) = error.filter(|_| host.publication().settled) {
+                break error;
+            }
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(error, "The service refused key [hidden value] (401)");
+        thread::sleep(Duration::from_millis(100));
+        let toasts = host.take_toasts();
+        assert!(
+            toasts.contains(&"Signed in with [hidden value]".to_owned()),
+            "{toasts:?}"
+        );
+        let state = kernel.state();
+        for (what, seen) in [
+            ("records", format!("{:?}", host.records())),
+            ("toasts", format!("{toasts:?}")),
+            ("publication", format!("{:?}", host.publication())),
+            ("saved entries", format!("{:?}", state.extensions)),
+            ("registries", format!("{:?}", state.registries)),
+        ] {
+            assert!(!seen.contains(SECRET), "the value is in the {what}");
+        }
+        drop(host);
+        drop(actor);
+    }
+    /// A run with a secret value entered for an extension leaves it nowhere
+    /// but in that extension's `api.vars`: not in the load trace or anything
+    /// else the process prints, the published contributions and records,
+    /// toasts and requests, the kernel's registries and extension entries,
+    /// the project, or the compiled-extension cache on disk.
+    #[test]
+    fn a_vars_value_never_reaches_logs_traces_published_state_the_project_or_caches() {
+        const SECRET: &str = "sk-sentinel-0f1e2d3c4b5a69788796";
+        if std::env::var_os("PM_VARS_SENTINEL_RUN").is_none() {
+            // The run itself, in a process of its own with the load trace on,
+            // so everything it prints can be read back.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "host::tests::a_vars_value_never_reaches_logs_traces_published_state_the_project_or_caches",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("PM_VARS_SENTINEL_RUN", "1")
+                .env("PM_NATIVE_MAIN_TRACE", "1")
+                .output()
+                .unwrap();
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "the run failed: {printed}");
+            assert!(
+                printed.contains("PM_EXT"),
+                "the load trace was on: {printed}"
+            );
+            assert!(!printed.contains(SECRET), "the value was printed");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        // Reads its value, says so without repeating it, then fails: the
+        // failure's text and toast are the host's.
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const value = api.vars.get('API_KEY') || '';
+               api.commands.register({id:'needs-key.got',label:'got '+value.length,run(){ throw new Error('command failed') }});
+               api.effects.register({id:'needs-key.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+             }",
+        );
+        extension(
+            &extensions,
+            "z-fails",
+            &[(
+                "index.ts",
+                "export default function(api){ throw new Error('activation failed') }",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let label = |host: &ExtensionHost| {
+            host.contributions().and_then(|c| {
+                c["commands"]
+                    .as_array()?
+                    .iter()
+                    .find(|c| c["id"] == "needs-key.got")?["label"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        };
+        while !host.publication().settled || label(&host).is_none() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(label(&host), Some(format!("got {}", SECRET.len())));
+        host.run_command("needs-key.got", json!([]));
+        thread::sleep(Duration::from_millis(300));
+        let published = kernel.published("window").unwrap();
+        let state = kernel.state();
+        let mut seen = vec![
+            format!("{:?}", host.publication()),
+            format!("{:?}", host.records()),
+            format!("{:?}", host.take_toasts()),
+            format!("{:?}", host.take_requests()),
+            format!("{:?}", host.surfaces()),
+            format!("{:?}", state.registries),
+            format!("{:?}", state.extensions),
+            pm_model::json::to_canonical_string(&published.snapshot.root().unwrap().to_value()),
+        ];
+        let mut folders = vec![root.path().to_owned()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(folder).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    folders.push(entry.path());
+                } else {
+                    seen.push(
+                        String::from_utf8_lossy(&fs::read(entry.path()).unwrap()).into_owned(),
+                    );
+                }
+            }
+        }
+        assert!(seen.len() > 8, "the cache and extension folders were read");
+        for text in &seen {
+            assert!(
+                !text.contains(SECRET),
+                "the value was kept: {}",
+                &text[..text.len().min(300)]
+            );
+        }
+        drop(host);
+        drop(actor);
+    }
+    #[test]
+    fn a_store_install_runs_confined_and_contributes_like_a_local_one() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-store",
+            &[
+                (
+                    "index.ts",
+                    "export default function(api: any){
+                       api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:1}],frag:'o = src(v_uv) * u_amount;'});
+                       api.commands.register({id:'mark',label:'Mark',run(){globalThis.ran=(typeof document)+':'+(typeof PM)}});
+                       api.events.on('project:changed',()=>{api.storage.set('seen',true)});
+                     }",
+                ),
+                (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
+            ],
+        );
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-editor",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-editor.rename',label:'Rename',
+                   run(){api.history.do('Rename',()=>{api.project.get().name='Moved'})}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.is_ready() && host.contributions().is_some()
+        });
+        assert_eq!(
+            fixture.health("synthetic-store"),
+            "ok",
+            "{:?}",
+            fixture.host.records()
+        );
+        let state = fixture.kernel.state();
+        assert!(state.provider("effects", "synthetic-store.tint").is_some());
+        assert!(state.provider("commands", "synthetic-store.mark").is_some());
+        let contributions = fixture.host.contributions().unwrap();
+        let definitions = contributions["definitions"].as_array().unwrap();
+        assert_eq!(definitions[0]["origin"], "store");
+        assert_eq!(definitions[0]["id"], "synthetic-store.tint");
+        assert!(command(&fixture, "synthetic-store.mark"));
+        // A listener in the helper hears a project change and writes through its
+        // own storage, proving the delivery end to end.
+        fixture
+            .host
+            .run_command("synthetic-editor.rename", json!([]));
+        fixture.until("listener", |_| {
+            fixture
+                .kernel
+                .state()
+                .extensions
+                .get("synthetic-store")
+                .and_then(|entry| entry.source.get("storePrivateStorageV1").cloned())
+                .is_some_and(|storage| {
+                    pm_model::json::to_canonical_string(&storage).contains("seen")
+                })
+        });
+        // A Settings toggle stops the helper and starts it again; the trusted
+        // realm never runs Store code, whatever the toggle order.
+        let toggle = |enabled: bool| {
+            let entry = fixture.kernel.state().extensions["synthetic-store"].clone();
+            fixture
+                .kernel
+                .state_transaction(StateTransaction {
+                    expected_revision: None,
+                    ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                        enabled,
+                        ..entry
+                    })],
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+        };
+        toggle(false);
+        // The kernel's registry follows the published list through its own queue.
+        fixture.until("helper stopped", |host| {
+            host.store_session("synthetic-store").is_none()
+                && !command(&fixture, "synthetic-store.mark")
+                && fixture
+                    .kernel
+                    .state()
+                    .provider("commands", "synthetic-store.mark")
+                    .is_none()
+        });
+        toggle(true);
+        fixture.until("helper again", |host| {
+            host.store_session("synthetic-store").is_some()
+                && command(&fixture, "synthetic-store.mark")
+        });
+        let state = fixture.kernel.state();
+        let owner = state.provider("commands", "synthetic-store.mark").unwrap();
+        assert!(
+            owner.token.starts_with("store:synthetic-store:"),
+            "{owner:?}"
+        );
+    }
+    #[test]
+    fn a_v4_extension_compiles_as_a_surface_and_stays_out_of_the_trusted_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        fs::create_dir_all(extensions.join("synthetic-v4")).unwrap();
+        fs::write(
+            extensions.join("synthetic-v4/manifest.json"),
+            json!({"id":"synthetic-v4","name":"Synthetic surface","version":"1.0.0","apiVersion":4,"entry":"panel.tsx"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4/panel.tsx"),
+            "import { useState } from 'powermove/hooks';
+             export const view = () => <text>{String(useState(1)[0])}</text>;",
+        )
+        .unwrap();
+        // A Store install never reaches the panel host, which has no permissions.
+        fs::create_dir_all(extensions.join("synthetic-v4-store")).unwrap();
+        fs::write(
+            extensions.join("synthetic-v4-store/manifest.json"),
+            json!({"id":"synthetic-v4-store","name":"Synthetic","version":"1.0.0","apiVersion":4,"entry":"panel.tsx"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4-store/panel.tsx"),
+            "export const view = () => <text>Store</text>;",
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4-store/.powermove-store.json"),
+            "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}",
+        )
+        .unwrap();
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        assert_eq!(fixture.health("synthetic-v4-store"), "build-error");
+        let surfaces = fixture.host.surfaces();
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0]["id"], "synthetic-v4");
+        let graph = &surfaces[0]["graph"];
+        let source = graph["sources"]["panel.tsx"].as_str().unwrap();
+        assert!(source.contains("powermove/jsx-runtime"), "{source}");
+        assert_eq!(
+            graph["edges"]["panel.tsx"]["powermove/hooks"],
+            "runtime:powermove/hooks"
+        );
+    }
+    #[test]
+    fn settings_toggles_and_disk_edits_reach_the_live_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let write = |label: &str| {
+            extension(
+                &extensions,
+                "synthetic-live",
+                &[(
+                    "index.ts",
+                    &format!(
+                        "export default function(api){{api.commands.register({{id:'synthetic-live.run',label:'{label}',run(){{}}}})}}"
+                    ),
+                )],
+            );
+        };
+        write("First");
+        let fixture = Fixture::start(root);
+        let label = |host: &ExtensionHost| {
+            host.contributions()
+                .and_then(|c| c["commands"][0]["label"].as_str().map(str::to_owned))
+        };
+        fixture.until("activation", |host| label(host).as_deref() == Some("First"));
+        let state = fixture.kernel.state();
+        let entry = state.extensions.get("synthetic-live").unwrap().clone();
+        assert_eq!(entry.version, "1.0.0");
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: false,
+                    ..entry.clone()
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        fixture.until("unload", |host| label(host).is_none());
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: true,
+                    ..entry
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        fixture.until("reload", |host| label(host).as_deref() == Some("First"));
+        std::thread::sleep(Duration::from_millis(1100));
+        extension(
+            &fixture._root.path().join("extensions"),
+            "synthetic-live",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-live.run',label:'Second',run(){}})}",
+            )],
+        );
+        fixture.until("rescan", |host| label(host).as_deref() == Some("Second"));
+    }
+    #[test]
+    fn one_bad_extension_leaves_the_others_running() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-throws",
+            &[(
+                "index.ts",
+                "export default function(){throw new Error('synthetic')}",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-broken",
+            &[(
+                "index.ts",
+                "export default function(api){ this is not javascript",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-missing",
+            &[(
+                "index.ts",
+                "import './nowhere'; export default function(){}",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-noexport",
+            &[("index.ts", "export const nothing = 1;")],
+        );
+        extension(
+            &extensions,
+            "synthetic-good",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-good.run',label:'Run',run(){}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        assert_eq!(fixture.health("synthetic-good"), "ok");
+        assert_eq!(fixture.health("synthetic-throws"), "activation-error");
+        assert_eq!(fixture.health("synthetic-broken"), "build-error");
+        assert_eq!(fixture.health("synthetic-missing"), "build-error");
+        assert!(matches!(
+            fixture.health("synthetic-noexport").as_str(),
+            "build-error" | "activation-error"
+        ));
+        assert!(command(&fixture, "synthetic-good.run"));
+    }
+    /// Stop on a hung activation rebuilds the realm; when the new realm
+    /// cannot start, nothing is left loading: the publication settles
+    /// without the realm's definitions and says why, instead of keeping the
+    /// hung load's "still loading" forever (frames held, exports waiting).
+    #[test]
+    fn a_restart_that_cannot_start_settles_with_the_failure_named() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "a-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'a-effect.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'})}",
+            )],
+        );
+        extension(
+            &extensions,
+            "z-hangs",
+            &[("index.ts", "export default function(){for(;;);}")],
+        );
+        let cache = root.path().join("cache");
+        let fixture = Fixture::start(root);
+        let asked = fixture.answer_unresponsive(Some("z-hangs"));
+        let hung = fixture.host.publication();
+        assert!(!hung.settled, "the hung load is still loading");
+        *FAIL_START.lock().unwrap() = Some(cache);
+        fixture.host.answer_unresponsive(asked, true);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut toasts = vec![];
+        let settled = loop {
+            toasts.extend(fixture.host.take_toasts());
+            let now = fixture.host.publication();
+            if now.settled {
+                break now;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the failed restart never settled: {now:?}, toasts {toasts:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        *FAIL_START.lock().unwrap() = None;
+        assert!(settled.loading.is_empty());
+        // A job without a window hears the failure by name, at once: no
+        // realm will ever finish this load.
+        assert!(fixture.host.is_ready(), "nothing is still starting");
+        let asked = Instant::now();
+        let answer = fixture
+            .host
+            .wait_contributions(Duration::from_secs(30), &|| false);
+        let failure = answer.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            failure.contains("Extensions could not start: "),
+            "the failure by name: {failure}"
+        );
+        assert!(asked.elapsed() < Duration::from_secs(2));
+        let definitions = settled
+            .contributions
+            .as_ref()
+            .map(|c| c["definitions"].clone());
+        assert!(
+            definitions.is_none_or(|d| d.as_array().is_none_or(Vec::is_empty)),
+            "the retired realm's definitions went with it"
+        );
+        thread::sleep(Duration::from_millis(50));
+        toasts.extend(fixture.host.take_toasts());
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.starts_with("Extensions could not start: ")),
+            "{toasts:?}"
+        );
+    }
+    /// An installed extension that provides nothing now is published with
+    /// why, for the frames and exports that need what it would provide.
+    #[test]
+    fn an_installed_extension_that_provides_nothing_is_published_with_why() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let ok =
+            "export default function(api){api.commands.register({id:'x.run',label:'Run',run(){}})}";
+        extension(&extensions, "synthetic-off", &[("index.ts", ok)]);
+        extension(
+            &extensions,
+            "synthetic-broken",
+            &[(
+                "index.ts",
+                "export default function(){throw new Error('no')}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let entry = fixture
+            .kernel
+            .state()
+            .extensions
+            .get("synthetic-off")
+            .unwrap()
+            .clone();
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: false,
+                    ..entry
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let named = |id: &str, why: &str| (id.to_owned(), id.to_owned(), why.to_owned());
+        let want = vec![
+            named("synthetic-broken", "couldn't start"),
+            named("synthetic-off", "is turned off"),
+        ];
+        fixture.until("named", |host| host.publication().unavailable == want);
+    }
+    /// A job that waits for extensions that never finish loading is told
+    /// which ones.
+    #[test]
+    fn a_wait_that_runs_out_names_who_is_still_loading() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-slow",
+            &[(
+                "index.ts",
+                "export default function(api){api.readiness.hold()}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let error = fixture
+            .host
+            .wait_contributions(Duration::from_millis(1500), &|| false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("synthetic-slow is still loading"), "{error}");
+    }
+    #[test]
+    fn a_hung_activation_is_stopped_and_the_realm_comes_back_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-hangs",
+            &[("index.ts", "export default function(){for(;;);}")],
+        );
+        extension(
+            &extensions,
+            "synthetic-good",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-good.run',label:'Run',run(){}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        // D11: the watchdog asks, naming the extension; nothing stops on its own.
+        let asked = fixture.answer_unresponsive(Some("synthetic-hangs"));
+        assert_eq!(fixture.host.view(), 1, "still the first realm while asking");
+        fixture.host.answer_unresponsive(asked, true);
+        fixture.until("recovery", |host| {
+            let stopped = host
+                .records()
+                .iter()
+                .any(|r| r["id"] == "synthetic-hangs" && r["health"]["state"] == "runtime-error");
+            stopped
+                && host.is_ready()
+                && host.contributions().is_some_and(|c| {
+                    c["commands"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["id"] == "synthetic-good.run")
+                })
+        });
+        assert_eq!(fixture.health("synthetic-good"), "ok");
+        // What frames and exports that need it are told: who, and why.
+        assert_eq!(
+            fixture.host.publication().unavailable,
+            vec![(
+                "synthetic-hangs".to_owned(),
+                "synthetic-hangs".to_owned(),
+                "is off until Powermove restarts".to_owned()
+            )]
+        );
+        // D11 Stop is for this run: the saved preference stays on, and the
+        // stop keeps the culprit out of the rebuilt realm.
+        let entry = |fixture: &Fixture| {
+            fixture
+                .kernel
+                .state()
+                .extensions
+                .get("synthetic-hangs")
+                .cloned()
+                .unwrap()
+        };
+        assert!(entry(&fixture).enabled);
+        assert!(entry(&fixture).stopped_this_run());
+        let view = fixture.host.view();
+        assert_eq!(view, 2, "one rebuild, one new page");
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(fixture.host.view(), view, "no second hang");
+        assert_eq!(fixture.health("synthetic-hangs"), "runtime-error");
+        // Turning it on (Settings ▸ Extensions) runs it again: it hangs again,
+        // and the watchdog asks about it again.
+        let on = entry(&fixture).switched(true);
+        drop(fixture.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::Extension(on)],
+        }));
+        let asked = fixture.answer_unresponsive(Some("synthetic-hangs"));
+        fixture.host.answer_unresponsive(asked, true);
+        fixture.until("stopped again", |host| host.view() == 3 && host.is_ready());
+        assert!(entry(&fixture).enabled);
+        let view = fixture.host.view();
+        // A hung command with an open entry: the rebuild seals it, so native undo
+        // is not left refused behind an entry no one will close.
+        extension(
+            &fixture._root.path().join("extensions"),
+            "synthetic-stuck",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-stuck.run',label:'Stuck',
+                   run(){api.history.begin('Stuck');for(;;);}})}",
+            )],
+        );
+        fixture.until("rescan", |host| command_of(host, "synthetic-stuck.run"));
+        fixture.host.run_command("synthetic-stuck.run", json!([]));
+        fixture.until("entry open", |_| {
+            fixture.kernel.published("window").unwrap().entry.is_some()
+        });
+        let asked = fixture.answer_unresponsive(Some("synthetic-stuck"));
+        fixture.host.answer_unresponsive(asked, false);
+        assert_eq!(fixture.host.view(), view);
+        fixture.host.inbox.send(Input::Unresponsive(view as u32, asked)).unwrap();
+        // The same inbox delivers Wait, the watchdog's repeated tick, then
+        // Stop, so the stopped publication proves all three were handled.
+        fixture.host.answer_unresponsive(asked, true);
+        fixture.until("third rebuild", |host| host.view() == 4 && host.is_ready());
+        assert!(
+            !fixture.host.take_requests().iter().any(|r| r["kind"] == "unresponsive"),
+            "Wait must not prompt again for the same task"
+        );
+        let published = fixture.kernel.published("window").unwrap();
+        assert!(published.entry.is_none(), "the open entry was sealed");
+    }
+    /// D11 outside activation and commands: the sheet names the extension whose
+    /// code is running (read from the stack), and Stop turns that one off so
+    /// the rebuilt realm doesn't run into the same hang again.
+    #[test]
+    fn a_hang_in_a_service_another_extension_calls_names_the_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-provider",
+            &[(
+                "index.ts",
+                "export default function(api){api.services.register('synthetic.slow',()=>{for(;;);})}",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-caller",
+            &[(
+                "index.ts",
+                "export default function(api){setTimeout(()=>api.services.get('synthetic.slow')?.(),300)}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let asked = fixture.answer_unresponsive(Some("synthetic-provider"));
+        fixture.host.answer_unresponsive(asked, true);
+        fixture.until("rebuilt", |host| host.view() == 2 && host.is_ready());
+        assert_eq!(fixture.health("synthetic-provider"), "runtime-error");
+        assert_eq!(fixture.health("synthetic-caller"), "ok");
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(fixture.host.view(), 2, "no second hang");
+        assert!(
+            !fixture
+                .host
+                .take_requests()
+                .iter()
+                .any(|r| r["kind"] == "unresponsive")
+        );
+    }
+    /// A hang with no extension's code on the stack (a timer callback made
+    /// with `new Function`) is named for the extension whose work started
+    /// it, and the question says where it was and for how long (PM-453
+    /// follow-up: the notice under load named nobody).
+    #[test]
+    fn a_hang_without_extension_frames_is_named_for_whose_task_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-anonymous",
+            &[(
+                "index.ts",
+                "export default function(api){setTimeout(new Function('for(;;);'),300)}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let request = loop {
+            if let Some(request) = fixture
+                .host
+                .take_requests()
+                .into_iter()
+                .find(|r| r["kind"] == "unresponsive")
+            {
+                break request;
+            }
+            assert!(Instant::now() < deadline, "no unresponsive prompt");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(request["name"], "synthetic-anonymous", "{request}");
+        let place = request["where"].as_str().unwrap_or_default();
+        assert!(place.contains(" < "), "its innermost frames: {request}");
+        assert!(request["seconds"].as_f64().is_some_and(|s| s > 0.), "{request}");
+        fixture
+            .host
+            .answer_unresponsive(request["execution"].as_u64().unwrap(), true);
+    }
+    /// A page that answers before the read starts waiting is not missed.
+    type Answers = Arc<Mutex<Vec<(u64, Value)>>>;
+    /// A window whose project has one text layer `t1`, the given extensions,
+    /// and raster hooks that log every answer as `(batch, width | error)`.
+    fn export_window(
+        extensions: &[(&str, &str)],
+        text: &str,
+        frames: Option<crate::FrameRenderer>,
+    ) -> (Fixture, Answers) {
+        let root = tempfile::tempdir().unwrap();
+        for (id, source) in extensions {
+            extension(&root.path().join("extensions"), id, &[("index.ts", source)]);
+        }
+        let mut document = crate::initial()["document"].clone();
+        document["layers"] = json!([{"id":"t1","type":"text","name":"T1","from":0,"dur":5,
+            "d":{"text":text}}]);
+        let answered: Answers = Arc::default();
+        let log = answered.clone();
+        let hooks = crate::RasterHooks {
+            base: Arc::new(|_| Ok(None)),
+            answers: Arc::new(move |batch, answers| {
+                for answer in answers {
+                    log.lock().unwrap().push((
+                        batch,
+                        match answer {
+                            crate::RasterAnswer::Raster { width, .. } => json!(width),
+                            crate::RasterAnswer::Failed(error) => json!(error),
+                            other => json!(format!("{:?}", std::mem::discriminant(&other))),
+                        },
+                    ));
+                }
+            }),
+            producing: Arc::new(|_, _, _| ()),
+        };
+        let fixture = Fixture::start_full(root, document, Some(hooks), frames);
+        fixture.until("activation", |host| host.is_ready());
+        (fixture, answered)
+    }
+    fn needs(fixture: &Fixture) -> Value {
+        let comp = fixture
+            .kernel
+            .published("window")
+            .unwrap()
+            .snapshot
+            .render_comp();
+        json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}])
+    }
+    fn answer_of(answered: &Answers, batch: u64, wait: Duration) -> Value {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some((_, answer)) = answered.lock().unwrap().iter().find(|(b, _)| *b == batch) {
+                return answer.clone();
+            }
+            assert!(Instant::now() < deadline, "batch {batch} was answered");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn edit_text(fixture: &Fixture, command: &str, text: &str) {
+        fixture.host.run_command(command, json!([text]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let p = fixture.kernel.published("window").unwrap();
+            if pm_model::json::to_canonical_string(&p.snapshot.document.to_value().unwrap())
+                .contains(text)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the edit reached the kernel");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    const SPY: &str = "export default function activate(api: any){
+       api.commands.register({id:'spy.text',label:'Text',run(text: string){
+         api.history.do('Text',()=>{api.project.get().layers[0].d.text=text})}});
+       api.commands.register({id:'spy.store',label:'Store',run(v: string){ api.storage.set('extra', v) }});
+       api.services.register('raster',(L: any)=>{
+         if (L.id === 't1' && globalThis.capture && !globalThis.inside) {
+           globalThis.inside = true;
+           try { globalThis.capture(); } finally { globalThis.inside = false; }
+         }
+         const c=document.createElement('canvas');
+         c.width=L.d.text.length + String(api.storage.get('extra') ?? '').length; c.height=1;
+         api.project.get().name='written by '+L.d.text;
+         return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0}});}";
+    /// The wrappers report the identity of the compiled code they run (the
+    /// records an export realm pins): the same in another launch over the same
+    /// files, different once the code changes. The disk render cache keys
+    /// override frames by it.
+    #[test]
+    fn producing_reports_the_code_identity_of_the_records_the_realm_runs() {
+        const RASTER: &str = "export default function(api: any){
+           api.services.register('raster',(L: any)=>{
+             const c=document.createElement('canvas'); c.width=1; c.height=1;
+             return {cv:c,w:1,h:1,anchorX:0,anchorY:0}});}";
+        type Calls = Arc<Mutex<Vec<(bool, u64)>>>;
+        let launch = |source: &str| {
+            let root = tempfile::tempdir().unwrap();
+            extension(
+                &root.path().join("extensions"),
+                "wrap",
+                &[("index.ts", source)],
+            );
+            let calls: Calls = Arc::default();
+            let log = calls.clone();
+            let hooks = crate::RasterHooks {
+                base: Arc::new(|_| Ok(None)),
+                answers: Arc::new(|_, _| ()),
+                producing: Arc::new(move |on, _, code| log.lock().unwrap().push((on, code))),
+            };
+            let fixture =
+                Fixture::start_with(root, crate::initial()["document"].clone(), Some(hooks));
+            fixture.until("producing", |_| calls.lock().unwrap().iter().any(|c| c.0));
+            let calls = calls.lock().unwrap().clone();
+            assert!(calls.iter().all(|(_, code)| *code != 0), "{calls:?}");
+            calls.iter().rev().find(|c| c.0).unwrap().1
+        };
+        let first = launch(RASTER);
+        assert_eq!(launch(RASTER), first, "unchanged code: the same identity");
+        assert_ne!(launch(&RASTER.replace("c.width=1", "c.width=2")), first);
+    }
+    #[test]
+    fn an_export_realm_answers_from_its_frozen_project_code_and_storage_while_the_window_edits() {
+        let (fixture, answered) = export_window(&[("spy", SPY)], "frozen", None);
+        fixture.host.run_command("spy.store", json!(["ab"]));
+        fixture.until("storage", |_| {
+            fixture.kernel.state().settings.contains_key("ext.spy")
+        });
+        let frozen = fixture.kernel.published("window").unwrap();
+        let needs = needs(&fixture);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // The export starts: its realm pins the extensions' code and storage now.
+        inbox
+            .export("job-1", frozen.clone(), cancel.clone())
+            .unwrap();
+        // The person edits the project and the extension's storage meanwhile.
+        fixture.host.run_command("spy.store", json!(["abcdef"]));
+        edit_text(&fixture, "spy.text", "edited meanwhile");
+        inbox.ask(1, needs.clone(), json!({"job":"job-1"}));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(2, needs.clone(), json!({"revision": live}));
+        // The export draws its frozen project and storage; the viewer the edits.
+        assert_eq!(
+            answer_of(&answered, 1, Duration::from_secs(30)),
+            json!(6 + 2)
+        );
+        assert_eq!(
+            answer_of(&answered, 2, Duration::from_secs(30)),
+            json!(16 + 6)
+        );
+        assert_eq!(fixture.host.export_pages().len(), 1);
+        // Neither the export realm's write nor its registrations reached the kernel.
+        thread::sleep(Duration::from_millis(200));
+        assert_ne!(fixture.name(), "written by frozen");
+        let commands = fixture
+            .kernel
+            .state()
+            .registries
+            .get("commands")
+            .map_or(0, Vec::len);
+        assert_eq!(commands, 2, "only the window's realm registers");
+        // The export ends: its realm and page go, and nothing answers it again.
+        cancel.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.host.export_pages().is_empty() {
+            assert!(Instant::now() < deadline, "the export realm ended");
+            thread::sleep(Duration::from_millis(10));
+        }
+        inbox.ask(3, needs, json!({"job":"job-1"}));
+        thread::sleep(Duration::from_millis(100));
+        assert!(!answered.lock().unwrap().iter().any(|(b, _)| *b == 3));
+    }
+    /// An export's realm says what it waits for and that it is getting on:
+    /// an extension still starting is named, the realm's steps move as it
+    /// boots and answers (the export's wait goes on for as long as they do;
+    /// an idle await, a timer, is no step), and the answer comes once the
+    /// extension has started.
+    #[test]
+    fn an_export_realm_reports_its_progress_and_names_the_extension_it_waits_for() {
+        const SLOW: &str = "export default async function activate(api: any){
+           await new Promise((done: any)=>setTimeout(done, 1500));
+           api.services.register('raster',(L: any)=>{
+             const c=document.createElement('canvas'); c.width=3; c.height=1;
+             return {cv:c,w:3,h:1,anchorX:0,anchorY:0}});}";
+        let (fixture, answered) = export_window(&[("slowstart", SLOW)], "abc", None);
+        let frozen = fixture.kernel.published("window").unwrap();
+        let needs = needs(&fixture);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-p", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs, json!({"job":"job-p"}));
+        let mut seen: Vec<(u64, String)> = vec![];
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !answered.lock().unwrap().iter().any(|(b, _)| *b == 1) {
+            assert!(Instant::now() < deadline, "answered: {seen:?}");
+            if let Some(progress) = inbox.export_progress("job-p") {
+                seen.push(progress);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            seen.iter().any(|(_, note)| note == "waiting for slowstart to start"),
+            "named while it starts: {seen:?}"
+        );
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(5)), json!(3));
+        let steps = inbox.export_progress("job-p").map(|(steps, _)| steps);
+        assert!(
+            seen.first().map(|(steps, _)| *steps) < steps,
+            "steps moved: {:?} then {steps:?}",
+            seen.first()
+        );
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn an_export_realms_capture_renders_its_frozen_project_and_asks_it_inline() {
+        // The renderer stands in for the app's engine job: it checks which
+        // project it was given and asks the realm waiting for it to draw t1.
+        type Wiring = Arc<Mutex<Option<(RasterInbox, Answers)>>>;
+        let wiring: Wiring = Arc::default();
+        let rendered: Arc<Mutex<Vec<u64>>> = Arc::default();
+        let (w, r) = (wiring.clone(), rendered.clone());
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let published = frame
+                .published
+                .clone()
+                .ok_or("a frame of the window's project")?;
+            r.lock().unwrap().push(published.revision());
+            let (inbox, answered) = w.lock().unwrap().clone().unwrap();
+            let comp = published.snapshot.render_comp();
+            inbox.export("capture-1", published, Arc::default())?;
+            inbox.ask(
+                77,
+                json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]),
+                json!({"job":"capture-1"}),
+            );
+            answer_of(&answered, 77, Duration::from_secs(10));
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 255, 255])
+                .unwrap();
+            Ok(png)
+        });
+        let capturer = "export default function activate(){
+            globalThis.capture = () => { globalThis.PM.renderFrameTo(0, 1, 1) } }";
+        let (fixture, answered) = export_window(
+            &[("spy", SPY), ("capturer", capturer)],
+            "frozen",
+            Some(frames),
+        );
+        *wiring.lock().unwrap() = Some((fixture.host.raster_inbox(), answered.clone()));
+        let frozen = fixture.kernel.published("window").unwrap();
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox
+            .export("job-2", frozen.clone(), cancel.clone())
+            .unwrap();
+        edit_text(&fixture, "spy.text", "edited meanwhile");
+        inbox.ask(5, needs(&fixture), json!({"job":"job-2"}));
+        // The capture inside the export's override drew the export's project,
+        // its t1 answered inline by the export realm (frozen text: 6).
+        assert_eq!(answer_of(&answered, 5, Duration::from_secs(40)), json!(6));
+        assert_eq!(answer_of(&answered, 77, Duration::from_secs(1)), json!(6));
+        assert_eq!(*rendered.lock().unwrap(), vec![frozen.revision()]);
+        cancel.store(true, Ordering::Release);
+    }
+    /// D7 through the host: each `frame:rendered` a bound presenter hears
+    /// carries the pixels of that frame (its time, its revision), not of the
+    /// playhead or a newer project; a realm behind the frame catches up
+    /// first, and a frame the project moved past is dropped.
+    #[test]
+    fn presenter_frames_carry_the_pixels_of_the_frame_they_name() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "presenter",
+            &[(
+                "index.ts",
+                "export default function activate(api: any){
+                  const canvas: any = document.createElement('canvas'); canvas.width = 2; canvas.height = 1;
+                  api.render.gl.init(canvas);
+                  const heard: any[] = [];
+                  api.events.on('frame:rendered', (f: any) => {
+                    const p = canvas.getContext('2d').getImageData(1, 0, 1, 1).data;
+                    heard.push([f.time, f.version, p[0], p[1]]);
+                    api.storage.set('heard', heard) }) }",
+            )],
+        );
+        // Each frame is filled with (revision, time × 10): what it was drawn from.
+        let drawn: Arc<Mutex<Vec<(u64, f64)>>> = Arc::default();
+        let log = drawn.clone();
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let revision = frame.published.as_ref().ok_or("no publication")?.revision();
+            log.lock().unwrap().push((revision, frame.time));
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, frame.width, frame.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let px = [revision as u8, (frame.time * 10.).round() as u8, 0, 255];
+            let pixels = px.repeat((frame.width * frame.height) as usize);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+            Ok(png)
+        });
+        let fixture = Fixture::start_full(
+            root,
+            crate::initial()["document"].clone(),
+            None,
+            frames.into(),
+        );
+        fixture.until("activation", |host| host.is_ready());
+        let heard = |count: usize| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let heard = fixture
+                    .kernel
+                    .state()
+                    .settings
+                    .get("ext.presenter")
+                    .map(|v| {
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v))
+                            .unwrap()["heard"]
+                            .clone()
+                    });
+                if let Some(Value::Array(heard)) = heard
+                    && heard.len() >= count
+                {
+                    return heard;
+                }
+                assert!(Instant::now() < deadline, "{count} frames heard");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = fixture.kernel.published("window").unwrap().revision();
+        // Playing: the frame's time, not the playhead's (0).
+        fixture
+            .host
+            .frame_presented(json!({"time": 1.5, "version": first, "quality": 1}));
+        assert_eq!(heard(1)[0], json!([1.5, first, first, 15]));
+        // An edit the realm has not received: the frame is of the new revision.
+        let edit = pm_kernel::Call::Transact {
+            label: Some("Set Work Area".into()),
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                pm_kernel::CompCommand::SetWorkArea {
+                    comp: None,
+                    start: Some(0.5),
+                    end: None,
+                },
+            )]),
+            expected_revision: None,
+        };
+        fixture
+            .kernel
+            .call_blocking("window", Request::new(pm_kernel::Caller::native(), edit))
+            .unwrap();
+        let next = fixture.kernel.published("window").unwrap().revision();
+        assert!(next > first);
+        fixture
+            .host
+            .frame_presented(json!({"time": 2.0, "version": next, "quality": 1}));
+        assert_eq!(heard(2)[1], json!([2, next, next, 20]));
+        // A frame the viewer drew before the edit, presented after it: dropped.
+        fixture
+            .host
+            .frame_presented(json!({"time": 2.5, "version": first, "quality": 1}));
+        fixture
+            .host
+            .frame_presented(json!({"time": 3.0, "version": next, "quality": 1}));
+        assert_eq!(heard(3)[2], json!([3, next, next, 30]));
+        assert!(!drawn.lock().unwrap().iter().any(|(_, t)| *t == 2.5));
+    }
+    /// A window realm's capture draws the publication the realm holds, so
+    /// an edit the kernel takes while the realm waits never leaves it asked
+    /// for a revision it cannot reach (it used to retry to the 60 s deadline,
+    /// frozen). The renderer stands in for the app's `frame_renderer` and
+    /// `JobOverrides`: the kernel's project when given none, a look's exact
+    /// ask while that is the kernel's current one, else the job route.
+    #[test]
+    fn a_window_capture_draws_the_realms_own_revision_when_an_edit_lands_meanwhile() {
+        type Wiring = Arc<Mutex<Option<(RasterInbox, Answers, KernelHandle)>>>;
+        let wiring: Wiring = Arc::default();
+        let rendered: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+        let (w, r) = (wiring.clone(), rendered.clone());
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let (inbox, answered, kernel) = w.lock().unwrap().clone().unwrap();
+            let before = kernel.published("window").unwrap();
+            // The person renames t1 while the realm waits for this frame.
+            let rename = pm_kernel::Call::Transact {
+                label: Some("Rename".into()),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                    pm_kernel::LayerCommand::Set {
+                        layer_id: "t1".into(),
+                        patch: pm_kernel::commands::layers::LayerPatch {
+                            name: Some("Renamed meanwhile".into()),
+                            ..Default::default()
+                        },
+                    },
+                )]),
+                expected_revision: None,
+            };
+            kernel
+                .call_blocking("window", Request::new(pm_kernel::Caller::native(), rename))
+                .map_err(|e| e.to_string())?;
+            let published = frame
+                .published
+                .clone()
+                .or_else(|| kernel.published("window"))
+                .unwrap();
+            let now = kernel.published("window").unwrap();
+            r.lock()
+                .unwrap()
+                .push((published.revision(), before.revision()));
+            let comp = published.snapshot.render_comp();
+            let needs = json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]);
+            let started = Instant::now();
+            for batch in 80.. {
+                if Arc::ptr_eq(&now, &published) {
+                    let ask = json!({"revision": published.revision(), "exact": true});
+                    inbox.ask(batch, needs.clone(), ask);
+                } else {
+                    inbox.export("capture-1", published.clone(), Arc::default())?;
+                    inbox.ask(batch, needs.clone(), json!({"job":"capture-1"}));
+                }
+                // A number is a drawn width; anything else is "ask again".
+                if answer_of(&answered, batch, Duration::from_secs(5)).is_number() {
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(3) {
+                    return Err("the waiting realm never reached the frame's revision".into());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 255, 255])
+                .unwrap();
+            Ok(png)
+        });
+        let capturer = "export default function activate(){
+            globalThis.capture = () => { globalThis.PM.renderFrameTo(0, 1, 1) } }";
+        let (fixture, answered) = export_window(
+            &[("spy", SPY), ("capturer", capturer)],
+            "window",
+            Some(frames),
+        );
+        *wiring.lock().unwrap() = Some((
+            fixture.host.raster_inbox(),
+            answered.clone(),
+            fixture.kernel.clone(),
+        ));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        let started = Instant::now();
+        fixture
+            .host
+            .raster_inbox()
+            .ask(5, needs(&fixture), json!({"revision": live}));
+        // t1's override captured a frame of the realm's own project, its t1
+        // answered inline by the waiting realm, and then drew itself.
+        assert_eq!(answer_of(&answered, 5, Duration::from_secs(20)), json!(6));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let rendered = rendered.lock().unwrap().clone();
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            rendered[0].0, rendered[0].1,
+            "the frame is the realm's revision"
+        );
+        assert!(
+            answered
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(b, a)| *b >= 80 && *a == json!(6)),
+            "the capture's t1 was drawn by the waiting realm"
+        );
+    }
+    #[test]
+    fn an_extension_that_runs_in_the_window_but_not_for_the_export_fails_it_by_name() {
+        let flaky = "export default function activate(api: any){
+            if (api.project.get().layers?.[0]?.d?.text === 'boom') throw Error('boom') }";
+        let (fixture, answered) = export_window(&[("spy", SPY), ("flaky", flaky)], "fine", None);
+        assert_eq!(fixture.health("flaky"), "ok");
+        edit_text(&fixture, "spy.text", "boom");
+        let inbox = fixture.host.raster_inbox();
+        let frozen = fixture.kernel.published("window").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-3", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-3"}));
+        let answer = answer_of(&answered, 1, Duration::from_secs(30));
+        assert_eq!(answer, json!("flaky could not start for the export"));
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn an_export_realm_reads_the_network_but_never_sends_changes() {
+        // Activation tries a POST; the realm notes whether it was refused as a
+        // delivery, and the override's width says so (3: refused).
+        let poster = "export default function activate(api: any){
+            globalThis.refused = false;
+            fetch('http://127.0.0.1:9/record', {method:'POST', body:'x'})
+              .catch((e: any) => { globalThis.refused = /only read the network/.test(String(e?.message ?? e)) });
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=globalThis.refused ? 3 : 1; c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("poster", poster)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        thread::sleep(Duration::from_millis(500));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(10)), json!(1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-5", frozen, cancel.clone()).unwrap();
+        inbox.ask(2, needs(&fixture), json!({"job":"job-5"}));
+        assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(3));
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn a_layout_read_no_page_answers_fails_the_export() {
+        let measure = "export default function activate(api: any){
+            const base = api.services.get('raster');
+            api.services.register('raster',(L: any, ...rest: any[])=>{
+              const d=document.createElement('div'); d.textContent='x'; document.body.append(d);
+              const w=d.getBoundingClientRect().width; d.remove();
+              const c=document.createElement('canvas'); c.width=1+Math.round(w); c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("measure", measure)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-4", frozen, cancel.clone()).unwrap();
+        // No window shows the export's page here: the read cannot be answered.
+        inbox.ask(1, needs(&fixture), json!({"job":"job-4"}));
+        let answer = answer_of(&answered, 1, Duration::from_secs(40));
+        assert!(
+            answer.as_str().unwrap().contains("stopped answering"),
+            "{answer}"
+        );
+        cancel.store(true, Ordering::Release);
+    }
+    /// A panel or an overlay that reads its layout (at activation, on a
+    /// timer) places no pixel of the export: its unanswered read does not
+    /// fail it, as no read does in a window's realm either.
+    #[test]
+    fn a_layout_read_outside_a_raster_answer_leaves_the_export_drawing() {
+        let panel = "export default function activate(api: any){
+            const read = () => { const d=document.createElement('div'); d.textContent='panel';
+              document.body.append(d); d.getBoundingClientRect(); getComputedStyle(d).color; d.remove() };
+            read(); setTimeout(read, 0);
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=5; c.height=1;
+              return {cv:c,w:5,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("panel", panel)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-6", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-6"}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(5));
+        cancel.store(true, Ordering::Release);
+    }
+    /// An export's realm withholds no animation frame: an extension that owns
+    /// a panel (never shown there) and waits for a frame still draws.
+    #[test]
+    fn an_export_realm_gives_a_panel_owner_its_animation_frames() {
+        let source = "export default async function activate(api: any){
+            api.panels.register({id:'waits.panel', title:'Waits', build: (root: any) => { root.textContent = 'panel'; } });
+            await new Promise((done: any) => requestAnimationFrame(done));
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=4; c.height=1;
+              return {cv:c,w:4,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("waits", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-8", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-8"}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(4));
+        cancel.store(true, Ordering::Release);
+    }
+    /// An export's realm builds no panel: nothing shows it, and what it
+    /// would start (a search over the network, timers) would only hold the
+    /// export's start. The window's realm builds it as before.
+    #[test]
+    fn an_export_realm_builds_no_panels() {
+        let source = "export default function activate(api: any){
+            globalThis.built = false;
+            api.panels.register({id:'shows.panel', title:'Shows',
+              build: (root: any) => { globalThis.built = true; root.textContent = 'panel';
+                setTimeout(() => {}, 3000); } });
+            api.panels.open('shows.panel');
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=globalThis.built ? 3 : 1; c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("shows", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(20)), json!(3));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-7", frozen, cancel.clone()).unwrap();
+        inbox.ask(2, needs(&fixture), json!({"job":"job-7"}));
+        assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(1));
+        cancel.store(true, Ordering::Release);
+    }
+    /// An export whose job keeps ending (its child dies, the person tries
+    /// again) gives its realm's room back to the shared isolate account each
+    /// time: with room for one export realm only, every next export is still
+    /// admitted and answers, so tries never starve the account or the other
+    /// windows' panels.
+    #[test]
+    fn an_ended_export_gives_its_isolate_room_back_for_the_next_try() {
+        let source = "export default function activate(api: any){
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=2; c.height=1;
+              return {cv:c,w:2,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("tries", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(20)), json!(2));
+        let cage = pm_runtime_v8::Admission::cage();
+        // Room for one export realm (its slice and some growth), no more.
+        let room = crate::EXPORT_SLICE + 96 * 1024 * 1024;
+        let held = cage
+            .hold(cage.budget().saturating_sub(cage.used() + room))
+            .unwrap();
+        for attempt in 0..3u64 {
+            let job = format!("try-{attempt}");
+            let cancel = Arc::new(AtomicBool::new(false));
+            let frozen = fixture.kernel.published("window").unwrap();
+            inbox.export(&job, frozen, cancel.clone()).unwrap();
+            let ask = 10 + attempt;
+            inbox.ask(ask, needs(&fixture), json!({"job": job}));
+            assert_eq!(
+                answer_of(&answered, ask, Duration::from_secs(60)),
+                json!(2),
+                "try {attempt} was admitted"
+            );
+            // The job ended (as when its child dies): its pin lets go.
+            cancel.store(true, Ordering::Release);
+        }
+        drop(held);
+    }
+    #[test]
+    fn the_projects_text_faces_and_pm_fonts_reach_the_window() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "fonts",
+            &[(
+                "index.ts",
+                "export default function activate(api: any){
+                   const fonts = api.media.fonts;
+                   api.commands.register({id:'fonts.ensure',label:'Ensure',run(){
+                     void fonts.ensure('Probe Serif', 700).then(() => api.storage.set('ensured', true)) }});
+                   api.commands.register({id:'fonts.list',label:'List',run(){
+                     api.storage.set('seen', {system: fonts.system.length, has: fonts.families.includes('Helvetica')}) }});
+                 }",
+            )],
+        );
+        let mut document = crate::initial()["document"].clone();
+        document["layers"] = json!([{"id":"t1","type":"text","name":"T1","from":0,"dur":5,
+            "d":{"text":"a","font":{"v":"Probe Sans","kf":[]},"weight":{"v":600,"kf":[]}}}]);
+        let fixture = Fixture::start_with(root, document, None);
+        fixture.until("activation", |host| host.is_ready());
+        let mut requests = vec![];
+        let mut take = |want: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                requests.extend(fixture.host.take_requests());
+                let found = requests
+                    .iter()
+                    .filter(|r| r["kind"] == "fonts")
+                    .flat_map(|r| r["faces"].as_array().cloned().unwrap_or_default())
+                    .find(|f| f["family"] == want);
+                if let Some(found) = found {
+                    return found;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{want} was asked for: {requests:?}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // The project's text face, as its layer animates it (`{v}`).
+        assert_eq!(
+            take("Probe Sans"),
+            json!({"family":"Probe Sans","weight":600,"italic":false})
+        );
+        fixture.host.run_command("fonts.ensure", json!([]));
+        assert_eq!(
+            take("Probe Serif"),
+            json!({"family":"Probe Serif","weight":700,"italic":false})
+        );
+        // `ensure` waits for its own face, not for any page answer.
+        let ensured = || {
+            fixture
+                .kernel
+                .state()
+                .settings
+                .get("ext.fonts")
+                .is_some_and(|v| pm_model::json::to_canonical_string(v).contains("ensured"))
+        };
+        fixture.host.fonts_loaded("", json!(["Probe Sans|600|0"]));
+        thread::sleep(Duration::from_millis(300));
+        assert!(!ensured(), "another face settling does not resolve ensure");
+        fixture.host.fonts_loaded("", json!(["Probe Serif|700|0"]));
+        fixture.until("ensure resolved", |_| ensured());
+        fixture.host.run_command("fonts.list", json!([]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let stored = fixture.kernel.state().settings.get("ext.fonts").map(|v| {
+                serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v)).unwrap()
+            });
+            if let Some(seen) = stored.map(|v| v["seen"].clone()).filter(|v| !v.is_null()) {
+                assert!(seen["system"].as_u64().unwrap() > 0, "this Mac's families");
+                assert_eq!(seen["has"], true);
+                break;
+            }
+            assert!(Instant::now() < deadline, "PM.Fonts answered");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn a_layout_answer_that_comes_before_its_read_waits_is_kept() {
+        let mut measures = Measures::default();
+        measures.answer(7, &json!({"request":7}));
+        assert_eq!(measures.wait(7).ok(), Some(json!({"request":7})));
+        // The usual order: the read waits, then the answer comes.
+        let rx = measures.wait(8).unwrap_err();
+        measures.answer(8, &json!({"request":8}));
+        assert_eq!(rx.try_recv().ok(), Some(json!({"request":8})));
+        // Answers no read waits for don't pile up.
+        for request in 100..120 {
+            measures.answer(request, &json!({}));
+        }
+        assert_eq!(measures.early.len(), 8);
+    }
+    fn command_of(host: &ExtensionHost, id: &str) -> bool {
+        host.contributions().is_some_and(|c| {
+            c["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["id"] == id)
+        })
+    }
+    /// A v1–3 theme reaches the native shell as token patches (plan 3.6.5).
+    #[test]
+    fn an_activated_v1_theme_publishes_native_token_patches() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-theme",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.theme.register({id:'synthetic-theme.warm',name:'Warm',scheme:'dark',
+                     tokens:{'--accent':'#123456','--bg-panel':'#202020'},css:''});
+                   api.theme.activate('synthetic-theme.warm');
+                   api.commands.register({id:'synthetic-theme.off',label:'Off',run(){api.theme.activate('default')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("theme", |host| {
+            host.contributions()
+                .is_some_and(|c| c["nativeTheme"]["id"] == "synthetic-theme.warm")
+        });
+        let theme = fixture.host.contributions().unwrap()["nativeTheme"].clone();
+        assert_eq!(theme["dark"]["colors.accent"], 0x123456, "{theme}");
+        assert_eq!(theme["light"]["colors.accent"], 0x123456, "{theme}");
+        // The timeline surface's inputs come with it (surface rules beyond tokens).
+        assert_eq!(theme["timeline"]["dark"]["track"], 0x202020, "{theme}");
+        assert_eq!(theme["timeline"]["dark"]["accent"], 0x123456, "{theme}");
+        assert!(theme["error"].is_null(), "{theme}");
+        // Going back to the default theme publishes an empty patch.
+        fixture
+            .host
+            .run_command("synthetic-theme.off", serde_json::json!([]));
+        fixture.until("default", |host| {
+            host.contributions()
+                .is_some_and(|c| c["nativeTheme"]["id"] == "default")
+        });
+        let theme = fixture.host.contributions().unwrap()["nativeTheme"].clone();
+        assert_eq!(theme["dark"], serde_json::json!({}));
+    }
+    /// v1–3 extensions size docks from `window.innerWidth` on activation, as
+    /// in Electron; the realm has the editor window's viewport.
+    #[test]
+    fn extensions_read_the_editor_window_size() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-size",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.workspace.mutate((w) => { for (const d of w.layout.docks) if (d.id === 'left') d.size = Math.round(window.innerWidth * .18); });
+                   api.commands.register({id:'synthetic-size.'+window.innerWidth+'x'+window.innerHeight,label:'Size',run(){}});
+                   window.addEventListener('resize', () => api.commands.register({id:'synthetic-size.resized-'+window.innerWidth,label:'Resized',run(){}}));
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |id: &'static str| {
+            move |host: &ExtensionHost| {
+                host.contributions().is_some_and(|c| {
+                    c["commands"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|command| command["id"] == id)
+                })
+            }
+        };
+        fixture.until(
+            "activation with the default size",
+            has("synthetic-size.1440x900"),
+        );
+        fixture.host.set_viewport(1200., 700., 2.);
+        fixture.until("resize", has("synthetic-size.resized-1200"));
+    }
+    /// The raw `PM` a v1–3 extension reaches through `api.host.pm` has every
+    /// member the shipped app (v1.2.0) assigned to it, except the reviewed list
+    /// of the app's own machinery it lacks.
+    #[test]
+    fn the_realm_pm_has_the_shipped_app_pm_roster() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "roster",
+            &[(
+                "index.ts",
+                "export default function(api){const pm=api.host.pm;const keys=[];for(const k in pm)keys.push(k);for(let o=pm;o&&o!==Object.prototype;o=Object.getPrototypeOf(o))keys.push(...Object.getOwnPropertyNames(o));api.storage.set('keys',[...new Set(keys)])}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let storage = crate::adapter::storage_of(&fixture.kernel);
+        let keys: BTreeSet<String> = storage
+            .as_object()
+            .and_then(|all| {
+                all.iter().find_map(|(key, v)| {
+                    if key.ends_with(".keys") {
+                        Some(v.clone())
+                    } else {
+                        v.get("keys").cloned()
+                    }
+                })
+            })
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| panic!("no roster: {storage} {:?}", fixture.host.records()));
+        let shipped = include_str!("../tests/fixtures/v1-pm-roster.txt");
+        // The shipped app's own machinery (its WebGL renderer, DOM chrome,
+        // agent harness, project file I/O): no sample extension reaches them.
+        let not_in_realm: BTreeSet<&str> = include_str!("../tests/fixtures/v1-pm-not-in-realm.txt")
+            .lines()
+            .collect();
+        let missing: Vec<&str> = shipped
+            .lines()
+            .filter(|m| !m.is_empty() && !keys.contains(*m) && !not_in_realm.contains(m))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "missing from the realm's PM: {missing:?}"
+        );
+        // A member the realm gains leaves the list.
+        let gained: Vec<&&str> = not_in_realm.iter().filter(|m| keys.contains(**m)).collect();
+        assert!(
+            gained.is_empty(),
+            "now in the realm, drop from the list: {gained:?}"
+        );
+    }
+    /// The model helpers of the shipped app's `PM` an extension can call:
+    /// the ones that are pure model work answer as the shipped app's did, and
+    /// each of the rest fails saying which member it is, never as
+    /// "undefined is not a function".
+    #[test]
+    fn the_shipped_model_helpers_answer_or_name_the_member_that_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "helpers",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   api.effects.register({id:'helpers.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:0.5}],frag:'o = src(v_uv);'});
+                   const said=(fn)=>{try{fn();return 'returned'}catch(e){return String(e.message)}};
+                   const made=PM.mkEffect('helpers.tint');
+                   const uniforms=PM.parseUniforms('uniform float uSpeed;   // @param 0.35 0 3\\nuniform vec3 uTint; // @param #FF6B1A\\nuniform float iTime;');
+                   api.storage.set('answers',{
+                     scope:Array.isArray(PM.scope)&&PM.scope.length===0,
+                     compOf:[PM.compOf(null),PM.compOf({type:'shape',d:{}}),PM.compOf({type:'precomp',d:{comp:'none'}})],
+                     made:{type:made.type,on:made.on,amount:made.p.amount.v,id:typeof made.id},
+                     def:PM.effectDef({type:'helpers.tint'}).label,
+                     noDef:PM.effectDef({type:'nothing.provides'})===undefined,
+                     fx:Object.keys(PM.FX).filter(id=>['helpers.tint','blur','nothing.provides'].includes(id)).sort(),
+                     fxLabel:PM.FX['helpers.tint'].label,
+                     // The legacy table holds the complete shader, as the shipped app assembled it.
+                     fxLegacy:(f=>({passes:f.passes,keepOrig:f.keepOrig,backdrop:f.backdrop,
+                       head:f.frag.startsWith('#version 300 es'),main:f.frag.includes('void main(){\\no = src(v_uv);\\n}'),
+                       param:f.frag.includes('uniform float u_amount;')}))(PM.FX['helpers.tint']),
+                     // Built-in effects and transitions are in the tables too.
+                     builtin:{has:'blur' in PM.FX,label:PM.effectDef({type:'blur'})?.label,group:PM.FX.blur?.group,
+                       params:(PM.FX.blur?.params??[]).map(p=>p.k).includes('amount'),
+                       made:(e=>e&&{type:e.type,on:e.on,amount:typeof e.p.amount?.v})(PM.mkEffect('blur')),
+                       transitions:['crossfade','wipe','slide','zoom'].every(id=>id in PM.TRANSITIONS&&Object.keys(PM.TRANSITIONS).includes(id)),
+                       crossfade:PM.transitionDef('crossfade')?.label,
+                       crossfadeMain:String(PM.TRANSITIONS.crossfade?.frag).includes('uniform sampler2D u_from, u_to;')&&String(PM.TRANSITIONS.crossfade?.frag).includes('void main(){'),
+                       madeTransition:PM.mkTransition('crossfade')},
+                     noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     // As the shipped app: nothing made of a type nobody provides.
+                     none:[PM.mkEffect('nothing.provides'),PM.mkTransition('nothing.provides')],
+                     uniforms,
+                     said:{
+                       precompose:said(()=>PM.precompose(['a'],'Name')),
+                       comps:said(()=>PM.Comps.precompose(['a'],{})),
+                       assetKind:said(()=>PM.assetKind({name:'a.png',type:'image/png'})),
+                       resolveAssetKind:said(()=>PM.resolveAssetKind({name:'a.png'})),
+                       takes:said(()=>PM.takes.list()),
+                       script:said(()=>PM.Script.run('1')),
+                       importFiles:said(()=>PM.importFiles([])),
+                       pickFiles:said(()=>PM.pickFiles()),
+                       saveProject:said(()=>PM.saveProject()),
+                     }});
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   api.commands.register({id:'helpers.add',label:'Add',run(id){PM.addLayer(layer(id),0)}});
+                   api.commands.register({id:'helpers.remove',label:'Remove',run(){PM.removeLayers('gone')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let got = stored(&fixture.kernel, "answers")
+            .unwrap_or_else(|| panic!("{:?}", fixture.host.records()));
+        assert_eq!(got["scope"], true);
+        assert_eq!(got["compOf"], json!([null, null, null]));
+        assert_eq!(
+            got["made"],
+            json!({"type":"helpers.tint","on":true,"amount":0.5,"id":"string"})
+        );
+        assert_eq!(got["def"], "Tint");
+        assert_eq!(got["noDef"], true);
+        assert_eq!(got["fx"], json!(["blur", "helpers.tint"]));
+        assert_eq!(got["fxLabel"], "Tint");
+        assert_eq!(
+            got["fxLegacy"],
+            json!({"passes":1,"keepOrig":false,"backdrop":false,"head":true,"main":true,"param":true})
+        );
+        assert_eq!(
+            got["builtin"],
+            json!({"has":true,"label":"Gaussian Blur","group":"Blur & Sharpen","params":true,
+                "made":{"type":"blur","on":true,"amount":"number"},
+                "transitions":true,"crossfade":"Crossfade","crossfadeMain":true,
+                "madeTransition":{"type":"crossfade","dur":0.5,"p":{}}})
+        );
+        assert_eq!(got["noTransition"], true);
+        assert_eq!(got["none"], json!([null, null]));
+        assert_eq!(
+            got["uniforms"],
+            json!([
+                {"name":"uSpeed","type":"float","label":"Speed","control":"num","def":0.35,"min":0,"max":3},
+                {"name":"uTint","type":"vec3","label":"Tint","control":"color","def":"#FF6B1A"}
+            ])
+        );
+        for (tried, member) in [
+            ("precompose", "PM.precompose"),
+            ("comps", "PM.Comps.precompose"),
+            ("assetKind", "PM.assetKind"),
+            ("resolveAssetKind", "PM.resolveAssetKind"),
+            ("takes", "PM.takes.list"),
+            ("script", "PM.Script.run"),
+            ("importFiles", "PM.importFiles"),
+            ("pickFiles", "PM.pickFiles"),
+            ("saveProject", "PM.saveProject"),
+        ] {
+            let said = got["said"][tried].as_str().unwrap_or_default();
+            assert!(said.contains(member), "{tried} said {said:?}, not {member}");
+        }
+        // `removeLayers` on its own is one step of the history, as `addLayer`.
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        for id in ["kept", "gone"] {
+            fixture.host.run_command("helpers.add", json!([id]));
+            fixture.until("a layer is added", |_| {
+                ids(&fixture).first().map(String::as_str) == Some(id)
+            });
+        }
+        assert_eq!(ids(&fixture), ["gone", "kept"]);
+        fixture.host.run_command("helpers.remove", json!([]));
+        fixture.until("the layer is removed", |_| {
+            !ids(&fixture).contains(&"gone".to_owned())
+        });
+        assert!(ids(&fixture).contains(&"kept".to_owned()));
+        let ack = fixture
+            .kernel
+            .call_blocking(
+                "window",
+                Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
+            )
+            .unwrap();
+        assert!(
+            matches!(ack.reply, Reply::Bool(true)),
+            "Undo of the removal"
+        );
+        fixture.until("Undo puts it back", |_| {
+            ids(&fixture).contains(&"gone".to_owned())
+        });
+    }
+    /// What an extension changes inside `PM.Edit.mutate` stays in its own
+    /// project afterwards: the realm is told its edit landed, so the layer it
+    /// just added is still there when it looks, and its next change does not
+    /// write the project back without it (the layer used to be deleted by
+    /// the extension's next write to the layer list).
+    #[test]
+    fn a_layer_added_inside_an_edit_stays_in_the_realms_project() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "edits",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   const seen=[];
+                   api.commands.register({id:'edits.add',label:'Add',run(id){
+                     const done=PM.Edit.mutate('Add',()=>{PM.proj.name='Edited '+id;PM.proj.layers.push(layer(id))});
+                     seen.push({ok:done.ok,layers:PM.proj.layers.map(l=>l.id),name:PM.proj.name});
+                     api.storage.set('seen',seen)}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        for id in ["first", "second", "third"] {
+            fixture.host.run_command("edits.add", json!([id]));
+            fixture.until("the edit lands", |_| ids(&fixture).contains(&id.to_owned()));
+        }
+        fixture.until("the realm reported", |_| {
+            stored(&fixture.kernel, "seen")
+                .is_some_and(|s| s.as_array().is_some_and(|s| s.len() == 3))
+        });
+        assert_eq!(
+            ids(&fixture),
+            ["first", "second", "third"],
+            "every layer is kept"
+        );
+        assert_eq!(
+            stored(&fixture.kernel, "seen").unwrap(),
+            json!([
+                {"ok":true,"layers":["first"],"name":"Edited first"},
+                {"ok":true,"layers":["first","second"],"name":"Edited second"},
+                {"ok":true,"layers":["first","second","third"],"name":"Edited third"},
+            ]),
+            "the realm sees its own edits"
+        );
+    }
+    /// Raw `PM.addLayer` called on its own (a command, a panel callback: no
+    /// edit open) is one step of the project's history: Undo takes the layer
+    /// out and Redo puts it back. Called inside an edit it belongs to that
+    /// edit, with the edit's other changes.
+    #[test]
+    fn raw_add_layer_outside_an_edit_is_one_undoable_step() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "raw-pm",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>({...PM.proj.layers[0]??{},id,name:id});
+                   api.commands.register({id:'raw-pm.alone',label:'Alone',run(){PM.addLayer(layer('alone'),0)}});
+                   api.commands.register({id:'raw-pm.both',label:'Both',run(){
+                     PM.Edit.mutate('Both',()=>{PM.proj.name='Both';PM.addLayer(layer('in-edit'),0)})}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let first = |fixture: &Fixture| {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .first()
+                .map(|l| l.id.clone())
+        };
+        let history = |call: HistoryCall| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ack = fixture
+                    .kernel
+                    .call_blocking(
+                        "window",
+                        Request::new(pm_kernel::Caller::native(), call.clone()),
+                    )
+                    .unwrap();
+                if matches!(ack.reply, Reply::Bool(true)) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{call:?} stayed refused");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let before = first(&fixture);
+        let name = fixture.name();
+        fixture.host.run_command("raw-pm.alone", json!([]));
+        fixture.until("the layer is added", |_| {
+            first(&fixture).as_deref() == Some("alone")
+        });
+        history(HistoryCall::Undo);
+        fixture.until("Undo takes the layer out", |_| first(&fixture) == before);
+        history(HistoryCall::Redo);
+        fixture.until("Redo puts it back", |_| {
+            first(&fixture).as_deref() == Some("alone")
+        });
+        // Inside an edit: one entry with the edit's other change.
+        fixture.host.run_command("raw-pm.both", json!([]));
+        fixture.until("the edit lands", |_| {
+            first(&fixture).as_deref() == Some("in-edit") && fixture.name() == "Both"
+        });
+        let published = fixture.kernel.published("window").unwrap();
+        let all: Vec<String> = published
+            .snapshot
+            .layers(None)
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+        assert!(
+            all.contains(&"alone".to_owned()),
+            "the earlier layer is kept: {all:?}"
+        );
+        history(HistoryCall::Undo);
+        fixture.until("one Undo for the whole edit", |_| {
+            first(&fixture).as_deref() == Some("alone") && fixture.name() == name
+        });
+    }
+    /// An edit made inside another edit that throws takes back what it wrote
+    /// and nothing else: the outer edit keeps its earlier layer, carries on,
+    /// reports success, and is one step of the history.
+    #[test]
+    fn a_failed_edit_inside_an_edit_takes_back_only_its_own_writes() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "nested",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   api.commands.register({id:'nested.run',label:'Run',run(){
+                     let inner;
+                     const outer=PM.Edit.mutate('Outer',()=>{
+                       PM.addLayer(layer('a'));
+                       inner=PM.Edit.mutate('Inner',()=>{
+                         PM.addLayer(layer('b'));PM.addLayer(layer('b2'));
+                         throw new Error('preparation failed')});
+                       if(!inner.ok)PM.addLayer(layer('c'));
+                     });
+                     api.storage.set('report',{outer:outer.ok,inner:inner.ok,message:inner.message,
+                       layers:PM.proj.layers.map(l=>l.id),busy:PM.hist.busy()})}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        let history = |call: HistoryCall| {
+            let ack = fixture
+                .kernel
+                .call_blocking(
+                    "window",
+                    Request::new(pm_kernel::Caller::native(), call.clone()),
+                )
+                .unwrap();
+            assert!(matches!(ack.reply, Reply::Bool(true)), "{call:?} refused");
+        };
+        let before = ids(&fixture);
+        let after: Vec<String> = ["c", "a"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(before.clone())
+            .collect();
+        fixture.host.run_command("nested.run", json!([]));
+        fixture.until("the command reported", |_| {
+            stored(&fixture.kernel, "report").is_some()
+        });
+        assert_eq!(
+            stored(&fixture.kernel, "report").unwrap(),
+            json!({"outer":true,"inner":false,"message":"preparation failed","layers":after,"busy":false}),
+            "what the extension was told and sees"
+        );
+        assert_eq!(ids(&fixture), after, "the project");
+        history(HistoryCall::Undo);
+        assert_eq!(ids(&fixture), before, "one Undo takes the whole edit out");
+        history(HistoryCall::Redo);
+        assert_eq!(ids(&fixture), after, "Redo puts it back");
+    }
+    /// The raw members a real extension used to cut a layer out of a clip:
+    /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
+    /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.
+    #[test]
+    fn media_store_reads_an_assets_file_and_add_layer_inserts_a_layer() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "raw-pm",
+            &[(
+                "index.ts",
+                "export default async function(api){const PM=api.host.pm;\
+                 PM.Edit.mutate('Add',()=>{PM.addLayer({...PM.proj.layers[0]??{},id:'added',name:'Added'},0)});\
+                 const blob=await PM.MediaStore.get({id:'clip'});const none=await PM.MediaStore.get({id:'gone'});\
+                 let refused='';try{PM.MediaStore.put('x',blob)}catch(e){refused=String(e.message)}\
+                 api.storage.set('read',{size:blob?.size??-1,text:blob?await blob.text():'',none,refused})}",
+            )],
+        );
+        let file = root.path().join("clip.bin");
+        fs::write(&file, b"clip bytes").unwrap();
+        let fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut answered = 0;
+        while answered < 2 {
+            for request in fixture.host.take_requests() {
+                if request["kind"] != "mediaFile" {
+                    continue;
+                }
+                let token = request["token"].as_u64().unwrap();
+                let answer = if request["asset"] == "clip" {
+                    let held = crate::files::hold_picked(file.clone());
+                    json!({"token":held.to_string(),"name":"clip.bin","type":"","size":10,"lastModified":0})
+                } else {
+                    Value::Null
+                };
+                fixture.host.answer(token, answer);
+                answered += 1;
+            }
+            assert!(Instant::now() < deadline, "{:?}", fixture.host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.until("read", |_| {
+            crate::adapter::storage_of(&fixture.kernel)
+                .to_string()
+                .contains("refused")
+        });
+        let storage = crate::adapter::storage_of(&fixture.kernel).to_string();
+        assert!(
+            storage.contains(r#""size":10"#) && storage.contains("clip bytes"),
+            "{storage}"
+        );
+        assert!(storage.contains(r#""none":null"#), "{storage}");
+        assert!(
+            storage.contains("PM.MediaStore.put is not available"),
+            "{storage}"
+        );
+        let published = fixture.kernel.published("window").unwrap();
+        let layers = published.snapshot.layers(None);
+        assert_eq!(
+            layers.first().map(|l| l.id.as_str()),
+            Some("added"),
+            "{layers:?}"
+        );
+    }
+    /// The PM-435 fixture: `toggled` contributes a panel, a command and an
+    /// effect and keeps a timer running; `switcher`'s commands turn it on and
+    /// off through the extension API (`api.extensions.setEnabled`).
+    /// What a page would apply: each admitted batch's payload, in order.
+    #[derive(Default)]
+    struct Applied(u64, Vec<Value>);
+    impl pm_compat_host::DomPanelHost for Applied {
+        fn generation(&self) -> pm_compat_host::Generation {
+            self.0
+        }
+        fn create(&mut self, _: pm_compat_host::PanelSpec) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn attach(&mut self, _: u64, _: pm_compat_host::PanelSlot) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn detach(&mut self, _: u64) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn destroy(&mut self, _: u64) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn apply(&mut self, _: u64, _: u64, batch: Value) -> pm_compat_host::Result<()> {
+            self.1.push(batch);
+            Ok(())
+        }
+        fn focus(&mut self, _: u64, _: Option<u64>) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+    }
+    /// PM-509: the window's page stopped applying, and every extension panel
+    /// in it stayed blank until extensions restarted (the router refused a
+    /// faulted page for good). The window makes its page again and asks for
+    /// a replay: the realm's whole document comes from batch 1, with the
+    /// panel's content, and later changes follow it.
+    #[test]
+    fn a_page_made_again_gets_the_realms_whole_document() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "anchor",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.panels.register({id:'anchor.panel',title:'Anchor Point',
+                     build(root){const h=document.createElement('h2');h.textContent='Anchor body';
+                       root.append(h);globalThis.anchorTitle=h;}});
+                   api.commands.register({id:'anchor.change',label:'Change',
+                     run(){globalThis.anchorTitle.textContent='Changed body'}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("the extension's panel is registered", |host| {
+            host.records().iter().any(|r| r["id"] == "anchor" && r["health"]["state"] == "ok")
+        });
+        fixture.host.set_panel("anchor.panel", true);
+        let view = fixture.host.view();
+        let page = |want: &str| {
+            let mut seen: Vec<Value> = vec![];
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let mut applied = Applied(view, vec![]);
+                for batch in fixture.host.take_batches(view) {
+                    batch.present(&mut applied).unwrap();
+                }
+                seen.extend(applied.1);
+                if serde_json::to_string(&seen).unwrap().contains(want) {
+                    return seen;
+                }
+                assert!(Instant::now() < deadline, "{want} never reached the page");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = page("Anchor body");
+        let last = first.last().unwrap()["seq"].as_u64().unwrap();
+        let session = json!({"panel":"compat","generation":1});
+        // The page faults at its last batch: the router and the realm stop it.
+        let sink = fixture.host.page_sink(view);
+        sink(json!({"kind":"fault","session":session,"seq":last,"message":"page fault"}));
+        thread::sleep(Duration::from_millis(100));
+        // The window's new page, and everything again from batch 1.
+        fixture.host.replay_page(view);
+        let replay = page("Anchor body");
+        assert_eq!(replay[0]["seq"], 1, "the replay starts a new page");
+        let end = replay.last().unwrap()["seq"].as_u64().unwrap();
+        sink(json!({"kind":"applied","session":session,"seq":end}));
+        // And what changes next follows on the new page.
+        fixture.host.run_command("anchor.change", json!([]));
+        let next = page("Changed body");
+        assert_eq!(next[0]["seq"].as_u64(), Some(end + 1));
+    }
+    fn toggled_extensions(extensions: &Path) {
+        extension(
+            extensions,
+            "toggled",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.panels.register({id:'toggled-panel',title:'Toggled',build(){}});
+                   api.commands.register({id:'toggled.hello',label:'Hello',run(){}});
+                   api.effects.register({id:'toggled.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                   setInterval(()=>api.storage.set('ticks',(api.storage.get('ticks')||0)+1),20);
+                 }",
+            )],
+        );
+        extension(
+            extensions,
+            "switcher",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.commands.register({id:'switcher.on',label:'On',run(){api.extensions.setEnabled('toggled',true)}});
+                   api.commands.register({id:'switcher.off',label:'Off',run(){api.extensions.setEnabled('toggled',false)}});
+                 }",
+            )],
+        );
+    }
+    fn contributes(now: &Publication, kind: &str, id: &str) -> bool {
+        now.contributions.as_ref().is_some_and(|c| {
+            c[kind]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|e| e["id"] == id))
+        })
+    }
+    fn toggled_contributes(now: &Publication) -> bool {
+        contributes(now, "panels", "toggled-panel")
+            && contributes(now, "commands", "toggled.hello")
+            && contributes(now, "effects", "toggled.tint")
+    }
+    fn toggled_gone(now: &Publication) -> bool {
+        now.settled
+            && !contributes(now, "panels", "toggled-panel")
+            && !contributes(now, "commands", "toggled.hello")
+            && !contributes(now, "effects", "toggled.tint")
+            && now
+                .unavailable
+                .iter()
+                .any(|(id, _, why)| id == "toggled" && why == "is turned off")
+    }
+    /// The extension's timer: still counting, or not.
+    fn ticking(kernel: &KernelHandle) -> bool {
+        let ticks = || stored(kernel, "ticks").and_then(|t| t.as_u64()).unwrap_or(0);
+        let before = ticks();
+        thread::sleep(Duration::from_millis(300));
+        ticks() > before
+    }
+    /// PM-435: an installed extension turned off (Settings' switch) gives up
+    /// everything it contributes (its panel, command and effect) and stops
+    /// running until it is turned on again, says which extension is off to
+    /// whatever needed it (the viewer and exports name it), keeps the choice
+    /// in the saved state, and comes back on without a relaunch, here
+    /// through the extension API's `setEnabled`.
+    #[test]
+    fn an_extension_turned_off_gives_up_its_panels_commands_effects_and_work_until_turned_on() {
+        let root = tempfile::tempdir().unwrap();
+        toggled_extensions(&root.path().join("extensions"));
+        let fixture = Fixture::start(root);
+        fixture.until("the extension contributes", |host| {
+            let now = host.publication();
+            now.settled && toggled_contributes(&now)
+        });
+        assert!(ticking(&fixture.kernel), "its timer runs");
+        let off = pm_kernel::state::switch_extension(&fixture.kernel.state(), "toggled", false);
+        fixture.kernel.state_transaction(off.unwrap()).wait().unwrap().unwrap();
+        fixture.until("off: nothing of it is left", |host| toggled_gone(&host.publication()));
+        assert!(!ticking(&fixture.kernel), "its timer stopped with it");
+        // What it would provide stays known, to name it beside a project's
+        // effect that needs it.
+        assert_eq!(
+            fixture.host.publication().provides.get("toggled"),
+            Some(&vec!["toggled.tint".to_owned()])
+        );
+        assert!(!fixture.kernel.state().extensions["toggled"].enabled, "the saved choice");
+        fixture.host.run_command("switcher.on", json!([]));
+        fixture.until("on again, without a relaunch", |host| {
+            let now = host.publication();
+            now.settled
+                && toggled_contributes(&now)
+                && now.unavailable.iter().all(|(id, ..)| id != "toggled")
+        });
+        assert!(fixture.kernel.state().extensions["toggled"].enabled);
+        assert!(ticking(&fixture.kernel), "its timer runs again");
+        fixture.host.run_command("switcher.off", json!([]));
+        fixture.until("off through the API too", |host| toggled_gone(&host.publication()));
+    }
+    /// PM-435: the choice survives a relaunch. A host started again on the
+    /// saved state leaves the extension off: nothing of it activates.
+    #[test]
+    fn an_extension_turned_off_stays_off_when_the_app_starts_again() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        toggled_extensions(&extensions);
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let start = || {
+            ExtensionHost::start(HostConfig {
+                kernel: kernel.clone(),
+                project: "window".into(),
+                roots: vec![extensions.clone()],
+                cache: root.path().join("cache"),
+                owner: None,
+                text: None,
+                frames: None,
+                rasters: None,
+                clipboard: None,
+                vars: None,
+                wake: Arc::new(|| ()),
+            })
+        };
+        let wait = |host: &ExtensionHost, what: &str, done: &dyn Fn(&Publication) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(&host.publication()) {
+                assert!(Instant::now() < deadline, "{what}: {:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let first = start();
+        wait(&first, "first launch", &|now| now.settled && toggled_contributes(now));
+        let off = pm_kernel::state::switch_extension(&kernel.state(), "toggled", false).unwrap();
+        kernel.state_transaction(off).wait().unwrap().unwrap();
+        wait(&first, "turned off", &toggled_gone);
+        drop(first);
+        let again = start();
+        wait(&again, "the next launch leaves it off, the others run", &|now| {
+            toggled_gone(now) && contributes(now, "commands", "switcher.on")
+        });
+        assert_eq!(
+            again.publication().provides.get("toggled"),
+            Some(&vec!["toggled.tint".to_owned()]),
+            "what it provided is kept across the launch"
+        );
+        assert!(!ticking(&kernel), "nothing of it runs");
+        drop(again);
+        drop(actor);
+    }
+    include!("library_panel_tests.rs");
+
+}

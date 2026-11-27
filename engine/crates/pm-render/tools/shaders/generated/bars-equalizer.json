@@ -1,0 +1,86 @@
+{
+ "name": "bars-equalizer",
+ "kind": "extension",
+ "covers": [
+  "extension-number",
+  "extension-toggle-bool",
+  "iTime",
+  "helper-hash"
+ ],
+ "prompt": "Extension layer type: fake audio equalizer bars. Bar count and speed parameters, a toggle for mirrored bars.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "e09cb0af1e7bdd6625aab65a2f66c696b0293b80e51c3982164b9d90e3d2ece2",
+  "seconds": 46.763,
+  "generated": "2026-10-17T07:33:56.420Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.eq-bars",
+  "label": "Equalizer Bars",
+  "version": 1,
+  "params": [
+   {
+    "k": "barCount",
+    "label": "Bar Count",
+    "def": 24,
+    "min": 1,
+    "max": 128,
+    "step": 1
+   },
+   {
+    "k": "speed",
+    "label": "Speed",
+    "def": 1,
+    "min": 0,
+    "max": 5,
+    "step": 0.01
+   },
+   {
+    "k": "mirror",
+    "label": "Mirrored",
+    "def": false,
+    "options": [
+     {
+      "v": false,
+      "label": "Off"
+     },
+     {
+      "v": true,
+      "label": "On"
+     }
+    ]
+   },
+   {
+    "k": "gap",
+    "label": "Gap",
+    "def": 0.25,
+    "min": 0,
+    "max": 0.9,
+    "step": 0.01,
+    "advanced": true
+   },
+   {
+    "k": "colorLow",
+    "label": "Base Color",
+    "def": "#1AD6FF",
+    "type": "color",
+    "advanced": true
+   },
+   {
+    "k": "colorHigh",
+    "label": "Peak Color",
+    "def": "#FF3D7F",
+    "type": "color",
+    "advanced": true
+   }
+  ],
+  "renderer": {
+   "kind": "fragment",
+   "fragment": "void main(){\n  float n = max(floor(u_barCount + 0.5), 1.0);\n  float x = uv.x * n;\n  float i = floor(x);\n  float f = fract(x);\n  float t = iTime * u_speed;\n  float s = hash1(i + 1.0);\n  float wave = 0.5 + 0.5 * sin(t * (2.0 + 3.0 * s) + s * 6.28318);\n  float jitter = 0.55 + 0.45 * noise(vec2(i * 0.37, t * 1.3));\n  float h = (0.12 + 0.88 * wave * jitter) * mix(1.0, 0.65, i / n);\n  float yy = u_mirror > 0.5 ? abs(uv.y - 0.5) * 2.0 : 1.0 - uv.y;\n  float hg = u_gap * 0.5;\n  float fx = max(fwidth(x), 1e-4);\n  float fy = max(fwidth(yy), 1e-4);\n  float bar = smoothstep(hg - fx, hg + fx, f) * (1.0 - smoothstep(1.0 - hg - fx, 1.0 - hg + fx, f));\n  float fill = 1.0 - smoothstep(h - fy, h + fy, yy);\n  vec3 col = mix(u_colorLow, u_colorHigh, clamp(yy, 0.0, 1.0));\n  float a = bar * fill;\n  fragColor = vec4(col * a, a);\n}"
+  }
+ },
+ "summary": "I wrote `gen.eq-bars`, a fragment layer that draws fake equalizer bars. Bar Count, Speed and Mirrored are the main controls, with Gap, Base Color and Peak Color under More. None of it was compiled or rendered because no live Powermove tools were attached. I assumed `iTime` and `uv` are available as in shader layers, with uv.y = 0 at the top."
+}

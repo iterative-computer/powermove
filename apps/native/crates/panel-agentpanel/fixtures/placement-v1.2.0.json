@@ -1,0 +1,170 @@
+{
+  "baseline": "v1.2.0",
+  "baselineCommit": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "sourceSha256": "d7d08430f211d09c5fca66dd0aebdfa79efbe05a66848363444915f54fd41492",
+  "source": "apps/desktop/src/renderer/src/panels/agent/ui-placement.ts:18-59",
+  "cases": [
+    {
+      "source": "Hello\nPOWERMOVE_UI_TARGET {\"kind\":\"panel\",\"id\":\"p\",\"label\":\"Work\"}\nAfter",
+      "streaming": false,
+      "expected": {
+        "text": "Hello\n\nAfter",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"kind\":\"panel\",\"id\":\"p\",\"label\":\"Work\"}"
+        ]
+      }
+    },
+    {
+      "source": "Hello\nPOWERMOVE_UI_TARGET {\"kind\":\"panel\",\"id\":\"p\",\"label\":\"Work\"}\nAfter",
+      "streaming": true,
+      "expected": {
+        "text": "Hello\n\nAfter",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"kind\":\"panel\",\"id\":\"p\",\"label\":\"Work\"}"
+        ]
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET {\"label\":\"brace } in string\"} tail",
+      "streaming": false,
+      "expected": {
+        "text": " tail",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"label\":\"brace } in string\"}"
+        ]
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET {\"label\":\"brace } in string\"} tail",
+      "streaming": true,
+      "expected": {
+        "text": " tail",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"label\":\"brace } in string\"}"
+        ]
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET {\"id\":",
+      "streaming": false,
+      "expected": {
+        "text": "",
+        "messages": []
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET {\"id\":",
+      "streaming": true,
+      "expected": {
+        "text": "",
+        "messages": []
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET blah\nKeep",
+      "streaming": false,
+      "expected": {
+        "text": "\nKeep",
+        "messages": []
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET blah\nKeep",
+      "streaming": true,
+      "expected": {
+        "text": "\nKeep",
+        "messages": []
+      }
+    },
+    {
+      "source": "Keep\n  POW",
+      "streaming": false,
+      "expected": {
+        "text": "Keep\n  POW",
+        "messages": []
+      }
+    },
+    {
+      "source": "Keep\n  POW",
+      "streaming": true,
+      "expected": {
+        "text": "Keep\n",
+        "messages": []
+      }
+    },
+    {
+      "source": "Use POWERMOVE_UI_TARGET {\"id\":\"p\"} inline",
+      "streaming": false,
+      "expected": {
+        "text": "Use POWERMOVE_UI_TARGET {\"id\":\"p\"} inline",
+        "messages": []
+      }
+    },
+    {
+      "source": "Use POWERMOVE_UI_TARGET {\"id\":\"p\"} inline",
+      "streaming": true,
+      "expected": {
+        "text": "Use POWERMOVE_UI_TARGET {\"id\":\"p\"} inline",
+        "messages": []
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET {\"a\":{}}\nPOWERMOVE_UI_TARGET{\"b\":1}",
+      "streaming": false,
+      "expected": {
+        "text": "\n",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"a\":{}}",
+          "POWERMOVE_UI_TARGET {\"b\":1}"
+        ]
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGET {\"a\":{}}\nPOWERMOVE_UI_TARGET{\"b\":1}",
+      "streaming": true,
+      "expected": {
+        "text": "\n",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"a\":{}}",
+          "POWERMOVE_UI_TARGET {\"b\":1}"
+        ]
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGETED is prose",
+      "streaming": false,
+      "expected": {
+        "text": "POWERMOVE_UI_TARGETED is prose",
+        "messages": []
+      }
+    },
+    {
+      "source": "POWERMOVE_UI_TARGETED is prose",
+      "streaming": true,
+      "expected": {
+        "text": "POWERMOVE_UI_TARGETED is prose",
+        "messages": []
+      }
+    },
+    {
+      "source": "\n\tPOWERMOVE_UI_TARGET\n{\"x\":1}\nend",
+      "streaming": false,
+      "expected": {
+        "text": "\n\nend",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"x\":1}"
+        ]
+      }
+    },
+    {
+      "source": "\n\tPOWERMOVE_UI_TARGET\n{\"x\":1}\nend",
+      "streaming": true,
+      "expected": {
+        "text": "\n\nend",
+        "messages": [
+          "POWERMOVE_UI_TARGET {\"x\":1}"
+        ]
+      }
+    }
+  ]
+}

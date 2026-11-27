@@ -1,0 +1,292 @@
+//! RGB primaries conversion in linear light (section 9: "P3 stills convert
+//! in float, relative colorimetric, no clip until output"; the viewer's
+//! Rec.709 → P3 conversion on a `display-p3` canvas).
+//!
+//! Sets that share a white convert as the product of two RGB → XYZ matrices.
+//! A set with another white (DCI, illuminant C) adapts it with Bradford.
+//! Values outside the destination gamut stay negative or above 1 (no clipping).
+
+use pm_protocol::color::Primaries;
+
+/// CIE xy chromaticities of red, green, blue, and white.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Chromaticities {
+    pub r: [f64; 2],
+    pub g: [f64; 2],
+    pub b: [f64; 2],
+    pub w: [f64; 2],
+}
+
+const D65: [f64; 2] = [0.3127, 0.3290];
+const ILLUMINANT_C: [f64; 2] = [0.310, 0.316];
+
+/// The chromaticities of a primaries tag; `None` when unspecified.
+pub fn chromaticities(p: Primaries) -> Option<Chromaticities> {
+    Some(match p {
+        Primaries::Bt709 => Chromaticities {
+            r: [0.640, 0.330],
+            g: [0.300, 0.600],
+            b: [0.150, 0.060],
+            w: D65,
+        },
+        Primaries::DisplayP3 => Chromaticities {
+            r: [0.680, 0.320],
+            g: [0.265, 0.690],
+            b: [0.150, 0.060],
+            w: D65,
+        },
+        Primaries::Bt2020 => Chromaticities {
+            r: [0.708, 0.292],
+            g: [0.170, 0.797],
+            b: [0.131, 0.046],
+            w: D65,
+        },
+        Primaries::Bt601_625 => Chromaticities {
+            r: [0.640, 0.330],
+            g: [0.290, 0.600],
+            b: [0.150, 0.060],
+            w: D65,
+        },
+        Primaries::Bt601_525 => Chromaticities {
+            r: [0.630, 0.340],
+            g: [0.310, 0.595],
+            b: [0.155, 0.070],
+            w: D65,
+        },
+        Primaries::Bt470M => Chromaticities {
+            r: [0.67, 0.33],
+            g: [0.21, 0.71],
+            b: [0.14, 0.08],
+            w: ILLUMINANT_C,
+        },
+        Primaries::GenericFilm => Chromaticities {
+            r: [0.681, 0.319],
+            g: [0.243, 0.692],
+            b: [0.145, 0.049],
+            w: ILLUMINANT_C,
+        },
+        Primaries::DciP3 => Chromaticities {
+            r: [0.680, 0.320],
+            g: [0.265, 0.690],
+            b: [0.150, 0.060],
+            w: [0.314, 0.351],
+        },
+        Primaries::Ebu3213 => Chromaticities {
+            r: [0.630, 0.340],
+            g: [0.295, 0.605],
+            b: [0.155, 0.077],
+            w: D65,
+        },
+        Primaries::SGamut3 => Chromaticities {
+            r: [0.730, 0.280],
+            g: [0.140, 0.855],
+            b: [0.100, -0.050],
+            w: D65,
+        },
+        Primaries::SGamut3Cine => Chromaticities {
+            r: [0.766, 0.275],
+            g: [0.225, 0.800],
+            b: [0.089, -0.087],
+            w: D65,
+        },
+        Primaries::VGamut => Chromaticities {
+            r: [0.730, 0.280],
+            g: [0.165, 0.840],
+            b: [0.100, -0.030],
+            w: D65,
+        },
+        Primaries::AwgGen3 => Chromaticities {
+            r: [0.6840, 0.3130],
+            g: [0.2210, 0.8480],
+            b: [0.0861, -0.1020],
+            w: D65,
+        },
+        Primaries::AwgGen4 => Chromaticities {
+            r: [0.7347, 0.2653],
+            g: [0.1424, 0.8576],
+            b: [0.0991, -0.0308],
+            w: D65,
+        },
+        Primaries::Unspecified => return None,
+    })
+}
+
+/// A 3×3 matrix, row-major: `out[i] = Σ m[i][j] · in[j]`.
+pub type Mat3 = [[f64; 3]; 3];
+
+fn xyz(c: [f64; 2]) -> [f64; 3] {
+    [c[0] / c[1], 1.0, (1.0 - c[0] - c[1]) / c[1]]
+}
+
+pub(crate) fn inverse(m: &Mat3) -> Mat3 {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let inv = 1.0 / det;
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv,
+        ],
+    ]
+}
+
+pub(crate) fn mul(a: &Mat3, b: &Mat3) -> Mat3 {
+    let mut out = [[0.0; 3]; 3];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    out
+}
+
+/// Linear RGB → XYZ for a set of chromaticities.
+pub fn rgb_to_xyz(c: &Chromaticities) -> Mat3 {
+    let (r, g, b) = (xyz(c.r), xyz(c.g), xyz(c.b));
+    let m = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]];
+    let w = xyz(c.w);
+    let inv = inverse(&m);
+    let s: Vec<f64> = (0..3)
+        .map(|i| inv[i][0] * w[0] + inv[i][1] * w[1] + inv[i][2] * w[2])
+        .collect();
+    [
+        [m[0][0] * s[0], m[0][1] * s[1], m[0][2] * s[2]],
+        [m[1][0] * s[0], m[1][1] * s[1], m[1][2] * s[2]],
+        [m[2][0] * s[0], m[2][1] * s[1], m[2][2] * s[2]],
+    ]
+}
+
+/// The linear-light conversion between two primaries sets, or `None` when
+/// either is unspecified. Identical primaries give the identity exactly.
+pub fn conversion(from: Primaries, to: Primaries) -> Option<Mat3> {
+    if from == to && from != Primaries::Unspecified {
+        return Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    }
+    let source = chromaticities(from)?;
+    let target = chromaticities(to)?;
+    if source.w != target.w {
+        return conversion_from(&source, to);
+    }
+    Some(mul(&inverse(&rgb_to_xyz(&target)), &rgb_to_xyz(&source)))
+}
+
+/// The linear-light conversion from arbitrary chromaticities (PNG `cHRM`,
+/// OpenEXR) to a primaries set, relative colorimetric: the source white is
+/// adapted to the destination's with the Bradford transform (ICC.1:2022
+/// Annex E), as an ICC profile's PCS adaptation does. `None` for
+/// unspecified primaries.
+pub fn conversion_from(c: &Chromaticities, to: Primaries) -> Option<Mat3> {
+    Some(conversion_between(c, &chromaticities(to)?))
+}
+
+/// The linear-light conversion between two sets of chromaticities, the
+/// source white adapted to the destination's with Bradford when they differ.
+pub fn conversion_between(c: &Chromaticities, dst: &Chromaticities) -> Mat3 {
+    const BRADFORD: Mat3 = [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ];
+    if c.w == dst.w {
+        return mul(&inverse(&rgb_to_xyz(dst)), &rgb_to_xyz(c));
+    }
+    let (sw, dw) = (apply(&BRADFORD, xyz(c.w)), apply(&BRADFORD, xyz(dst.w)));
+    let scale = [
+        [dw[0] / sw[0], 0.0, 0.0],
+        [0.0, dw[1] / sw[1], 0.0],
+        [0.0, 0.0, dw[2] / sw[2]],
+    ];
+    let adapt = mul(&inverse(&BRADFORD), &mul(&scale, &BRADFORD));
+    mul(&inverse(&rgb_to_xyz(dst)), &mul(&adapt, &rgb_to_xyz(c)))
+}
+
+/// Applies a row-major matrix.
+pub fn apply(m: &Mat3, v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn white_maps_to_white() {
+        for (from, to) in [
+            (Primaries::DisplayP3, Primaries::Bt709),
+            (Primaries::Bt709, Primaries::DisplayP3),
+            (Primaries::Bt2020, Primaries::Bt709),
+        ] {
+            let m = conversion(from, to).unwrap();
+            let w = apply(&m, [1.0, 1.0, 1.0]);
+            for c in w {
+                assert!((c - 1.0).abs() < 1e-12, "{from:?}→{to:?} {w:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rec709_luminance_row() {
+        // The Y row of Rec.709 → XYZ is the familiar luma weights.
+        let m = rgb_to_xyz(&chromaticities(Primaries::Bt709).unwrap());
+        assert!((m[1][0] - 0.2126).abs() < 1e-4);
+        assert!((m[1][1] - 0.7152).abs() < 1e-4);
+        assert!((m[1][2] - 0.0722).abs() < 1e-4);
+    }
+
+    #[test]
+    fn p3_red_is_outside_rec709_and_not_clipped() {
+        let m = conversion(Primaries::DisplayP3, Primaries::Bt709).unwrap();
+        let red = apply(&m, [1.0, 0.0, 0.0]);
+        assert!(red[0] > 1.0 && red[1] < 0.0 && red[2] < 0.0, "{red:?}");
+        let back = apply(
+            &conversion(Primaries::Bt709, Primaries::DisplayP3).unwrap(),
+            red,
+        );
+        assert!((back[0] - 1.0).abs() < 1e-12 && back[1].abs() < 1e-12);
+    }
+
+    #[test]
+    fn chromaticities_adapt_their_white() {
+        // D65 chromaticities equal to a primaries set convert exactly as it.
+        let p3 = chromaticities(Primaries::DisplayP3).unwrap();
+        let a = conversion_from(&p3, Primaries::Bt709).unwrap();
+        let b = conversion(Primaries::DisplayP3, Primaries::Bt709).unwrap();
+        for (ra, rb) in a.iter().zip(b) {
+            for (x, y) in ra.iter().zip(rb) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+        // A D50 white maps to D65 white (relative colorimetric).
+        let d50 = Chromaticities {
+            w: [0.3457, 0.3585],
+            ..p3
+        };
+        let w = apply(&conversion_from(&d50, Primaries::Bt709).unwrap(), [1.0; 3]);
+        assert!(w.iter().all(|c| (c - 1.0).abs() < 1e-12), "{w:?}");
+    }
+
+    #[test]
+    fn identity_is_exact() {
+        assert_eq!(
+            conversion(Primaries::Bt709, Primaries::Bt709).unwrap(),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+        assert!(conversion(Primaries::Unspecified, Primaries::Bt709).is_none());
+    }
+}

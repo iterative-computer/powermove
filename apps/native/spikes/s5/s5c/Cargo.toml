@@ -1,0 +1,21 @@
+[package]
+name = "pm-native-s5c-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Isolated consumer manifest, same target as all native lanes. Never builds V8.
+[workspace]
+resolver = "3"
+[dependencies]
+v8 = { version = "=152.2.0", features = ["v8_enable_sandbox"] }
+serde_json = "=1.0.150"
+libc = "=0.2.186"
+tungstenite = "0.27"
+[profile.dev]
+debug = 0
+incremental = false
+[profile.release]
+debug = 0
+[profile.release.build-override]
+strip = false

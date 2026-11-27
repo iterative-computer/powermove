@@ -1,0 +1,306 @@
+# Powermove GPUI-CE fork
+
+Upstream: https://github.com/gpui-ce/gpui-ce
+Pinned commit: `bc577476a0eb55173ef985585cfb487f75ab1cab`.
+License: Apache-2.0, retained in LICENSE.md and crate license/notice files.
+Shallow-cloned with `git clone --depth 1`, then removed the nested .git.
+Omitted root assets, examples, benches, tooling, CI and upstream lockfile.
+Only the macOS Metal dependency closure is retained (14 crates). WGPU, other
+platforms, fonts/example packages, tests and their dev-dependency edges are omitted.
+Linux feature names remain inert for the core test-support manifest; this fork is macOS-only.
+The upstream Rust-authored shaders are retained, rather than replacing their pipeline.
+
+Powermove modifications are described below as they are introduced. Upstream source
+notices are preserved. No patch has been submitted upstream yet.
+
+References inspected: Frame's excluded vendor workspace/path overrides
+(https://github.com/66HEX/frame/blob/master/Cargo.toml), and
+https://github.com/luciascarlet/gpui-glass-demo. The latter uses custom WGPU glass;
+we use AppKit materials per the native composition contract, with no shader code copied.
+
+Pruned unused crates: gpui_ce_fonts, gpui_elements, gpui_linux, gpui_path, gpui_platform, gpui_tokio, gpui_web, gpui_wgpu, gpui_windows, gpui_zed_util.
+
+## Powermove patches (S2)
+
+Each modified source carries a Powermove notice. The native workspace uses direct
+path dependencies and its own lockfile/toolchain. These are additive Metal APIs,
+not WGPU emulation. All upstream intent below is proposed, not submitted.
+
+| Patch | What and why | Status / upstream intent |
+|---|---|---|
+| P-DEVICE | `MacPlatform::new_with_metal_device`, `MetalRenderer::new_with_device` and `new_headless_with_device` retain the app's device. Otherwise preserve upstream enumeration. Atlas, queue and window layer use that same device. Reject imported texture/event device mismatches. | Implemented, builds and headless imports pass. Propose explicit device injection rather than global device state. |
+| P-HEADLESS | Expose existing Metal capture/render APIs and `PlatformHeadlessRenderer` in ordinary builds. Autorelease pools bound capture/submission temporaries; unified-memory captures use Shared storage (Managed on discrete GPUs). | Implemented, real GPU captures pass without an unlocked desktop. Full GPUI test app context remains test-gated; AppKit/WebKit cannot be captured by this renderer. Propose production capture feature/API independent of test-support. |
+| P-TEXTURE | `NativeTexture` + `Window::paint_texture`; BGRA8Unorm/RGBA16Float, premultiplied SDR sRGB, top-down. Use upstream surface shader's RGB branch and premultiplied ONE / ONE_MINUS_SRC_ALPHA pipeline. Encode MTLEvent waits before render encoders. Deduplicate source fences, retain textures/events/pool leases per submission, notify after completion (including failure). Cached scenes keep their own leases. | Implemented; pixel, delayed signal, repeat-submission, clip and retirement tests pass. Propose typed native texture source with completion lease. No CPU pixel upload/readback in consumption; test producer/readback only in verify. |
+| P-LAYER | Main-thread RAII registration invokes a host immediately before GPUI draw/present. Explicit CATransaction and transactional drawable present enclose slot frame changes. Spike hosts a below CAMetalLayer, masked WKWebView, above native field and native glass transport. | Prototype; actual resize/display behavior unverified. Propose frame-scoped composition publication hook, replacing a process-global native overlay. |
+| P-HIT | GPUIView hitTest converts AppKit coordinates into top-left points and declines transparent regions. Above siblings and child windows win through AppKit. Host's native SlotView applies matching shape mask/hit clip. | Prototype; deterministic ordering/capture/clip tests pass, AppKit drag tests unverified. Propose host-provided frame hit/occlusion data with ordinary GPUI behavior when unregistered. |
+| P-TEXT | Actual NSTextField native slot and a menu search field; AppKit owns responder and composition. | Partial; no full text slot API, multiline field, inFields key resolver, IME/Services test. Upstream intent: native-input ownership integrated with composition slots. |
+| P-A11Y | `composition::publish_accessibility` supplies the committed reading order. Ivar-free wrappers on AccessKit's content view and root merge its GPUI nodes with unignored native slot elements, preserving both parent chains. GPUIView forwards AX hit testing; window/panel focus forwards to the content adapter; GPUI focus reclaims the native first responder. | Implemented in S2b. External AX order, parents, frames, WebKit inner field, focus transitions, hit tests and native actions pass with the session locked. Windowless NSTextField/NSTextView/NSButton reorder, removal and teardown probes pass. Spoken VoiceOver traversal remains unverified. Upstream intent: an adapter-supported foreign-child/graft API; this pin has no such API, so the documented AppKit fallback is isolated in the macOS backend. Not submitted upstream. |
+| P-A11Y-PRESS | `Div`: a node with click handlers answers an assistive Press (AccessKit `Click`) by calling those handlers with a keyboard `ClickEvent`, as Return does. Upstream's fallback clicked the pointer at the node's centre, which a child with its own handler took (a timeline row's name label swallowed the row's selection). | Implemented; on-screen proof with cua-driver on a timeline row. Upstream intent: the documented on_click → AX Click handler. |
+| P-A11Y-SYNTHETIC | `A11ySubtreeBuilder::push_child_at` gives a synthetic child its window bounds: the accessibility frame and the entry the built-in `Click` uses, so an assistive Press clicks its centre as it does an element's. The timeline's clips are synthetic children of the tracks list. | Implemented; headless press test in `app/src/timeline_tests.rs`. Upstream intent: bounds for synthetic children. |
+| P-A11Y-CACHE | A cached view (or deferred draw) whose prepaint is reused replays last frame's accessibility nodes under its parent (the frame's node log records each node's depth; the prepaint range records where its nodes start), with their bounds, focus registrations, focus and action listeners, instead of rendering again. The first frame after (re)activation renders every view. Updates to the adapter carry only nodes that changed (none when nothing did); the whole tree is kept for replay and `a11y_tree()`. | Implemented; headless test `crates/shell/tests/a11y_cache.rs` (reuse, focus, press, incremental updates applied give the whole tree). Upstream intent: replay a11y nodes with reused prepaint; incremental tree updates. |
+| P-FEEL | Opt-in input-to-photon probe (`PM_FEEL_TRACE=<file>`, `gpui_apple::feel`): AppKit mouse/scroll/key events and app-dispatched input note their timestamp; the next drawable carries the oldest one and its presented handler appends `{ui, path, input, frame, draw, target, presented}` (host seconds). Off without the variable: no handler, file or clock reads. On, a writer thread opens and appends the file (main never touches it; a full queue drops lines). | Implemented; measured by `crates/app/tools/feel.py`. Diagnostic only, not proposed upstream. |
+| P-FEEL-OBSERVE | `gpui_apple::feel::observe(frame, input)`: the app (product telemetry) gets each frame's build time (from its start until it is encoded, before any drawable wait, ms) and drag/scroll input kinds, on the main thread. Unset: one atomic load a frame. | Implemented for `pm-telemetry` frame summaries. Not proposed upstream. |
+| P-SHEET | `WindowOptions::parent` names the window a `WindowKind::Dialog` attaches to as a sheet (resolved to its `NSWindow` through the parent's window handle); without it, the main window as before. A background app has no main window, and with several projects open the main one isn't always the one that asked. | Implemented; on-screen proof: the Export sheet attaches to its editor window in a background launch. Upstream intent: explicit sheet parent. |
+| P-CHILD | Every way a window is shown (GPUI's open, activate and set_visible, tab joins, the app's own raises) goes through `child_window::present`. Child windows (pop-ups, floating windows, the palette, the field menu, the colour panel; marked by hiding on deactivation) sit at the normal level as a child of the window that asked (`WindowOptions::parent`, else the main window), never on every Space, and show only while the app is active: asked for while it's inactive, one waits and shows on activation, unless it or its parent closed or hid meanwhile. Other windows come forward only while the app is active and otherwise appear behind other apps. Attaching resets a child's hiding and Spaces, so `attach` reapplies the policy. | Implemented; headless tests `crates/shell/tests/child_windows.rs` (AppKit window properties, attach and reparent, the inactive-app queue, no direct ordering in the creation sources) and `child_windows_gpui.rs` (GPUI's real open and activate paths with activation prohibited: a PopUp stays off screen, attached, and never shows after its parent closed). Upstream intent: windows owned by their window; nothing from an inactive app over other apps. |
+| P-SHEET-WAIT | Every sheet goes through `child_window::sheet(parent, sheet, begin, cancel)`. A normal launch (and every release build) begins it at once, exactly as AppKit does. A development LANE launch only (opt-in set in process by the development `--draw-occluded` flag the lane launcher passes; never by the environment; compiled out of release builds) holds a sheet asked for while the app is inactive, because `beginSheet` orders its parent front and let macOS activate a lane app over the owner's work: it waits attached to nothing and begins on activation or when its minimised window is restored; an entry that never begins runs its `cancel` (forgotten by its owner — `OpenSheet::close`, an extension page closing its modal, `close_sheets` — or its window torn down, by sheet or by parent), so nothing waits forever; in that mode an alert (a question) answers itself with its Escape choice instead of waiting, so a lane quit never waits on a hidden question. With `--open` as well, a held sheet stands just above its window for review captures. | Implemented; headless tests `crates/shell/tests/child_windows.rs` (normal launch begins at once; lane: waits, cancelled when forgotten, when its parent is torn down, when its window closed before activation, begins on activation; restore observer; a scan that every sheet site goes through the gate) and `child_windows_gpui.rs` (a Dialog begins at once in a normal launch; in a lane a Dialog and a prompt wait and are cancelled once their window closed); `main.rs` `only_the_lane_flag_holds_sheets_and_only_with_open_stands_them`. Upstream intent: none (development tooling). |
+| P-120 | On macOS 14+ the view's own `CADisplayLink` paces the Metal renderer, which asks the layer for its drawable (PM-310: on a 120 Hz display a `CAMetalDisplayLink` drawable reaches the glass 41.6 ms after its update, five refreshes, whatever its frame latency or the layer's drawable count; the view's link and its own drawable take two to three). `PM_GPUI_METAL_DISPLAY_LINK=1` restores the `CAMetalDisplayLink`, which supplies one retained drawable per callback: reserve half a refresh before its submission deadline; reject stale updates without draining GPUI demand. Two-frame GPU render-ahead; commit then call `present()` before the CPU deadline, without `nextDrawable` or `waitUntilScheduled` on stable frames. Geometry changes, first publication, untracked hosts and AppKit synchronous paints remain transactional. Release unused callback drawables; invalidate the link on window teardown. The older CVDisplayLink fallback retains continuous-frame coupling. `PM_GPUI_CV_DISPLAY_LINK=1` selects the CVDisplayLink, to measure it. The layer has two drawables and display sync off (PM-310: presenting every refresh with display sync queues about four frames, 34 ms from draw to glass on a bare layer against 17 ms without; Powermove scrolls at 27-29 ms input to screen instead of 35-42, as evenly paced, and playback keeps 24 fps without tearing); frames stay driven by the display link alone (drawing on input as well paced unevenly). `PM_GPUI_DISPLAY_SYNC=1` restores display sync, `PM_GPUI_DRAWABLES=3` the third drawable. Native AppKit tab-bar accessories are no longer hidden/collapsed. | CPU headroom and drawable-wait improvement measured; **zero-miss display gate still FAIL**. Contract/deadline tests in `spikes/s2/src/p120.rs`, grouped/cache pixel comparison in `--verify`, native single-window tab-bar probe in `--verify-tab-bar`. See the 2026-11-01 pacing section in `docs/native/s2-gpui-ce.md`. Upstream intent: compositor-paced frame source with callback-owned drawable and geometry-scoped transactions. |
+| P-LAUNCH | `MacPlatform::run` calls `finishLaunching`, applies the default Regular policy and runs the app's launch callback before `NSApplication::run`, instead of waiting for LaunchServices' open-application Apple Event (15-25 ms idle at every launch); `run` skips `finishLaunching`, and `applicationDidFinishLaunching:` still installs the observers and finds no callback left. That early work runs in its own autorelease pool, drained before `run`: without it a window the callback opened was never freed after closing. Documents and links arrive after the callback through `open_urls` (the shell buffers them on a channel either way). Adapted from NativeGPUI (github.com/Cafekery/NativeGPUI @63a384c) patches 0003 (finish launching immediately) and 0007 (launch callback pool), Apache-2.0. NativeGPUI 0005 (keep the first window hidden, then order it and draw its first frame in one transaction) was ported, measured and dropped: our first window opens after the library attaches, outside the callback, and deferring it ordered the window ~225 ms later with its content no sooner (PM-609). | Implemented; `crates/shell/tests/launch_release.rs` (a window opened in the callback is freed after closing; fails without the pool). Measured in PM-609: the callback 11-17 ms earlier, the window ordered 4-25 ms earlier (medians of three interleaved series of ten). Upstream intent: as NativeGPUI. |
+| P-LAUNCH-TRACE | Opt-in launch timing (`PM_LAUNCH_TRACE=<file>`, `gpui_apple::launch`): NDJSON lines `{m, w}` (Unix ms) for the process start (`exec`, from `proc_pidinfo`), `run`, `will_finish`, `did_finish`, `callback_end`, each window's `order`, and app marks (`main`, `engine`, Home's `recent`, a project's `opened` and its viewer `picture`); each window's first drawable and the drawable after an app mark write a `present` line from its presented handler (presentedTime as wall time; `exact:false` when the drawable never reached the glass); `idle` is the main run loop's first wait for events after a traced present. Off, each costs one cached flag read. | Diagnostics only; measured with the lane tools in PM-609. Idea from NativeGPUI's `launch_trace` (Apache-2.0). |
+| P-DRAW-TRACE | Opt-in frame diagnostics. `PM_DRAW_TRACE=1` prints one `PM_DRAW {json}` line per drawn frame on stderr: the dirty view count, the views rendered, each view type's own (exclusive) layout/prepaint/paint time, and the frame's layout, prepaint, paint and a11y phases; `PM_FRAME` lines time next-frame callbacks. `PM_GPUI_FRAME_LATENCY` (1.0-2.0) and `PM_GPUI_DRAWABLES` (2-3) override P-120's frame latency and the layer's drawable count (two by default) to measure input-to-glass. Off, each costs one cached flag read. | Diagnostics only; defaults unchanged. |
+| P-SCROLL-LAYER | A scrolling div that declares its content independent of the offset (`.scroll_layer()`) records what its children drew, one size past its edges along the axes it scrolls, with their hitboxes (`gpui::scroll_layer`). A wheel step inside that recording moves the offset and asks for a frame without notifying the view: the cached view's frame is reused and the layer replayed from its recording, shifted and clipped to the div again (`Scene::replay_layers`, `Window::reuse_hitboxes`). A step past the recording, a text input, deferred draw or transformed glyph inside notifies as before; 150 ms after the last step the view draws in full, and hover waits until then (as AppKit's tracking areas). Cached views inside a recording draw in full. A layer recorded inside another's recording draws its view again on its steps (the outer replays it as recorded). AppKit slots follow through P-SLOT-REGION. `PM_SCROLL_LAYER=0` turns it and P-TRUNCATE-CACHE off (measurement); `PM_DRAW_TRACE` names refused steps. | Implemented (PM-311). |
+| P-SLOT-REGION | Every scrolling div is a region for the AppKit slots painted inside it (`gpui::slot_region`, `gpui_macos::slot_region`): a slot stages its bounds in the region's content coordinates, and the platform keeps one clipping container per region (the clip view carries the edge fades; nested regions nest) whose content view moves by the region's offset. A wheel step changes one view's origin whatever the number of slots, in the slot transaction of the frame that draws the scrolled content: a replayed scroll layer at the offset it replays, a repainted scroller at the one it painted. A slot whose placement and container are unchanged touches no AppKit view. Clip edges at or past the region's are the container's; a nested region's container also keeps the clips of views between it and its parent region. A region is published only while a frame draws it (painted, or in a reused view's paint, replays included). A slot its region's view shows none of is hidden (no keys, not read out), and joins the window only once shown (P-SLOT-LAZY). Views move between parents by being added to the new one; one holding the first responder stays put (at the same place on screen) until the edit ends. The window prepares its Metal frame (drawable, encoded commands) before publishing slots: a frame that cannot present moves nothing and keeps its staging; a frame that would move slots waits for the next update while an earlier asynchronous present is still in flight. Only a CAMetalDisplayLink's drawable is presented right after its commit; any other is presented by its command buffer. Only a frame that moves a hosted view presents with the transaction (and waits for its command buffer's scheduling), then flushes it so its drawable goes back to the layer at once (NativeGPUI 0002); the frames between, a direct window's included, present at once. Replaces the slot pictures drawn in GPUI while a body scrolled. | Implemented (PM-696); `crates/shell/tests/slot_region.rs` (slot on its drawn row after every step: layer, nested layers, cached view, plain scroller, paused and playing), `hosted_present.rs` `regions` (containers, nesting, per-step cost by slot count). |
+| P-FRAME-DRAWS | A real (production) app draws a window only when its platform asks for a frame. The app links `headless-support` (MCP captures, the effect lab), which also enabled the test harness's draw of every dirty window as effects settle: each notify drew the tree outside the frame callback without presenting it (five to seven draws per frame shown while a panel scrolled during playback). Test and headless apps still draw as effects settle. | Implemented (PM-696). |
+| P-TRUNCATE-CACHE | A truncated label is shaped once per text, runs, size, widths and affix (a per-window cache, cleared past 8192 entries); layout measured each truncated label several times a frame. | Implemented (PM-311). |
+| P-TRANSITION-REST | A `Transition` at rest is sampled through a read (`Animated::resting_sample`), not a mutable borrow: dropping the borrow notified the state, so every view that evaluated a resting fade or slide drew again the next frame (the workspace's 18 panel-corner fades redrew the whole window on every scroll step). A running transition samples as before. | Implemented (PM-702); `v4_view_tests::a_transition_at_rest_evaluates_without_notifying`. |
+| P-SLOT-LAZY | A `NativeControlSlot` joins the window the first time a present shows it, not when it is made. AppKit lays out every view in the window, hidden or not, and on macOS 27 a control's first layout builds its SwiftUI graph: Settings › Shortcuts (369 buttons, about twenty on screen) stalled the main thread about half a second on every visit. | Implemented; `crates/shell/tests/hosted_present.rs` checks a slot is not in the window until a present shows it. Upstream intent: none (Powermove slot API). |
+| P-SLOT-BLEED | A `NativeControlSlot`'s clipping wrapper reaches 8 pt past its control on every side (still cut by the slot's clip and its region's container), and a press in that margin passes to GPUI's view. A Liquid Glass control draws its rim and shadow outside its frame: a wrapper cut at the frame flattened the top and bottom of Home's search field and glass buttons (worst in light mode, PM w116). Whether a slot shows is still its control's own rect. | Implemented; `crates/shell/tests/hosted_present.rs`. Upstream intent: none (Powermove slot API). |
+| P-EMBED | GPUI's view may sit inside another view rather than fill the window (Settings' `NSSplitViewController` detail item, PM-375): `content_size` is the view's own frame, pointer and drag positions are offset by the view's origin in the window (zero when it fills the window), native control slots are placed in the view's parent from the view's frame, the drag image is anchored in the view's coordinates, and the accessibility adapter is found on the view's parent. | Powermove-specific; upstream assumes the view is the content view's only child at its origin. |
+| P-COMPOSER-UNDO | A composer text view (`TextKind::Composer`) keeps its own `NSUndoManager` (its `undoManager` override), and a text the host sets (`set_value`, `replace_value`, a cancel) clears it: AppKit's typing undo names ranges of the text typed, so after a send emptied the field ⌘Z ran `-[NSUndoTyping undoRedo:]` on the old ranges and aborted the app with an `NSRangeException` (PM-749). Other kinds keep the window's manager. | Implemented; `crates/app/tests/composer_undo.rs` (the real composer view: type, send, ⌘Z; fails without the patch with the same exception). Upstream intent: none (Powermove slot API). |
+| P-DROP-SOURCES | Incoming macOS drops accept Finder lists, local file URLs, AppKit file promises and PNG/TIFF up to 512 MiB, in that order. A usable file URL wins over a promise and a bare web link is refused. Workers stage transfers under `media/received/.incoming`, and launch clears abandoned staging. Promise completion counts AppKit callbacks with a deadline. Completed files reach the release position without interrupting a newer gesture. Import leases delete archived or refused copies and preserve registered in-place sources. | Adapted from NativeGPUI’s `0001-accept-browser-promise-and-image-drags.patch` (Apache-2.0). |
+
+### Ownership and colour
+
+`NativeTexture::from_borrowed_raw` bridges objc2-metal to metal 0.33: non-null,
+live +0 pointers are retained to +1 exactly once, then released by owned wrappers.
+The caller pins its wgpu HAL resources until that retain completes. The producer
+signals the supplied value from its queue, and must not rewrite/recycle the source
+while any scene or command-buffer lease remains. Completion is sampling complete,
+not scanout, and callbacks must be short/nonblocking. Removing UI references is not
+permission to recycle. The CPU never waits for the producer event.
+
+RGBA16F support is **not** HDR presentation. The engine must convert extended-linear
+content into display-referred SDR sRGB for this BGRA8 GPUI target. S3 owns EDR output
+in the below-slot layer. The API cannot infer the encoding from a pixel format;
+incorrect producer tagging is still a contract violation. Device owners must retire
+all cached sources on device loss; failed consuming submissions also retire their
+sources. Real device loss and the wgpu-30 bridge remain integration tests for S3.
+
+### Composition limitations
+
+S2's host paints a synthetic fixed layout, not a production docking manager.
+It publishes ordered slots, masks/transforms, interactive and occluding regions,
+compat overlay rectangles and accessibility order. Affine inverse/clip math is
+covered in CPU tests; native placement currently supports translation only.
+Overlay geometry is a fixed synthetic DOM fixture, not an asynchronous S5 channel.
+WKWebView is clipped to panel + overlay union, never composited full-window.
+Native pointer capture is delegated to AppKit; deterministic model capture is
+separately tested. S2b verifies the foreign-child tree and programmatic focus/actions
+without the screen. Native drag/clip coverage, resize lag, spoken VoiceOver,
+keyboard/IME handoff and glass appearance still require live verification.
+
+The glass implementation copies NSToolbar/material/control placement from
+`apps/mac/crates/glass`, with pre-26 and Reduce Transparency material fallback.
+Solid GPUI panels and viewer surround never use glass. Refraction above GPUI is
+only the native-content transport and child field menu. In-window GPUI-child glass
+would be below-band; it must not be implemented with an above-slot native bar.
+The pooled menu uses the public CASpringAnimation duration/bounce initializer
+(0.32/0.15), scale 0.96 → 1, non-bouncing 0.12 exit and 0.15 Reduce Motion fade.
+It resumes from current presentation values; velocity continuity, keyboard/typeahead,
+glider and all transient kinds remain incomplete. See docs/native/s2-gpui-ce.md.
+
+### P-A11Y implementation and pin assumptions (S2b, 2026-11-01)
+
+Shell accessibility follow-up (2026-11-01): `composition_accessibility::focus`
+also forwards a native first responder outside the published slots (AppKit's
+standard toolbar). Previously its ring was visible but the content adapter
+returned no AX focused element because GPUI did not own focus. It uses the
+responder's real focused element or AppKit's unignored ancestor, without copying
+native controls into AccessKit. `apps/native/scripts/shell-ax.swift` checks the
+external AX focused element alongside the keyboard walkthrough. The fallback
+only considers native responders outside the content adapter, avoiding a call
+back into that same adapter when a popup restores the initial responder.
+
+
+The pinned `accesskit_macos` 0.26.3 `SubclassingAdapter` exposes only AccessKit
+platform nodes. It cannot accept an NSView child. We retain it, then wrap its
+**actual window content view**, which is separate from GPUIView. The adapter's
+single `Role::Window` root remains in the tree. A second, per-instance wrapper on
+that root merges `accessibilityChildren` and `accessibilityChildrenInNavigationOrder`.
+This preserves GPUI's AXParent relationships rather than flattening its root.
+Both wrappers add no ivars; weak, main-thread registries locate their state.
+Teardown restores the original classes before the upstream adapter is dropped.
+
+`AccessibilityItem::Gpui(AXIdentifier)` selects an exposed direct root child;
+`Native(NSView)` inserts that slot's unignored AppKit accessibility elements;
+`RemainingGpui` preserves all other GPUI children in their original order. A native
+control may expose its cell rather than its NSView. Using AppKit's unignored-child
+API avoids an AXUnknown wrapper and duplicate identifiers. Missing anchors cannot
+drop GPUI children; duplicate object identities are emitted once. Nested GPUI
+subtrees stay intact: a host that needs an insertion point must publish a direct,
+exposed root child with a stable identifier. Z order and reading order are distinct.
+
+The host publishes the retained order in its present callback, with slot frames.
+AX getters read that snapshot without entering the host or taking GPUI's window
+mutex. Native elements keep their own frames, actions and text interfaces; their
+AXParent is the retained AccessKit root. Removal/unregister clears overridden
+parents. Structural changes post an AppKit layout notification asynchronously,
+after the draw lock is released. Ordinary pointer-hit callbacks avoid copying the
+accessibility snapshot.
+
+The content-view AX hit test uses AppKit's ordinary composition hit test, including
+slot clipping, then delegates to the winning native slot. GPUIView forwards its AX
+hit query to the content adapter. GPUIWindow/GPUIPanel use AccessKit's standard
+focus forwarder. Native focus queries use WebKit's actual responder for a remote
+DOM element and the owning NSControl for its shared field editor. An AccessKit
+Focus action makes GPUIView first responder before updating GPUI's logical focus. GPUIWindow/GPUIPanel also observe
+successful `makeFirstResponder:` changes and queue AccessKit host-focus updates
+after the native action unwinds. Host focus requires GPUIView itself to own the
+responder; a native slot in the same key window must clear the previous GPUI
+node's AXFocused flag. The adapter is shared through a main-thread RefCell so this
+synchronization never enters the GPUI window mutex or re-borrows AccessKit's tree
+during an AX action. The external probe verifies losing and regaining AXFocused
+as well as the application's focused element.
+
+Verification lives in `spikes/s2/scripts/check-ax.sh`. Its external Swift walker
+uses AXUIElementCreateApplication; its independent AppKit-only probe compiles these
+exact vendor sources and never shows a window. All artifacts stay outside Git.
+The root shape, upstream subclass implementation and native control behavior are
+pin-specific assumptions to recheck at each GPUI/AccessKit rebase. No system-wide
+method swizzle, WebKit DOM mirror or new AccessKit dependency fork was introduced.
+
+### P-TEXT/P-120 pass (2026-11-01)
+
+This is an **implementation / screen-free test pass**, not a 120-Hz or S2 gate pass.
+The session locked before the after-patch display and OS IME checks; those are open.
+
+- **P-TEXT:** `gpui_macos::native_text::NativeTextSlot` owns real `NSTextField`
+  and scrollable plain `NSTextView` editors. Primary/multiline fields stay native;
+  dense text/number fields become native only while editing. Geometry and inherited
+  rectangular clips are staged from GPUI paint, then applied in the composition's
+  `CATransaction`. No custom `NSTextInputClient`, key injection or marked-string
+  conversion is installed. AppKit keeps its field editor, responder chain, undo,
+  selection, marked text, contextual Services, dictation and emoji input. Spell
+  check/correction is enabled for text (disabled for numbers). Writing Tools uses
+  the system default behavior where the selector exists; actual system availability
+  remains an OS/account/hardware condition, not an emulated feature.
+- **P-TEXT / AX:** live native editors join the retained composition reading order;
+  an explicit `accessibility_item()` lets the host anchor one at a panel position.
+  Otherwise managed text editors are appended, with identity deduplication.
+  Visibility changes/removal notify the existing P-A11Y adapter; drop removes the
+  native subview and parent override. Placement currently supports rectangular
+  clipping and translation, matching the existing S2 host limitation.
+- **P-TEXT / shell:** `pm_shell::text::TextField` renders dense values in GPUI and
+  overlays an identically sized native slot while editing. Number validation runs
+  at commit, allowing incomplete/marked strings during editing; invalid values or
+  Escape restore the previous value. Change/commit/cancel events wake GPUI through
+  a channel. Primary and multiline kinds use the same component API. The shell and
+  popup key monitors return marked-text events directly to AppKit. Native Edit
+  menu roles expose spelling, Writing Tools and Emoji & Symbols; Services retains
+  its standard application menu. No dictation permission is requested by tests.
+- **P-120:** retain the existing per-display CoreVideo link and its safe immortal
+  registry. Starting an already subscribed display is now a no-op; a display move
+  changes subscriptions, and occlusion/no-screen stops them. No fixed 60-Hz timer
+  or unsafe display-link teardown was added. ProMotion pacing still needs an
+  unlocked run. `PM_FRAME_PACING=1` records the **GPUI layer's** drawable timestamps;
+  zero timestamps are unknown, never successful presentations. CPU phase timing
+  remains opt-in through `ZED_MEASUREMENTS=1`.
+- **P-120 / composition:** `MacWindow::draw` releases the window lock before the
+  slot transaction commits. The commit runs AppKit's display cycle, whose cursor
+  rect reset takes the same lock; holding it deadlocked the main thread whenever
+  the viewer slot moved.
+- **P-120 / sync paint:** `display_layer` and `window_did_change_key_status`
+  invalidate the window's display link before their synchronous `nextDrawable`
+  paint (`release_display_link_for_sync_present`; Core Animation raised on any
+  window resize or key change, even with the link paused); the next start
+  attaches a fresh link. While a link owns the layer, `MetalRenderer::draw`
+  without a link-supplied drawable returns `false` and the window repaints on
+  the link's next update, never calling `nextDrawable` (HANDOFF P-120 rule).
+- **P-120 / headroom candidate:** S2 caches its unchanged native viewer pattern and
+  clip masks, and gives the 1,000 static texture tiles a cached GPUI entity. The
+  fresh 60-Hz producer is separate; texture leases/fences remain intact. This uses
+  GPUI's existing invalidation-aware `.cached(...)` API; it does not introduce a
+  second scene cache. An explicit `S2_BASELINE=1` disables these fixture caches for
+  A/B checks. A real 5,000-row `uniform_list` scroll workload advances seven rows
+  on every requested display frame (`S2_TIMELINE=1`), bounded to 7,400 frames.
+
+Tests: the native AppKit probe checks multiline/UTF-16 marked text and commit,
+spell/undo configuration, clipping, equal dense/native geometry and teardown,
+then reruns the original foreign-child AX bridge probes. A real headless GPUI
+regression test confirms twelve parent invalidations reuse an unchanged child,
+identical rendered pixels, and a child notification invalidates its cache.
+Reproduction and open gates: `docs/native/s2-gpui-ce.md`. Upstream intent is an
+optional native text-slot facility and idempotent frame-source start; no submission
+has been made. No measurements from a locked or occluded session certify pacing.
+- **P-TEXT / canvas kind:** `TextKind::Canvas` is an invisible `NSTextView`
+  (alpha 0, inside a hit-test-transparent host) that owns typing, IME, dictation,
+  emoji and spelling while the app draws the text from its engine. It reports
+  `Selection`, editing chords (`Key`) and `Blurred` instead of committing, keeps
+  its last placement when a frame skips its host's paint (so it stays first
+  responder), and shows the system insertion point (`NSTextInsertionIndicator`)
+  at a caret rectangle the host stages. Its context menu (`context_menu`)
+  opens on the run-loop turn after the click, never inside GPUI's event
+  dispatch: menu tracking runs GPUI's tasks, which need the app the
+  dispatch still holds (PM-631).
+- **Development review frames:** debug builds with `PM_NATIVE_DRAW_OCCLUDED`
+  set keep an occluded window's display link running, so background lane checks
+  see live frames without raising a window. Release builds always pause it.
+- **Hosted views and the frame that carries them:** `MacWindow::draw` moves
+  AppKit slots only in a frame that reaches the screen with them, and decides
+  what the frame does before it touches one (`composition::step`):
+  - Nothing would move (`composition::pending`: the text and control slots
+    compare what the last paint staged with where they stand; a registered
+    host answers through `composition::set_pending`): the scene goes into the
+    `CAMetalDisplayLink`'s drawable and the main thread waits for nothing.
+  - Something would move: a link's drawable is shown at the link's own time,
+    after the slot transaction, so the window changes pace
+    (`composition::Pace::Direct`). The link is invalidated once, a plain
+    `CADisplayLink` keeps the frame callback, and drawables come from the
+    layer through `metal_renderer::DrawableSource`: a thread calls
+    `nextDrawable` (it may wait there) and the main thread takes one that
+    has arrived and has the layer's size, or none. A frame with none in
+    hand draws nothing and moves nothing; the next tick tries again. Frames
+    present with the slot transaction. The window stays direct for the
+    whole scroll or drag and goes back to the link when nothing has moved
+    for `composition::DIRECT_LINGER` (0.5 s), no frame is waiting and no
+    drawable is on its way (the layer must not be asked while a link owns
+    it).
+  - A link drawable of the size before a resize is passed over; after three
+    in a row the window goes direct, where the layer hands out the current
+    size. No path draws a scene into a drawable of another size
+    (`MetalRenderer::draw` refuses one too). This guard is in every Metal
+    window, with or without hosted views.
+  Where the main thread still asks the layer itself: AppKit's synchronous
+  paints (`displayLayer:` in a live resize, a tab coming forward), and one
+  frame after a host with no `set_pending` (native extension panel bodies)
+  has already moved its views under a link. `allowsNextDrawableTimeout` is
+  on, so those waits end after a second at worst. Frame cost: in the direct
+  pace every frame waits for its command buffer to be scheduled
+  (`presentsWithTransaction`), which the link pace does not; stable windows
+  never enter it. `PM_GPUI_PRESENT_TRACE=1` prints one line per draw (path,
+  moved, milliseconds on the main thread including the transaction commit,
+  milliseconds waiting for a drawable). Contract tests:
+  `crates/shell/tests/hosted_present.rs`.
+- **A slot belongs to the paint that staged it:** `composition::painted`
+  counts a view's paints; a slot's staged geometry carries the number of the
+  paint that staged it and a present places only what the last complete
+  paint staged. A control staged by a paint that never reached the screen
+  (no drawable, or a draw nobody presented) is not placed over a later scene
+  that left it out.
+- **A scene shown again moves no hosted view:** `PlatformWindow::painted`
+  (called at the end of `Window::draw`) tells the platform a new scene
+  follows. GPUI keeps presenting the last scene for a second after fast
+  input; such a `draw` staged nothing, and placing slots from it hid every
+  hosted control and field until the next paint.
+
+### Snapshot view transitions
+
+`Window::paint_snapshot` (under the existing `frame-capture` feature) paints a
+prepainted subtree into the frame as usual and pictures a copy of exactly the
+operations it added offscreen. (Painting into a temporary scene instead broke
+cached views, whose recorded paint ranges then indexed the wrong scene.) This lets a transition freeze
+its own children without capturing the display or including its live overlay.
+The native Metal window exposes its retained `metal::Device` through the existing
+`gpu_context` hook, so custom surface producers use the renderer's device rather
+than guessing the system default. The Metal layer explicitly declares sRGB:
+packed `NativeTexture` surfaces contain display-encoded sRGB, and ColorSync must
+convert those colors for a Display P3 display. No new scene primitive or shader
+pipeline is added to GPUI for the wave itself.
+`Window::paint_snapshot_gpu` pictures the same operations into a GPU texture
+(`GpuSnapshot`: texture, event, value) through `PlatformWindow::render_region_to_texture`
+(Metal window and headless renderer): no readback, no CPU wait, no upload. A
+transition prepared from it waits on the event on the GPU, so its capture
+costs no stall.
+A window at the status level (25) or above keeps the frame it asks for:
+`constrainFrameRect:toScreen:` returns it unchanged, so Powermove's first-run
+stage covers the whole screen, the menu bar's strip too (AppKit otherwise kept
+the full-screen borderless window under the menu bar).

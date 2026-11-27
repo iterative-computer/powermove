@@ -1,0 +1,82 @@
+{
+  "baseline": "v1.2.0",
+  "source": "ClaudeEventParser with synthetic stream-json",
+  "frames": [
+    {
+      "kind": "in",
+      "value": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting"
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "claude-compact-1",
+        "toolName": "compact",
+        "label": "Compacting context"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "system",
+        "subtype": "compact_boundary"
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "claude-compact-1",
+        "isError": false,
+        "output": "Earlier context summarized"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 2,
+        "max_retries": 5
+      }
+    },
+    {
+      "kind": "progress",
+      "value": "Retrying the request (2 of 5)…"
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "result",
+        "subtype": "success",
+        "result": "{\"message\":\"done\"}",
+        "structured_output": {
+          "message": "done"
+        }
+      }
+    },
+    {
+      "kind": "close-stdin",
+      "value": true
+    }
+  ],
+  "terminal": {
+    "output": {
+      "message": "done"
+    },
+    "text": "{\"message\":\"done\"}",
+    "error": null
+  }
+}

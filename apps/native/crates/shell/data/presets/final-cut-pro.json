@@ -1,0 +1,272 @@
+{
+ "preset": "final-cut-pro",
+ "label": "Final Cut Pro",
+ "bindings": [
+  {
+   "command": "play",
+   "args": [],
+   "keys": [
+    "space"
+   ]
+  },
+  {
+   "command": "shuttleBackward",
+   "args": [],
+   "keys": [
+    "j"
+   ]
+  },
+  {
+   "command": "shuttleStop",
+   "args": [],
+   "keys": [
+    "k"
+   ]
+  },
+  {
+   "command": "shuttleForward",
+   "args": [],
+   "keys": [
+    "l"
+   ]
+  },
+  {
+   "command": "prevFrame",
+   "args": [],
+   "keys": [
+    "left"
+   ]
+  },
+  {
+   "command": "nextFrame",
+   "args": [],
+   "keys": [
+    "right"
+   ]
+  },
+  {
+   "command": "stepFrames",
+   "args": [
+    -10
+   ],
+   "keys": [
+    "shift+left"
+   ]
+  },
+  {
+   "command": "stepFrames",
+   "args": [
+    10
+   ],
+   "keys": [
+    "shift+right"
+   ]
+  },
+  {
+   "command": "prevEdge",
+   "args": [],
+   "keys": [
+    "up"
+   ]
+  },
+  {
+   "command": "nextEdge",
+   "args": [],
+   "keys": [
+    "down"
+   ]
+  },
+  {
+   "command": "workIn",
+   "args": [],
+   "keys": [
+    "i"
+   ]
+  },
+  {
+   "command": "workOut",
+   "args": [],
+   "keys": [
+    "o"
+   ]
+  },
+  {
+   "command": "gotoWorkIn",
+   "args": [],
+   "keys": [
+    "shift+i"
+   ]
+  },
+  {
+   "command": "gotoWorkOut",
+   "args": [],
+   "keys": [
+    "shift+o"
+   ]
+  },
+  {
+   "command": "timeline.addMarker",
+   "args": [],
+   "keys": [
+    "m"
+   ]
+  },
+  {
+   "command": "rippleTrimIn",
+   "args": [],
+   "keys": [
+    "alt+["
+   ]
+  },
+  {
+   "command": "rippleTrimOut",
+   "args": [],
+   "keys": [
+    "alt+]"
+   ]
+  },
+  {
+   "command": "extendEdit",
+   "args": [],
+   "keys": [
+    "shift+x"
+   ]
+  },
+  {
+   "command": "rippleDelete",
+   "args": [],
+   "keys": [
+    "backspace",
+    "delete"
+   ]
+  },
+  {
+   "command": "delete",
+   "args": [],
+   "keys": [
+    "shift+backspace",
+    "shift+delete"
+   ]
+  },
+  {
+   "command": "nudgeLayerTime",
+   "args": [
+    -1
+   ],
+   "keys": [
+    ","
+   ]
+  },
+  {
+   "command": "nudgeLayerTime",
+   "args": [
+    1
+   ],
+   "keys": [
+    "."
+   ]
+  },
+  {
+   "command": "nudgeLayerTime",
+   "args": [
+    -10
+   ],
+   "keys": [
+    "shift+,"
+   ]
+  },
+  {
+   "command": "nudgeLayerTime",
+   "args": [
+    10
+   ],
+   "keys": [
+    "shift+."
+   ]
+  },
+  {
+   "command": "toolSelect",
+   "args": [],
+   "keys": [
+    "a"
+   ]
+  },
+  {
+   "command": "timeline.tool:ripple",
+   "args": [],
+   "keys": [
+    "t"
+   ]
+  },
+  {
+   "command": "toolHand",
+   "args": [],
+   "keys": [
+    "h"
+   ]
+  },
+  {
+   "command": "toolZoom",
+   "args": [],
+   "keys": [
+    "z"
+   ]
+  },
+  {
+   "command": "timeline.toggleSnapping",
+   "args": [],
+   "keys": [
+    "n"
+   ]
+  },
+  {
+   "command": "toggleSkimming",
+   "args": [],
+   "keys": [
+    "s"
+   ]
+  },
+  {
+   "command": "toggleAudioSkimming",
+   "args": [],
+   "keys": [
+    "shift+s"
+   ]
+  },
+  {
+   "command": "freezeFrame",
+   "args": [],
+   "keys": [
+    "alt+f"
+   ]
+  },
+  {
+   "command": "fitView",
+   "args": [],
+   "keys": [
+    "shift+z"
+   ]
+  },
+  {
+   "command": "prevSelectedEvent",
+   "args": [],
+   "keys": [
+    "alt+shift+up"
+   ]
+  },
+  {
+   "command": "nextSelectedEvent",
+   "args": [],
+   "keys": [
+    "alt+shift+down"
+   ]
+  },
+  {
+   "command": "keyboardShortcuts",
+   "args": [],
+   "keys": [
+    "cmd+alt+k"
+   ]
+  }
+ ]
+}

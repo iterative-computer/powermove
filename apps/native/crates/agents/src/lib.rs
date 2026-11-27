@@ -1,0 +1,175 @@
+//! Headless agent services. All runtime and disk work belongs on workers.
+//! OAuth homes are opaque runtime-owned paths, never read or modified here.
+pub mod account;
+pub mod aero;
+pub mod approvals;
+pub mod citations;
+pub mod claude;
+pub mod claude_launch;
+pub mod codex;
+pub mod codex_auth;
+pub mod codex_exec;
+pub mod compatible;
+pub mod context;
+pub mod conversation;
+pub mod delivery;
+pub mod edge;
+pub mod history;
+pub mod inference;
+pub mod keys;
+pub mod launch;
+pub mod monitor;
+pub mod stats;
+pub mod orchestration;
+pub mod persistence;
+pub mod protocol;
+pub mod refresh_broker;
+pub mod runtime;
+pub mod trace;
+pub mod transport;
+pub mod user_mcp;
+pub mod visual;
+pub mod workspace;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    #[default]
+    Editor,
+    Project,
+    Computer,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    Supervised,
+    #[default]
+    Auto,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Chatgpt,
+    Claude,
+    Compatible,
+    Aero,
+}
+impl Provider {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "chatgpt",
+            Self::Claude => "claude",
+            Self::Compatible => "compatible",
+            Self::Aero => "aero",
+        }
+    }
+}
+
+/// Lifecycle fallback when a runtime has no specific exit diagnostic.
+pub const RUNTIME_STOPPED: &str = "Agent runtime stopped.";
+
+/// Display a diagnostic when an unfinished run receives the generic marker.
+pub fn runtime_exit_error(reason: &str) -> &str {
+    if reason == RUNTIME_STOPPED {
+        "Agent runtime exited without a result."
+    } else {
+        reason
+    }
+}
+
+/// Public result shape emitted by the clients (shared/ipc.ts).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunResult {
+    Success {
+        ok: bool,
+        text: String,
+        access: Access,
+    },
+    Failure {
+        ok: bool,
+        error: String,
+        cancelled: bool,
+    },
+}
+impl RunResult {
+    pub fn success(text: String, access: Access) -> Self {
+        Self::Success {
+            ok: true,
+            text,
+            access,
+        }
+    }
+    pub fn failure(error: impl Into<String>, cancelled: bool) -> Self {
+        Self::Failure {
+            ok: false,
+            error: error.into(),
+            cancelled,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
+pub enum Event {
+    Ready,
+    Trace { run: String, value: Value },
+    Progress { run: String, text: String },
+    Session { run: String, id: String },
+    Completed { run: String, result: RunResult },
+    Notification(Value),
+    Warning(String),
+    Stopped(String),
+}
+impl Event {
+    /// A text fragment of a reply or its reasoning: one per provider token. Its
+    /// effect lives in the conversation, so hosts checkpoint it, not each one.
+    pub fn streamed(&self) -> bool {
+        match self {
+            Event::Trace { value, .. } => {
+                matches!(value["kind"].as_str(), Some("answer" | "thought"))
+            }
+            Event::Progress { .. } => true,
+            _ => false,
+        }
+    }
+}
+#[derive(Default, Debug)]
+pub struct Effects {
+    pub outgoing: Vec<Value>,
+    pub events: Vec<Event>,
+    pub close_stdin: bool,
+}
+impl Effects {
+    pub fn trace(&mut self, run: &str, value: Value) {
+        self.events.push(Event::Trace {
+            run: run.into(),
+            value,
+        });
+    }
+    pub fn progress(&mut self, run: &str, text: impl Into<String>) {
+        self.events.push(Event::Progress {
+            run: run.into(),
+            text: text.into(),
+        });
+    }
+    pub fn append(&mut self, mut next: Self) {
+        self.outgoing.append(&mut next.outgoing);
+        self.events.append(&mut next.events);
+        self.close_stdin |= next.close_stdin;
+    }
+}
+pub(crate) fn valid_id(s: &str, limit: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= limit
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+pub(crate) fn error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
+pub(crate) fn text(v: &Value, key: &str) -> String {
+    v[key].as_str().unwrap_or_default().into()
+}

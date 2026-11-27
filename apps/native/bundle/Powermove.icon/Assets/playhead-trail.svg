@@ -1,0 +1,16 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="trail" x1="322" y1="789" x2="509" y2="789" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F0580A" stop-opacity="0"/>
+      <stop offset="0.30" stop-color="#F0580A" stop-opacity="0.11"/>
+      <stop offset="0.68" stop-color="#F0580A" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#F0580A" stop-opacity="0.58"/>
+    </linearGradient>
+    <radialGradient id="trailWarmth" cx="496" cy="830" r="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF6B1A" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#F0580A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="322" y="554" width="187" height="470" fill="url(#trail)"/>
+  <rect x="322" y="554" width="187" height="470" fill="url(#trailWarmth)"/>
+</svg>

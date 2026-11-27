@@ -1,0 +1,702 @@
+//! The export pipeline after rendering (section 17):
+//!
+//! ```text
+//! working frame → encoder input (matrix, siting-aware chroma, dither) → sink
+//! ```
+//!
+//! The production sink encodes with VideoToolbox, muxes with AVAssetWriter, verifies,
+//! and moves the file into place (`mac::VideoToolboxSink`). Test sinks capture the
+//! encoder input itself, so tests can compare it exactly without a codec in the way.
+
+use crate::Error;
+use crate::convert::{Chroma, ConvertParams, EncoderInput, WorkingFrame, convert_tagged};
+use crate::settings::ExportSpec;
+use std::sync::atomic::AtomicBool;
+
+/// Where encoder input goes.
+pub trait Sink {
+    type Output;
+    /// Frame `index` (0-based, in order).
+    fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error>;
+    /// [`Sink::video`] for a frame the caller no longer needs.
+    fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
+        self.video(index, &input)
+    }
+    /// Interleaved f32 PCM at the spec's sample rate.
+    fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error>;
+    /// The next frame is late (the render waits on a busy viewer or an
+    /// extension): finish encoding the frames an encoder holds back, so a
+    /// hardware encoder never times them out (VideoToolbox drops them).
+    fn idle(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Counts the frames of the written file checked while it finishes, in
+    /// `checked` (sinks that check their file frame by frame).
+    fn count_checked(&mut self, _checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {}
+    fn finish(self) -> Result<Self::Output, Error>;
+    /// A finished output given the levels of the mix it carries (a delivered
+    /// file reports them, so the person is told what clipped).
+    fn with_mix(output: Self::Output, _mix: Option<crate::verify::MixLevels>) -> Self::Output
+    where
+        Self: Sized,
+    {
+        output
+    }
+    /// A job may be cancelled while a sink is finishing a long encoder or mux step.
+    fn finish_with_cancel(self, _cancel: &AtomicBool) -> Result<Self::Output, Error>
+    where
+        Self: Sized,
+    {
+        self.finish()
+    }
+}
+
+enum Message {
+    Video(u64, EncoderInput),
+    Audio(Vec<f32>),
+    Checked(std::sync::Arc<std::sync::atomic::AtomicU64>),
+}
+
+/// Runs a sink on its own thread, one frame behind: the next frame converts
+/// while this one encodes. Sinks whose encoder already runs asynchronously
+/// (VideoToolbox) gain nothing from it.
+pub struct Overlapped<S: Sink + Send + 'static> {
+    tx: Option<std::sync::mpsc::SyncSender<Message>>,
+    worker: Option<std::thread::JoinHandle<Result<S, Error>>>,
+}
+
+impl<S: Sink + Send + 'static> Overlapped<S> {
+    pub fn new(sink: S) -> Result<Self, Error> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Message>(1);
+        let qos = crate::par::current_qos();
+        let worker = std::thread::Builder::new()
+            .name("pm-export-encode".into())
+            .spawn(move || {
+                crate::par::apply_qos(qos);
+                let mut sink = sink;
+                for message in rx {
+                    match message {
+                        Message::Video(index, input) => sink.video_owned(index, input)?,
+                        Message::Audio(samples) => sink.audio(&samples)?,
+                        Message::Checked(checked) => sink.count_checked(checked),
+                    }
+                }
+                Ok(sink)
+            })
+            .map_err(|e| Error::Encode(format!("start the encoder thread: {e}")))?;
+        Ok(Self {
+            tx: Some(tx),
+            worker: Some(worker),
+        })
+    }
+
+    fn send(&mut self, message: Message) -> Result<(), Error> {
+        let sent = self.tx.as_ref().map(|tx| tx.send(message).is_ok());
+        if sent == Some(true) {
+            return Ok(());
+        }
+        // The worker stopped at an error; it is the answer.
+        Err(self
+            .join()
+            .err()
+            .unwrap_or_else(|| Error::Encode("the encoder thread stopped".into())))
+    }
+
+    fn join(&mut self) -> Result<S, Error> {
+        self.tx.take();
+        match self.worker.take() {
+            Some(worker) => worker
+                .join()
+                .map_err(|_| Error::Encode("the encoder thread panicked".into()))?,
+            None => Err(Error::Encode("the encoder thread stopped".into())),
+        }
+    }
+}
+
+impl<S: Sink + Send + 'static> Drop for Overlapped<S> {
+    fn drop(&mut self) {
+        // Dropping the sink on its thread cleans up its temporary output.
+        let _ = self.join();
+    }
+}
+
+impl<S: Sink + Send + 'static> Sink for Overlapped<S> {
+    type Output = S::Output;
+
+    fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
+        self.send(Message::Video(index, input.clone()))
+    }
+
+    fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
+        self.send(Message::Video(index, input))
+    }
+
+    fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
+        self.send(Message::Audio(interleaved.to_vec()))
+    }
+
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let _ = self.send(Message::Checked(checked));
+    }
+
+    fn finish(mut self) -> Result<S::Output, Error> {
+        self.join()?.finish()
+    }
+
+    fn with_mix(output: S::Output, mix: Option<crate::verify::MixLevels>) -> S::Output {
+        S::with_mix(output, mix)
+    }
+
+    fn finish_with_cancel(mut self, cancel: &AtomicBool) -> Result<S::Output, Error> {
+        self.join()?.finish_with_cancel(cancel)
+    }
+}
+
+/// One export in progress.
+pub struct Pipeline<S: Sink> {
+    spec: ExportSpec,
+    sink: S,
+    next: u64,
+    audio_frames: u64,
+}
+
+impl<S: Sink> Pipeline<S> {
+    pub fn new(spec: ExportSpec, sink: S) -> Result<Self, Error> {
+        spec.validate()?;
+        Ok(Self {
+            spec,
+            sink,
+            next: 0,
+            audio_frames: 0,
+        })
+    }
+
+    pub fn spec(&self) -> &ExportSpec {
+        &self.spec
+    }
+
+    /// Frames delivered so far.
+    pub fn frames(&self) -> u64 {
+        self.next
+    }
+
+    /// Audio sample frames delivered so far.
+    pub fn audio_frames(&self) -> u64 {
+        self.audio_frames
+    }
+
+    fn admit(&self) -> Result<u64, Error> {
+        if self.next >= self.spec.frames {
+            return Err(Error::InvalidFrame(format!(
+                "the export has all {} frames",
+                self.spec.frames
+            )));
+        }
+        Ok(self.next)
+    }
+
+    /// Converts a premultiplied RGBA working frame on the CPU and delivers it. The frame
+    /// index seeds the dither. Chroma is decimated band-limited ([`Chroma::Filtered`]).
+    pub fn push_frame(&mut self, frame: &WorkingFrame) -> Result<(), Error> {
+        self.push_frame_with(frame, Chroma::Filtered)
+    }
+
+    /// [`Pipeline::push_frame`] with the chroma decimation the frame takes
+    /// ([`Chroma::Footage`] only for a frame of untouched footage).
+    pub fn push_frame_with(&mut self, frame: &WorkingFrame, chroma: Chroma) -> Result<(), Error> {
+        let index = self.admit()?;
+        if frame.width != self.spec.width || frame.height != self.spec.height {
+            return Err(Error::InvalidFrame(format!(
+                "frame is {}×{}, the export is {}×{}",
+                frame.width, frame.height, self.spec.width, self.spec.height
+            )));
+        }
+        let params = ConvertParams {
+            working: self.spec.working,
+            alpha: self.spec.alpha,
+            tags: self.spec.tags,
+            dither: self.spec.dither_enabled(),
+            frame: index as u32,
+        };
+        let input = convert_tagged(
+            frame,
+            self.spec.input_format(),
+            &params,
+            self.spec.tags,
+            chroma,
+        )?;
+        self.sink.video_owned(index, input)?;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Delivers encoder input converted elsewhere (the GPU encoder-input pass, or
+    /// Y′CbCr planes copied on pass-through).
+    pub fn push_encoder_input(&mut self, input: &EncoderInput) -> Result<(), Error> {
+        let index = self.admit()?;
+        input.validate()?;
+        if input.format != self.spec.input_format()
+            || input.width != self.spec.width
+            || input.height != self.spec.height
+        {
+            return Err(Error::InvalidFrame(
+                "encoder input format or size does not match the export".into(),
+            ));
+        }
+        self.sink.video(index, input)?;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Delivers interleaved f32 PCM. Push audio as the frames advance (for example one
+    /// frame's worth at a time) so the muxer can interleave.
+    pub fn push_audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
+        let Some(audio) = self.spec.audio else {
+            return Err(Error::InvalidFrame("this export has no audio track".into()));
+        };
+        if !interleaved.len().is_multiple_of(audio.channels as usize) {
+            return Err(Error::InvalidFrame(
+                "audio samples are not a whole number of frames".into(),
+            ));
+        }
+        self.sink.audio(interleaved)?;
+        self.audio_frames += (interleaved.len() / audio.channels as usize) as u64;
+        Ok(())
+    }
+
+    /// No frame has arrived for a while: see [`Sink::idle`].
+    pub fn idle(&mut self) -> Result<(), Error> {
+        self.sink.idle()
+    }
+
+    /// Finishes once every frame is delivered.
+    pub fn finish(self) -> Result<S::Output, Error> {
+        if self.next != self.spec.frames {
+            return Err(Error::InvalidFrame(format!(
+                "{} of {} frames were delivered",
+                self.next, self.spec.frames
+            )));
+        }
+        self.sink.finish()
+    }
+
+    /// Counts the frames of the written file checked while it finishes.
+    pub fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.sink.count_checked(checked);
+    }
+
+    /// Finishes a job while allowing its sink to interrupt blocking encoder work.
+    pub fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<S::Output, Error> {
+        if self.next != self.spec.frames {
+            return Err(Error::InvalidFrame(format!(
+                "{} frames delivered, expected {}",
+                self.next, self.spec.frames
+            )));
+        }
+        self.sink.finish_with_cancel(cancel)
+    }
+
+    /// Abandons the export; the sink discards partial output when dropped.
+    pub fn cancel(self) {}
+}
+
+/// Test-only sinks (section 17): capture encoder input instead of encoding it.
+#[cfg(any(test, feature = "test-sinks"))]
+pub mod test_sinks {
+    use std::fs::File;
+    use std::io::{BufWriter, Read, Write};
+    use std::path::{Path, PathBuf};
+
+    use super::Sink;
+    use crate::Error;
+    use crate::convert::{EncoderInput, Plane, PlaneData, plane_layout};
+    use crate::settings::InputFormat;
+
+    /// Keeps every frame and all audio in memory.
+    #[derive(Default, Debug)]
+    pub struct MemorySink {
+        pub frames: Vec<EncoderInput>,
+        pub audio: Vec<f32>,
+    }
+
+    impl Sink for MemorySink {
+        type Output = MemorySink;
+
+        fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
+            assert_eq!(index as usize, self.frames.len(), "frames arrive in order");
+            self.frames.push(input.clone());
+            Ok(())
+        }
+
+        fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
+            self.audio.extend_from_slice(interleaved);
+            Ok(())
+        }
+
+        fn finish(self) -> Result<MemorySink, Error> {
+            Ok(self)
+        }
+    }
+
+    /// Writes every frame's planes, tightly packed and little-endian, one frame after
+    /// another (the S2 raw sink format). Audio is ignored.
+    pub struct RawFileSink {
+        path: PathBuf,
+        out: BufWriter<File>,
+        frames: u64,
+    }
+
+    impl RawFileSink {
+        pub fn create(path: &Path) -> Result<Self, Error> {
+            let file =
+                File::create(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+            Ok(Self {
+                path: path.to_path_buf(),
+                out: BufWriter::new(file),
+                frames: 0,
+            })
+        }
+    }
+
+    impl Sink for RawFileSink {
+        type Output = (PathBuf, u64);
+
+        fn video(&mut self, _index: u64, input: &EncoderInput) -> Result<(), Error> {
+            for plane in &input.planes {
+                let bytes: Vec<u8> = match &plane.data {
+                    PlaneData::U16(v) => v.iter().flat_map(|s| s.to_le_bytes()).collect(),
+                    PlaneData::U8(v) => v.clone(),
+                };
+                self.out
+                    .write_all(&bytes)
+                    .map_err(|e| Error::Io(e.to_string()))?;
+            }
+            self.frames += 1;
+            Ok(())
+        }
+
+        fn audio(&mut self, _: &[f32]) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn finish(mut self) -> Result<(PathBuf, u64), Error> {
+            self.out.flush().map_err(|e| Error::Io(e.to_string()))?;
+            Ok((self.path, self.frames))
+        }
+    }
+
+    /// Reads a raw sink file back into frames.
+    pub fn read_raw(
+        path: &Path,
+        format: InputFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<EncoderInput>, Error> {
+        let mut bytes = vec![];
+        File::open(path)
+            .and_then(|mut f| f.read_to_end(&mut bytes))
+            .map_err(|e| Error::Io(e.to_string()))?;
+        let layout = plane_layout(format, width, height);
+        let frame_bytes: usize = layout
+            .iter()
+            .map(|&(s, r, wide)| s * r * if wide { 2 } else { 1 })
+            .sum();
+        if frame_bytes == 0 || bytes.len() % frame_bytes != 0 {
+            return Err(Error::Io(format!(
+                "{} is not a whole number of frames",
+                path.display()
+            )));
+        }
+        let mut frames = vec![];
+        let mut at = 0;
+        while at < bytes.len() {
+            let mut planes = vec![];
+            for &(samples, rows, wide) in &layout {
+                let n = samples * rows;
+                let data = if wide {
+                    let v = bytes[at..at + 2 * n]
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    at += 2 * n;
+                    PlaneData::U16(v)
+                } else {
+                    let v = bytes[at..at + n].to_vec();
+                    at += n;
+                    PlaneData::U8(v)
+                };
+                planes.push(Plane {
+                    data,
+                    row_samples: samples,
+                    rows,
+                });
+            }
+            frames.push(EncoderInput {
+                format,
+                width,
+                height,
+                planes,
+                light: None,
+            });
+        }
+        Ok(frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::test_sinks::{MemorySink, RawFileSink, read_raw};
+    use super::*;
+    use crate::settings::*;
+    use pm_time::Rate;
+
+    fn spec(codec: Codec, frames: u64) -> ExportSpec {
+        ExportSpec {
+            width: 32,
+            height: 16,
+            rate: Rate::FPS_25,
+            frames,
+            codec,
+            container: if matches!(codec, Codec::ProRes(_)) {
+                Container::Mov
+            } else {
+                Container::Mp4
+            },
+            tags: ColorTags::Rec709QuickTime,
+            alpha: AlphaOutput::None,
+            working: WorkingEncoding::Standard,
+            dither: Dither::Default,
+            audio: Some(AudioSpec {
+                sample_rate: 48_000,
+                channels: 2,
+                codec: AudioCodec::Aac,
+            }),
+            timecode: None,
+            destination: PathBuf::from("/tmp/unused.mov"),
+            overwrite: Overwrite::Fail,
+            mode: None,
+        }
+    }
+
+    fn ramp(frame: u32) -> Vec<f32> {
+        (0..16u32)
+            .flat_map(|y| {
+                (0..32u32).flat_map(move |x| {
+                    [
+                        x as f32 / 31.0,
+                        y as f32 / 15.0,
+                        (frame % 4) as f32 / 3.0,
+                        1.0,
+                    ]
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frames_reach_the_sink_converted_in_order_with_per_frame_dither() {
+        let h264 = Codec::H264 {
+            bitrate_bps: 4_000_000,
+        };
+        let mut dithered = spec(h264, 3);
+        dithered.dither = Dither::On;
+        let mut p = Pipeline::new(dithered, MemorySink::default()).unwrap();
+        let f = ramp(0);
+        for _ in 0..3 {
+            p.push_frame(&WorkingFrame {
+                width: 32,
+                height: 16,
+                rgba: &f,
+            })
+            .unwrap();
+            p.push_audio(&[0.0; 2 * 1920]).unwrap();
+        }
+        assert!(
+            p.push_frame(&WorkingFrame {
+                width: 32,
+                height: 16,
+                rgba: &f
+            })
+            .is_err(),
+            "a fourth frame"
+        );
+        let sink = p.finish().unwrap();
+        assert_eq!(sink.frames.len(), 3);
+        assert_eq!(sink.audio.len(), 3 * 2 * 1920);
+        assert!(sink.frames.iter().all(|f| f.format == InputFormat::V420));
+        // Same pixels, different frame index: opt-in dither differs per frame.
+        assert_ne!(sink.frames[0], sink.frames[1]);
+        // Lean H.264 is not dithered by default (4 Mb/s at 640 × 360, 25 fps:
+        // 0.69 bits per pixel, under `H264_DITHER_BITS_PER_PIXEL`): same
+        // pixels, same input.
+        let lean = ExportSpec {
+            width: 640,
+            height: 360,
+            ..spec(h264, 2)
+        };
+        let f = [0.3f32, 0.5, 0.7, 1.0].repeat(640 * 360);
+        let mut p = Pipeline::new(lean, MemorySink::default()).unwrap();
+        for _ in 0..2 {
+            p.push_frame(&WorkingFrame {
+                width: 640,
+                height: 360,
+                rgba: &f,
+            })
+            .unwrap();
+            p.push_audio(&[0.0; 2 * 1920]).unwrap();
+        }
+        let sink = p.finish().unwrap();
+        assert_eq!(sink.frames[0], sink.frames[1]);
+    }
+
+    /// Fails at frame 1.
+    struct FailingSink;
+
+    impl Sink for FailingSink {
+        type Output = ();
+        fn video(&mut self, index: u64, _: &EncoderInput) -> Result<(), Error> {
+            if index == 1 {
+                return Err(Error::Encode("frame 1".into()));
+            }
+            Ok(())
+        }
+        fn audio(&mut self, _: &[f32]) -> Result<(), Error> {
+            Ok(())
+        }
+        fn finish(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_overlapped_sink_keeps_order_and_reports_its_error() {
+        let h264 = Codec::H264 {
+            bitrate_bps: 4_000_000,
+        };
+        let frames: Vec<Vec<f32>> = (0..3).map(ramp).collect();
+        fn push<S: Sink>(p: &mut Pipeline<S>, frames: &[Vec<f32>]) -> Result<(), Error> {
+            for f in frames {
+                p.push_frame(&WorkingFrame {
+                    width: 32,
+                    height: 16,
+                    rgba: f,
+                })?;
+                p.push_audio(&[0.25; 2 * 1920])?;
+            }
+            Ok(())
+        }
+        let mut direct = Pipeline::new(spec(h264, 3), MemorySink::default()).unwrap();
+        push(&mut direct, &frames).unwrap();
+        let direct = direct.finish().unwrap();
+        let mut overlapped = Pipeline::new(
+            spec(h264, 3),
+            Overlapped::new(MemorySink::default()).unwrap(),
+        )
+        .unwrap();
+        push(&mut overlapped, &frames).unwrap();
+        let overlapped = overlapped.finish().unwrap();
+        assert_eq!(overlapped.frames, direct.frames);
+        assert_eq!(overlapped.audio, direct.audio);
+
+        let mut failing =
+            Pipeline::new(spec(h264, 3), Overlapped::new(FailingSink).unwrap()).unwrap();
+        let error = push(&mut failing, &frames)
+            .err()
+            .or_else(|| failing.finish().err())
+            .expect("the sink's error");
+        assert!(error.to_string().contains("frame 1"), "{error}");
+    }
+
+    #[test]
+    fn incomplete_exports_and_mismatched_input_fail() {
+        let mut p = Pipeline::new(
+            spec(Codec::ProRes(ProResProfile::Hq), 2),
+            MemorySink::default(),
+        )
+        .unwrap();
+        let f = ramp(0);
+        p.push_frame(&WorkingFrame {
+            width: 32,
+            height: 16,
+            rgba: &f,
+        })
+        .unwrap();
+        assert!(
+            p.push_frame(&WorkingFrame {
+                width: 16,
+                height: 32,
+                rgba: &f
+            })
+            .is_err()
+        );
+        assert!(
+            p.push_audio(&[0.0; 3]).is_err(),
+            "odd sample count for stereo"
+        );
+        let wrong = crate::convert::convert(
+            &WorkingFrame {
+                width: 32,
+                height: 16,
+                rgba: &f,
+            },
+            InputFormat::Y416,
+            &ConvertParams {
+                working: WorkingEncoding::Standard,
+                alpha: AlphaOutput::None,
+                tags: crate::settings::ColorTags::Rec709QuickTime,
+                dither: false,
+                frame: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            p.push_encoder_input(&wrong).is_err(),
+            "y416 into a 4:2:2 export"
+        );
+        assert!(p.finish().is_err(), "one of two frames");
+    }
+
+    #[test]
+    fn raw_file_sink_round_trips_every_format() {
+        let dir = std::env::temp_dir();
+        for (codec, i) in [
+            (Codec::ProRes(ProResProfile::P4444), 0),
+            (Codec::ProRes(ProResProfile::Standard), 1),
+            (
+                Codec::H264 {
+                    bitrate_bps: 1_000_000,
+                },
+                2,
+            ),
+        ] {
+            let path = dir.join(format!("pm-export-raw-{}-{i}.raw", std::process::id()));
+            let mut s = spec(codec, 2);
+            s.audio = None;
+            let mut memory = Pipeline::new(s.clone(), MemorySink::default()).unwrap();
+            let mut raw = Pipeline::new(s, RawFileSink::create(&path).unwrap()).unwrap();
+            for frame in 0..2 {
+                let f = ramp(frame);
+                memory
+                    .push_frame(&WorkingFrame {
+                        width: 32,
+                        height: 16,
+                        rgba: &f,
+                    })
+                    .unwrap();
+                raw.push_frame(&WorkingFrame {
+                    width: 32,
+                    height: 16,
+                    rgba: &f,
+                })
+                .unwrap();
+            }
+            let (written, n) = raw.finish().unwrap();
+            assert_eq!(n, 2);
+            let back = read_raw(&written, codec.input_format(false), 32, 16).unwrap();
+            assert_eq!(back, memory.finish().unwrap().frames);
+            std::fs::remove_file(written).unwrap();
+        }
+    }
+}

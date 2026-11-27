@@ -2,13 +2,18 @@ import { expect, test } from 'bun:test';
 import { readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { walkDir } from '@powermove/registry/node';
-import { type BuiltinPlan, publishBuiltins } from '../../desktop/scripts/lib/publish-builtins';
+import { type BuiltinPlan, publishBuiltins } from '../scripts/lib/publish-builtins';
+import { v1Desktop, v1Missing } from '../scripts/lib/v1-ref';
+
+/** The built-ins come from a v1 checkout; without one these tests are skipped, saying why. */
+const v1 = v1Missing({ paths: ['src/extensions'] });
+if (v1) console.warn(`skipping the v1 built-ins tests: ${v1}`);
 import { createApp } from '../src/app';
 import { extensions, releases, repos } from '../src/db/schema';
 import { withData } from './db';
 import { makeEnv } from './env';
 import { publisher } from './publish-fixture';
-const root = resolve(import.meta.dir, '../../desktop/src/extensions');
+const root = resolve(v1Desktop, 'src/extensions');
 const expectedCategories: Record<string, BuiltinPlan['category']> = {
   'effects-basic': 'effects',
   inspector: 'panels',
@@ -21,7 +26,7 @@ const expectedCategories: Record<string, BuiltinPlan['category']> = {
   'transitions-basic': 'transitions',
   viewer: 'panels',
 };
-test('publishes ten built-ins, skips unchanged versions, and requires a bump for changed trees', () =>
+test.skipIf(v1 !== null)('publishes ten built-ins, skips unchanged versions, and requires a bump for changed trees', () =>
   withData(async (data) => {
     const env = makeEnv(data);
     const actor = await publisher(data, env, 'powermove');

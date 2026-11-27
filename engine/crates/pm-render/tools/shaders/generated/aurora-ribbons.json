@@ -1,0 +1,24 @@
+{
+ "name": "aurora-ribbons",
+ "kind": "shader",
+ "covers": [
+  "iTime",
+  "iResolution",
+  "fragColor",
+  "helper-fbm",
+  "param-float",
+  "param-color"
+ ],
+ "prompt": "Make a shader layer with slow aurora ribbons drifting across a dark sky. Give me sliders for speed and ribbon count and a color picker for the glow.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "c8e200fc6361f758ee22ca553470ad83ee378d0b03ce9759a8aeb7d3724d91a3",
+  "seconds": 28.966,
+  "generated": "2026-10-17T07:30:54.821Z"
+ },
+ "code": "// Aurora ribbons drifting across a dark night sky.\nuniform float uSpeed;  // @param 0.15 0 1\nuniform float uCount;  // @param 4 1 8\nuniform vec3  uGlow;   // @param #3DFFB0\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = vec2((uv.x - 0.5) * aspect, uv.y);\n  float t = iTime * uSpeed;\n\n  // Dark sky gradient\n  vec3 col = mix(vec3(0.012, 0.02, 0.05), vec3(0.002, 0.004, 0.015), uv.y);\n\n  // Twinkling stars\n  vec2 cell = floor(vec2(uv.x * aspect, uv.y) * 220.0);\n  float s = hash(cell);\n  float star = step(0.996, s) * (0.55 + 0.45 * sin(iTime * 1.7 + s * 90.0));\n  col += vec3(0.8, 0.85, 1.0) * star * 0.5 * smoothstep(0.05, 0.5, uv.y);\n\n  // Aurora ribbons\n  vec3 topTint = mix(uGlow, vec3(0.55, 0.2, 0.9), 0.6);\n  vec3 aur = vec3(0.0);\n  for (int i = 0; i < 8; i++) {\n    float fi = float(i);\n    float on = clamp(uCount - fi, 0.0, 1.0); // fractional count fades ribbons in smoothly\n    if (on <= 0.0) break;\n    float seed = hash1(fi + 1.3);\n    float dir = mod(fi, 2.0) < 1.0 ? 1.0 : -1.0;\n    float drift = t * (0.6 + 0.5 * seed) * dir;\n    float x = p.x;\n\n    float base = 0.3 + 0.45 * hash1(fi * 3.7 + 0.2);\n    float y = base\n            + 0.12 * sin(x * (1.2 + seed) + drift * 1.3 + seed * 6.28)\n            + 0.18 * (fbm(vec2(x * 0.8 + drift, fi * 4.1 + t * 0.3)) - 0.5);\n\n    float d = p.y - y;\n    float below = exp(-max(-d, 0.0) * 60.0);            // crisp lower edge\n    float above = exp(-max(d, 0.0) * (5.0 + 4.0 * seed)); // long upward curtain\n    float curtain = below * above;\n\n    float rays = 0.55 + 0.45 * noise(vec2(x * 28.0 + drift * 3.0, fi * 7.0));\n    rays *= 0.7 + 0.3 * noise(vec2(x * 90.0, t + fi));\n    float fadeX = 0.35 + 0.65 * fbm(vec2(x * 1.5 - drift * 0.7, fi * 2.3));\n\n    float a = curtain * rays * fadeX * on;\n    vec3 c = mix(uGlow, topTint, smoothstep(0.0, 0.25, d));\n    aur += c * a * 0.55;\n  }\n\n  // Soft glow tonemap so overlapping ribbons bloom instead of clipping\n  col += 1.0 - exp(-aur * 1.6);\n  fragColor = vec4(col, 1.0);\n}",
+ "definition": null,
+ "summary": "I wrote a shader layer with slow aurora ribbons over a dark, starry sky. Each ribbon has a sharp lower edge and a vertical curtain that fades upward, shifting toward violet at the top. The controls are uSpeed (0–1, default 0.15), uCount (1–8 ribbons, default 4) and a uGlow color picker (default #3DFFB0). Fractional uCount values fade the last ribbon in or out, so keyframes look smooth. I haven't compiled or rendered it because no Powermove tools were attached to this run."
+}

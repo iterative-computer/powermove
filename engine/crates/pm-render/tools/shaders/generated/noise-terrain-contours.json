@@ -1,0 +1,21 @@
+{
+ "name": "noise-terrain-contours",
+ "kind": "shader",
+ "covers": [
+  "helper-noise",
+  "helper-fbm",
+  "derivatives"
+ ],
+ "prompt": "Topographic map look: contour lines over fbm noise terrain, with lines that stay one pixel thick at any resolution.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "d2240a1e34e28d1d46672ced26674c492734504e0207e17f1bd09d18112e7d2d",
+  "seconds": 20.868,
+  "generated": "2026-10-17T07:31:22.704Z"
+ },
+ "code": "// Topographic map: contour lines over fbm terrain.\n// Lines are anti-aliased in screen space via fwidth(), so they stay\n// uLineWidth pixels thick (default 1px) at any layer resolution.\nuniform float uScale;      // @param 2.5 0.5 10\nuniform float uLevels;     // @param 28 4 100\nuniform float uSpeed;      // @param 0.04 0 1\nuniform float uLineWidth;  // @param 1.0 0.5 3\nuniform float uIndexEvery; // @param 5 0 10\nuniform float uLineAlpha;  // @param 0.55 0 1\nuniform float uTintAmount; // @param 0.35 0 1\nuniform vec3  uPaper;      // @param #EFE6D2\nuniform vec3  uInk;        // @param #6B4A2B\nuniform vec3  uLowTint;    // @param #B9D3A8\nuniform vec3  uHighTint;   // @param #E2C49A\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float t = iTime * uSpeed;\n\n  // Terrain height: broad landforms + detail\n  float h = 0.65 * fbm(p * uScale + vec2(t, -t * 0.7))\n          + 0.35 * fbm(p * uScale * 0.45 + vec2(-3.7, 1.9) - t * 0.3);\n\n  // Contour field\n  float v  = h * uLevels;\n  float fw = max(fwidth(v), 1e-5);\n  float d  = abs(fract(v + 0.5) - 0.5) / fw;          // distance to nearest contour, in pixels\n  float line = clamp(0.5 * uLineWidth - d + 0.5, 0.0, 1.0); // pixel coverage\n\n  // Index contours (every Nth level) drawn darker, same 1px thickness\n  float alpha = uLineAlpha;\n  if (uIndexEvery >= 1.0) {\n    float idx = mod(floor(v + 0.5), floor(uIndexEvery));\n    if (idx < 0.5) alpha = 1.0;\n  }\n\n  // Hypsometric paper tint\n  float e = smoothstep(0.25, 0.75, h);\n  vec3 tint = mix(uLowTint, uHighTint, e);\n  vec3 col = mix(uPaper, uPaper * tint * 1.08, uTintAmount);\n\n  col = mix(col, uInk, line * alpha);\n  fragColor = vec4(col, 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a topographic map shader: contour lines over fbm terrain on paper-colored ground, shaded from green lowlands to tan highlands. I haven't compiled or rendered it, because no live Powermove tools were attached to this run. The lines are measured in screen pixels, so they stay `uLineWidth` pixels thick (default 1) at any resolution, and every `uIndexEvery`-th line is drawn darker at the same thickness. Other controls set the scale, number of levels, drift speed, line opacity, tint strength, and paper, ink and tint colors."
+}

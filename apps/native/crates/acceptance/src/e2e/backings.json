@@ -1,0 +1,302 @@
+{
+  "W001": {
+    "missing": "Native startup/Open event queue, last-focused-window restoration and hidden launch driver; assert exact restored project IDs and retained Recents.",
+    "evidence": "docs/native/w1-workflows.md:64"
+  },
+  "W002": {
+    "missing": "Native tab/window focus, drag reorder/detach/attach and in-memory document activation driver; kernel library operations do not exercise window routing.",
+    "evidence": "docs/native/w1-workflows.md:92"
+  },
+  "W003": {
+    "missing": "Native document/window/Quit close coordinator with Cancel, Save chooser cancellation, final recovery flush and archive-preserving DiscardClose integration.",
+    "evidence": "docs/native/w1-workflows.md:125"
+  },
+  "W004": {
+    "missing": "Native runtime-crash injection and reload/close coordinator with journal recovery and surviving MCP connections; headless journal reads alone do not prove this.",
+    "evidence": "docs/native/w1-workflows.md:148"
+  },
+  "W006": {
+    "missing": "Native Projects/tab/context-menu controls for create/open/rename/duplicate/trash and picker cancellation; headless library IDs are independently testable.",
+    "evidence": "docs/native/w1-workflows.md:184"
+  },
+  "W007": {
+    "missing": "Native Open/Save/Save As chooser and file-association/recovery coordination with portable media closure, cancelled/failed writes and external-change detection.",
+    "evidence": "docs/native/w1-workflows.md:207"
+  },
+  "W008": {
+    "missing": "Native asynchronous load coordinator with cancellable tab intents, joined opens, paint/input progress and bounded document ownership; a synchronous open is not this gate.",
+    "evidence": "docs/native/w1-workflows.md:249"
+  },
+  "W009": {
+    "missing": "Native New/Project Settings and delivery-default controls bound to exact kernel composition fields; retain fractional authored rates.",
+    "evidence": "docs/native/w1-workflows.md:270"
+  },
+  "W010": {
+    "missing": "Native key dispatch connected to focused GPUI and remote-DOM surfaces, text ownership, repeat and decline; isolated resolver probes do not deliver physical input.",
+    "evidence": "docs/native/w1-workflows.md:292"
+  },
+  "W011": {
+    "missing": "AppKit/context-menu routing to native command IDs with correct pointer location, focus and edit/Undo state.",
+    "evidence": "docs/native/w1-workflows.md:321"
+  },
+  "W012": {
+    "missing": "Native Settings sections/search, live extension details, preference controls and persistence across a real host relaunch.",
+    "evidence": "docs/native/w1-workflows.md:411"
+  },
+  "W013": {
+    "missing": "Native onboarding/About coordinator, setup handoffs and reduced-motion/input interruption; no replacement copy or layout may be invented.",
+    "evidence": "docs/native/w1-workflows.md:441"
+  },
+  "W014": {
+    "missing": "Native workspace/panel arrange/resize/hide/collapse controller with stable hosts and project-specific saved geometry across relaunch.",
+    "evidence": "docs/native/w1-workflows.md:459"
+  },
+  "W015": {
+    "missing": "AppKit panel-popout lifecycle, allowed window names, retained panel state and return-to-dock integration.",
+    "evidence": "docs/native/w1-workflows.md:485"
+  },
+  "W016": {
+    "missing": "Native Library panel-preview host with bounded queues, fit, cancellation and retained live editor identity through transitions.",
+    "evidence": "docs/native/w1-workflows.md:503"
+  },
+  "W017": {
+    "missing": "Native command palette/modal/menu/toast semantic driver, focus restoration, asynchronous failure/retry and dismissal.",
+    "evidence": "docs/native/w1-workflows.md:523"
+  },
+  "W018": {
+    "missing": "Native media list selection/marquee/folder/drop/confirmation controller bound to project identity; metadata edits alone do not exercise stale dialogs or pointer selection.",
+    "evidence": "docs/native/w1-workflows.md:558"
+  },
+  "W019": {
+    "missing": "Durable native import coordinator and MCP import_media/import_media_to_timeline, decoder/conversion worker, progress/cancel and project/revision fencing.",
+    "evidence": "docs/native/w1-workflows.md:587"
+  },
+  "W020": {
+    "missing": "Native image-sequence discovery/gap/replacement flow with exact source fps, durable frame bytes, decoder and portable-save closure.",
+    "evidence": "docs/native/w1-workflows.md:626"
+  },
+  "W021": {
+    "missing": "Native source-preview surface and independent decoder/transport instance, open/double-click routing and source-only scrubbing without timeline mutation.",
+    "evidence": "docs/native/w1-workflows.md:647"
+  },
+  "W022": {
+    "missing": "Native relink/replace_media coordinator with sampled source fingerprint checks, original/proxy provenance, durable version publication and runtime error recovery.",
+    "evidence": "docs/native/w1-workflows.md:668"
+  },
+  "W023": {
+    "missing": "Native deferred cloud-media download coordinator, fresh-byte storage, cancellation/failure cleanup and automatic recovery; no remote service is simulated as a real download.",
+    "evidence": "docs/native/w1-workflows.md:694"
+  },
+  "W024": {
+    "missing": "Native subscription/API/local-provider connection and request/stream adapter, account persistence and broken-stream recovery under the real host boundary.",
+    "evidence": "docs/native/w1-workflows.md:710"
+  },
+  "W025": {
+    "missing": "Native agent conversation surface and dock/popover/float/pin/resize controller with one retained conversation and saved window placement.",
+    "evidence": "docs/native/w1-workflows.md:754"
+  },
+  "W026": {
+    "missing": "Native agent composer editing, caret/selection/newlines/slash tokens, attachment bytes and submit/focus ownership in each declared surface variant.",
+    "evidence": "docs/native/w1-workflows.md:782"
+  },
+  "W027": {
+    "missing": "Native agent run/thread persistence and orchestration lifecycle, launch deduplication, steering, stop and project/thread isolation across host relaunch.",
+    "evidence": "docs/native/w1-workflows.md:806"
+  },
+  "W028": {
+    "missing": "Native streaming reply/reasoning/result renderer and durable archive with full text, stable nodes, late fragments, failures, narrow layouts and follow-ups.",
+    "evidence": "docs/native/w1-workflows.md:842"
+  },
+  "W029": {
+    "missing": "Native publish_visual_reply backing, durable thread attachments and WebKit interaction/replay host with CSP/navigation/privilege confinement.",
+    "evidence": "docs/native/w1-workflows.md:861"
+  },
+  "W030": {
+    "missing": "Native agent-run coordinator around MCP inspection/edit/review/finish, exact baseline refresh, interleaved Undo and final-frame verification; kernel/MCP checks cover only the explicitly linked assertions.",
+    "evidence": "docs/native/w1-workflows.md:884"
+  },
+  "W031": {
+    "missing": "Native media registry/original resolver plus probe/sample/contact-sheet/waveform/transcription workers and media import/replacement run coordination; metadata is not decoded media.",
+    "evidence": "docs/native/w1-workflows.md:913"
+  },
+  "W032": {
+    "missing": "Real SurfaceHook panel tree/controls/capture and workspace-transfer host, stable element IDs, input delivery and retry; a recording trait double is not a rendered panel.",
+    "evidence": "docs/native/w1-workflows.md:942"
+  },
+  "W033": {
+    "missing": "Native packaged MCP entrypoint/session reconnection and real host tool adapters across reload/crash; in-process MCP contract tests do not certify installed-app transport.",
+    "evidence": "docs/native/w1-workflows.md:969"
+  },
+  "W034": {
+    "missing": "Existing browser-host/CLI workflow integration is outside the native editor cutover; preserve its contract and consumers until separately replaced (N4/prune).",
+    "evidence": "docs/native/w1-workflows.md:1003"
+  },
+  "W036": {
+    "missing": "Native remote Store catalog/icon/install/update/publish coordinator with verified artifacts, approval/cancellation and failed-image fallback.",
+    "evidence": "docs/native/w1-workflows.md:1040"
+  },
+  "W037": {
+    "missing": "Production extension discovery/compiler/activation/fork/rebase/reload coordinator connected to V8 trusted-service closure and WebKit panels; retain project/panel identity on replacement and failure.",
+    "evidence": "docs/native/w1-workflows.md:1070"
+  },
+  "W038": {
+    "missing": "Per-Store-extension V8 process and WebKit view integration with permissions, network/clipboard/navigation boundaries, watchdog kill and independent surviving extensions.",
+    "evidence": "docs/native/w1-workflows.md:1113"
+  },
+  "W040": {
+    "missing": "Unchanged v1\u20133 activation/PM/live services and contribution lifecycle wired through the V8 realm and remote DOM, including synchronous callbacks and native recorder-canvas raster.",
+    "evidence": "docs/native/w1-workflows.md:1153"
+  },
+  "W041": {
+    "missing": "Native speech-model download/selection/removal coordinator and real utility-process inference with timed words; model-unavailable prompts must be exercised by the host.",
+    "evidence": "docs/native/w1-workflows.md:1217"
+  },
+  "W042": {
+    "missing": "Native theme ownership/unapply/reload/system-appearance integration across all declared workspaces and host restarts; existing Opus tokens/specs remain authoritative.",
+    "evidence": "docs/native/w1-workflows.md:1245"
+  },
+  "W043": {
+    "missing": "AppKit text services, clipboard and native selection/editing menus plus remote-DOM/GPUI focus, IME, accessibility and reduced-motion integration.",
+    "evidence": "docs/native/w1-workflows.md:1275"
+  },
+  "W044": {
+    "missing": "Native notification/warning/haptic delivery and lifecycle with real foreground/background cadence and dismissal.",
+    "evidence": "docs/native/w1-workflows.md:1294"
+  },
+  "W045": {
+    "missing": "Native viewer/timeline wheel/trackpad/pinch/pan/fit controller, cursor-anchor math and retained picture placement verified against real presentation.",
+    "evidence": "docs/native/w1-workflows.md:1311"
+  },
+  "W046": {
+    "missing": "Native viewer hit-test/hover/group/multi-selection/lock controller and pointer/key gestures with exact selection, transform and Undo publication.",
+    "evidence": "docs/native/w1-workflows.md:1356"
+  },
+  "W047": {
+    "missing": "Native viewer transform/resize/rotate/anchor/alignment gizmo controller, local/common pivot semantics, cursor and fixed-screen-size indicators with pixel verification.",
+    "evidence": "docs/native/w1-workflows.md:1394"
+  },
+  "W048": {
+    "missing": "Native Pen/vector/mask tool and pointer editing controller with lock protection, geometry/Undo and actual raster/matte pixels.",
+    "evidence": "docs/native/w1-workflows.md:1426"
+  },
+  "W049": {
+    "missing": "Native canvas point/paragraph text editing controller, caret/word selection/clipboard/focus and live glyph layout/raster under parent transforms.",
+    "evidence": "docs/native/w1-workflows.md:1462"
+  },
+  "W050": {
+    "missing": "Native 2.5D/3D scene import/gizmo/orbit controller and model/material/texture/lighting render backing; portable asset closure and exact camera/Undo must be verified.",
+    "evidence": "docs/native/w1-workflows.md:1506"
+  },
+  "W051": {
+    "missing": "Native engine transport/decoder scheduler connected to host time/quality/play controls and independent clip instances; decoded cuts/playback/audio and display samples are required.",
+    "evidence": "docs/native/w1-workflows.md:1550"
+  },
+  "W052": {
+    "missing": "Native work/source-range controls and key routing bound to preview/export ranges; kernel fields alone do not drive the host.",
+    "evidence": "docs/native/w1-workflows.md:1579"
+  },
+  "W053": {
+    "missing": "Native timeline ruler marker menus/pins and keyboard Undo/Redo in layers/tracks modes, stable marker IDs and saved-host reopen.",
+    "evidence": "docs/native/w1-workflows.md:1601"
+  },
+  "W054": {
+    "missing": "Native directional snap/guide controller for playhead, clip edges and keys with crossing/latch/release and modifier bypass input.",
+    "evidence": "docs/native/w1-workflows.md:1621"
+  },
+  "W055": {
+    "missing": "Native timeline layers/tracks rows, disclosure, track assignment/reorder and viewport controller with stable hosts and live property readouts.",
+    "evidence": "docs/native/w1-workflows.md:1650"
+  },
+  "W056": {
+    "missing": "Native clip pointer/keyboard move/split/trim controller with live preview, stack order, source-time decoder publication, cancellation and one-step Undo.",
+    "evidence": "docs/native/w1-workflows.md:1723"
+  },
+  "W057": {
+    "missing": "Native source-slip command integration plus decoded source-in/out frame oracle; typed timing alone does not verify decoded continuity.",
+    "evidence": "docs/native/w1-workflows.md:1750"
+  },
+  "W058": {
+    "missing": "Native Speed property control/drag/cancel bound to source-span-preserving retime, timeline strip geometry and Undo/Redo; MCP retiming is only linked supporting evidence.",
+    "evidence": "docs/native/w1-workflows.md:1764"
+  },
+  "W059": {
+    "missing": "Native embedded audio playback/separation/mute controller and real device output with source-rate mapping; kernel audio metadata is insufficient.",
+    "evidence": "docs/native/w1-workflows.md:1779"
+  },
+  "W060": {
+    "missing": "Native timeline/inspector stopwatch/diamond/property-row/keyframe pointer controller and selected-key navigation with exact key IDs, values, times and Undo.",
+    "evidence": "docs/native/w1-workflows.md:1798"
+  },
+  "W061": {
+    "missing": "Native Graph Editor picking/marquee/value-speed/Bezier-handle controller with independent selected curves, cancellation and pixel/readout verification.",
+    "evidence": "docs/native/w1-workflows.md:1854"
+  },
+  "W062": {
+    "missing": "Native group/parent/precompose/ungroup commands and pointer/menu integration checked by rendered pixels at all declared times, including animated boundaries and saved media.",
+    "evidence": "docs/native/w1-workflows.md:1893"
+  },
+  "W063": {
+    "missing": "Native Properties/multi-edit/composition control bindings with type-specific fields, exact authored values, lock guards and one-step Undo.",
+    "evidence": "docs/native/w1-workflows.md:1940"
+  },
+  "W064": {
+    "missing": "Native effect/matte browser/registration/reorder/copy-paste control integration and real shader/raster outputs through masks, blend, alpha and timing.",
+    "evidence": "docs/native/w1-workflows.md:2011"
+  },
+  "W065": {
+    "missing": "Native easing/vector preset library panel, extended-preset import and graph editing integration with durable user preset data.",
+    "evidence": "docs/native/w1-workflows.md:2031"
+  },
+  "W066": {
+    "missing": "Native typography/variable-axis/text-animator controls plus actual installed-font registration/cache and glyph raster; font swaps and memory must be measured.",
+    "evidence": "docs/native/w1-workflows.md:2054"
+  },
+  "W067": {
+    "missing": "Native caption import/cue editing/style/preset/Generate Captions host and timed-model service with burn-in/export pixels; linked pure SRT/VTT exports do not prove the entire workflow.",
+    "evidence": "docs/native/w1-workflows.md:2086"
+  },
+  "W068": {
+    "missing": "Native Mixer panel/fader/mute/solo/routing plus real nested audio output and moving measured meters; no simulated level is an audible pass.",
+    "evidence": "docs/native/w1-workflows.md:2177"
+  },
+  "W069": {
+    "missing": "Native export destination/progress/cancel controller and originals-only engine ExportChild with real codec/file verification, backpressure, failures and resource drain.",
+    "evidence": "docs/native/w1-workflows.md:2198"
+  },
+  "W070": {
+    "missing": "Native durable render-queue job/preset/snapshot/retry controller and real export child; preserve fractional rate/alpha and active document.",
+    "evidence": "docs/native/w1-workflows.md:2232"
+  },
+  "W071": {
+    "missing": "Native source-time decoder, output-rate encoder and timecode/cadence verification at authored fractional rates; exact kernel fps persistence is supporting evidence only.",
+    "evidence": "docs/native/w1-workflows.md:2251"
+  },
+  "W072": {
+    "missing": "Standalone web-animation export was removed by the owner (2026-10-29, p0-decisions.md); retain these frozen declarations for traceability, never report them as native passes or remove unrelated portable-project export.",
+    "evidence": "docs/native/w1-workflows.md:2262"
+  },
+  "W073": {
+    "missing": "Native numeric/choice/toggle/point control semantics for typing, pointer scrub, field key ownership, cancellation and one-step Undo.",
+    "evidence": "docs/native/w1-workflows.md:2272"
+  },
+  "W074": {
+    "missing": "Native solid/gradient color picker/eyedropper control and overlay/focus/alpha binding with actual color/raster verification.",
+    "evidence": "docs/native/w1-workflows.md:2342"
+  },
+  "W075": {
+    "missing": "Native cross-surface history/clipboard/live-edit routing with text-versus-layer ownership, pending redo and persisted history; linked actor/MCP checks do not deliver host events.",
+    "evidence": "docs/native/w1-workflows.md:2392"
+  },
+  "W076": {
+    "missing": "Real pm-engine-service/Metal render/readback backing and independent decoded pixel/geometry/color oracle, GPU loss/recovery and cache generation/resource assertions; EngineHook doubles provide no pixels.",
+    "evidence": "docs/native/w1-workflows.md:2422"
+  },
+  "W077": {
+    "missing": "Paired native/Electron performance runs on the same supported Mac with real input/presentation, decoder/GPU/resource counters and the declared project; Linux wall clocks cannot certify this budget.",
+    "evidence": "docs/native/w1-workflows.md:2433"
+  },
+  "W078": {
+    "missing": "Native shader authoring/compiler/registration/uniform controller and Metal/approved fallback output, errors and reload lifecycle.",
+    "evidence": "docs/native/w1-workflows.md:2444"
+  }
+}

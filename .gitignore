@@ -19,6 +19,7 @@ packages/macos-haptics/build/
 
 # generated packages
 packages/player/dist/
+packages/player/.v1-src/
 
 # local environment
 .env
@@ -34,8 +35,23 @@ DEPLOYMENT-*.md
 apps/desktop/dist-local-*/
 apps/desktop/test-results/
 
+# Powermove's FFmpeg build staged for packaging (engine/third_party/ffmpeg/package.sh)
+apps/desktop/vendor/ffmpeg/
+
 # serve host build (npm package payload)
 packages/cli/dist/
 
 # also match symlinks named node_modules (a worktree once committed one)
 node_modules
+
+# native engine addon (bun run build:engine)
+apps/desktop/native/
+
+# pm-wasm build output (node engine/crates/pm-wasm/scripts/build.mjs)
+apps/desktop/src/renderer/public/engine/
+
+# Locally assembled Node CLI native runtimes (copied into dist for packaging)
+packages/cli/prebuilds/
+__pycache__/
+*.pyc
+engine/target/pm-wasm/

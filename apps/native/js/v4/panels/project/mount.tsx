@@ -1,0 +1,70 @@
+import {
+  FIRST_PAGE,
+  ProjectPanel,
+  ProjectService,
+  type ViewMode,
+} from "./index";
+import { projectMenuOptions } from "./presentation";
+import type { BuiltinEnv, Mounted } from "../../src/builtin";
+
+/** Poster keys are the host's own picture keys (`thumb/…`): the host draws
+ * them, so they pass through unchanged. */
+const hostPosters: ReadonlyMap<string, string> = {
+  get: (key: string) => key,
+} as unknown as ReadonlyMap<string, string>;
+
+export async function mount(env: BuiltinEnv): Promise<Mounted> {
+  const { native, platform, host, fields, report, root } = env;
+  const service = new ProjectService(host, {
+    command: "panel.project",
+    subscription: "project",
+    projectStamp: (p: any) => p.stamp ?? null,
+  });
+  await service.page(0, FIRST_PAGE);
+  // The list/grid choice is the person's, kept per project by the host.
+  const loadViewMode = (): Promise<ViewMode> =>
+    platform("project.view").then(
+      (mode) => (mode === "list" ? "list" : "grid"),
+      () => "grid",
+    );
+  // The panel draws at once as a grid (v1.2.0's view); the project's own
+  // choice follows when the host answers (never waited for: a host that
+  // answers late, or not at all, must not hold the panel's first frame).
+  const viewMode: ViewMode = "grid";
+  await service.start();
+  const r = root();
+  await r.render(
+    <ProjectPanel
+      service={service}
+      layout={native("project.layout", { view: viewMode })}
+      viewMode={viewMode}
+      layoutFor={(view, width) => native("project.layout", { view, width })}
+      loadViewMode={loadViewMode}
+      onViewMode={(view) => {
+        void platform("project.view", { view }).catch(report);
+      }}
+      posters={hostPosters}
+      native={{
+        ...fields(["searchBinding", "renameBinding"]),
+        menu(entries, choose, context) {
+          const options = projectMenuOptions(entries);
+          void platform("project.menu", { entries: options, context })
+            .then((index) => {
+              const entry = index === null ? null : options[index];
+              if (entry) choose(entry);
+            })
+            .catch(report);
+        },
+      }}
+    />,
+  );
+  const mounted: Mounted = {
+    root: r,
+    async dispose() {
+      await service.dispose();
+      await r.dispose();
+    },
+  };
+  mounted.settle = () => service.idle();
+  return mounted;
+}

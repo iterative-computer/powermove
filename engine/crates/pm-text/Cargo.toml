@@ -1,0 +1,86 @@
+[package]
+name = "pm-text"
+description = "Font registry, subsetting, shaping, layout, caret geometry (section 12)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["system", "level2"]
+# The native font registry (CoreText on macOS). Off for `pm-wasm`, which
+# answers registry queries from answers and subsets main serves.
+system = []
+# Level 2 layout on Parley.
+level2 = ["dep:parley", "dep:parlance"]
+# The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
+corpus-tools = ["system", "level2", "dep:flate2"]
+# Where color glyphs (COLR paint graphs, bitmap strikes) draw, without the
+# painter: pm-eval's text ink bounds, also in pm-wasm.
+ink = ["dep:kurbo", "dep:skrifa", "dep:png"]
+# Unhinted outline coverage, float paint and color glyphs. Off for layout-only users.
+render = ["ink", "dep:vello_cpu", "dep:libm", "dep:pm-color", "dep:i_overlay"]
+# The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
+coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGDataProvider"]
+# Chromium-compatible glyph masks for the native macOS legacy raster path.
+canvas2d = ["render", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGDataProvider"]
+
+[dependencies]
+i_overlay = { version = "9.1", optional = true }
+harfrust = "0.14"
+read-fonts = "0.45"
+icu_segmenter = "2"
+icu_properties = "2"
+unicode-bidi = "0.3.18"
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
+thiserror.workspace = true
+parley = { version = "0.12", default-features = false, features = ["std"], optional = true }
+parlance = { version = "0.1.1", default-features = false, optional = true }
+flate2 = { version = "1.1", optional = true }
+kurbo = { version = "0.13.1", optional = true }
+skrifa = { version = "0.44", optional = true }
+png = { version = "0.18", optional = true }
+vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"], optional = true }
+libm = { version = "0.2", optional = true }
+pm-color = { path = "../pm-color", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+memmap2 = "0.9"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString", "NSValue", "NSDictionary", "NSObjCRuntime"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSFont", "NSFontDescriptor", "NSFontManager", "objc2-core-foundation"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-text = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGFont", "CGPath"] }
+
+[dev-dependencies]
+flate2 = "1.1"
+
+[[bin]]
+name = "pm-text-corpus"
+path = "src/bin/pm-text-corpus.rs"
+required-features = ["corpus-tools"]
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "corpus"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "registry"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "blink_sizes"
+harness = false
+
+[[example]]
+# The level 1 layout over subsets as a plain wasm32-unknown-unknown module, for
+# the native vs WASM identity check (scripts/wasm-identity.mjs).
+name = "layout_wasm"
+crate-type = ["cdylib"]

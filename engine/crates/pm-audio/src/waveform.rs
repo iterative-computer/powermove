@@ -1,0 +1,320 @@
+//! Waveform data from a streaming decode: the legacy timeline envelope and
+//! a min/max pyramid for zoomable drawing.
+//!
+//! * [`legacy_peaks`] is `peakEnvelope` of `legacy/core/audio.ts`: 100
+//!   buckets per second of source, each the largest magnitude over every
+//!   channel, bucket `b` spanning frames `floor(b × frames / length)` to the
+//!   next bucket's start. `api.assets.get(id).peaks` keeps this shape.
+//! * [`Waveform`] keeps the minimum and maximum per channel per bucket and
+//!   reduces by 4 per level, so a view at any zoom reads one level.
+//!
+//! Both read the file once, in chunks; nothing holds the decoded file.
+
+use std::path::Path;
+
+use pm_media::audio::AudioDecoder;
+use serde::Serialize;
+
+use crate::error::{AudioError, Result};
+
+/// Legacy envelope rate.
+pub const PEAKS_PER_SECOND: f64 = 100.0;
+
+/// `peakEnvelope(buffer)` for the best audio stream of a file.
+pub fn legacy_peaks(path: &Path) -> Result<Vec<f32>> {
+    let mut d = AudioDecoder::open(path, None)?;
+    let info = d.info().clone();
+    let frames = match info.length {
+        Some(n) if n > 0 => n,
+        _ => count(&mut d)?,
+    }
+    .max(1);
+    d.seek(0)?;
+    let duration = (frames as f64 / info.sample_rate as f64).max(0.001);
+    let length = (frames)
+        .min((duration * PEAKS_PER_SECOND).ceil() as u64)
+        .max(1);
+    let mut peaks = vec![0f32; length as usize];
+    let bounds = |b: u64| -> u64 { b * frames / length };
+    let mut bucket = 0u64;
+    let mut next = if length > 1 {
+        (bounds(1)).max(1)
+    } else {
+        frames
+    };
+    let mut at = 0u64;
+    let mut buf = vec![Vec::new(); info.channels()];
+    loop {
+        for c in &mut buf {
+            c.clear();
+        }
+        let n = d.read(&mut buf, 1 << 15)?;
+        if n == 0 {
+            break;
+        }
+        for i in 0..n {
+            if at >= frames {
+                break;
+            }
+            while at >= next && bucket + 1 < length {
+                bucket += 1;
+                next = if bucket == length - 1 {
+                    frames
+                } else {
+                    bounds(bucket + 1).max(bounds(bucket) + 1)
+                };
+            }
+            let mut m = 0f32;
+            for c in &buf {
+                m = m.max(c[i].abs());
+            }
+            let p = &mut peaks[bucket as usize];
+            *p = p.max(m);
+            at += 1;
+        }
+    }
+    Ok(peaks)
+}
+
+/// The envelope of what an asset's clip plays, on the clip's own timeline:
+/// per bucket of clip time (`buckets_per_second`, rounded to whole samples
+/// of the first stream), the largest magnitude over every channel of every
+/// stream in `streams`, each read from the source the mix plays, placed
+/// where the asset's `timing` places it. Returns the envelope and its exact
+/// buckets per second.
+pub fn clip_envelope(
+    path: &Path,
+    streams: &[Option<usize>],
+    timing: pm_media::clip::ClipTiming,
+    buckets_per_second: f64,
+) -> Result<(Vec<f32>, f64)> {
+    let levels = clip_levels(path, streams, timing, buckets_per_second)?;
+    let envelope = levels.peak.iter().map(|[a, b]| a.max(*b)).collect();
+    Ok((envelope, levels.rate))
+}
+
+/// What an asset's clip plays, per bucket of clip time, for drawing: the
+/// peak and the RMS of two channel slots, the first channel and every other
+/// channel together (a mono clip has the same sound in both), over every
+/// stream heard. [`clip_envelope`] is the larger peak of the two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClipLevels {
+    /// Exact buckets per second.
+    pub rate: f64,
+    /// Channels the clip has (at most 2 are kept apart).
+    pub channels: usize,
+    pub peak: Vec<[f32; 2]>,
+    pub rms: Vec<[f32; 2]>,
+}
+
+/// [`ClipLevels`] of `streams` of `path` as the asset's `timing` places them,
+/// at about `buckets_per_second` (rounded to whole samples of the first
+/// stream).
+pub fn clip_levels(
+    path: &Path,
+    streams: &[Option<usize>],
+    timing: pm_media::clip::ClipTiming,
+    buckets_per_second: f64,
+) -> Result<ClipLevels> {
+    const CHUNK: usize = 1 << 15;
+    let cache = crate::source::SourceCache::new(8 << 20, 0);
+    let result = (|| {
+        let sources = streams
+            .iter()
+            .map(|&stream| cache.open_as(path, stream, timing))
+            .collect::<Result<Vec<_>>>()?;
+        let first = sources
+            .first()
+            .ok_or_else(|| AudioError::Media(pm_media::MediaError::invalid("no audio stream")))?;
+        let per = (f64::from(first.sample_rate()) / buckets_per_second)
+            .round()
+            .max(1.0);
+        let exact = f64::from(first.sample_rate()) / per;
+        let mut peak: Vec<[f32; 2]> = vec![];
+        let mut squares: Vec<[f64; 2]> = vec![];
+        let mut counts: Vec<[u32; 2]> = vec![];
+        let mut channels = 0;
+        for (&stream, source) in streams.iter().zip(&sources) {
+            let rate = f64::from(source.sample_rate());
+            channels = channels.max(source.channels());
+            let end = match source.length() {
+                Some(n) => n as i64,
+                None => {
+                    let mut d = AudioDecoder::open(path, stream)?;
+                    (count(&mut d)? as i64 + source.lead()).max(0)
+                }
+            };
+            let buckets = (end as f64 * exact / rate).ceil() as usize;
+            if peak.len() < buckets {
+                peak.resize(buckets, [0.0; 2]);
+                squares.resize(buckets, [0.0; 2]);
+                counts.resize(buckets, [0; 2]);
+            }
+            let mut scratch = vec![vec![0f32; CHUNK]; source.channels()];
+            let mono = source.channels() == 1;
+            let mut at = 0i64;
+            while at < end {
+                let len = CHUNK.min((end - at) as usize);
+                let mut out: Vec<&mut [f32]> = scratch.iter_mut().map(|c| &mut c[..]).collect();
+                cache.read(source, at, len, &mut out, true)?;
+                for i in 0..len {
+                    let bucket =
+                        (((at + i as i64) as f64 * exact / rate) as usize).min(peak.len() - 1);
+                    for (c, samples) in scratch.iter().enumerate() {
+                        let v = samples[i];
+                        let slots: &[usize] = if mono { &[0, 1] } else if c == 0 { &[0] } else { &[1] };
+                        for &slot in slots {
+                            let p = &mut peak[bucket][slot];
+                            *p = p.max(v.abs().min(1.0));
+                            squares[bucket][slot] += f64::from(v) * f64::from(v);
+                            counts[bucket][slot] += 1;
+                        }
+                    }
+                }
+                at += len as i64;
+            }
+        }
+        let rms = squares
+            .iter()
+            .zip(&counts)
+            .map(|(s, n)| {
+                let r = |k: usize| {
+                    if n[k] == 0 { 0.0 } else { ((s[k] / f64::from(n[k])).sqrt() as f32).min(1.0) }
+                };
+                [r(0), r(1)]
+            })
+            .collect();
+        Ok(ClipLevels {
+            rate: exact,
+            channels,
+            peak,
+            rms,
+        })
+    })();
+    cache.shutdown();
+    result
+}
+
+fn count(d: &mut AudioDecoder) -> Result<u64> {
+    let mut buf = vec![Vec::new(); d.info().channels()];
+    let mut total = 0u64;
+    loop {
+        for c in &mut buf {
+            c.clear();
+        }
+        let n = d.read(&mut buf, 1 << 16)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        total += n as u64;
+    }
+}
+
+/// Minimum and maximum per channel per bucket, at several resolutions.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Waveform {
+    pub sample_rate: u32,
+    pub channels: usize,
+    /// Program samples decoded.
+    pub frames: u64,
+    pub levels: Vec<Level>,
+}
+
+/// One resolution: bucket `b` of channel `c` is `[min, max]` at
+/// `data[b × channels + c]`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Level {
+    pub samples_per_bucket: u64,
+    pub data: Vec<[f32; 2]>,
+}
+
+impl Waveform {
+    /// Decodes `path` and builds levels from `samples_per_bucket` (the
+    /// finest) up, each 4 times coarser, until a level has at most 64
+    /// buckets.
+    pub fn compute(path: &Path, samples_per_bucket: u64) -> Result<Waveform> {
+        if samples_per_bucket == 0 {
+            return Err(AudioError::invalid("samples per bucket must be positive"));
+        }
+        let mut d = AudioDecoder::open(path, None)?;
+        let channels = d.info().channels();
+        let sample_rate = d.info().sample_rate;
+        let mut data = Vec::new();
+        let mut cur = vec![[f32::INFINITY, f32::NEG_INFINITY]; channels];
+        let mut filled = 0u64;
+        let mut frames = 0u64;
+        let mut buf = vec![Vec::new(); channels];
+        loop {
+            for c in &mut buf {
+                c.clear();
+            }
+            let n = d.read(&mut buf, 1 << 15)?;
+            if n == 0 {
+                break;
+            }
+            for i in 0..n {
+                for (e, c) in cur.iter_mut().zip(&buf) {
+                    e[0] = e[0].min(c[i]);
+                    e[1] = e[1].max(c[i]);
+                }
+                filled += 1;
+                if filled == samples_per_bucket {
+                    data.extend_from_slice(&cur);
+                    cur.iter_mut()
+                        .for_each(|e| *e = [f32::INFINITY, f32::NEG_INFINITY]);
+                    filled = 0;
+                }
+            }
+            frames += n as u64;
+        }
+        if filled > 0 {
+            data.extend_from_slice(&cur);
+        }
+        let mut levels = vec![Level {
+            samples_per_bucket,
+            data,
+        }];
+        while levels.last().unwrap().data.len() / channels.max(1) > 64 {
+            let next = levels.last().unwrap().reduce(channels, 4);
+            levels.push(next);
+        }
+        Ok(Waveform {
+            sample_rate,
+            channels,
+            frames,
+            levels,
+        })
+    }
+
+    /// The finest level whose buckets span at least `samples` samples.
+    pub fn level_for(&self, samples: u64) -> &Level {
+        self.levels
+            .iter()
+            .find(|l| l.samples_per_bucket >= samples)
+            .unwrap_or_else(|| self.levels.last().unwrap())
+    }
+}
+
+impl Level {
+    fn reduce(&self, channels: usize, factor: usize) -> Level {
+        let buckets = self.data.len() / channels.max(1);
+        let mut data = Vec::with_capacity(buckets.div_ceil(factor) * channels);
+        for start in (0..buckets).step_by(factor) {
+            for c in 0..channels {
+                let mut e = [f32::INFINITY, f32::NEG_INFINITY];
+                for b in start..(start + factor).min(buckets) {
+                    let v = self.data[b * channels + c];
+                    e[0] = e[0].min(v[0]);
+                    e[1] = e[1].max(v[1]);
+                }
+                data.push(e);
+            }
+        }
+        Level {
+            samples_per_bucket: self.samples_per_bucket * factor as u64,
+            data,
+        }
+    }
+}

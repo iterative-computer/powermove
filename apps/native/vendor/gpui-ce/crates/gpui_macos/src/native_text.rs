@@ -1,0 +1,1903 @@
+//! Powermove P-TEXT. Real AppKit editors; never translate marked text into GPUI input.
+//! Geometry is staged during GPUI paint and applied in the composition transaction.
+use objc2::{
+    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+    rc::Retained,
+    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
+};
+use objc2_app_kit::*;
+use objc2_foundation::{
+    NSArray, NSDictionary, NSNotFound, NSNotification, NSPoint, NSRange, NSRect, NSSize,
+    NSString, NSUndoManager,
+};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::{Rc, Weak},
+};
+#[path = "native_text_selection.rs"]
+mod selection;
+
+/// The tag of a field in which Escape cancels the edit; see
+/// `NativeTextSlot::set_escape_cancels`.
+pub const ESCAPE_CANCELS: isize = 0x504d_4543;
+const INPUT_TRAIT_NO: isize = 1;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextKind {
+    Primary,
+    Multiline,
+    DenseText,
+    DenseNumber,
+    /// A form's text field (Settings): AppKit's own bordered, rounded field,
+    /// shown at all times, as System Settings has it.
+    Form,
+    /// A form's number field: as `Form`, the value right-aligned in tabular
+    /// digits; it may carry a stepper (`NativeTextSlot::set_stepper`).
+    FormNumber,
+    /// On-canvas text: an invisible `NSTextView` owns typing, IME, dictation,
+    /// emoji and spelling while the host draws the text, caret and selection
+    /// from its own layout. Clicks pass through to the host; blurring reports
+    /// `Blurred` instead of committing, so the host decides.
+    Canvas,
+    /// A message composer: a multiline text view where Return submits and
+    /// Shift- or Option-Return starts a new line (IME, spelling, dictation
+    /// and emoji are AppKit's own).
+    Composer,
+}
+impl TextKind {
+    fn dense(self) -> bool {
+        matches!(self, Self::DenseText | Self::DenseNumber)
+    }
+    fn number(self) -> bool {
+        matches!(self, Self::DenseNumber | Self::FormNumber)
+    }
+    fn form(self) -> bool {
+        matches!(self, Self::Form | Self::FormNumber)
+    }
+}
+/// A form number field's stepper: its width beside the field, and the gap.
+const STEPPER: (f64, f64) = (13., 4.);
+#[derive(Clone, Debug, PartialEq)]
+pub enum TextEvent {
+    Changed(String),
+    Committed(String),
+    Cancelled,
+    /// Canvas only: the selected UTF-16 range changed.
+    Selection {
+        start: usize,
+        end: usize,
+    },
+    /// Canvas only: an editing chord the host handles (`commit`, `bold`,
+    /// `italic`, `larger`, `smaller`, `larger10`, `smaller10`, `alignLeft`,
+    /// `alignCenter`, `alignRight`, `up`, `down`, `shiftUp`, `shiftDown`).
+    /// A plain multiline field sends `tab` / `backtab`: focus moves on.
+    /// A composer sends `escape`.
+    Key(&'static str),
+    /// Canvas only: the editor lost first responder.
+    Blurred,
+    /// Return in a composer, with the text as typed.
+    Submitted(String),
+}
+enum Editor {
+    Field(Retained<NSTextField>),
+    Multiline(Retained<NSTextView>),
+}
+impl Editor {
+    fn view(&self) -> &NSView {
+        match self {
+            Self::Field(v) => v,
+            Self::Multiline(v) => v,
+        }
+    }
+    fn value(&self) -> String {
+        match self {
+            Self::Field(v) => v.stringValue().to_string(),
+            Self::Multiline(v) => v.string().to_string(),
+        }
+    }
+    fn set(&self, value: &str) {
+        let s = NSString::from_str(value);
+        match self {
+            Self::Field(v) => v.setStringValue(&s),
+            Self::Multiline(v) => v.setString(&s),
+        }
+    }
+}
+struct State {
+    kind: TextKind,
+    editor: Editor,
+    wrapper: Retained<NSView>,
+    scroll: Option<Retained<NSScrollView>>,
+    gpui: Retained<NSView>,
+    editing: Cell<bool>,
+    /// A multiline field that keeps Tab as a character (a code editor).
+    /// Otherwise Tab and Shift-Tab commit and move focus on, as in an
+    /// inspector (Option-Tab still types a tab).
+    tab_inserts: Cell<bool>,
+    host_navigation: Cell<bool>,
+    focus_pending: Cell<bool>,
+    selection_pending: Cell<Option<(usize, usize)>>,
+    /// A composer takes the keyboard only when the person asked for it: a
+    /// press on it, Tab to it, or the host beginning to edit it (an explicit
+    /// open). Never AppKit handing a window's keyboard to the first text
+    /// view it finds (Powermove: Space then typed instead of playing).
+    armed: Cell<bool>,
+    original: RefCell<String>,
+    last_font: RefCell<Option<(String, u64)>>,
+    /// A composer's own undo (PM-749): its typing undo names ranges of the
+    /// text typed, so a text the host sets (the field emptied after a send)
+    /// clears it. ⌘Z then never reaches text the field no longer holds.
+    undo: Option<Retained<NSUndoManager>>,
+    events: RefCell<Vec<TextEvent>>,
+    wake: RefCell<Option<Rc<dyn Fn()>>>,
+    paste: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+    /// What a paint staged, with that paint's number: placed by the present
+    /// that follows that paint, and by no later one.
+    /// In a scrolling region's container when `region` is set (P-SLOT-REGION).
+    geometry: Cell<Option<(u64, crate::slot_region::Placement)>>,
+    scroll_fade: crate::scroll_fade::ScrollFade,
+    staged: Cell<Option<crate::slot_region::Placement>>,
+    build_alpha: Cell<Option<(u64, f64)>>,
+    kept_alpha: Cell<f64>,
+    /// Canvas: the system insertion point, in its own pointer-transparent host.
+    caret: Option<(Retained<NSView>, Retained<NSTextInsertionIndicator>)>,
+    /// Canvas: the caret rectangle and clip in GPUI points, `None` hides it.
+    caret_staged: Cell<Option<(NSRect, NSRect)>>,
+    /// Canvas: where input method candidates open (GPUI points): the host's
+    /// caret on the visible text, never this view's own unwrapped layout.
+    input_rect: Cell<Option<NSRect>>,
+    /// A form number field's stepper, at the field's trailing edge.
+    stepper: RefCell<Option<Retained<NSStepper>>>,
+    /// Canvas: the context menu to show on the next run-loop turn, with the
+    /// click that asked for it.
+    menu: RefCell<Option<(Retained<NSMenu>, Retained<NSEvent>)>>,
+}
+impl State {
+    fn emit(&self, event: TextEvent) {
+        self.events.borrow_mut().push(event);
+        let wake = self.wake.borrow().clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+    fn finish(&self, cancel: bool) {
+        if !self.editing.replace(false) {
+            return;
+        }
+        let value = self.editor.value();
+        // Validate only the committed value. Intermediate IME/number strings stay untouched.
+        if cancel || (self.kind.number() && !valid_number(&value)) {
+            self.editor.set(&self.original.borrow());
+            self.forget_typing();
+            self.emit(TextEvent::Cancelled);
+        } else {
+            *self.original.borrow_mut() = value.clone();
+            self.emit(TextEvent::Committed(value));
+        }
+        if self.kind.dense() {
+            self.wrapper.setHidden(true);
+            crate::composition_accessibility::changed(Retained::as_ptr(&self.gpui) as usize);
+        }
+    }
+}
+impl State {
+    /// A text set from outside: a composer's typing undo goes with the text
+    /// it named (PM-749).
+    fn forget_typing(&self) {
+        if let Some(undo) = &self.undo {
+            undo.removeAllActions();
+        }
+    }
+    /// The selected UTF-16 range, start before end.
+    fn selection(&self) -> (usize, usize) {
+        match &self.editor {
+            Editor::Multiline(v) => {
+                let r: NSRange = unsafe { msg_send![&**v, selectedRange] };
+                (r.location, r.location + r.length)
+            }
+            Editor::Field(_) => (0, 0),
+        }
+    }
+}
+define_class!(
+    /// The canvas editor: handles the editing chords a plain text view would
+    /// beep at or hand to the menu bar, only while it is first responder.
+    #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMCanvasTextView"]
+    #[ivars = RefCell<Weak<State>>]
+    struct CanvasTextView;
+    unsafe impl NSObjectProtocol for CanvasTextView {}
+    impl CanvasTextView {
+        // AppKit's completions can otherwise edit the invisible backing string
+        // and move its selection. Marked text still uses NSTextView's input client.
+        #[unsafe(method(inlinePredictionType))]
+        fn inline_prediction_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(textCompletionType))]
+        fn text_completion_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(autocorrectionType))]
+        fn autocorrection_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(mathExpressionCompletionType))]
+        fn math_expression_completion_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(isAutomaticTextCompletionEnabled))]
+        fn automatic_text_completion_enabled(&self) -> bool {
+            false
+        }
+        #[unsafe(method(isAutomaticSpellingCorrectionEnabled))]
+        fn automatic_spelling_correction_enabled(&self) -> bool {
+            false
+        }
+        #[unsafe(method(rangeForUserCompletion))]
+        fn range_for_user_completion(&self) -> NSRange {
+            NSRange::new(NSNotFound as usize, 0)
+        }
+        #[unsafe(method(completionsForPartialWordRange:indexOfSelectedItem:))]
+        fn completions(&self, _: NSRange, _: *mut isize) -> *mut NSArray<NSString> {
+            std::ptr::null_mut()
+        }
+        #[unsafe(method(complete:))]
+        fn complete(&self, _: Option<&AnyObject>) {}
+        #[unsafe(method(insertCompletion:forPartialWordRange:movement:isFinal:))]
+        fn insert_completion(&self, _: &NSString, _: NSRange, _: isize, _: bool) {}
+        #[unsafe(method(insertCandidateString:replacementRange:fromTextCheckingResult:))]
+        fn insert_candidate_string(&self, _: Option<&AnyObject>, _: NSRange, _: bool) {}
+        #[unsafe(method(insertCandidateTextCheckingResult:))]
+        fn insert_candidate_result(&self, _: Option<&AnyObject>) {}
+        #[unsafe(method(updateCandidates))]
+        fn update_candidates(&self) {}
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            self.chord(event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+        /// Input methods place candidates here (NSTextInputClient).
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, range: NSRange, actual: *mut NSRange) -> NSRect {
+            if !actual.is_null() {
+                unsafe { *actual = range };
+            }
+            let staged = self.ivars().borrow().upgrade().and_then(|s| s.input_rect.get());
+            match (staged, self.window()) {
+                (Some(rect), Some(window)) => {
+                    // From GPUI's view (P-EMBED): its frame in the window.
+                    let s = self.ivars().borrow().upgrade();
+                    let g = s.as_ref().map(|s| {
+                        let v = &s.gpui;
+                        v.convertRect_toView(v.bounds(), None)
+                    });
+                    let g = g.unwrap_or_else(|| window.contentView().map_or(NSRect::ZERO, |v| v.bounds()));
+                    let flipped = NSRect::new(
+                        NSPoint::new(
+                            g.origin.x + rect.origin.x,
+                            g.origin.y + g.size.height - rect.origin.y - rect.size.height,
+                        ),
+                        rect.size,
+                    );
+                    window.convertRectToScreen(flipped)
+                }
+                _ => unsafe {
+                    msg_send![super(self), firstRectForCharacterRange: range, actualRange: actual]
+                },
+            }
+        }
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if !self.chord(event) {
+                unsafe { let _: () = msg_send![super(self), keyDown: event]; }
+            }
+        }
+    }
+);
+impl CanvasTextView {
+    fn chord(&self, event: &NSEvent) -> bool {
+        let Some(state) = self.ivars().borrow().upgrade() else {
+            return false;
+        };
+        let me = self as *const Self as *const AnyObject;
+        let first = self
+            .window()
+            .and_then(|w| w.firstResponder())
+            .is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, me));
+        let marked: bool = unsafe { msg_send![self, hasMarkedText] };
+        if !first || marked || event.r#type() != NSEventType::KeyDown {
+            return false;
+        }
+        let flags = event.modifierFlags();
+        let has = |f: NSEventModifierFlags| flags.contains(f);
+        if !has(NSEventModifierFlags::Command) || has(NSEventModifierFlags::Control) {
+            return false;
+        }
+        let (shift, alt) = (
+            has(NSEventModifierFlags::Shift),
+            has(NSEventModifierFlags::Option),
+        );
+        // Key codes, so other layouts reach the same physical keys.
+        let key = match (event.keyCode(), shift, alt) {
+            (36 | 76, _, _) => "commit",
+            (11, false, false) => "bold",
+            (34, false, false) => "italic",
+            (47, true, false) => "larger",
+            (43, true, false) => "smaller",
+            (47, true, true) => "larger10",
+            (43, true, true) => "smaller10",
+            (37, false, true) => "alignLeft",
+            (17, false, true) => "alignCenter",
+            (15, false, true) => "alignRight",
+            _ => return false,
+        };
+        state.emit(TextEvent::Key(key));
+        true
+    }
+}
+define_class!(
+    /// A composer (the Agent's prompt): an ordinary text view that becomes
+    /// first responder only for the person (`State::armed`, `ComposerTextView::wanted`).
+    #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMComposerTextView"]
+    #[ivars = RefCell<Weak<State>>]
+    struct ComposerTextView;
+    unsafe impl NSObjectProtocol for ComposerTextView {}
+    impl ComposerTextView {
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            self.submit_command_return(event)
+                || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if !self.submit_command_return(event) {
+                unsafe { let _: () = msg_send![super(self), keyDown: event]; }
+            }
+        }
+
+        #[unsafe(method(paste:))]
+        fn paste(&self, sender: Option<&AnyObject>) {
+            let claimed = self.ivars().borrow().upgrade().is_some_and(|s| {
+                s.paste.borrow().as_ref().is_some_and(|paste| paste())
+            });
+            if !claimed { unsafe { let _: () = msg_send![super(self), paste: sender]; } }
+        }
+        /// Its own undo, never the window's (`State::undo`).
+        #[unsafe(method(undoManager))]
+        fn undo_manager(&self) -> *mut NSUndoManager {
+            match self.ivars().borrow().upgrade().and_then(|s| s.undo.clone()) {
+                Some(undo) => Retained::autorelease_return(undo),
+                None => unsafe { msg_send![super(self), undoManager] },
+            }
+        }
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            if self.wanted() {
+                unsafe { msg_send![super(self), becomeFirstResponder] }
+            } else {
+                false
+            }
+        }
+    }
+);
+impl ComposerTextView {
+    fn submit_command_return(&self, event: &NSEvent) -> bool {
+        use NSEventModifierFlags as Flags;
+        if event.r#type() != NSEventType::KeyDown || !matches!(event.keyCode(), 36 | 76) {
+            return false;
+        }
+        let flags = event.modifierFlags();
+        if !flags.contains(Flags::Command)
+            || flags.intersects(Flags::Shift | Flags::Option | Flags::Control)
+        {
+            return false;
+        }
+        let me = self as *const Self as *const AnyObject;
+        let first = self.window().and_then(|window| window.firstResponder())
+            .is_some_and(|responder| std::ptr::eq(Retained::as_ptr(&responder).cast::<AnyObject>(), me));
+        let marked: bool = unsafe { msg_send![self, hasMarkedText] };
+        let Some(state) = self.ivars().borrow().upgrade().filter(|_| first && !marked) else {
+            return false;
+        };
+        if !event.isARepeat() {
+            state.emit(TextEvent::Submitted(state.editor.value()));
+        }
+        true
+    }
+
+    /// The person's press on it or Tab to it (the event AppKit is handling
+    /// now), or the host's own `begin_editing`.
+    fn wanted(&self) -> bool {
+        if self.ivars().borrow().upgrade().is_some_and(|s| s.armed.get()) {
+            return composer_takes_keyboard(true, None);
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let event = NSApplication::sharedApplication(mtm).currentEvent();
+        composer_takes_keyboard(
+            false,
+            event.as_ref().map(|e| match e.r#type() {
+                NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
+                    Asking::Press
+                }
+                NSEventType::KeyDown => Asking::Key(e.keyCode()),
+                _ => Asking::Other,
+            }),
+        )
+    }
+}
+#[path = "native_text_keyboard.rs"]
+mod composer_keyboard;
+pub(crate) use composer_keyboard::{Asking, composer_takes_keyboard};
+
+define_class!(
+    /// Holds the canvas editor without taking any pointer event.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMPassthroughView"]
+    struct PassthroughView;
+    unsafe impl NSObjectProtocol for PassthroughView {}
+    impl PassthroughView {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+    }
+);
+/// A composer's lines are `COMPOSER_LEADING` times its type apart (v1's
+/// prompt reads at 1.5), centred in that height: the gap past the font's own
+/// line goes between lines and half of it above the first.
+pub const COMPOSER_LEADING: f64 = 1.5;
+/// A composer's text container inset (width, height): its first line box
+/// starts `COMPOSER_INSET.1` down and, with AppKit's 5 pt line fragment
+/// padding, its text 7 pt in (8 pt inside the composer's 1 pt edge).
+pub const COMPOSER_INSET: (f64, f64) = (2., 7.);
+fn composer_leading(v: &NSTextView, points: f64) {
+    use objc2_app_kit::{NSLayoutManager, NSMutableParagraphStyle, NSParagraphStyleAttributeName};
+    let font = NSFont::systemFontOfSize(points);
+    let natural = NSLayoutManager::new().defaultLineHeightForFont(&font);
+    let gap = (points * COMPOSER_LEADING - natural).max(0.);
+    let style = NSMutableParagraphStyle::new();
+    style.setLineSpacing(gap);
+    v.setDefaultParagraphStyle(Some(&style));
+    let mut typing = v.typingAttributes().to_owned();
+    unsafe {
+        let mutable: Retained<objc2_foundation::NSMutableDictionary<objc2_foundation::NSAttributedStringKey, objc2::runtime::AnyObject>> =
+            objc2_foundation::NSMutableDictionary::dictionaryWithDictionary(&typing);
+        mutable.setObject_forKey(&style, ProtocolObject::from_ref(NSParagraphStyleAttributeName));
+        typing = Retained::cast_unchecked(mutable);
+        v.setTypingAttributes(&typing);
+    }
+    v.setTextContainerInset(NSSize::new(COMPOSER_INSET.0, COMPOSER_INSET.1 + gap / 2.));
+}
+pub fn valid_number(value: &str) -> bool {
+    value.trim().parse::<f64>().is_ok_and(f64::is_finite)
+}
+thread_local! { static SLOTS: RefCell<HashMap<usize, Vec<Weak<State>>>> = RefCell::new(HashMap::new()); }
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMNativeTextDelegate"]
+    #[ivars = Rc<State>]
+    struct TextDelegate;
+    unsafe impl NSObjectProtocol for TextDelegate {}
+    unsafe impl NSControlTextEditingDelegate for TextDelegate {}
+    unsafe impl NSTextDelegate for TextDelegate {}
+    unsafe impl NSTextFieldDelegate for TextDelegate {}
+    unsafe impl NSTextViewDelegate for TextDelegate {}
+    impl TextDelegate {
+        #[unsafe(method(textView:candidatesForSelectedRange:))]
+        fn candidates_for_range(&self, _: &NSTextView, _: NSRange) -> *mut NSArray {
+            if self.ivars().kind == TextKind::Canvas {
+                // An empty list suppresses AppKit's query to NSSpellChecker.
+                Retained::autorelease_return(NSArray::new())
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+        #[unsafe(method(textView:candidates:forSelectedRange:))]
+        fn candidates(
+            &self,
+            _: &NSTextView,
+            candidates: &NSArray,
+            _: NSRange,
+        ) -> *const NSArray {
+            if self.ivars().kind == TextKind::Canvas {
+                Retained::autorelease_return(NSArray::new()).cast_const()
+            } else {
+                candidates
+            }
+        }
+        #[unsafe(method(textView:completions:forPartialWordRange:indexOfSelectedItem:))]
+        fn completions(
+            &self,
+            _: &NSTextView,
+            words: &NSArray<NSString>,
+            _: NSRange,
+            _: *mut isize,
+        ) -> *const NSArray<NSString> {
+            if self.ivars().kind == TextKind::Canvas {
+                Retained::autorelease_return(NSArray::new()).cast_const()
+            } else {
+                words
+            }
+        }
+        #[unsafe(method(textView:shouldSelectCandidateAtIndex:))]
+        fn should_select_candidate(&self, _: &NSTextView, _: usize) -> bool {
+            self.ivars().kind != TextKind::Canvas
+        }
+        #[unsafe(method(textView:willCheckTextInRange:options:types:))]
+        fn will_check_text(
+            &self,
+            _: &NSTextView,
+            _: NSRange,
+            options: Option<&NSDictionary>,
+            types: *mut u64,
+        ) -> *const NSDictionary {
+            if self.ivars().kind == TextKind::Canvas && !types.is_null() {
+                unsafe { *types = 0 };
+            }
+            options.map_or(std::ptr::null(), std::ptr::from_ref)
+        }
+        /// The stepper beside a form number field: a step up or down, as
+        /// Up and Down in the field (the host owns the value and its step).
+        /// It rests in the middle of its range, so it never stops.
+        #[unsafe(method(stepped:))]
+        fn stepped(&self, sender: &NSStepper) {
+            let value = sender.doubleValue();
+            sender.setDoubleValue(1.);
+            self.ivars().emit(TextEvent::Key(if value > 1. { "up" } else { "down" }));
+        }
+        #[unsafe(method(controlTextDidBeginEditing:))]
+        fn field_begin(&self, _: &NSNotification) {
+            self.ivars().editing.set(true);
+            if self.ivars().host_navigation.get() {self.ivars().emit(TextEvent::Key("focus"));}
+            if let Editor::Field(v)=&self.ivars().editor {if let Some(ed)=v.currentEditor() {configure_editor(&ed,!self.ivars().kind.number());}}
+        }
+        #[unsafe(method(textDidBeginEditing:))]
+        fn text_begin(&self, _: &NSNotification) { self.ivars().editing.set(true); }
+        #[unsafe(method(controlTextDidChange:))]
+        fn field_change(&self, _: &NSNotification) { self.changed(); }
+        #[unsafe(method(textDidChange:))]
+        fn text_change(&self, _: &NSNotification) { self.changed(); }
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn field_end(&self, _: &NSNotification) { self.ivars().finish(false); }
+        #[unsafe(method(textDidEndEditing:))]
+        fn text_end(&self, _: &NSNotification) {
+            let s = self.ivars();
+            s.armed.set(false);
+            if s.kind == TextKind::Canvas {
+                s.editing.set(false);
+                s.emit(TextEvent::Blurred);
+            } else {
+                s.finish(false);
+            }
+        }
+        #[unsafe(method(textViewDidChangeSelection:))]
+        fn selection_change(&self, _: &NSNotification) {
+            let s = self.ivars();
+            if s.kind == TextKind::Canvas {
+                let (start, end) = s.selection();
+                s.emit(TextEvent::Selection { start, end });
+            }
+        }
+        /// A spelling guess chosen from the canvas context menu.
+        #[unsafe(method(pmUseGuess:))]
+        fn use_guess(&self, item: &NSMenuItem) {
+            if let Editor::Multiline(v) = &self.ivars().editor {
+                let range: NSRange = unsafe { msg_send![&**v, selectedRange] };
+                let title = item.title();
+                unsafe {
+                    let _: () = msg_send![&**v, insertText: &*title, replacementRange: range];
+                }
+            }
+        }
+        /// The canvas context menu, a run-loop turn after its click: menu
+        /// tracking runs GPUI's tasks, so it never nests inside GPUI's
+        /// event dispatch.
+        #[unsafe(method(pmShowMenu:))]
+        fn show_menu(&self, _: Option<&AnyObject>) {
+            let s = self.ivars();
+            let pending = s.menu.borrow_mut().take();
+            if let (Some((menu, event)), Editor::Multiline(v)) = (pending, &s.editor) {
+                if v.window().is_some() {
+                    NSMenu::popUpContextMenu_withEvent_forView(&menu, &event, v);
+                }
+            }
+        }
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn field_command(&self, _: &NSControl, view: &NSTextView, command: Sel) -> bool { self.command(view, command) }
+        #[unsafe(method(textView:doCommandBySelector:))]
+        fn text_command(&self, view: &NSTextView, command: Sel) -> bool { self.command(view, command) }
+    }
+);
+impl TextDelegate {
+    fn changed(&self) {
+        let s = self.ivars();
+        s.emit(TextEvent::Changed(s.editor.value()));
+    }
+    fn command(&self, view: &NSTextView, command: Sel) -> bool {
+        // The input method consumes Escape/Return first when it owns marked text.
+        if unsafe { msg_send![view, hasMarkedText] } {
+            return false;
+        }
+        // Opt-in dialog fields keep Tab, Return and Escape inside their host.
+        if self.ivars().host_navigation.get() {
+            let key=if command==objc2::sel!(insertTab:) {Some("tab")}else if command==objc2::sel!(insertBacktab:) {Some("backtab")}else if command==objc2::sel!(cancelOperation:) {Some("escape")}else{None};
+            if let Some(key)=key {self.ivars().emit(TextEvent::Key(key));return true;}
+            if command==objc2::sel!(insertNewline:) {self.ivars().emit(TextEvent::Submitted(self.ivars().editor.value()));return true;}
+        }
+        // A number field steps with Up and Down (Shift: ten steps), as a
+        // spin field does; the host owns the value and its step.
+        if self.ivars().kind.number() {
+            let key = match command {
+                c if c == objc2::sel!(moveUp:) => Some("up"),
+                c if c == objc2::sel!(moveDown:) => Some("down"),
+                c if c == objc2::sel!(moveUpAndModifySelection:) => Some("shiftUp"),
+                c if c == objc2::sel!(moveDownAndModifySelection:) => Some("shiftDown"),
+                _ => None,
+            };
+            if let Some(key) = key {
+                self.ivars().emit(TextEvent::Key(key));
+                return true;
+            }
+        }
+        if self.ivars().kind == TextKind::Canvas {
+            let key = match command {
+                c if c == objc2::sel!(cancelOperation:) => Some("commit"),
+                c if c == objc2::sel!(moveUp:) => Some("up"),
+                c if c == objc2::sel!(moveDown:) => Some("down"),
+                c if c == objc2::sel!(moveUpAndModifySelection:) => Some("shiftUp"),
+                c if c == objc2::sel!(moveDownAndModifySelection:) => Some("shiftDown"),
+                // Tab never leaves the text or types into it.
+                c if c == objc2::sel!(insertTab:) || c == objc2::sel!(insertBacktab:) => None,
+                _ => return false,
+            };
+            if let Some(key) = key {
+                self.ivars().emit(TextEvent::Key(key));
+            }
+            return true;
+        }
+        if command == objc2::sel!(insertNewline:) && self.ivars().kind == TextKind::Composer {
+            if NSApplication::sharedApplication(MainThreadMarker::from(self)).currentEvent().is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat()) { return true; }
+            let flags = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .currentEvent()
+                .map(|e| e.modifierFlags())
+                .unwrap_or(objc2_app_kit::NSEventModifierFlags::empty());
+            if flags.intersects(
+                objc2_app_kit::NSEventModifierFlags::Shift | objc2_app_kit::NSEventModifierFlags::Option,
+            ) {
+                // A new line, as typed.
+                unsafe { view.insertNewlineIgnoringFieldEditor(None) };
+                return true;
+            }
+            let s = self.ivars();
+            s.emit(TextEvent::Submitted(s.editor.value()));
+            return true;
+        }
+        if self.ivars().kind == TextKind::Composer
+            && self.ivars().editor.value().is_empty()
+            && command == objc2::sel!(deleteBackward:)
+        {
+            // Holding Backspace must not arm and then delete a file in one press.
+            let repeat = NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .currentEvent().is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat());
+            if !repeat { self.ivars().emit(TextEvent::Key("backspace")); }
+            return true;
+        }
+        // Escape in a composer belongs to its host (close a menu, then the
+        // popover around it); AppKit's own cancelOperation: does nothing here.
+        if command == objc2::sel!(cancelOperation:) && self.ivars().kind == TextKind::Composer {
+            self.ivars().emit(TextEvent::Key("escape"));
+            return true;
+        }
+        if matches!(self.ivars().kind, TextKind::Multiline | TextKind::Composer)
+            && !self.ivars().tab_inserts.get()
+            && (command == objc2::sel!(insertTab:) || command == objc2::sel!(insertBacktab:))
+        {
+            // Commit, give focus back to GPUI, and let the host move it to
+            // the next (or previous) control.
+            self.ivars().finish(false);
+            if let Some(w) = view.window() {
+                w.makeFirstResponder(Some(&self.ivars().gpui));
+            }
+            self.ivars().emit(TextEvent::Key(if command == objc2::sel!(insertTab:) {
+                "tab"
+            } else {
+                "backtab"
+            }));
+            return true;
+        }
+        let cancels = match &self.ivars().editor {
+            Editor::Field(field) => field.tag() == ESCAPE_CANCELS,
+            Editor::Multiline(_) => false,
+        };
+        if command == objc2::sel!(cancelOperation:) && (self.ivars().kind.dense() || cancels) {
+            self.ivars().finish(true);
+            if let Some(w) = view.window() {
+                w.makeFirstResponder(Some(&self.ivars().gpui));
+            }
+            return true;
+        }
+        false
+    }
+}
+/// Main-thread RAII native slot. Drop removes it and its accessibility parent.
+/// Primary/multiline fields remain native; dense fields are hidden until `begin_editing`.
+pub struct NativeTextSlot {
+    state: Rc<State>,
+    _delegate: Retained<TextDelegate>,
+}
+impl NativeTextSlot {
+    /// A form number field gets a stepper at its trailing edge (Frame Rate):
+    /// a click is a step, as Up or Down in the field.
+    pub fn set_stepper(&self, on: bool) {
+        let state = &self.state;
+        if on == state.stepper.borrow().is_some() || state.kind != TextKind::FormNumber {
+            return;
+        }
+        if !on {
+            if let Some(stepper) = state.stepper.borrow_mut().take() {
+                stepper.removeFromSuperview();
+            }
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
+        stepper.setFocusRingType(NSFocusRingType::None);
+        stepper.setControlSize(objc2_app_kit::NSControlSize::Regular);
+        stepper.setMinValue(0.);
+        stepper.setMaxValue(2.);
+        stepper.setIncrement(1.);
+        stepper.setDoubleValue(1.);
+        stepper.setValueWraps(false);
+        unsafe {
+            stepper.setTarget(Some(&self._delegate));
+            stepper.setAction(Some(objc2::sel!(stepped:)));
+        }
+        state.wrapper.addSubview(&stepper);
+        *state.stepper.borrow_mut() = Some(stepper);
+    }
+    pub fn set_label(&self, label: &str) {unsafe {let _: ()=msg_send![&*self.state.wrapper, setAccessibilityLabel: &*NSString::from_str(label)];}}
+    pub fn set_host_navigation(&self, enabled: bool) {self.state.host_navigation.set(enabled);}
+
+    /// Keep Tab as a typed character (a code editor) instead of moving focus.
+    pub fn set_tab_inserts(&self, inserts: bool) {
+        self.state.tab_inserts.set(inserts);
+    }
+    pub fn new(gpui: &NSView, kind: TextKind, label: &str, initial: &str) -> Self {
+        Self::new_inner(gpui, kind, label, initial, false)
+    }
+    /// The form field and its optional stepper, installed by an AppKit
+    /// container with Auto Layout instead of by the GPUI compositor.
+    pub fn new_form(
+        owner: &NSView,
+        label: &str,
+        initial: &str,
+        number: bool,
+        stepper: bool,
+    ) -> Self {
+        use objc2_app_kit::NSLayoutConstraint;
+        use objc2_foundation::NSArray;
+        let kind = if number {
+            TextKind::FormNumber
+        } else {
+            TextKind::Form
+        };
+        let slot = Self::new_inner(owner, kind, label, initial, true);
+        slot.set_stepper(stepper);
+        slot.set_escape_cancels(true);
+        let field = slot.native_view();
+        field.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let wrapper = &slot.state.wrapper;
+        let mut constraints = vec![
+            field
+                .leadingAnchor()
+                .constraintEqualToAnchor(&wrapper.leadingAnchor()),
+            field
+                .topAnchor()
+                .constraintEqualToAnchor(&wrapper.topAnchor()),
+            field
+                .bottomAnchor()
+                .constraintEqualToAnchor(&wrapper.bottomAnchor()),
+        ];
+        if let Some(stepper) = slot.state.stepper.borrow().as_ref() {
+            stepper.setTranslatesAutoresizingMaskIntoConstraints(false);
+            stepper.setAccessibilityLabel(Some(&NSString::from_str(label)));
+            constraints.extend([
+                stepper
+                    .leadingAnchor()
+                    .constraintEqualToAnchor_constant(&field.trailingAnchor(), 5.),
+                stepper
+                    .trailingAnchor()
+                    .constraintEqualToAnchor(&wrapper.trailingAnchor()),
+                stepper
+                    .centerYAnchor()
+                    .constraintEqualToAnchor(&field.centerYAnchor()),
+            ]);
+        } else {
+            constraints.push(
+                field
+                    .trailingAnchor()
+                    .constraintEqualToAnchor(&wrapper.trailingAnchor()),
+            );
+        }
+        NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&constraints));
+        slot
+    }
+    pub fn form_view(&self) -> &NSView {
+        &self.state.wrapper
+    }
+    fn new_inner(
+        gpui: &NSView,
+        kind: TextKind,
+        label: &str,
+        initial: &str,
+        standalone: bool,
+    ) -> Self {
+        let mtm = MainThreadMarker::new().expect("text slots require the main thread");
+        let mut canvas = None;
+        let mut composer = None;
+        let editor = if kind == TextKind::Canvas {
+            let this = CanvasTextView::alloc(mtm).set_ivars(RefCell::new(Weak::new()));
+            let v: Retained<CanvasTextView> =
+                unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            canvas = Some(v.clone());
+            let v: Retained<NSTextView> = Retained::into_super(v);
+            v.setRichText(false);
+            v.setImportsGraphics(false);
+            v.setAllowsUndo(true);
+            v.setContinuousSpellCheckingEnabled(false);
+            v.setGrammarCheckingEnabled(false);
+            v.setAutomaticDataDetectionEnabled(false);
+            v.setAutomaticLinkDetectionEnabled(false);
+            v.setAutomaticSpellingCorrectionEnabled(false);
+            v.setAutomaticQuoteSubstitutionEnabled(false);
+            v.setAutomaticDashSubstitutionEnabled(false);
+            v.setAutomaticTextCompletionEnabled(false);
+            v.setAutomaticTextReplacementEnabled(false);
+            v.setSmartInsertDeleteEnabled(false);
+            // The app queries NSSpellChecker directly for underlines and menu guesses.
+            unsafe {
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setInlinePredictionType:)] {
+                    let _: () = msg_send![&*v, setInlinePredictionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setTextCompletionType:)] {
+                    let _: () = msg_send![&*v, setTextCompletionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setAutocorrectionType:)] {
+                    let _: () = msg_send![&*v, setAutocorrectionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setMathExpressionCompletionType:)] {
+                    let _: () = msg_send![&*v, setMathExpressionCompletionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)] {
+                    let _: () = msg_send![&*v, setWritingToolsBehavior: -1isize];
+                }
+            }
+            v.setDrawsBackground(false);
+            v.setFont(Some(&NSFont::systemFontOfSize(13.)));
+            v.setTextContainerInset(NSSize::new(0., 0.));
+            // Lines break only where the text does; the host wraps paragraphs.
+            v.setHorizontallyResizable(true);
+            v.setVerticallyResizable(true);
+            v.setMaxSize(NSSize::new(1e7, 1e7));
+            if let Some(container) = unsafe { v.textContainer() } {
+                container.setWidthTracksTextView(false);
+                container.setContainerSize(NSSize::new(1e7, 1e7));
+                container.setLineFragmentPadding(0.);
+            }
+            Editor::Multiline(v)
+        } else if matches!(kind, TextKind::Multiline | TextKind::Composer) {
+            let v = if kind == TextKind::Composer {
+                let this = ComposerTextView::alloc(mtm).set_ivars(RefCell::new(Weak::new()));
+                let v: Retained<ComposerTextView> =
+                    unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+                composer = Some(v.clone());
+                Retained::into_super(v)
+            } else {
+                NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO)
+            };
+            v.setRichText(false);
+            v.setImportsGraphics(false);
+            v.setAllowsUndo(true);
+            v.setContinuousSpellCheckingEnabled(true);
+            v.setGrammarCheckingEnabled(true);
+            v.setAutomaticSpellingCorrectionEnabled(true);
+            v.setDrawsBackground(false);
+            v.setFont(Some(&NSFont::systemFontOfSize(13.)));
+            v.setTextContainerInset(NSSize::new(4., 3.));
+            if kind == TextKind::Composer {
+                composer_leading(&v, 13.);
+                // A prompt is not prose to rewrite: no Writing Tools badge
+                // beside the empty field (NSWritingToolsBehaviorNone).
+                unsafe {
+                    let supported: bool =
+                        msg_send![&*v, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)];
+                    if supported {
+                        let _: () = msg_send![&*v, setWritingToolsBehavior: -1isize];
+                    }
+                }
+            }
+            Editor::Multiline(v)
+        } else {
+            let v = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+            v.setEditable(true);
+            v.setSelectable(true);
+            v.setBezeled(false);
+            v.setBordered(false);
+            v.setDrawsBackground(false);
+            v.setFont(Some(&NSFont::systemFontOfSize(13.)));
+            if kind.form() {
+                // AppKit's own rounded field; no accent focus ring (owner
+                // rule), the field's caret shows it has the keyboard.
+                v.setControlSize(objc2_app_kit::NSControlSize::Regular);
+                v.setBezeled(true);
+                v.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
+                v.setDrawsBackground(true);
+            }
+            if kind == TextKind::FormNumber {
+                v.setAlignment(NSTextAlignment::Right);
+                v.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(13., unsafe {
+                    NSFontWeightRegular
+                })));
+            }
+            // AppKit configures its shared field editor for this control.
+            unsafe {
+                let _: () = msg_send![&*v, setAllowsEditingTextAttributes: false];
+            }
+            Editor::Field(v)
+        };
+        editor.view().setFocusRingType(NSFocusRingType::None);
+        editor.set(initial);
+        editor
+            .view()
+            .setAccessibilityLabel(Some(&NSString::from_str(label)));
+        let wrapper = if kind == TextKind::Canvas {
+            let this = PassthroughView::alloc(mtm).set_ivars(());
+            let v: Retained<PassthroughView> =
+                unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            let v: Retained<NSView> = Retained::into_super(v);
+            // Never seen: the host draws what this editor holds.
+            v.setAlphaValue(0.);
+            v
+        } else {
+            NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO)
+        };
+        if !standalone {
+            wrapper.setWantsLayer(true);
+            if let Some(layer) = wrapper.layer() {
+                layer.setMasksToBounds(true);
+            }
+        }
+        wrapper.setHidden(kind.dense());
+        let scroll = if kind == TextKind::Canvas {
+            wrapper.addSubview(editor.view());
+            None
+        } else if let Editor::Multiline(v) = &editor {
+            let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), NSRect::ZERO);
+            scroll.setHasVerticalScroller(true);
+            scroll.setAutohidesScrollers(true);
+            scroll.setDrawsBackground(false);
+            v.setVerticallyResizable(true);
+            v.setHorizontallyResizable(false);
+            v.setMaxSize(NSSize::new(f64::MAX, f64::MAX));
+            scroll.setDocumentView(Some(v));
+            wrapper.addSubview(&scroll);
+            Some(scroll)
+        } else {
+            wrapper.addSubview(editor.view());
+            None
+        };
+        let state = Rc::new(State {
+            kind,
+            editor,
+            wrapper,
+            scroll,
+            gpui: unsafe { Retained::retain(gpui as *const NSView as *mut NSView).unwrap() },
+            editing: Cell::new(false),
+            tab_inserts: Cell::new(false),
+            host_navigation: Cell::new(false),
+            focus_pending: Cell::new(false),
+            selection_pending: Cell::new(None),
+            armed: Cell::new(false),
+            original: RefCell::new(initial.into()),
+            last_font: RefCell::new(None),
+            undo: (kind == TextKind::Composer).then(|| NSUndoManager::new(mtm)),
+            events: RefCell::new(Vec::new()),
+            wake: RefCell::new(None),
+            paste: RefCell::new(None),
+            geometry: Cell::new(None),
+            scroll_fade: Default::default(),
+            staged: Cell::new(None),
+            build_alpha: Cell::new(None),
+            kept_alpha: Cell::new(1.),
+            caret: (kind == TextKind::Canvas).then(|| {
+                let this = PassthroughView::alloc(mtm).set_ivars(());
+                let host: Retained<PassthroughView> =
+                    unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+                let host: Retained<NSView> = Retained::into_super(host);
+                let indicator = NSTextInsertionIndicator::initWithFrame(
+                    NSTextInsertionIndicator::alloc(mtm),
+                    NSRect::ZERO,
+                );
+                indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
+                host.addSubview(&indicator);
+                host.setHidden(true);
+                (host, indicator)
+            }),
+            caret_staged: Cell::new(None),
+            input_rect: Cell::new(None),
+            stepper: RefCell::new(None),
+            menu: RefCell::new(None),
+        });
+        if let Some(canvas) = &canvas {
+            *canvas.ivars().borrow_mut() = Rc::downgrade(&state);
+        }
+        if let Some(composer) = &composer {
+            *composer.ivars().borrow_mut() = Rc::downgrade(&state);
+        }
+        let delegate = TextDelegate::alloc(mtm).set_ivars(state.clone());
+        let delegate: Retained<TextDelegate> = unsafe { msg_send![super(delegate), init] };
+        match &state.editor {
+            Editor::Field(v) => unsafe {
+                v.setDelegate(Some(ProtocolObject::from_ref(&*delegate)))
+            },
+            Editor::Multiline(v) => v.setDelegate(Some(ProtocolObject::from_ref(&*delegate))),
+        }
+        // Writing Tools, dictation, emoji and Services use NSTextView's ordinary responder.
+        // No input-context replacement or keyDown override is installed.
+        if !standalone {
+            // In GPUI's view's parent: the window's content view, or the detail
+            // view of a split view hosting GPUI's view (P-EMBED).
+            if let Some(content) = unsafe { gpui.superview() } {
+                // As a hosted control: it keeps its distance from the window's
+                // top edge until the next paint places it.
+                let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
+                state.wrapper.setAutoresizingMask(top);
+                content.addSubview_positioned_relativeTo(
+                    &state.wrapper,
+                    NSWindowOrderingMode::Above,
+                    Some(gpui),
+                );
+                if let Some((host, _)) = &state.caret {
+                    host.setAutoresizingMask(top);
+                    content.addSubview_positioned_relativeTo(
+                        host,
+                        NSWindowOrderingMode::Above,
+                        Some(&state.wrapper),
+                    );
+                }
+            }
+            SLOTS.with(|slots| {
+                slots
+                    .borrow_mut()
+                    .entry(gpui as *const NSView as usize)
+                    .or_default()
+                    .push(Rc::downgrade(&state))
+            });
+            crate::composition_accessibility::changed(gpui as *const NSView as usize);
+        }
+        Self {
+            state,
+            _delegate: delegate,
+        }
+    }
+    pub fn set_font_size(&self, points: f64) {
+        self.state.last_font.take();
+        let font = NSFont::systemFontOfSize(points);
+        match &self.state.editor {
+            Editor::Field(v) => v.setFont(Some(&font)),
+            Editor::Multiline(v) => {
+                v.setFont(Some(&font));
+                if self.state.kind == TextKind::Composer {
+                    composer_leading(v, points);
+                }
+            }
+        }
+    }
+    /// Placeholder for single-line fields (AppKit draws it while editing).
+    /// Escape in this field cancels the edit (the view hears `Cancelled`:
+    /// a search clears itself) instead of committing what was typed.
+    pub fn set_escape_cancels(&self, cancels: bool) {
+        if let Editor::Field(v) = &self.state.editor {
+            v.setTag(if cancels { ESCAPE_CANCELS } else { 0 });
+        }
+    }
+    /// Claims supported non-text paste payloads; false keeps AppKit text paste.
+    pub fn set_paste_handler(&self, handler: Rc<dyn Fn() -> bool>) {
+        *self.state.paste.borrow_mut() = Some(handler);
+    }
+    pub fn set_placeholder(&self, text: &str) {
+        if let Editor::Field(v) = &self.state.editor {
+            v.setPlaceholderString(Some(&NSString::from_str(text)));
+        }
+    }
+    pub fn on_event(&self, wake: Rc<dyn Fn()>) {
+        *self.state.wake.borrow_mut() = Some(wake);
+    }
+    pub fn value(&self) -> String {
+        self.state.editor.value()
+    }
+    pub fn is_editing(&self) -> bool {
+        self.state.editing.get()
+    }
+    pub fn snapshot_visible(&self) -> bool {
+        !self.state.wrapper.isHidden()
+    }
+    /// Whether the field has the keyboard now (AppKit's first responder is
+    /// it or its field editor), not only asked to take it.
+    pub fn has_keyboard(&self) -> bool {
+        match &self.state.editor {
+            Editor::Field(v) => v.currentEditor().is_some(),
+            Editor::Multiline(v) => v.window().and_then(|w| w.firstResponder()).is_some_and(|r| {
+                std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(v) as *const AnyObject)
+            }),
+        }
+    }
+    pub fn native_view(&self) -> &NSView {
+        self.state.editor.view()
+    }
+    /// Optional explicit reading-order anchor for the host's committed composition.
+    pub fn accessibility_item(&self) -> Option<crate::composition::AccessibilityItem> {
+        (!self.state.wrapper.isHidden()).then(|| {
+            crate::composition::AccessibilityItem::Native(unsafe {
+                Retained::retain(self.native_view() as *const NSView as *mut NSView).unwrap()
+            })
+        })
+    }
+    /// Top-left point bounds and inherited rectangular content clip, in GPUI coordinates.
+    pub fn stage(&self, bounds: NSRect, clip: NSRect) {
+        self.stage_with_scroll_fade(bounds, clip, [0., 0.]);
+    }
+    pub fn stage_with_scroll_fade(&self, bounds: NSRect, clip: NSRect, fade: [f64; 2]) {
+        let placement = crate::slot_region::Placement { bounds, clip, region: None };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
+        self.state.scroll_fade.stage(fade);
+    }
+    /// P-SLOT-REGION: staged in scrolling region `region`'s container, with
+    /// bounds and clip in its content coordinates.
+    pub fn stage_in_region(&self, region: usize, bounds: NSRect, clip: NSRect) {
+        let placement = crate::slot_region::Placement { bounds, clip, region: Some(region) };
+        self.state.stage(Some(placement));
+        self.state.staged.set(Some(placement));
+    }
+    pub fn stage_build_alpha(&self, alpha: f64) {
+        let paint = crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
+        let alpha = alpha.clamp(0., 1.);
+        self.state.build_alpha.set(Some((paint, alpha)));
+        self.state.kept_alpha.set(alpha);
+    }
+    /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
+    pub fn keep(&self) {
+        self.state.stage(self.state.staged.get());
+        self.stage_build_alpha(self.state.kept_alpha.get());
+    }
+    /// Stages nothing: the next present hides the editor; [`Self::keep`]
+    /// keeps it hidden.
+    pub fn hide(&self) {
+        self.state.stage(None);
+        self.state.staged.set(None);
+    }
+    pub fn begin_editing(&self) {
+        if !self.state.editing.replace(true) {
+            *self.state.original.borrow_mut() = self.value();
+        }
+        self.state.armed.set(true);
+        self.state.focus_pending.set(true);
+    }
+    /// Ends editing (its text kept) and gives the keyboard back to the GPUI
+    /// view it sits on, the editor: what Escape in a docked composer and a
+    /// press elsewhere do.
+    pub fn blur(&self) {
+        self.state.focus_pending.set(false);
+        self.state.selection_pending.set(None);
+        self.state.armed.set(false);
+        let view: Retained<NSView> = match &self.state.editor {
+            Editor::Field(v) => Retained::into_super(Retained::into_super(v.clone())),
+            Editor::Multiline(v) => Retained::into_super(Retained::into_super(v.clone())),
+        };
+        let Some(w) = view.window() else {
+            return;
+        };
+        let first = w.firstResponder().is_some_and(|r| {
+            std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(&view) as *const AnyObject)
+        });
+        if first {
+            w.makeFirstResponder(Some(&self.state.gpui));
+        }
+        self.state.finish(false);
+    }
+    pub fn take_events(&self) -> Vec<TextEvent> {
+        std::mem::take(&mut *self.state.events.borrow_mut())
+    }
+    pub fn set_value(&self, value: &str) {
+        if !self.is_editing() {
+            self.state.editor.set(value);
+            self.state.forget_typing();
+            *self.state.original.borrow_mut() = value.into();
+        }
+    }
+    /// Canvas: where the system insertion point stands (top-left GPUI
+    /// points, clipped), or `None` while a range is selected.
+    pub fn stage_caret(&self, caret: Option<(NSRect, NSRect)>) {
+        self.state.caret_staged.set(caret);
+    }
+    /// Canvas: the caret rectangle input method candidates open beside
+    /// (top-left GPUI points).
+    pub fn stage_input_rect(&self, rect: Option<NSRect>) {
+        self.state.input_rect.set(rect);
+    }
+    /// Canvas: the composing (marked) UTF-16 range, if any.
+    pub fn marked_range(&self) -> Option<(usize, usize)> {
+        let Editor::Multiline(v) = &self.state.editor else {
+            return None;
+        };
+        if !self.has_marked_text() {
+            return None;
+        }
+        let r: NSRange = unsafe { msg_send![&**v, markedRange] };
+        (r.location != usize::MAX).then_some((r.location, r.location + r.length))
+    }
+    /// Canvas: the selected UTF-16 range, start before end.
+    pub fn selection(&self) -> (usize, usize) {
+        self.state.selection()
+    }
+    /// Select a UTF-16 range (clamped to the text), after focus if needed.
+    pub fn set_selection(&self, start: usize, end: usize) {
+        match &self.state.editor {
+            Editor::Multiline(v) => {
+                v.setSelectedRange(selection_range(start, end, v.string().length()));
+            }
+            Editor::Field(v) => {
+                // The shared field editor exists only after focus is applied.
+                // selectText selects everything, so apply a requested prefix
+                // afterwards (a filename's stem, leaving its extension).
+                self.state.selection_pending.set(Some((start, end)));
+                if !self.state.focus_pending.get() {
+                    if let Some(ed) = v.currentEditor() {
+                        ed.setSelectedRange(selection_range(start, end, ed.string().length()));
+                        self.state.selection_pending.set(None);
+                    }
+                }
+            }
+        }
+    }
+    /// Replaces the text even while editing (a composer clearing after its
+    /// message was sent; on canvas, an outside change such as undo or the
+    /// inspector, keeping the selection where it still fits). An input
+    /// method's composition is never interrupted.
+    pub fn replace_value(&self, value: &str) {
+        if self.has_marked_text() || self.value() == value {
+            return;
+        }
+        let (start, end) = self.selection();
+        self.state.editor.set(value);
+        self.state.forget_typing();
+        *self.state.original.borrow_mut() = value.into();
+        if self.state.kind == TextKind::Canvas {
+            self.set_selection(start, end);
+        }
+    }
+    pub fn has_marked_text(&self) -> bool {
+        match &self.state.editor {
+            Editor::Multiline(v) => unsafe { msg_send![&**v, hasMarkedText] },
+            Editor::Field(_) => false,
+        }
+    }
+    /// The editor is the window's first responder.
+    pub fn is_focused(&self) -> bool {
+        let view = self.native_view() as *const NSView as *const AnyObject;
+        self.state
+            .gpui
+            .window()
+            .and_then(|w| w.firstResponder())
+            .is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, view))
+    }
+    /// Canvas: the edited text's family and on-screen size, so input method
+    /// candidates open beside the glyphs.
+    pub fn set_font(&self, family: &str, points: f64) {
+        let Editor::Multiline(v) = &self.state.editor else {
+            return;
+        };
+        let points = points.clamp(1., 2000.);
+        let bits = points.to_bits();
+        if self.state.last_font.borrow().as_ref().is_some_and(
+            |(last_family, last_bits)| last_family == family && *last_bits == bits,
+        ) {
+            return;
+        }
+        let font = NSFont::fontWithName_size(&NSString::from_str(family), points)
+            .unwrap_or_else(|| NSFont::systemFontOfSize(points));
+        *self.state.last_font.borrow_mut() = Some((family.to_owned(), bits));
+        v.setFont(Some(&font));
+    }
+    /// Canvas: misspelled UTF-16 ranges, from the system spell checker with
+    /// this editor's document tag (so Ignore and Learn apply).
+    pub fn misspelled(&self) -> Vec<(usize, usize)> {
+        let Editor::Multiline(v) = &self.state.editor else {
+            return vec![];
+        };
+        let text = v.string();
+        let length = text.length();
+        let mut ranges = vec![];
+        unsafe {
+            let checker: Retained<AnyObject> =
+                msg_send![class!(NSSpellChecker), sharedSpellChecker];
+            let tag: isize = msg_send![&**v, spellCheckerDocumentTag];
+            let mut from = 0usize;
+            while from < length {
+                let found: NSRange = msg_send![
+                    &checker,
+                    checkSpellingOfString: &*text,
+                    startingAt: from as isize,
+                    language: Option::<&NSString>::None,
+                    wrap: false,
+                    inSpellDocumentWithTag: tag,
+                    wordCount: std::ptr::null_mut::<isize>()
+                ];
+                if found.length == 0 || found.location == usize::MAX || found.location < from {
+                    break;
+                }
+                ranges.push((found.location, found.location + found.length));
+                from = found.location + found.length;
+            }
+        }
+        ranges
+    }
+    /// Canvas: the editor's own context menu on `word` (selected first), with
+    /// spelling guesses on top when it is misspelled and AppKit lists none.
+    /// Shown on the next run-loop turn (`pmShowMenu:`).
+    pub fn context_menu(&self, word: (usize, usize)) {
+        let Editor::Multiline(v) = &self.state.editor else {
+            return;
+        };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        self.set_selection(word.0, word.1);
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(event) = app.currentEvent() else {
+            return;
+        };
+        let menu: Option<Retained<NSMenu>> = unsafe { msg_send![&**v, menuForEvent: &*event] };
+        let menu = menu.unwrap_or_else(|| NSMenu::new(mtm));
+        if self.misspelled().contains(&word) {
+            unsafe {
+                let checker: Retained<AnyObject> =
+                    msg_send![class!(NSSpellChecker), sharedSpellChecker];
+                let tag: isize = msg_send![&**v, spellCheckerDocumentTag];
+                let range = NSRange::new(word.0, word.1 - word.0);
+                let guesses: Option<Retained<NSArray<NSString>>> = msg_send![
+                    &checker,
+                    guessesForWordRange: range,
+                    inString: &*v.string(),
+                    language: Option::<&NSString>::None,
+                    inSpellDocumentWithTag: tag
+                ];
+                let mut guesses = guesses.map(|g| g.to_vec()).unwrap_or_default();
+                // AppKit lists its own guesses, in the menu's first section,
+                // once it has checked the word.
+                let listed = menu
+                    .itemArray()
+                    .iter()
+                    .take_while(|item| !item.isSeparatorItem())
+                    .any(|item| guesses.iter().any(|guess| **guess == *item.title()));
+                if listed {
+                    guesses.clear();
+                }
+                if !guesses.is_empty() {
+                    menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), 0);
+                }
+                for guess in guesses.iter().take(6).rev() {
+                    let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        guess,
+                        Some(objc2::sel!(pmUseGuess:)),
+                        &NSString::new(),
+                    );
+                    item.setTarget(Some(&*self._delegate));
+                    menu.insertItem_atIndex(&item, 0);
+                }
+            }
+        }
+        *self.state.menu.borrow_mut() = Some((menu, event));
+        unsafe {
+            let _: () = msg_send![
+                &*self._delegate,
+                performSelector: objc2::sel!(pmShowMenu:),
+                withObject: std::ptr::null::<AnyObject>(),
+                afterDelay: 0.0f64
+            ];
+        }
+    }
+}
+impl Drop for NativeTextSlot {
+    fn drop(&mut self) {
+        self.state.menu.borrow_mut().take();
+        if self.state.editing.get() {
+            if let Some(w) = self.state.gpui.window() {
+                w.makeFirstResponder(Some(&self.state.gpui));
+            }
+        }
+        self.state.wrapper.removeFromSuperview();
+        if let Some((host, _)) = &self.state.caret {
+            host.removeFromSuperview();
+        }
+        crate::composition_accessibility::changed(Retained::as_ptr(&self.state.gpui) as usize);
+        let v = unsafe {
+            Retained::retain(self.state.editor.view() as *const NSView as *mut NSView).unwrap()
+        };
+        crate::composition::clear_parents(&[crate::composition::AccessibilityItem::Native(v)]);
+        SLOTS.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            if let Some(v) = slots.get_mut(&(Retained::as_ptr(&self.state.gpui) as usize)) {
+                v.retain(|s| s.upgrade().is_some_and(|s| !Rc::ptr_eq(&s, &self.state)));
+            }
+        });
+    }
+}
+impl State {
+    fn stage(&self, geometry: Option<crate::slot_region::Placement>) {
+        let paint = crate::composition::open_paint(Retained::as_ptr(&self.gpui) as usize);
+        self.geometry
+            .set(geometry.map(|placement| (paint, placement)));
+    }
+}
+/// Applies staged text-slot geometry. Returns `Moved` when any slot's frame,
+/// clip or visibility changed this frame (P-120 transactional present).
+pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
+    place(key, true).into()
+}
+/// Whether [`present`] would move a slot. Nothing is touched.
+pub(crate) fn pending(key: usize) -> bool {
+    place(key, false)
+}
+/// Places what the last complete paint staged (`apply`), or only says
+/// whether doing so would move anything.
+fn place(key: usize, apply: bool) -> bool {
+    let mut moved = false;
+    let last = crate::composition::last_paint(key);
+    let slots = SLOTS.with(|slots| slots.borrow().get(&key).cloned().unwrap_or_default());
+    for state in slots.into_iter().filter_map(|s| s.upgrade()) {
+        // A canvas editor is invisible and must stay first responder, so a
+        // frame that did not repaint its host keeps the last placement.
+        let geometry = state
+            .geometry
+            .get()
+            .filter(|(paint, _)| Some(*paint) == last)
+            .map(|(_, placement)| placement)
+            .or_else(|| {
+                (state.kind == TextKind::Canvas)
+                    .then(|| state.staged.get())
+                    .flatten()
+            });
+        if apply {
+            state.geometry.set(None);
+        }
+        // A region's slot goes in its container's content view; a region the
+        // last draw did not make hides it.
+        let parent = geometry.and_then(|p| p.region).map(|region| {
+            crate::slot_region::content_view(&state.gpui, region, apply)
+        });
+        if !apply && matches!(parent, Some(None)) {
+            moved = true;
+            continue;
+        }
+        let geometry = geometry.filter(|_| !matches!(parent, Some(None)));
+        let parent = parent.flatten();
+        let Some(crate::slot_region::Placement { bounds, clip, region }) = geometry else {
+            if !state.wrapper.isHidden() {
+                moved = true;
+                if apply {
+                    state.wrapper.setHidden(true);
+                    crate::composition_accessibility::changed(key);
+                }
+            }
+            // A field that is no longer drawn (its panel went to another
+            // tab) takes its caret with it: the system's insertion indicator
+            // stayed where the field was, over the panel shown there now.
+            // (The keyboard comes back to the editor through the shell's
+            // stray-responder check.)
+            if let Some((host, indicator)) = &state.caret
+                && !host.isHidden()
+            {
+                moved = true;
+                if apply {
+                    indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
+                    host.setHidden(true);
+                }
+            }
+            continue;
+        };
+        if let Some((paint, alpha)) = state.build_alpha.get() {
+            if Some(paint) == last && state.wrapper.alphaValue() != alpha {
+                moved = true;
+                if apply {
+                    state.wrapper.setAlphaValue(alpha);
+                }
+            }
+        }
+        // From GPUI's frame in its parent (P-EMBED).
+        let visible = intersection(bounds, clip);
+        // In a region, hidden while its region's view shows none of it: no
+        // keys, not read out (PM-696 review).
+        let outside = region.is_some_and(|r| !crate::slot_region::shows(&state.gpui, r, visible));
+        let hidden = outside
+            || visible.size.width <= 0.
+            || visible.size.height <= 0.
+            || (state.kind.dense() && !state.editing.get());
+        // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
+        // field at rest, a field scrolled out) still follows its row, but
+        // nothing on screen moved, so the frame needs no synchronous
+        // present: a panel of number fields made every frame of its scroll
+        // one.
+        let unseen = hidden && state.wrapper.isHidden();
+        // Top-down content coordinates in a region.
+        let mut frame = match region {
+            Some(_) => visible,
+            None => crate::composition::hosted_rect(&state.gpui, visible),
+        };
+        if apply {
+            let (adopted, placed) =
+                crate::slot_region::reparent(&state.gpui, &state.wrapper, parent.as_deref(), frame, !hidden);
+            frame = placed;
+            if adopted {
+                moved = true;
+                // In a region its container's clip fades, not its own mask.
+                if parent.is_some() {
+                    state.scroll_fade.clear(&state.wrapper);
+                }
+            }
+        } else {
+            moved |= crate::slot_region::misplaced(&state.gpui, &state.wrapper, parent.as_deref())
+                || (parent.is_some() && unsafe { state.wrapper.superview() }.is_none());
+        }
+        if state.wrapper.frame() != frame {
+            moved |= !unseen;
+            if apply {
+                state.wrapper.setFrame(frame);
+            }
+        }
+        if !hidden && region.is_none() {
+            moved |= state.scroll_fade.place(&state.wrapper, visible, clip, apply);
+        }
+        let local = NSRect::new(
+            NSPoint::new(
+                bounds.origin.x - visible.origin.x,
+                visible.origin.y + visible.size.height - bounds.origin.y - bounds.size.height,
+            ),
+            bounds.size,
+        );
+        if let Some(scroll) = &state.scroll {
+            if scroll.frame() != local {
+                moved |= !unseen;
+                if apply {
+                    scroll.setFrame(local);
+                }
+            }
+            let size = scroll.contentSize();
+            let view = state.editor.view();
+            if apply && view.frame().size.width != size.width {
+                view.setFrameSize(NSSize::new(
+                    size.width,
+                    view.frame().size.height.max(size.height),
+                ));
+            }
+        } else {
+            // A stepper takes the field's trailing edge.
+            let mut field = local;
+            if let Some(stepper) = state.stepper.borrow().as_ref() {
+                field.size.width = (local.size.width - STEPPER.0 - STEPPER.1).max(0.);
+                let at = NSRect::new(
+                    NSPoint::new(local.origin.x + local.size.width - STEPPER.0, local.origin.y),
+                    NSSize::new(STEPPER.0, local.size.height),
+                );
+                if stepper.frame() != at {
+                    moved |= !unseen;
+                    if apply {
+                        stepper.setFrame(at);
+                    }
+                }
+            }
+            if state.editor.view().frame() != field {
+                moved |= !unseen;
+                if apply {
+                    state.editor.view().setFrame(field);
+                }
+            }
+        }
+        if state.wrapper.isHidden() != hidden {
+            moved = true;
+            if apply {
+                state.wrapper.setHidden(hidden);
+                crate::composition_accessibility::changed(key);
+            }
+        }
+        if let Some((host, indicator)) = &state.caret {
+            let focused = state.editing.get();
+            match state.caret_staged.get().filter(|_| focused) {
+                Some((rect, clip)) => {
+                    let shown = intersection(rect, clip);
+                    let frame = crate::composition::hosted_rect(&state.gpui, rect);
+                    let visible = shown.size.width > 0. && shown.size.height > 0.;
+                    if host.frame() != frame {
+                        moved = true;
+                        if apply {
+                            host.setFrame(frame);
+                            indicator.setFrame(NSRect::new(NSPoint::new(0., 0.), rect.size));
+                        }
+                    }
+                    if host.isHidden() == visible {
+                        moved = true;
+                        if apply {
+                            host.setHidden(!visible);
+                        }
+                    }
+                    if apply {
+                        indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Automatic);
+                    }
+                }
+                None => {
+                    if !host.isHidden() {
+                        moved = true;
+                        if apply {
+                            indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
+                            host.setHidden(true);
+                        }
+                    }
+                }
+            }
+        }
+        if apply && state.focus_pending.replace(false) {
+            if let Some(w) = state.gpui.window() {
+                if let Editor::Multiline(v) = &state.editor {
+                    w.makeFirstResponder(Some(v));
+                }
+                if let Editor::Field(v) = &state.editor {
+                    unsafe {
+                        v.selectText(None);
+                    }
+                    if let Some(ed) = v.currentEditor() {
+                        configure_editor(&ed, !state.kind.number());
+                        if let Some((start, end)) = state.selection_pending.take() {
+                            ed.setSelectedRange(selection_range(start, end, ed.string().length()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    moved
+}
+pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::AccessibilityItem> {
+    SLOTS.with(|slots| {
+        slots
+            .borrow()
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.upgrade())
+            .filter(|s| !s.wrapper.isHidden())
+            .map(|s| {
+                crate::composition::AccessibilityItem::Native(unsafe {
+                    Retained::retain(s.editor.view() as *const NSView as *mut NSView).unwrap()
+                })
+            })
+            .collect()
+    })
+}
+fn intersection(a: NSRect, b: NSRect) -> NSRect {
+    let x = a.origin.x.max(b.origin.x);
+    let y = a.origin.y.max(b.origin.y);
+    NSRect::new(
+        NSPoint::new(x, y),
+        NSSize::new(
+            (a.origin.x + a.size.width)
+                .min(b.origin.x + b.size.width)
+                .max(x)
+                - x,
+            (a.origin.y + a.size.height)
+                .min(b.origin.y + b.size.height)
+                .max(y)
+                - y,
+        ),
+    )
+}
+
+pub(crate) fn has_slots(key: usize) -> bool {
+    SLOTS.with(|s| {
+        s.borrow()
+            .get(&key)
+            .is_some_and(|v| v.iter().any(|s| s.strong_count() > 0))
+    })
+}
+
+fn configure_editor(editor: &NSText, spell: bool) {
+    unsafe {
+        let _: () = msg_send![editor,setContinuousSpellCheckingEnabled:spell];
+        let _: () = msg_send![editor,setAutomaticSpellingCorrectionEnabled:spell];
+        let supported: bool =
+            msg_send![editor,respondsToSelector:objc2::sel!(setWritingToolsBehavior:)];
+        if supported {
+            let _: () = msg_send![editor,setWritingToolsBehavior:0isize];
+        }
+    }
+}
+
+// AppKit ranges count UTF-16 code units, as JavaScript string lengths do.
+fn selection_range(start: usize, end: usize, length: usize) -> NSRange {
+    let (location, length) = selection::selection_range(start, end, length);
+    NSRange::new(location, length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2::rc::autoreleasepool;
+
+    const APPKIT_TEST: &str = "PM_CANVAS_TEXT_APPKIT_TEST";
+
+    #[test]
+    fn canvas_text_has_no_appkit_completions() {
+        // libtest runs tests on worker threads. The child runs AppKit on its
+        // main thread before starting the test harness.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(APPKIT_TEST, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "AppKit test exited with {}:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[ctor::ctor(unsafe)]
+    fn run_appkit_test_on_main_thread() {
+        if std::env::var_os(APPKIT_TEST).is_some() {
+            let result = std::panic::catch_unwind(|| autoreleasepool(|_| check_canvas_text()));
+            std::process::exit(i32::from(result.is_err()));
+        }
+    }
+
+    fn check_canvas_text() {
+        let mtm = MainThreadMarker::new().expect("AppKit test requires the main thread");
+        NSApplication::sharedApplication(mtm)
+            .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        let host = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        let initial = "This is tually";
+        let canvas = NativeTextSlot::new_inner(&host, TextKind::Canvas, "Canvas", initial, true);
+        let composer = NativeTextSlot::new_inner(&host, TextKind::Composer, "Composer", "", true);
+        let Editor::Multiline(view) = &canvas.state.editor else {
+            panic!("canvas uses a text view");
+        };
+        let range = NSRange::new(8, 6);
+        let selection = NSRange::new(11, 0);
+        view.setSelectedRange(selection);
+        let suggestion = NSString::from_str("actually");
+        let suggestions = NSArray::from_slice(&[&*suggestion]);
+
+        let result: Retained<AnyObject> = unsafe {
+            msg_send![class!(NSTextCheckingResult), spellCheckingResultWithRange: range]
+        };
+        let checking_results = NSArray::from_slice(&[&*result]);
+
+        assert!(!view.isContinuousSpellCheckingEnabled());
+        assert!(!view.isGrammarCheckingEnabled());
+        assert!(!view.isAutomaticDataDetectionEnabled());
+        assert!(!view.isAutomaticLinkDetectionEnabled());
+        assert!(!view.isAutomaticSpellingCorrectionEnabled());
+        assert!(!view.isAutomaticTextCompletionEnabled());
+        unsafe {
+            let trait_value: isize = msg_send![&**view, inlinePredictionType];
+            assert_eq!(trait_value, 1);
+            let trait_value: isize = msg_send![&**view, textCompletionType];
+            assert_eq!(trait_value, 1);
+            let trait_value: isize = msg_send![&**view, autocorrectionType];
+            assert_eq!(trait_value, 1);
+            let trait_value: isize = msg_send![&**view, mathExpressionCompletionType];
+            assert_eq!(trait_value, 1);
+            let completion_range: NSRange = msg_send![&**view, rangeForUserCompletion];
+            assert_eq!(completion_range, NSRange::new(NSNotFound as usize, 0));
+            let completions: Option<Retained<NSArray<NSString>>> = msg_send![
+                &**view, completionsForPartialWordRange: range,
+                indexOfSelectedItem: std::ptr::null_mut::<isize>()
+            ];
+            assert!(completions.is_none());
+
+            let _: () = msg_send![&**view, complete: Option::<&AnyObject>::None];
+            let _: () = msg_send![&**view, updateCandidates];
+            for final_choice in [false, true] {
+                let _: () = msg_send![
+                    &**view, insertCompletion: &*suggestion, forPartialWordRange: range,
+                    movement: 0isize, isFinal: final_choice
+                ];
+            }
+            let _: () = msg_send![
+                &**view, insertCandidateString: &*suggestion, replacementRange: range,
+                fromTextCheckingResult: true
+            ];
+            let _: () = msg_send![&**view, insertCandidateTextCheckingResult: &*result];
+        }
+        assert_eq!(canvas.value(), initial);
+        assert_eq!(canvas.selection(), (11, 11));
+        assert!(canvas.misspelled().contains(&(8, 14)));
+
+        for slot in [&canvas, &composer] {
+            let Editor::Multiline(view) = &slot.state.editor else {
+                panic!("the slot uses a text view");
+            };
+            let is_canvas = slot.state.kind == TextKind::Canvas;
+            let delegate = &*slot._delegate;
+            let options = NSDictionary::<NSString, NSString>::new();
+            let mut types = 1u64 << 1; // NSTextCheckingTypeSpelling
+            unsafe {
+                let candidates: Option<Retained<NSArray>> =
+                    msg_send![delegate, textView: &**view, candidatesForSelectedRange: range];
+                assert_eq!(candidates.as_deref().map(NSArray::count), is_canvas.then_some(0));
+                let candidates: Retained<NSArray> = msg_send![
+                    delegate, textView: &**view, candidates: &*checking_results,
+                    forSelectedRange: range
+                ];
+                assert_eq!(candidates.count(), usize::from(!is_canvas));
+                let completions: Retained<NSArray<NSString>> = msg_send![
+                    delegate, textView: &**view, completions: &*suggestions,
+                    forPartialWordRange: range, indexOfSelectedItem: std::ptr::null_mut::<isize>()
+                ];
+                assert_eq!(completions.count(), usize::from(!is_canvas));
+                let may_select: bool =
+                    msg_send![delegate, textView: &**view, shouldSelectCandidateAtIndex: 0usize];
+                assert_eq!(may_select, !is_canvas);
+                let returned: Retained<NSDictionary<NSString, NSString>> = msg_send![
+                    delegate, textView: &**view, willCheckTextInRange: range, options: &*options,
+                    types: &mut types as *mut u64
+                ];
+                assert!(std::ptr::eq(&*returned, &*options));
+                assert_eq!(types, if is_canvas { 0 } else { 1 << 1 });
+            }
+        }
+
+        canvas.set_font("Helvetica", 24.);
+        // AppKit can change attributes while composing between paints.
+        let alternate = NSFont::systemFontOfSize(18.);
+        view.setFont(Some(&alternate));
+        for _ in 0..3 {
+            canvas.set_font("Helvetica", 24.);
+        }
+        assert_eq!(view.font().unwrap().pointSize(), 18.);
+        assert_eq!(canvas.value(), initial);
+        assert_eq!(canvas.selection(), (11, 11));
+        canvas.set_font_size(20.);
+        canvas.set_font("Helvetica", 24.);
+        assert_eq!(view.font().unwrap().pointSize(), 24.);
+
+        // The normal NSTextInputClient entry points still take marked text.
+        unsafe {
+            let marked = NSString::from_str("日本");
+            let _: () = msg_send![
+                &**view, setMarkedText: &*marked, selectedRange: NSRange::new(2, 0),
+                replacementRange: NSRange::new(NSNotFound as usize, 0)
+            ];
+            let has_marked_text: bool = msg_send![&**view, hasMarkedText];
+            assert!(has_marked_text);
+            let committed = NSString::from_str("語");
+            let _: () = msg_send![
+                &**view, insertText: &*committed,
+                replacementRange: NSRange::new(NSNotFound as usize, 0)
+            ];
+            let has_marked_text: bool = msg_send![&**view, hasMarkedText];
+            assert!(!has_marked_text);
+            assert!(canvas.value().contains('語'));
+        }
+    }
+}

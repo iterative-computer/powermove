@@ -1,0 +1,1775 @@
+use crate::{Error, Result, json_value, model};
+use pm_kernel::session::{SessionHandle, SessionSource, ShellCall, ShellReply};
+use pm_kernel::{
+    Ack, ActorHistoryMark, Call, Caller, Command, Kernel, KernelConfig, KernelEvent, KernelHandle,
+    Origin, Published, Reply, Request, Selection, Snapshot, WriteBody, state::StateSnapshot,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, mpsc},
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AutomationEvent {
+    pub project_id: String,
+    pub revision: u64,
+    pub kind: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CaptureRequest {
+    pub project_id: String,
+    pub revision: u64,
+    pub times: Vec<f64>,
+    pub width: u32,
+}
+/// Renders a project's frames as MCP base64 image blocks.
+pub trait EngineHook: Send + Sync {
+    /// Settle live extension registrations before registry-dependent edits.
+    /// Called on the MCP worker without the Automation mutex held.
+    fn prepare_definitions(&self, _project: &str, _document: u64, _revision: u64) -> Result<()> {
+        Ok(())
+    }
+    fn capture(&self, request: &CaptureRequest) -> Result<Value>;
+    fn extension_probe(
+        &self, _project: &str, _document: u64, _revision: u64, _ids: &[String],
+    ) -> Result<Value> {
+        Err(Error::unavailable("native extension probe renderer"))
+    }
+    fn eval_registrations(&self, _project: &str, _document: u64, _revision: u64) -> Result<Value> {
+        Err(Error::unavailable("native registration evidence"))
+    }
+    fn measure_frame_time(&self, _project: &str, _document: u64, _revision: u64, _args: &Value) -> Result<Value> {
+        Err(Error::unavailable("paired native frame timing"))
+    }
+    fn render_effect_lab(
+        &self,
+        _: &crate::effect_lab::Request,
+        _: &crate::effect_lab::Context,
+        _: &(dyn Fn() -> bool + Sync),
+    ) -> Result<crate::services::ToolOutput> {
+        Err(Error::unavailable("native effect lab renderer"))
+    }
+    fn capture_snapshot(
+        &self,
+        request: &CaptureRequest,
+        _snapshot: &crate::services::FrozenProject,
+    ) -> Result<Value> {
+        self.capture(request)
+    }
+    fn scene3d_assets(
+        &self,
+        _snapshot: &crate::services::FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        Ok(Arc::new(pm_scene3d::geometry::NoAssets))
+    }
+    fn resolve_media(
+        &self,
+        _: &crate::services::MediaRequest,
+    ) -> Result<crate::media_tools::MediaSource> {
+        Err(Error::unavailable(
+            "engine original media resolver and evaluated source timing",
+        ))
+    }
+    fn probe(
+        &self,
+        _: &crate::services::MediaRequest,
+        _: &crate::media_tools::MediaSource,
+    ) -> Result<crate::media_tools::Probe> {
+        Err(Error::unavailable("engine native media probe"))
+    }
+    fn sample(&self, _: &crate::media_tools::FrameRequest) -> Result<Vec<crate::services::Image>> {
+        Err(Error::unavailable("engine native source-frame decoder"))
+    }
+    fn scan(&self, _: &crate::media_tools::ScanRequest) -> Result<crate::media_tools::Scan> {
+        Err(Error::unavailable("engine informative source-frame scan"))
+    }
+    fn sheet(&self, _: &crate::media_tools::SheetRequest) -> Result<crate::services::Image> {
+        Err(Error::unavailable(
+            "engine labelled contact-sheet assembler",
+        ))
+    }
+    fn composition_sheet(
+        &self,
+        request: &crate::media_tools::SheetRequest,
+    ) -> Result<crate::media_tools::SheetOutput> {
+        Ok(crate::media_tools::SheetOutput {
+            image: self.sheet(request)?,
+            completed: request.cells.len(),
+        })
+    }
+    fn waveform(
+        &self,
+        _: &crate::media_tools::WaveformRequest,
+    ) -> Result<crate::media_tools::Waveform> {
+        Err(Error::unavailable(
+            "engine measured waveform and loudness worker",
+        ))
+    }
+}
+/// The running app's panels and workspace (open_panel, get_panel_state,
+/// interact_panel, capture_panel, computer_use_panel, set_panel_layout and the
+/// live half of get_workspace_state/get_panel_layout). Runs on the main thread;
+/// the worker waits for its reply. `project` is the session's attached project.
+pub type AgentGrants = Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>;
+pub type AgentWorkspace = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+/// The project a grant token's run was started from (none for an app thread).
+pub type AgentProjects = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub trait SurfaceHook: Send + Sync {
+    fn call(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
+}
+/// Either the headless binary's own kernel or the running app's actor.
+enum Backend {
+    Owned(Box<Kernel>),
+    App(Arc<crate::app_host::Host>),
+}
+/// One project's published state, read the same way from either backend.
+pub struct ProjectView {
+    pub document: u64,
+    pub revision: u64,
+    pub snapshot: Snapshot,
+    pub selection: Selection,
+    pub workspace: pm_model::Value,
+    pub path: Option<PathBuf>,
+}
+pub enum StateRead<'a> {
+    Owned(&'a StateSnapshot),
+    Shared(Arc<StateSnapshot>),
+}
+impl std::ops::Deref for StateRead<'_> {
+    type Target = StateSnapshot;
+    fn deref(&self) -> &StateSnapshot {
+        match self {
+            Self::Owned(state) => state,
+            Self::Shared(state) => state,
+        }
+    }
+}
+/// The host bound to one caller's attached document until dropped, so a
+/// queued request cannot land in a replacement document that reuses the
+/// project id. Without a fence, requests go to the project's current document.
+pub struct Fenced<'a>(std::sync::MutexGuard<'a, Automation>);
+impl Automation {
+    pub fn fenced(
+        host: &std::sync::Mutex<Automation>,
+        document: Option<u64>,
+    ) -> Result<Fenced<'_>> {
+        let mut guard = host
+            .lock()
+            .map_err(|_| Error::unavailable("headless host stopped"))?;
+        guard.document_fence = document;
+        Ok(Fenced(guard))
+    }
+}
+impl std::ops::Deref for Fenced<'_> {
+    type Target = Automation;
+    fn deref(&self) -> &Automation {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Fenced<'_> {
+    fn deref_mut(&mut self) -> &mut Automation {
+        &mut self.0
+    }
+}
+impl Drop for Fenced<'_> {
+    fn drop(&mut self) {
+        self.0.document_fence = None;
+        self.0.composition = None;
+    }
+}
+/// Single owner host. Call on a dedicated worker; do not put this behind a mutex
+/// that a UI thread waits for. It never discovers a profile.
+pub struct Automation {
+    backend: Backend,
+    /// See [`Fenced`].
+    document_fence: Option<u64>,
+    pub(crate) composition: Option<String>,
+    composition_selections: HashMap<(u64, String), Vec<String>>,
+    pub profile: PathBuf,
+    pub exports: PathBuf,
+    pub active: Option<String>,
+    sessions: HashMap<String, SessionHandle>,
+    pending_opens: crate::recovery::PendingOpens,
+    subscribers: Vec<mpsc::Sender<AutomationEvent>>,
+    presence: Vec<mpsc::SyncSender<crate::presence::Presence>>,
+    pub engine: Option<Arc<dyn EngineHook>>,
+    pub surfaces: Option<Arc<dyn SurfaceHook>>,
+    /// Resolves a provider run's grant token (`--agent-run`) to its run id and
+    /// MCP access. Only the app issues tokens.
+    pub agent_grants: Option<AgentGrants>,
+    pub agent_workspace: Option<AgentWorkspace>,
+    pub agent_projects: Option<AgentProjects>,
+    pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    pub media_importer: Option<Arc<dyn crate::services::MediaImporter>>,
+    pub speech: Option<Arc<dyn crate::services::Speech>>,
+    pub threads: Option<Arc<dyn crate::services::ThreadArchive>>,
+    pub export_jobs: Arc<crate::export_jobs::ExportJobs>,
+    /// Loaded 3D geometry from the native import/engine worker, for snapshot-bound placement and exploded views.
+    pub scene3d_assets: Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>,
+    pub export_child: Arc<dyn crate::services::ExportChild>,
+    pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
+    pub creative: Arc<dyn crate::creative::CreativeInspection>,
+    /// Extension authoring: staging, publication, forks and rebases.
+    pub extensions: Option<Arc<dyn crate::extensions::ExtensionHost>>,
+    pub(crate) completions: HashMap<String, crate::completion::Receipt>,
+    pub(crate) completion_owners: HashMap<String, String>,
+}
+impl Automation {
+    /// `profile` must be an explicit, isolated native destination, never the
+    /// Electron profile. Kernel's locks and copy decisions remain authoritative.
+    pub fn new(profile: PathBuf, exports: PathBuf) -> Result<Self> {
+        if !profile.is_absolute() || !exports.is_absolute() {
+            return Err(Error::invalid(
+                "Use absolute native profile and export paths",
+            ));
+        }
+        std::fs::create_dir_all(&profile)?;
+        let mut kernel = Kernel::new(KernelConfig {
+            journal_root: Some(profile.join("journals")),
+            backup_root: Some(profile.join("backups")),
+            ..Default::default()
+        });
+        match kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: profile.clone(),
+                format: pm_kernel::persistence::DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .map_err(Error::kernel)?
+        {
+            ShellReply::Library(pm_kernel::locks::OpenDecision::Writable) => {}
+            other => return Err(Error::kernel(other)),
+        }
+        Ok(Self::with_backend(
+            Backend::Owned(Box::new(kernel)),
+            profile,
+            exports,
+        ))
+    }
+    /// Attach to the running app's kernel actor and session slot.
+    pub fn attached(host: Arc<crate::app_host::Host>, exports: PathBuf) -> Self {
+        let profile = host.profile.clone();
+        Self::with_backend(Backend::App(host), profile, exports)
+    }
+    fn with_backend(backend: Backend, profile: PathBuf, exports: PathBuf) -> Self {
+        Self {
+            backend,
+            document_fence: None,
+            composition: None,
+            composition_selections: HashMap::new(),
+            profile,
+            exports,
+            active: None,
+            sessions: HashMap::new(),
+            pending_opens: Default::default(),
+            subscribers: Vec::new(),
+            presence: Vec::new(),
+            engine: None,
+            surfaces: None,
+            agent_grants: None,
+            agent_workspace: None,
+            agent_projects: None,
+            media_registry: None,
+            media_importer: None,
+            speech: None,
+            threads: None,
+            export_jobs: Arc::new(crate::export_jobs::ExportJobs::default()),
+            scene3d_assets: None,
+            export_child: Arc::new(crate::services::NativeExportChild),
+            store_reads: None,
+            extensions: None,
+            completions: Default::default(),
+            completion_owners: Default::default(),
+            creative: Arc::new(crate::creative::CreativeReader::default()),
+        }
+    }
+    /// The headless binary's own kernel; none when attached to the app's actor.
+    pub fn kernel(&self) -> Option<&Kernel> {
+        match &self.backend {
+            Backend::Owned(kernel) => Some(kernel),
+            Backend::App(_) => None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn kernel_mut(&mut self) -> &mut Kernel {
+        match &mut self.backend {
+            Backend::Owned(kernel) => kernel,
+            Backend::App(_) => panic!("Attached automation has no owned kernel"),
+        }
+    }
+    fn app(&self) -> Option<&Arc<crate::app_host::Host>> {
+        match &self.backend {
+            Backend::Owned(_) => None,
+            Backend::App(host) => Some(host),
+        }
+    }
+    pub fn coedit_host(&self) -> Option<Arc<crate::app_host::Host>> {
+        match &self.backend {
+            Backend::App(host) => Some(host.clone()),
+            _ => None,
+        }
+    }
+    pub fn active_project(&self) -> Option<String> {
+        match &self.backend {
+            Backend::Owned(_) => self.active.clone(),
+            Backend::App(host) => host.current().map(|session| session.project),
+        }
+    }
+    pub fn state(&self) -> StateRead<'_> {
+        match &self.backend {
+            Backend::Owned(kernel) => StateRead::Owned(kernel.state()),
+            Backend::App(host) => StateRead::Shared(host.kernel.state()),
+        }
+    }
+    pub fn view(&self, id: &str) -> Result<ProjectView> {
+        let mut view = self.original_view(id)?;
+        if let Some(comp) = &self.composition {
+            let non_open = view.snapshot.open_comp().as_ref() != Some(comp);
+            view.snapshot = composition_snapshot(&view.snapshot, comp)?;
+            if non_open {
+                let layers = view.snapshot.layers(Some(comp));
+                let selection = self
+                    .composition_selections
+                    .get(&(view.document, comp.clone()))
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| layers.iter().any(|layer| layer.id == **id))
+                    .cloned()
+                    .collect();
+                view.selection = Selection::from_parts(selection, vec![], None);
+            }
+        }
+        Ok(view)
+    }
+    pub(crate) fn video_request(
+        &self,
+        id: &str,
+        args: &Value,
+    ) -> Result<crate::services::VideoExportRequest> {
+        let options = crate::services::VideoOptions::parse(args)?;
+        let snapshot = self.freeze(id)?;
+        if self.document_fence.is_some_and(|document| document != snapshot.document_id) {
+            return Err(Error::conflict("The attached project changed before export started"));
+        }
+        let publication = if let Some(host) = self.app() {
+            let mut published = host
+                .kernel
+                .published(id)
+                .filter(|p| {
+                    p.snapshot.doc_id == snapshot.document_id && p.revision() == snapshot.revision
+                })
+                .ok_or_else(|| Error::conflict("The composition changed before export started"))?;
+            if let Some(comp) = self.composition.as_deref() {
+                let targeted = composition_snapshot(&published.snapshot, comp)?;
+                Arc::make_mut(&mut published).snapshot = targeted;
+            }
+            Some(published)
+        } else {
+            None
+        };
+        Ok(crate::services::VideoExportRequest {
+            snapshot,
+            publication,
+            options,
+            directory: self.exports.clone(),
+            cancel: Arc::default(),
+        })
+    }
+    pub(crate) fn original_view(&self, id: &str) -> Result<ProjectView> {
+        match &self.backend {
+            Backend::Owned(kernel) => {
+                let project = kernel
+                    .project(id)
+                    .ok_or_else(|| Error::invalid("Project is not open"))?;
+                let store = project.store();
+                Ok(ProjectView {
+                    document: store.doc_id(),
+                    revision: store.revision(),
+                    snapshot: store.snapshot(),
+                    selection: store.selection().clone(),
+                    workspace: project.workspace().clone(),
+                    path: store.path().map(std::path::Path::to_path_buf),
+                })
+            }
+            Backend::App(host) => {
+                let p = host
+                    .kernel
+                    .published(id)
+                    .ok_or_else(|| Error::invalid("Project is not open"))?;
+                Ok(ProjectView {
+                    document: p.snapshot.doc_id,
+                    revision: p.revision(),
+                    snapshot: p.snapshot.clone(),
+                    selection: p.selection.clone(),
+                    workspace: p.workspace.clone(),
+                    path: p.path.clone(),
+                })
+            }
+        }
+    }
+    pub(crate) fn scene_geometry(
+        &self,
+        id: &str,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        if let Some(assets) = &self.scene3d_assets {
+            return Ok(assets.clone());
+        }
+        match &self.engine {
+            Some(engine) => engine.scene3d_assets(&self.freeze(id)?),
+            None => Ok(Arc::new(pm_scene3d::geometry::NoAssets)),
+        }
+    }
+    fn shell(&mut self, call: ShellCall) -> Result<ShellReply> {
+        match &mut self.backend {
+            Backend::Owned(kernel) => kernel.shell(call).map_err(Error::kernel),
+            Backend::App(host) => host.shell(call),
+        }
+    }
+    /// Bounded and nonblocking: a hidden/slow surface never stalls editing.
+    pub fn subscribe_presence(&mut self) -> mpsc::Receiver<crate::presence::Presence> {
+        let (tx, rx) = mpsc::sync_channel(6);
+        self.presence.push(tx);
+        rx
+    }
+    pub(crate) fn presence(
+        &mut self,
+        project: &str,
+        run: &str,
+        kind: crate::presence::Kind,
+        layer: Option<String>,
+    ) {
+        self.presence_detail(project, run, kind, layer, None, Vec::new());
+    }
+    pub(crate) fn presence_detail(
+        &mut self,
+        project: &str,
+        run: &str,
+        kind: crate::presence::Kind,
+        layer: Option<String>,
+        property: Option<String>,
+        times: Vec<f64>,
+    ) {
+        if self.composition.as_ref().is_some_and(|comp| {
+            self.original_view(project)
+                .is_ok_and(|view| view.snapshot.open_comp().as_ref() != Some(comp))
+        }) {
+            return;
+        }
+        if self.presence.is_empty() && matches!(&self.backend, Backend::Owned(_)) {
+            return;
+        }
+        let event = crate::presence::Presence {
+            project: project.into(),
+            run: run.into(),
+            step: self.revision(project).unwrap_or(0),
+            kind,
+            layer,
+            property,
+            times,
+        };
+        if let Backend::App(host) = &self.backend {
+            host.publish_presence(event.clone());
+        }
+        self.presence.retain(|tx| {
+            !matches!(
+                tx.try_send(event.clone()),
+                Err(mpsc::TrySendError::Disconnected(_))
+            )
+        });
+    }
+    pub fn subscribe(&mut self) -> mpsc::Receiver<AutomationEvent> {
+        let (tx, rx) = mpsc::channel();
+        self.subscribers.push(tx);
+        rx
+    }
+    fn emit(&mut self, id: &str, kind: &str) {
+        let revision = self.revision(id).unwrap_or(0);
+        let event = AutomationEvent {
+            project_id: id.into(),
+            revision,
+            kind: kind.into(),
+        };
+        self.subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+    pub fn revision(&self, id: &str) -> Result<u64> {
+        Ok(self.view(id)?.revision)
+    }
+    /// The owned store, for headless harnesses. Production paths read `view`.
+    pub fn store(&self, id: &str) -> Result<&pm_kernel::DocumentStore> {
+        self.kernel()
+            .ok_or_else(|| Error::unavailable("an owned kernel store"))?
+            .project(id)
+            .map(|p| p.store())
+            .ok_or_else(|| Error::invalid("Project is not open"))
+    }
+    /// The authored model stays in JavaScript's UTF-16 domain. File ingress,
+    /// portable export and snapshots must not round-trip it through serde JSON.
+    pub fn read_document_model(&self, id: &str) -> Result<pm_model::Value> {
+        let view = self.view(id)?;
+        let mut project = pm_model::canonical::realize_project(working_document(&view.snapshot)?);
+        if let Some(object) = project.as_object_mut() {
+            object.insert("revision", pm_model::Value::Number(view.revision as f64));
+        }
+        Ok(project)
+    }
+    fn project_identity(&self, id: &str) -> Result<Value> {
+        // Only the response metadata needs a Unicode projection. An unrelated
+        // opaque authored field may contain any JavaScript UTF-16 code units.
+        let view = self.view(id)?;
+        let name = view
+            .snapshot
+            .root()
+            .and_then(|root| root.get("name"))
+            .and_then(|node| match node.kind() {
+                pm_model::NodeKind::String(text) => text.as_str(),
+                _ => None,
+            });
+        let mut identity = json!({"projectId": id, "name": name});
+        if let Some(extensions) = self
+            .app()
+            .map(|host| host.project_extensions(view.document))
+            && let Some(report) = extensions.report.as_object()
+        {
+            identity.as_object_mut().unwrap().extend(report.clone());
+        }
+        Ok(identity)
+    }
+    pub fn project_memory(
+        &mut self,
+        id: &str,
+        args: &Value,
+        writer: u32,
+    ) -> Result<pm_model::Value> {
+        let view = self.view(id)?;
+        let document = view.document;
+        let prepared = crate::memory_admission::prepare(
+            view.snapshot
+                .root()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+            args,
+        )?;
+        match prepared {
+            crate::memory_admission::Prepared::Read(value) => Ok(value),
+            crate::memory_admission::Prepared::Write(call) => {
+                let ack = self.call(
+                    id,
+                    Request::new(Caller::realm(writer, 1, Origin::Mcp), call)
+                        .with_document(document),
+                )?;
+                crate::memory_admission::result(ack)
+            }
+        }
+    }
+
+    pub fn read_document(&self, id: &str) -> Result<Value> {
+        document_json(&self.view(id)?.snapshot)
+    }
+    /// The kernel half of `get_workspace_state`; the window adds viewport,
+    /// open projects, extension health, errors and unsaved state.
+    pub fn workspace_state(&self, project: Option<&str>) -> Result<Value> {
+        let state = self.state();
+        let mut effects = Vec::<Value>::new();
+        for entry in state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter(|entry| project.map_or(entry.project.is_none(), |id| entry.visible_to(id)))
+        {
+            let effect = json_value(&entry.definition);
+            let row = json!({"id":effect["id"],"label":effect["label"],"group":effect["group"],
+                "parameters":effect["params"].as_array().map(|params| params.iter().map(|p| p["k"].clone()).collect::<Vec<_>>()).unwrap_or_default()});
+            match effects.iter_mut().find(|e| e["id"] == row["id"]) {
+                Some(previous) => *previous = row,
+                None => effects.push(row),
+            }
+        }
+        let extensions = state
+            .extensions
+            .values()
+            .filter(|e| e.installed)
+            .map(|e| json!({"id":e.id,"version":e.version,"enabled":e.enabled,"health":null}))
+            .collect::<Vec<_>>();
+        drop(state);
+        let (identity, selection) = match project {
+            Some(id) => {
+                let view = self.view(id)?;
+                let document = json_value(&pm_model::canonical::realize_project(
+                    view.snapshot
+                        .document
+                        .to_value()
+                        .ok_or_else(|| Error::invalid("Missing document"))?,
+                ));
+                (
+                    json!({"id":id,"name":document["name"],"revision":view.revision,
+                        "layerCount":document["layers"].as_array().map_or(0, Vec::len),
+                        "file":view.path.as_ref().map(|p| p.display().to_string()),"unsaved":null}),
+                    self.selection(id)?,
+                )
+            }
+            None => (Value::Null, Value::Null),
+        };
+        Ok(
+            json!({"project":identity,"openProjects":[],"extensions":extensions,
+            "registeredEffects":effects,"projectsScreenOpen":false,"selection":selection,
+            "layout":self.panel_layout(project)?,"viewport":null,"errors":[]}),
+        )
+    }
+    pub fn selection(&self, id: &str) -> Result<Value> {
+        let s = self.view(id)?.selection;
+        Ok(json!({"layers":s.layers(),"keys":s.keys(),"chan":s.channel()}))
+    }
+    pub fn playhead(&self, id: &str) -> f64 {
+        self.state()
+            .ui
+            .get(id)
+            .and_then(|ui| ui.transport.get("time"))
+            .and_then(pm_model::Value::as_f64)
+            .unwrap_or(0.0)
+    }
+    pub fn apply_commands(
+        &mut self,
+        id: &str,
+        commands: Vec<Command>,
+        label: &str,
+        origin: Origin,
+        expected_revision: u64,
+        writer: u32,
+    ) -> Result<Ack> {
+        self.apply_commands_guarded(
+            id,
+            commands,
+            label,
+            origin,
+            expected_revision,
+            writer,
+            false,
+        )
+    }
+    pub(crate) fn apply_commands_guarded(
+        &mut self,
+        id: &str,
+        commands: Vec<Command>,
+        label: &str,
+        origin: Origin,
+        expected_revision: u64,
+        writer: u32,
+        outside: bool,
+    ) -> Result<Ack> {
+        if !matches!(origin, Origin::Mcp | Origin::Agent) {
+            return Err(Error::invalid(
+                "Automation edits require Mcp or Agent origin",
+            ));
+        }
+        let body = self.scoped_body(id, WriteBody::Commands(commands), label, origin)?;
+        let request = Request::new(
+            Caller::realm(writer, 1, origin),
+            Call::Transact {
+                label: Some(label.into()),
+                body,
+                expected_revision: Some(expected_revision),
+            },
+        );
+        self.call(
+            id,
+            if outside {
+                request.outside_revision(expected_revision)
+            } else {
+                request
+            },
+        )
+    }
+    pub(crate) fn apply_body(
+        &mut self,
+        id: &str,
+        body: WriteBody,
+        label: &str,
+        expected: u64,
+        writer: u32,
+        outside: bool,
+    ) -> Result<Ack> {
+        let body = self.scoped_body(id, body, label, Origin::Mcp)?;
+        let request = Request::new(
+            Caller::realm(writer, 1, Origin::Mcp),
+            Call::Transact {
+                label: Some(label.into()),
+                body,
+                expected_revision: Some(expected),
+            },
+        );
+        self.call(
+            id,
+            if outside {
+                request.outside_revision(expected)
+            } else {
+                request
+            },
+        )
+    }
+
+    fn scoped_body(
+        &self,
+        id: &str,
+        body: WriteBody,
+        label: &str,
+        origin: Origin,
+    ) -> Result<WriteBody> {
+        // Plan on a private targeted tree. Only authored differences reach the
+        // real actor, guarded by the same document and revision as any agent edit.
+        let body = match (self.composition.as_ref(), body) {
+            (Some(_), WriteBody::Commands(commands)) => {
+                let snapshot = self.view(id)?.snapshot;
+                let mut scratch = pm_kernel::DocumentStore::scratch(&snapshot);
+                scratch.set_runtime_state(self.state().for_project(id), None);
+                scratch
+                    .transact(label, origin, &commands)
+                    .map_err(Error::kernel)?;
+                WriteBody::Ops(pm_model::ops::diff_node_ops(
+                    snapshot.root(),
+                    scratch.snapshot().root(),
+                ))
+            }
+            (_, body) => body,
+        };
+        Ok(body)
+    }
+    fn call(&mut self, id: &str, mut request: Request) -> Result<Ack> {
+        let ack = match &mut self.backend {
+            Backend::Owned(kernel) => kernel
+                .handle(id, request)
+                .map_err(Error::kernel)?
+                .reply
+                .ok_or_else(|| Error::unavailable("external history continuation runtime"))?,
+            Backend::App(host) => {
+                let document = self
+                    .document_fence
+                    .or_else(|| host.kernel.published(id).map(|p| p.snapshot.doc_id))
+                    .ok_or_else(|| {
+                        Error::conflict("Project closed before the request was admitted")
+                    })?;
+                request = request.with_document(document);
+                host.kernel
+                    .call(id, request)
+                    .wait()
+                    .ok_or_else(crate::app_host::stopped)?
+                    .map_err(Error::kernel)?
+            }
+        };
+        if let Reply::Throw(e) = &ack.reply {
+            return Err(Error::kernel(e));
+        }
+        // A notice can accompany an applied edit (notably NotDurable). Keep
+        // its acknowledgement so the session still tracks and can undo it.
+        if let Some(notice) = &ack.notice {
+            eprintln!("MCP kernel notice: {notice:?}");
+            self.emit(id, &format!("notice: {notice:?}"));
+        }
+        self.emit(id, "published");
+        Ok(ack)
+    }
+    pub fn select_layers(
+        &mut self,
+        id: &str,
+        ids: &[String],
+        add: bool,
+        writer: u32,
+    ) -> Result<Value> {
+        if let Some(comp) = &self.composition {
+            let view = self.original_view(id)?;
+            if view.snapshot.open_comp().as_ref() != Some(comp) {
+                let selected = self
+                    .composition_selections
+                    .entry((view.document, comp.clone()))
+                    .or_default();
+                if !add {
+                    selected.clear();
+                }
+                for id in ids {
+                    if !selected.contains(id) {
+                        selected.push(id.clone());
+                    }
+                }
+                return self.selection(id);
+            }
+        }
+        self.call(
+            id,
+            Request::new(
+                Caller::realm(writer, 1, Origin::Mcp),
+                pm_kernel::SelectionCall::Layers {
+                    ids: ids.to_vec(),
+                    add,
+                },
+            ),
+        )?;
+        self.selection(id)
+    }
+    pub fn agent_turn(&mut self, id: &str, writer: u32, active: bool) -> Result<()> {
+        self.call(
+            id,
+            Request::new(
+                Caller::realm(writer, 1, Origin::Mcp),
+                pm_kernel::HistoryCall::AgentTurn { active },
+            ),
+        )?;
+        Ok(())
+    }
+    pub(crate) fn begin_checked_edit(
+        &mut self, project: &str, writer: u32, label: &str, revision: u64,
+    ) -> Result<u64> {
+        use pm_kernel::EditCall;
+        let ack = self.call(project, Request::new(
+            Caller::realm(writer, 1, Origin::Mcp),
+            EditCall::MutateBegin { label: label.to_owned() },
+        ).outside_revision(revision))?;
+        match ack.reply {
+            Reply::Mutation(lease) => Ok(lease),
+            _ => Err(Error::kernel(ack.reply)),
+        }
+    }
+
+    /// Commits or aborts the lease. An abort that could not take everything
+    /// back (another writer changed the same values) keeps the work and
+    /// returns the kernel's reason with the revision.
+    pub(crate) fn finish_checked_edit(
+        &mut self, project: &str, writer: u32, lease: u64, commit: bool,
+    ) -> Result<(u64, Option<String>)> {
+        use pm_kernel::EditCall;
+        let call = if commit {
+            EditCall::MutateFinish { lease, ops: Vec::new(), label: None }
+        } else {
+            EditCall::MutateAbort { lease }
+        };
+        let ack = self.call(
+            project, Request::new(Caller::realm(writer, 1, Origin::Mcp), call),
+        )?;
+        let kept = match &ack.notice {
+            Some(pm_kernel::Notice::CommitWithNotice { reason, .. }) => Some(reason.clone()),
+            _ => None,
+        };
+        match &ack.reply {
+            Reply::Bool(true) => Ok((ack.revision, kept)),
+            Reply::Edit(value) if value.ok => Ok((ack.revision, kept)),
+            _ => Err(Error::kernel(ack.reply)),
+        }
+    }
+
+    /// [`Self::restore`] from a snapshot in its native form: no JSON
+    /// projection, so authored strings (lone surrogates included) come back
+    /// byte for byte. Current notes stay, as there.
+    pub(crate) fn restore_snapshot(
+        &mut self,
+        id: &str,
+        snapshot: &pm_kernel::Snapshot,
+        expected: u64,
+        writer: u32,
+    ) -> Result<u64> {
+        let mut project =
+            pm_model::canonical::realize_project(crate::automation::working_document(snapshot)?);
+        let view = self.view(id)?;
+        let current = crate::automation::working_document(&view.snapshot)?;
+        if let (pm_model::Value::Object(target), pm_model::Value::Object(current)) =
+            (&mut project, &current)
+        {
+            for key in ["memory", "memoryEnabled"] {
+                match current.get(key) {
+                    Some(value) => {
+                        target.insert(key, value.clone());
+                    }
+                    None => {
+                        target.remove(key);
+                    }
+                }
+            }
+        }
+        let ack = self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, Origin::Mcp),
+                    Call::Restore {
+                        project,
+                        label: "Roll back agent changes".into(),
+                        expected_revision: expected,
+                        expected_document: view.document,
+                    },
+                ),
+            )
+            .map_err(|e| Error::conflict(e.message))?;
+        Ok(ack.revision)
+    }
+
+    pub fn history_mark(&mut self, id: &str, writer: u32) -> Result<ActorHistoryMark> {
+        match self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, Origin::Mcp),
+                    pm_kernel::HistoryCall::Mark,
+                ),
+            )?
+            .reply
+        {
+            Reply::Mark(mark) => Ok(mark),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub fn squash(
+        &mut self,
+        id: &str,
+        mark: &ActorHistoryMark,
+        label: &str,
+    ) -> Result<Option<u64>> {
+        let revision = self.revision(id)?;
+        let writer = mark.writer();
+        match self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer.realm, writer.generation, Origin::Mcp),
+                    pm_kernel::HistoryCall::Squash {
+                        mark: mark.clone(),
+                        label: label.into(),
+                        expected_revision: revision,
+                    },
+                ),
+            )?
+            .reply
+        {
+            Reply::Entry(entry) => Ok(entry),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub fn squash_segments(
+        &mut self,
+        id: &str,
+        mark: &ActorHistoryMark,
+        label: &str,
+    ) -> Result<Option<u64>> {
+        let revision = self.revision(id)?;
+        let writer = mark.writer();
+        match self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer.realm, writer.generation, Origin::Mcp),
+                    pm_kernel::HistoryCall::SquashSegments {
+                        mark: mark.clone(),
+                        label: label.into(),
+                        expected_revision: revision,
+                    },
+                ),
+            )?
+            .reply
+        {
+            Reply::Entry(entry) => Ok(entry),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub fn restore(
+        &mut self,
+        id: &str,
+        mut value: Value,
+        expected: u64,
+        writer: u32,
+    ) -> Result<u64> {
+        // Main treats notes and their agent-access setting as durable metadata,
+        // not video content. Composition rollback must preserve current notes.
+        let current = self.read_document(id)?;
+        if let Some(target) = value.as_object_mut() {
+            for key in ["memory", "memoryEnabled"] {
+                if let Some(current) = current.get(key) {
+                    target.insert(key.into(), current.clone());
+                } else {
+                    target.remove(key);
+                }
+            }
+        }
+        let document = self.view(id)?.document;
+        let ack = self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, Origin::Mcp),
+                    Call::Restore {
+                        project: model(&value),
+                        label: "Roll back agent changes".into(),
+                        expected_revision: expected,
+                        expected_document: document,
+                    },
+                ),
+            )
+            .map_err(|e| Error::conflict(e.message))?;
+        Ok(ack.revision)
+    }
+    pub fn undo(&mut self, id: &str, origin: Origin, writer: u32) -> Result<Ack> {
+        self.call(
+            id,
+            Request::new(
+                Caller::realm(writer, 1, origin),
+                pm_kernel::HistoryCall::Undo,
+            ),
+        )
+    }
+    pub fn capture_frames(&self, request: &CaptureRequest) -> Result<Value> {
+        if self.revision(&request.project_id)? != request.revision {
+            return Err(Error::conflict("Capture revision is stale"));
+        }
+        self.engine
+            .as_ref()
+            .ok_or_else(|| Error::unavailable("engine-service headless render"))?
+            .capture(request)
+    }
+    /// The frozen layout digest reads saved data, never live surface controls.
+    pub fn panel_layout(&self, project: Option<&str>) -> Result<Value> {
+        let state = self.state();
+        let saved = project
+            .map(|id| self.view(id))
+            .transpose()?
+            .map(|view| json_value(&view.workspace));
+        let named = state
+            .settings
+            .get("workspaces")
+            .map(json_value)
+            .unwrap_or(json!([]));
+        let current = state.settings.get("workspace").map(json_value);
+        let workspace = saved.as_ref().filter(|v| v.is_object()).or_else(|| {
+            named
+                .as_array()?
+                .iter()
+                .find(|v| Some(&v["id"]) == current.as_ref())
+        });
+        let registrations = state.registries.get("panels");
+        // A contribution stack exposes only its winning provider, retaining
+        // first-registration ordering just like object property replacement.
+        let mut panels = Vec::<Value>::new();
+        if let Some(registrations) = registrations {
+            for entry in registrations
+                .iter()
+                .filter(|entry| project.map_or(entry.project.is_none(), |id| entry.visible_to(id)))
+            {
+                let definition = json_value(&entry.definition);
+                let id = definition["id"].as_str().unwrap_or(&entry.id);
+                if id.is_empty() {
+                    continue;
+                }
+                let panel = json!({"id":id,"title":definition["title"].as_str().filter(|s| !s.is_empty()).unwrap_or(id)});
+                if let Some(previous) = panels.iter_mut().find(|v| v["id"] == id) {
+                    *previous = panel;
+                } else {
+                    panels.push(panel);
+                }
+            }
+        }
+        let docks = workspace.and_then(|w| w["layout"]["docks"].as_array()).map(|docks| docks.iter().map(|dock| {
+            let children = dock["panels"].as_array().map(|children| children.iter().map(|panel| {
+                let id = panel["id"].as_str().unwrap_or("");
+                let title = panel["title"].as_str().filter(|s| !s.is_empty())
+                    .or_else(|| panels.iter().find(|v| v["id"] == id).and_then(|v| v["title"].as_str()))
+                    .unwrap_or(id);
+                json!({"id":id,"title":title,"collapsed":panel["collapsed"] == true,"flex":panel["flex"] == true,
+                    "size":panel["size"].as_f64().map(|_| panel["size"].clone())})
+            }).collect::<Vec<_>>()).unwrap_or_default();
+            json!({"id":dock["id"].as_str().unwrap_or(""),"size":dock["size"].as_f64().map(|_| dock["size"].clone()),"panels":children})
+        }).collect::<Vec<_>>()).unwrap_or_default();
+        let mut identity = json!(null);
+        if let Some(workspace) = workspace {
+            identity = json!({});
+            for key in ["id", "name"] {
+                if let Some(value) = workspace.get(key) {
+                    identity[key] = value.clone();
+                }
+            }
+        }
+        Ok(json!({"workspace":identity,"docks":docks,"registeredPanels":panels}))
+    }
+    pub fn list_projects(&mut self) -> Result<Value> {
+        let rows = match self.shell(ShellCall::Recent)? {
+            ShellReply::Recent(rows) => {
+                rows.into_iter().map(|v| json_value(&v)).collect::<Vec<_>>()
+            }
+            other => return Err(Error::kernel(other)),
+        };
+        let mut result = json!({"currentProjectId":self.active_project(),"projects":rows});
+        let pending = match self.app() {
+            Some(host) => host.pending_recoveries(),
+            None => self.pending_opens.list(),
+        };
+        if !pending.as_array().unwrap().is_empty() {
+            result["pendingRecoveries"] = pending;
+        }
+        Ok(result)
+    }
+    pub fn create_project(&mut self, args: &Value) -> Result<Value> {
+        let id = pm_kernel::new_id("P");
+        let name = args["name"].as_str().unwrap_or("Untitled").trim();
+        if name.is_empty() {
+            return Err(Error::invalid("name is required"));
+        }
+        let w = args["width"].as_u64().unwrap_or(1920);
+        let h = args["height"].as_u64().unwrap_or(1080);
+        let fps = args["fps"].as_f64().unwrap_or(30.0);
+        let dur = args["duration"].as_f64().unwrap_or(10.0);
+        let value = json!({"id":id,"compId":pm_kernel::new_id("C"),"compName":"Main","comps":{},"name":name,"w":w,"h":h,"fps":fps,"dur":dur,"work":[0,dur],"bg":"#000000","layers":[],"assets":{},"params":{},"markers":[]});
+        if let Some(host) = self.app() {
+            host.open(id.clone(), SessionSource::New(model(&value)))?;
+        } else {
+            let reply = self.shell(ShellCall::Open {
+                id: id.clone(),
+                source: SessionSource::New(model(&value)),
+                electron_profile: None,
+            })?;
+            self.adopt(reply)?;
+        }
+        self.save_library(&id)?;
+        Ok(json!({"projectId":id,"name":name,"width":w,"height":h,"fps":fps,"duration":dur}))
+    }
+    fn adopt(&mut self, reply: ShellReply) -> Result<String> {
+        match reply {
+            ShellReply::Opened {
+                session,
+                decision: pm_kernel::locks::OpenDecision::Writable,
+                recovery:
+                    pm_kernel::session::RecoveryResult::None
+                    | pm_kernel::session::RecoveryResult::Recovered { .. },
+                ..
+            } => {
+                let id = session.project.clone();
+                if let Some(previous) = self.active.clone().filter(|previous| previous != &id)
+                    && let Some(handle) = self.sessions.get(&previous).cloned()
+                {
+                    self.shell(ShellCall::Close(handle))?;
+                    self.sessions.remove(&previous);
+                    self.emit(&previous, "closed");
+                }
+                self.sessions.insert(id.clone(), session);
+                self.active = Some(id.clone());
+                self.emit(&id, "opened");
+                Ok(id)
+            }
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub fn open_project(&mut self, id: &str) -> Result<Value> {
+        self.open_project_choice(id, None)
+    }
+    pub fn open_project_choice(&mut self, id: &str, choice: Option<&Value>) -> Result<Value> {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || id.is_empty()
+        {
+            return Err(Error::invalid("Invalid projectId"));
+        }
+        if let Some(host) = self.app() {
+            if let Some(choice) = choice {
+                return host.decide_recovery(id, choice);
+            }
+            if host.current().is_none_or(|session| session.project != id) {
+                return host.open(
+                    id.into(),
+                    SessionSource::Library {
+                        profile: self.profile.clone(),
+                        project: id.into(),
+                    },
+                );
+            }
+            return self.project_identity(id);
+        }
+        if let Some(choice) = choice {
+            let (ticket, decision) = self.pending_opens.take(id, choice)?;
+            let reply = self.shell(ShellCall::DecideRecovery { ticket, decision })?;
+            return self.finish_open(id, reply);
+        }
+        if !self.sessions.contains_key(id) {
+            let reply = self.shell(ShellCall::PrepareOpen {
+                id: id.into(),
+                source: SessionSource::Library {
+                    profile: self.profile.clone(),
+                    project: id.into(),
+                },
+                electron_profile: None,
+            })?;
+            return self.finish_open(id, reply);
+        }
+        self.active = Some(id.into());
+        self.project_identity(id)
+    }
+    fn finish_open(&mut self, id: &str, reply: ShellReply) -> Result<Value> {
+        if let ShellReply::RecoveryRequired { ticket, recovery } = reply {
+            return Ok(self.pending_opens.required(id, ticket, recovery));
+        }
+        let report = if let ShellReply::Opened { info, .. } = &reply {
+            crate::project_extensions::open_report(&info.extension_bundle, &self.profile).0
+        } else {
+            json!({})
+        };
+        let project = self.adopt(reply)?;
+        let mut identity = self.project_identity(&project)?;
+        identity
+            .as_object_mut()
+            .unwrap()
+            .extend(report.as_object().unwrap().clone());
+        Ok(identity)
+    }
+    /// Explicit host ingress for a caller-selected working file. This uses the
+    /// same kernel session/locks, recovery decisions and resident media table
+    /// as the app; it does not import metadata in place of original bytes.
+    /// The frozen open_project MCP schema remains a library-ID operation.
+    pub fn open_file(&mut self, id: &str, path: PathBuf) -> Result<Value> {
+        if !path.is_absolute() {
+            return Err(Error::invalid("Use an absolute project working-file path"));
+        }
+        if let Some(host) = self.app() {
+            return host.open(id.into(), SessionSource::File(path));
+        }
+        let reply = self.shell(ShellCall::PrepareOpen {
+            id: id.into(),
+            source: SessionSource::File(path),
+            electron_profile: None,
+        })?;
+        self.finish_open(id, reply)
+    }
+    /// Only the process owning a headless host calls this after all clients
+    /// disconnect. Library autosaves are closed; unsaved working files remain
+    /// recoverable and are never silently overwritten on EOF.
+    pub fn close_headless(&mut self) -> Result<()> {
+        if let Some(host) = self.app() {
+            return host.close_headless();
+        }
+        let sessions = self.sessions.values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            let store = self.store(&session.project)?;
+            let call = if store.path().is_some() && store.is_dirty() {
+                ShellCall::DeferClose(session.clone())
+            } else {
+                ShellCall::Close(session.clone())
+            };
+            match self.shell(call)? {
+                ShellReply::Closed {
+                    recovery_copy: None,
+                } => {}
+                other => return Err(Error::kernel(other)),
+            }
+            self.sessions.remove(&session.project);
+        }
+        self.active = None;
+        self.shell(ShellCall::ReleaseLibrary)?;
+        Ok(())
+    }
+    fn session(&self, id: &str) -> Result<SessionHandle> {
+        match self.app() {
+            // Whichever window shows it: an agent keeps working on its project
+            // when another window becomes key.
+            Some(host) => host.session_of(id),
+            None => self.sessions.get(id).cloned(),
+        }
+        .ok_or_else(|| Error::invalid("No shell session"))
+    }
+    pub fn save_library(&mut self, id: &str) -> Result<()> {
+        let handle = self.session(id)?;
+        if let Some(host) = self.app() {
+            return host.save(handle, None).map(|_| ());
+        }
+        match self.shell(ShellCall::Save(handle))? {
+            ShellReply::Saved {
+                recovery_copy: None,
+                ..
+            } => Ok(()),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub fn save_project(&mut self, id: &str) -> Result<Value> {
+        // Pinned main c7f46a056 mcp-project-tools.ts checks filePath before
+        // exporting: an associated working file saves like Cmd-S, retaining
+        // external links even when their originals are currently offline.
+        let view = self.view(id)?;
+        if let Some(path) = view.path {
+            match self.app() {
+                Some(host) => host.save_document(self.session(id)?, view.document)?,
+                None => self.save_library(id)?,
+            }
+            self.emit(id, "saved");
+            return Ok(json!({"path":path,"projectId":id}));
+        }
+        self.export_project(id)
+    }
+
+    pub fn export_project(&mut self, id: &str) -> Result<Value> {
+        let view = self.original_view(id)?;
+        std::fs::create_dir_all(&self.exports)?;
+        let identity = self.project_identity(id)?;
+        let name = identity["name"]
+            .as_str()
+            .unwrap_or("Project")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == ' ' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(100)
+            .collect::<String>();
+        // A library project exports without adopting the new file as the live
+        // session's destination or marking edits clean.
+        let path = self
+            .exports
+            .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));
+        let session = self.session(id)?;
+        let mut plan = match &self.backend {
+            Backend::Owned(kernel) => {
+                kernel.prepare_session_export(session, view.document, path.clone())
+            }
+            Backend::App(host) => host
+                .kernel
+                .prepare_export(session, view.document, path.clone())
+                .wait()
+                .ok_or_else(crate::app_host::stopped)?,
+        }
+        .map_err(Error::kernel)?;
+        let scope = self
+            .app()
+            .map(|host| host.project_extensions(plan.doc_id))
+            .unwrap_or_default();
+        let bundle = plan
+            .root()
+            .map(|root| {
+                crate::project_extensions::collect_from_library(
+                    root,
+                    &self.state().for_project(id),
+                    &self.profile,
+                    &scope,
+                )
+            })
+            .unwrap_or_default();
+        bundle.add_to(&mut plan).map_err(Error::invalid)?;
+        let receipt = plan.run().map_err(Error::kernel)?;
+        if !receipt.unavailable_links.is_empty() {
+            return Err(Error::unavailable(
+                "original media unavailable for complete portable project export",
+            ));
+        }
+        let mut result = json!({"path":path,"projectId":id});
+        if !bundle.entries.is_empty() {
+            result["requiredExtensions"] = json!(bundle.entries);
+        }
+        self.emit(id, "saved");
+        Ok(result)
+    }
+    pub fn library_action(&mut self, call: ShellCall) -> Result<ShellReply> {
+        self.shell(call)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_extensions_mcp_portable_export_lists_extensions_and_open_never_installs() {
+        use crate::project_extensions::{Bundle, STORE_MARKER, Status};
+        use std::{fs, path::PathBuf};
+        let model_value = |v: Value| pm_model::json::parse(&v.to_string());
+        let root = std::env::temp_dir().join(pm_kernel::new_id("pmv-bundle-test"));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let source = root.join("source");
+        let recipient = root.join("recipient");
+        let exports = root.join("exports");
+        for id in ["toy", "unused", "store-demo"] {
+            let path = source.join("extensions").join(id);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("manifest.json"),
+                json!({"id":id,"version":"1.0.0","name":id}).to_string(),
+            )
+            .unwrap();
+            fs::write(path.join("index.ts"), "export default function () {}").unwrap();
+            if id == "store-demo" {
+                fs::write(
+                    path.join(STORE_MARKER),
+                    r#"{"repoId":"synthetic-store-id","redistributable":false}"#,
+                )
+                .unwrap();
+            }
+        }
+        let mut writer = crate::Automation::new(source, exports.clone()).unwrap();
+        let reply = writer
+            .library_action(pm_kernel::session::ShellCall::PrepareOpen {
+                id: "demo".into(),
+                source: pm_kernel::session::SessionSource::New(
+                    model_value(json!({
+                        "name":"Synthetic", "id":"demo", "compId":"root",
+                        "w":32,"h":32,"dur":1,"fps":30,"layers":[
+                            {"id":"solid","type":"solid","fx":[
+                                {"id":"one","type":"toy.tint","on":true,"p":{}},
+                                {"id":"two","type":"store-demo.tint","on":true,"p":{}},
+                                {"id":"three","type":"blur","on":true,"p":{}}
+                            ]}
+                        ]
+                    }))
+                    .unwrap(),
+                ),
+                electron_profile: None,
+            })
+            .unwrap();
+        writer.adopt(reply).unwrap();
+        let exported = writer.export_project("demo").unwrap();
+        let path = PathBuf::from(exported["path"].as_str().unwrap());
+        let project = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+        let bundle = Bundle::read(&project.file.envelope.extra).unwrap();
+        assert_eq!(bundle.entries.len(), 2);
+        assert_eq!(bundle.entries[0].status, Status::StoreOnly);
+        assert_eq!(
+            bundle.entries[0].store_id.as_deref(),
+            Some("synthetic-store-id")
+        );
+        assert!(bundle.files("store-demo").is_none());
+        assert!(bundle.files("toy").unwrap().contains_key("index.ts"));
+
+        let mut reader = crate::Automation::new(recipient.clone(), exports).unwrap();
+        let opened = reader.open_file("received", path).unwrap();
+        assert_eq!(opened["extensionConsentRequired"], true);
+        assert_eq!(opened["missingExtensions"].as_array().unwrap().len(), 2);
+        assert!(!recipient.join("extensions").exists());
+        let document = reader.read_document("received").unwrap();
+        assert_eq!(document["layers"][0]["fx"][0]["type"], "toy.tint");
+    }
+
+    #[test]
+    fn open_foreign_entry_prevents_snapshot_restore_and_squash() {
+        let root = std::env::temp_dir().join(pm_kernel::new_id("pm-mcp-open-entry"));
+        {
+            let mut host = Automation::new(root.clone(), root.join("exports")).unwrap();
+            let id = host
+                .create_project(&json!({"name":"Synthetic open entry"}))
+                .unwrap()["projectId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let snapshot = host.read_document(&id).unwrap();
+            let revision = host.revision(&id).unwrap();
+            let mark = host.history_mark(&id, 23).unwrap();
+            let Backend::Owned(kernel) = &mut host.backend else {
+                unreachable!()
+            };
+            kernel
+                .handle(
+                    &id,
+                    Request::new(
+                        Caller::realm(22, 1, Origin::Interface),
+                        pm_kernel::HistoryCall::Begin {
+                            label: "Foreign edit".into(),
+                        },
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                host.restore(&id, snapshot.clone(), revision, 23)
+                    .unwrap_err()
+                    .code,
+                "revision_conflict"
+            );
+            assert_eq!(host.squash(&id, &mark, "Agent run").unwrap(), None);
+            assert_eq!(host.read_document(&id).unwrap(), snapshot);
+            assert!(
+                host.kernel()
+                    .unwrap()
+                    .project(&id)
+                    .unwrap()
+                    .open_entry()
+                    .is_some()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Adapter to the app's existing actor. Reads are immutable; edits are awaited.
+/// Selection, history and restore use the same actor messages as standalone tools.
+#[derive(Clone)]
+pub struct ActorAutomation {
+    pub kernel: KernelHandle,
+    pub engine: Option<Arc<dyn EngineHook>>,
+    pub surfaces: Option<Arc<dyn SurfaceHook>>,
+    pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    pub export_child: Arc<dyn crate::services::ExportChild>,
+}
+impl ActorAutomation {
+    pub fn new(kernel: KernelHandle) -> Self {
+        Self {
+            kernel,
+            engine: None,
+            surfaces: None,
+            media_registry: None,
+            export_child: Arc::new(crate::services::NativeExportChild),
+        }
+    }
+    pub fn for_actor(&self, caller: Caller) -> pm_kernel::ActorHandle {
+        self.kernel.for_actor(caller)
+    }
+    async fn actor_call(&self, id: &str, caller: Caller, call: impl Into<Call>) -> Result<Ack> {
+        let ack = self
+            .for_actor(caller)
+            .call(id, call)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)?;
+        if let Reply::Throw(e) = &ack.reply {
+            return Err(Error::kernel(e));
+        }
+        Ok(ack)
+    }
+    pub async fn select_layers(
+        &self,
+        id: &str,
+        caller: Caller,
+        ids: Vec<String>,
+        add: bool,
+    ) -> Result<Ack> {
+        self.actor_call(id, caller, pm_kernel::SelectionCall::Layers { ids, add })
+            .await
+    }
+    pub async fn history_mark(&self, id: &str, caller: Caller) -> Result<ActorHistoryMark> {
+        match self
+            .actor_call(id, caller, pm_kernel::HistoryCall::Mark)
+            .await?
+            .reply
+        {
+            Reply::Mark(mark) => Ok(mark),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub async fn squash(
+        &self,
+        id: &str,
+        caller: Caller,
+        mark: ActorHistoryMark,
+        expected_revision: u64,
+        label: String,
+    ) -> Result<Ack> {
+        self.actor_call(
+            id,
+            caller,
+            pm_kernel::HistoryCall::Squash {
+                mark,
+                label,
+                expected_revision,
+            },
+        )
+        .await
+    }
+    pub async fn restore(
+        &self,
+        id: &str,
+        caller: Caller,
+        value: Value,
+        expected_revision: u64,
+        expected_document: u64,
+    ) -> Result<Ack> {
+        self.actor_call(
+            id,
+            caller,
+            Call::Restore {
+                project: model(&value),
+                label: "Roll back agent changes".into(),
+                expected_revision,
+                expected_document,
+            },
+        )
+        .await
+    }
+    /// The caller runs SessionSave::run on its worker and returns the completion.
+    pub async fn prepare_save(
+        &self,
+        session: SessionHandle,
+        path: Option<PathBuf>,
+    ) -> Result<pm_kernel::session::SessionSave> {
+        self.kernel
+            .prepare_save(session, path)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)
+    }
+    pub async fn finish_save(
+        &self,
+        completion: pm_kernel::session::SessionSaveCompletion,
+    ) -> Result<ShellReply> {
+        self.kernel
+            .finish_save(completion)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)
+    }
+    pub fn inspect_project(&self, id: &str) -> Result<Arc<Published>> {
+        self.kernel
+            .published(id)
+            .ok_or_else(|| Error::invalid("Project is not open"))
+    }
+    pub fn read_document(&self, id: &str) -> Result<Value> {
+        let p = self.inspect_project(id)?;
+        let mut value = json_value(&pm_model::canonical::realize_project(
+            p.snapshot
+                .document
+                .to_value()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+        ));
+        value["revision"] = json!(p.revision());
+        Ok(value)
+    }
+    pub fn capture_frames(&self, request: &CaptureRequest) -> Result<Value> {
+        if self.inspect_project(&request.project_id)?.revision() != request.revision {
+            return Err(Error::conflict("Capture revision is stale"));
+        }
+        self.engine
+            .as_ref()
+            .ok_or_else(|| Error::unavailable("engine-service headless render"))?
+            .capture(request)
+    }
+    pub fn subscribe(&self) -> mpsc::Receiver<KernelEvent> {
+        self.kernel.subscribe()
+    }
+    /// Use the application's generation-bound session, without opening another
+    /// store or discovering a profile. The caller must handle recovery copies.
+    pub async fn save(&self, session: SessionHandle) -> Result<ShellReply> {
+        self.shell(ShellCall::Save(session)).await
+    }
+    pub async fn save_as(&self, session: SessionHandle, path: PathBuf) -> Result<ShellReply> {
+        self.shell(ShellCall::SaveAs {
+            session,
+            path,
+            replace: false,
+        })
+        .await
+    }
+    async fn shell(&self, call: ShellCall) -> Result<ShellReply> {
+        self.kernel
+            .shell(call)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)
+    }
+    pub async fn apply_commands(
+        &self,
+        id: &str,
+        commands: Vec<Command>,
+        label: String,
+        origin: Origin,
+        expected_revision: u64,
+        writer: u32,
+    ) -> Result<Ack> {
+        if !matches!(origin, Origin::Mcp | Origin::Agent) {
+            return Err(Error::invalid(
+                "Automation edits require Mcp or Agent origin",
+            ));
+        }
+        let ack = self
+            .kernel
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, origin),
+                    Call::Transact {
+                        label: Some(label),
+                        body: WriteBody::Commands(commands),
+                        expected_revision: Some(expected_revision),
+                    },
+                ),
+            )
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)?;
+        if let Reply::Throw(ref e) = ack.reply {
+            return Err(Error::kernel(e));
+        }
+        Ok(ack)
+    }
+}
+
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod layout_tests;
+
+/// A published document as the realized project JSON tools read, with its
+/// revision.
+pub(crate) fn document_json(snapshot: &pm_kernel::Snapshot) -> Result<Value> {
+    let mut project = json_value(&pm_model::canonical::realize_project(working_document(
+        snapshot,
+    )?));
+    project["revision"] = json!(snapshot.revision);
+    Ok(project)
+}
+
+// Also exclude the retired field from snapshots supplied in memory, before
+// converting any nodes to owned values (file ingress already skips it).
+pub(crate) fn working_document(snapshot: &pm_kernel::Snapshot) -> Result<pm_model::Value> {
+    let root = snapshot
+        .root()
+        .ok_or_else(|| Error::invalid("Missing document"))?;
+    let pm_model::NodeKind::Object(members) = root.kind() else {
+        return Err(Error::invalid("Invalid project"));
+    };
+    let mut project = pm_model::Map::new();
+    for (key, node) in members.iter() {
+        if key.as_str() != Some("native3dHistoryArchive") {
+            project.insert(key.clone(), node.to_value());
+        }
+    }
+    Ok(pm_model::Value::Object(project))
+}
+
+#[cfg(test)]
+mod retired_archive_projection_tests {
+    #[test]
+    fn an_in_memory_snapshot_does_not_expose_the_recovery_archive() {
+        let value = pm_model::json::parse(r#"{"id":"P","w":640,"h":360,"layers":[],"native3dHistoryArchive":{"obsolete":true},"scene":{"keep":42}}"#).unwrap();
+        let snapshot = pm_kernel::Snapshot {
+            doc_id: 0,
+            revision: 0,
+            document: std::sync::Arc::new(pm_model::Document::new(Some(value), 0)),
+        };
+        let p = super::document_json(&snapshot).unwrap();
+        assert!(p.get("native3dHistoryArchive").is_none());
+        assert_eq!(p["scene"]["keep"], 42);
+    }
+}
+
+/// Change only a private snapshot's projection; never publish navigation.
+pub fn composition_snapshot(snapshot: &Snapshot, comp: &str) -> Result<Snapshot> {
+    let root = snapshot
+        .root()
+        .ok_or_else(|| Error::invalid("Missing document"))?;
+    if snapshot.open_comp().is_none() && snapshot.render_comp() == comp {
+        return Ok(snapshot.clone());
+    }
+    if pm_kernel::model::comp_node(root, Some(comp)).is_none() {
+        return Err(Error::invalid(format!("Unknown compositionId: {comp}")));
+    }
+    let mut document = (*snapshot.document).clone();
+    document
+        .apply_ops(&[pm_model::Op::Leaf(pm_model::patch::Patch::set(
+            vec!["compId".into()],
+            pm_model::Value::from(comp),
+        ))])
+        .map_err(Error::kernel)?;
+    Ok(Snapshot {
+        // A projection retains the publication's revision; navigation is not
+        // an authored edit and must not look like a newer engine document.
+        document: Arc::new(pm_model::Document::from_root(
+            document.root().cloned(),
+            snapshot.revision,
+        )),
+        ..snapshot.clone()
+    })
+}

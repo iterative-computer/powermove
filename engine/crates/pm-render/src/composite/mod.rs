@@ -1,0 +1,151 @@
+//! Compositing (plan sections 8, 9, 10; Phase 3a): layer masks, track
+//! mattes, the nine blend modes, adjustment layers, styled groups as
+//! compositing boundaries, linear blending, 16- and 32-bit precision,
+//! region of interest with effect padding, and isolation.
+//!
+//! Today's compositor (`legacy/gl/compositor.ts` `renderProject`) draws a
+//! layer straight into the accumulator when it has no masks, effects, blend
+//! mode, motion blur, transition, or matte (the fast path). Otherwise the
+//! layer goes through its own target, in this order:
+//!
+//! 1. the layer's content (with its opacity; a group's members with the
+//!    group's opacity left for the composite),
+//! 2. masks (`applyMasks`: analytic coverage, multiplied in),
+//! 3. effects (`runEffects`),
+//! 4. the track matte (`applyTrackMatte`: the matte source rendered alone,
+//!    alpha or Rec.709 luma, optionally inverted, multiplied in),
+//! 5. the composite: premultiplied source-over for normal, else
+//!    `FRAG_COMPOSITE` (unpremultiply both for the blend function, then combine
+//!    premultiplied source/destination contributions and their blended overlap).
+//!
+//! An adjustment layer runs its effects on the accumulator, masks the
+//! result, and composites it over the accumulator with its opacity and
+//! blend mode through `FRAG_COMPOSITE` (`compositeAdjustment`).
+//!
+//! The plan carries these steps as [`Node`]s (a [`crate::plan::Content`]
+//! variant); [`exec`] runs them, splitting the target's render pass at
+//! each node. Fused arithmetic stays in f32; precision changes only at an
+//! actual working-format store.
+//!
+//! Design notes: `docs/engine/composite.md`.
+
+pub mod build;
+pub mod color;
+pub mod effects;
+pub(crate) mod exec;
+pub mod gaussian;
+pub(crate) mod gpu;
+pub mod path_masks;
+pub mod region;
+
+use pm_protocol::color::BlendMode;
+
+use crate::plan::{CompPlan, Draw};
+
+pub use color::{ColorSettings, project_color};
+pub use effects::{
+    EffectHost, EffectPasses, Padding, PreparedEffects, PreparedTransition, TransitionPasses,
+};
+
+/// Today's `MASK_MAX`: the parametric route evaluates at most 8 masks.
+pub const MASK_MAX: usize = pm_vector::mask::MAX_PARAMETRIC_MASKS;
+
+/// Today's matte recursion limit (`opt.matteDepth >= 8`).
+pub const MATTE_MAX_DEPTH: u32 = 8;
+
+/// A compositing step that needs the layer in its own target, or the
+/// accumulator itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Layer(LayerNode),
+    Adjustment(AdjustmentNode),
+}
+
+impl Node {
+    /// The layer this node belongs to.
+    pub fn layer(&self) -> &str {
+        match self {
+            Node::Layer(l) => &l.layer,
+            Node::Adjustment(a) => &a.layer,
+        }
+    }
+}
+
+/// 2.5D per-pixel depth-of-field parameters on a projected layer or 3D group.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dof25d {
+    /// Row 2 of `inverse(plane_matrix)` in top-down output pixels: `1/w = inv_w · (x, y, 1)`.
+    pub inv_w: [f64; 3],
+    /// Projective depth `w = 1 + focus_z / f` at the focal plane.
+    pub focus_w: f64,
+    /// Circle-of-confusion scale in output pixels per unit relative depth error.
+    pub blur_px: f64,
+    /// Maximum blur radius in output pixels.
+    pub max_radius: f64,
+}
+
+/// A layer through its own target (today's slow path).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerNode {
+    pub layer: String,
+    /// The layer's content, drawn into a cleared target with premultiplied
+    /// source-over (`drawContent` with the layer's opacity; for a group,
+    /// its compositing boundary at opacity 1).
+    pub content: Vec<Draw>,
+    pub masks: Option<Masks>,
+    pub effects: Option<PreparedEffects>,
+    pub matte: Option<Matte>,
+    pub blend: BlendMode,
+    /// Opacity applied at the composite (`compositeAlpha`: the group's
+    /// opacity for a group, 1 otherwise).
+    pub alpha: f64,
+    /// The active transition, run after the composite (`runTransition`).
+    pub transition: Option<PreparedTransition>,
+    /// Optional 2.5D GPU depth-of-field blur stage.
+    pub dof: Option<Dof25d>,
+}
+
+/// An adjustment layer: its effects over the accumulator beneath it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdjustmentNode {
+    pub layer: String,
+    pub effects: PreparedEffects,
+    pub masks: Option<Masks>,
+    pub blend: BlendMode,
+    /// The layer's opacity.
+    pub alpha: f64,
+}
+
+/// A layer's masks, ready for the GPU: today's parametric route, or the
+/// path route's coverage canvas (`path`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Masks {
+    /// Parametric: output pixels to layer pixels (`u_inv`), a column-major
+    /// 3×3 matrix: the inverse world matrix, or for a 3D layer the inverse
+    /// of its projected plane. Path: output pixels to coverage canvas
+    /// pixels (`u_covTransform`; the identity for a 2D layer).
+    pub inverse: [f64; 9],
+    /// The parametric masks (empty on the path route).
+    pub masks: pm_vector::ParametricMasks,
+    /// The path route (`applyPathMasks`).
+    pub path: Option<path_masks::PathCoverage>,
+}
+
+/// A track matte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Matte {
+    /// Rec.709 luma of the premultiplied, E-encoded matte (else its alpha).
+    pub luma: bool,
+    pub inverted: bool,
+    /// The matte pass: the source layer rendered alone into a transparent
+    /// target in the layer's pixel space (`renderProject` with
+    /// `mattePass`).
+    pub source: Box<CompPlan>,
+}
+
+/// Whether a plan draws anything through a [`Node`].
+pub fn has_nodes(plan: &CompPlan) -> bool {
+    plan.draws
+        .iter()
+        .any(|d| matches!(d.content, crate::plan::Content::Composite(_)))
+}

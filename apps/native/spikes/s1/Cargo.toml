@@ -1,0 +1,11 @@
+[package]
+name = "pm-native-s1-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+v8 = { version = "=152.2.0", features = ["v8_enable_sandbox"] }
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+libc = "=0.2.186"

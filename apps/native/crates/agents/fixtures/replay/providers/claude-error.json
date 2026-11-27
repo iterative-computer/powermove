@@ -1,0 +1,24 @@
+{
+  "baseline": "v1.2.0",
+  "source": "ClaudeEventParser with synthetic stream-json",
+  "frames": [
+    {
+      "kind": "in",
+      "value": {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "result": "Synthetic provider refusal"
+      }
+    },
+    {
+      "kind": "close-stdin",
+      "value": true
+    }
+  ],
+  "terminal": {
+    "output": null,
+    "text": "Synthetic provider refusal",
+    "error": "Synthetic provider refusal"
+  }
+}

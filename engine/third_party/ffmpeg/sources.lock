@@ -1,0 +1,24 @@
+# Pinned sources for Powermove's FFmpeg build (read by build.sh).
+#
+# One source per line, whitespace separated:
+#   name  version  sha256  archive-top-dir  license(SPDX)  license-files  url
+# license-files is a comma-separated list of paths inside the archive that are
+# copied into out/share/licenses/<name>/.
+#
+# Every archive is verified against its SHA-256 before it is extracted; a
+# mismatch stops the build. When pinning a new version, cross-check the hash
+# against the upstream signature or checksum file and record it in README.md.
+#
+# Shipped in the output (linked into the dylibs):
+ffmpeg    9.0.2   8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  ffmpeg-9.0.2         LGPL-2.1-or-later                  COPYING.LGPLv2.1,LICENSE.md      https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+zlib      1.3.2   d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3  zlib-1.3.2           Zlib                               LICENSE                          https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz
+libvpx    1.17.0  1020f184046187baa2985dbde38e0691f49c44088bca7a1842b0236c6081dc0a  libvpx-1.17.0        BSD-3-Clause                       LICENSE,PATENTS                  https://github.com/webmproject/libvpx/archive/refs/tags/v1.17.0.tar.gz
+opus      1.6.1   6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1  opus-1.6.1           BSD-3-Clause                       COPYING                          https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+dav1d     1.5.4   686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5  dav1d-1.5.4          BSD-2-Clause                       COPYING                          https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz
+svt-av1   4.2.0   c7b13c4a84bd3751aa35fcc72be13e6875467e7c2216879251a486e5b1e4e740  SVT-AV1-v4.2.0       BSD-3-Clause-Clear                 LICENSE.md,PATENTS.md            https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v4.2.0/SVT-AV1-v4.2.0.tar.gz
+freetype  2.14.3  36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f  freetype-2.14.3      FTL                                LICENSE.TXT,docs/FTL.TXT         https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz
+harfbuzz  14.6.0  d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586  harfbuzz-14.6.0      MIT-Modern-Variant                 COPYING                          https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz
+zimg      3.0.6   be89390f13a5c9b2388ce0f44a5e89364a20c1c57ce46d382b1fcc3967057577  zimg-release-3.0.6   WTFPL                              COPYING                          https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.6.tar.gz
+#
+# Build tool only (runs on the build machine, never shipped):
+meson     1.12.1  ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743  meson-1.12.1         Apache-2.0                         COPYING                          https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz

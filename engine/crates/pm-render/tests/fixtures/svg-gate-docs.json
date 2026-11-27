@@ -1,0 +1,2383 @@
+{
+"source": "feat/ne-svg svg-gate-cases (synthetic SVG semantics probes); Chromium 152 references live outside the repository (svg-gate-* captures)",
+"docs": [
+{
+"name": "gate-size-vb",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-equal",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-double",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-fraction",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"99.5\" height=\"60.25\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-px",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150px\" height=\"90px\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-percent",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-auto",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"auto\" height=\"auto\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-w-only",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-h-only",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"90\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-no-vb",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-w-only-no-vb",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-no-size",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-vb-origin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-vb-negative",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-20 -10 100 60\"><rect x=\"-20\" y=\"-10\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"-12\" y=\"-4\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"5\" cy=\"33.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"50\" cy=\"20\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-vb-commas",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0,0,100,60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-wh-vb-origin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"10 5 100 60\"><rect x=\"10\" y=\"5\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"18\" y=\"11\" width=\"30\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"35\" cy=\"48.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"80\" cy=\"35\" rx=\"20\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-root-xy",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" x=\"10\" y=\"7\" width=\"100\" height=\"60\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-size-icon",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\"><path d=\"M12 2 L22 20 L2 20 Z\" fill=\"#3FCF8E\"/></svg>",
+"sizes": [
+[
+96,
+96
+],
+[
+48,
+48
+],
+[
+131,
+131
+]
+]
+},
+{
+"name": "gate-size-icon-tess",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-par-wide-none",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-none",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMinYMin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMinYMin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMinYMin-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMinYMin-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMin-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMin-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMaxYMin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMin\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMaxYMin",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMin\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMaxYMin-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMin slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMaxYMin-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMin slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMinYMid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMinYMid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMinYMid-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMinYMid-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMid-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMid-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMaxYMid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMid\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMaxYMid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMid\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMaxYMid-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMid slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMaxYMid-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMid slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMinYMax",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMinYMax",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMinYMax-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMinYMax-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMax",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMax",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMax-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMax-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMaxYMax",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMax\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMaxYMax",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMax\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMaxYMax-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMaxYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMaxYMax-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMaxYMax slice\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-wide-xMidYMid-meet",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMidYMid meet\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-tall-xMidYMid-meet",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 60 160\" preserveAspectRatio=\"xMidYMid meet\"><rect x=\"0\" y=\"0\" width=\"60\" height=\"160\" fill=\"#1B2A4A\"/><rect x=\"4.8\" y=\"16\" width=\"18\" height=\"56\" fill=\"#3FCF8E\"/><circle cx=\"15\" cy=\"115.19999999999999\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"42\" cy=\"80\" rx=\"12\" ry=\"48\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+100,
+100
+],
+[
+160,
+160
+]
+]
+},
+{
+"name": "gate-par-vb-only-slice",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"xMinYMax slice\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-par-vb-only-none",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 160 60\" preserveAspectRatio=\"none\"><rect x=\"0\" y=\"0\" width=\"160\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"12.8\" y=\"6\" width=\"48\" height=\"21\" fill=\"#3FCF8E\"/><circle cx=\"40\" cy=\"43.199999999999996\" r=\"10.799999999999999\" fill=\"#FF6B1A\"/><ellipse cx=\"112\" cy=\"30\" rx=\"32\" ry=\"18\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-translate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(13.5 7.25)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(13.5 7.25)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-translate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(13.5 7.25)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(13.5 7.25)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(13.5 7.25)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-translate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(13.5 7.25)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-translate1",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(9)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(9)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-translate1",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(9)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(9)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(9)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-translate1",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(9)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-rotate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(-30 50 30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(-30 50 30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-rotate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(-30 50 30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(-30 50 30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(-30 50 30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-rotate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(-30 50 30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-rotate-commas",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"rotate(25,50,30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"rotate(25,50,30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-rotate-commas",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"rotate(25,50,30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"rotate(25,50,30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"rotate(25,50,30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-rotate-commas",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"rotate(25,50,30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-scale",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(1.3 0.8)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(1.3 0.8)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-scale",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(1.3 0.8)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(1.3 0.8)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(1.3 0.8)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-scale",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(1.3 0.8)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-scale1",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"scale(0.75)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"scale(0.75)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-scale1",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"scale(0.75)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"scale(0.75)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"scale(0.75)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-scale1",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"scale(0.75)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-skewx",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewX(20)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewX(20)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-skewx",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewX(20)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewX(20)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewX(20)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-skewx",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewX(20)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-skewy",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"skewY(-15)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"skewY(-15)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-skewy",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"skewY(-15)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"skewY(-15)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"skewY(-15)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-skewy",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"skewY(-15)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-matrix",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-matrix",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-matrix",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"matrix(0.9 0.3 -0.2 1.1 8 -4)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-analytic-list",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><rect x=\"48\" y=\"6\" width=\"40\" height=\"20\" rx=\"6\" fill=\"#F2C14E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><ellipse cx=\"70\" cy=\"44\" rx=\"18\" ry=\"8\" fill=\"#4C8DFF\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-tess-list",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M6 54 L30 6 L54 54 Z\" fill=\"#3FCF8E\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polygon points=\"58,8 94,14 88,52 62,46\" fill=\"#FF6B1A\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/><polyline points=\"40,10 50,30 60,12\" fill=\"#A73366\" transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-list",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(50 30) rotate(15) scale(0.8) translate(-50 -30)\"><rect x=\"8.5\" y=\"7.25\" width=\"30\" height=\"20\" fill=\"#3FCF8E\"/><rect x=\"48\" y=\"6\" width=\"44\" height=\"22\" rx=\"6\" fill=\"#F2C14E\"/><circle cx=\"24\" cy=\"44\" r=\"11\" fill=\"#FF6B1A\"/><ellipse cx=\"70\" cy=\"44\" rx=\"20\" ry=\"9\" fill=\"#4C8DFF\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-shape-opacity",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"10\" y=\"10\" width=\"50\" height=\"30\" rx=\"5\" fill=\"#F2C14E\" opacity=\"0.6\" transform=\"rotate(-12 35 25)\"/><circle cx=\"60\" cy=\"35\" r=\"18\" fill=\"#4C8DFF\" opacity=\"0.5\" transform=\"scale(1.1 0.9)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-shape-clip",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"40\" height=\"30\" rx=\"8\"/></clipPath></defs><rect x=\"0\" y=\"0\" width=\"60\" height=\"40\" fill=\"#3FCF8E\" clip-path=\"url(#c)\" transform=\"translate(20 10) rotate(10)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-shape-gradient",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"10\" y=\"10\" width=\"60\" height=\"30\" rx=\"6\" fill=\"url(#g)\" transform=\"rotate(15 40 25) translate(5 3)\"/><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"url(#g)\" transform=\"skewX(-10)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-shape-gradient-tess",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"0.7\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\"/></radialGradient></defs><path d=\"M10 50 L40 5 L70 50 Z\" fill=\"url(#r)\" transform=\"translate(10 2) scale(1.1)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-nested-shape",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><g transform=\"translate(10 5)\"><g transform=\"scale(0.9)\"><rect x=\"10\" y=\"10\" width=\"40\" height=\"25\" fill=\"#3FCF8E\" transform=\"rotate(20 30 22)\"/><circle cx=\"70\" cy=\"30\" r=\"12\" fill=\"#FF6B1A\" transform=\"translate(-5 4)\"/></g></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-group-clip",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"40\" cy=\"30\" r=\"22\"/></clipPath></defs><g transform=\"translate(10 0)\" clip-path=\"url(#c)\"><rect width=\"100\" height=\"30\" fill=\"#3FCF8E\"/><rect y=\"30\" width=\"100\" height=\"30\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-clip-rotated",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" transform=\"rotate(20 50 30)\"><rect x=\"20\" y=\"15\" width=\"60\" height=\"30\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#F2C14E\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#A73366\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-single-top",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"rotate(10 40 25)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-single-top-sized",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><path d=\"M20 10 L60 15 L40 50 Z\" fill=\"#4C8DFF\" transform=\"translate(15 5)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-identity",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"20\" y=\"10\" width=\"40\" height=\"30\" fill=\"#3FCF8E\" transform=\"translate(0 0)\"/><circle cx=\"70\" cy=\"30\" r=\"15\" fill=\"#FF6B1A\" transform=\"rotate(360 70 30)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-xform-root-sized",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" height=\"90\" viewBox=\"5 5 100 60\"><g transform=\"rotate(-8 50 30)\"><rect x=\"15\" y=\"15\" width=\"40\" height=\"30\" fill=\"#3FCF8E\"/></g><ellipse cx=\"75\" cy=\"40\" rx=\"15\" ry=\"10\" fill=\"#FF6B1A\" transform=\"translate(-4 2)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-percent",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" x1=\"10%\" y1=\"0%\" x2=\"90%\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"8\" fill=\"url(#g)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-user-percent",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"20\" y=\"5\" width=\"60\" height=\"50\" fill=\"url(#g)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-href",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"base\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><linearGradient id=\"g\" href=\"#base\" x2=\"0\" y2=\"1\"/><linearGradient id=\"g2\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xlink:href=\"#g\" y1=\"0.2\"/></defs><rect x=\"5\" y=\"5\" width=\"40\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"72\" cy=\"30\" r=\"22\" fill=\"url(#g2)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-stops",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"20%\" style=\"stop-color:#1B2A4A\"/><stop offset=\"0.1\" stop-color=\"#3FCF8E\"/><stop offset=\"80%\" stop-color=\"#F2C14E\" stop-opacity=\"0.5\"/><stop offset=\"1.5\" stop-color=\"#A73366\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-pad",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" spreadMethod=\"pad\" x1=\"0.3\" x2=\"0.7\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" fill=\"url(#g)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-radial-transform",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientTransform=\"translate(0.5 0.5) scale(1 0.5) rotate(30) translate(-0.5 -0.5)\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"90\" height=\"50\" rx=\"10\" fill=\"url(#r)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-radial-percent",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" cx=\"40%\" cy=\"60%\" r=\"70%\" fx=\"40%\" fy=\"60%\"><stop offset=\"0\" stop-color=\"#F2C14E\"/><stop offset=\"1\" stop-color=\"#A73366\"/></radialGradient></defs><ellipse cx=\"50\" cy=\"30\" rx=\"45\" ry=\"25\" fill=\"url(#r)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-radial-user",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><radialGradient id=\"r\" gradientUnits=\"userSpaceOnUse\" cx=\"50\" cy=\"30\" r=\"40\"><stop offset=\"0\" stop-color=\"#3FCF8E\"/><stop offset=\"1\" stop-color=\"#1B2A4A\" stop-opacity=\"0.2\"/></radialGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#r)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-opacity",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"#E8E2CF\"/><g opacity=\"0.7\"><rect x=\"5\" y=\"5\" width=\"60\" height=\"40\" fill=\"url(#g)\" fill-opacity=\"0.6\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-tess",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><path d=\"M5 55 C 20 0, 60 0, 95 55 Z\" fill=\"url(#g)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-sized-root",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 100 60\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"10%\" y1=\"0\" x2=\"90%\" y2=\"0\"><stop offset=\"0\" stop-color=\"#FF6B1A\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient></defs><rect width=\"100\" height=\"60\" fill=\"url(#g)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-ellipse",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><ellipse cx=\"50\" cy=\"30\" rx=\"40\" ry=\"20\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-rrect",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-rect-fraction",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10.3\" y=\"8.6\" width=\"70.2\" height=\"40.7\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-polygon",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><polygon points=\"50,2 98,58 2,58\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-rule",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><path clip-rule=\"evenodd\" d=\"M5 5 H95 V55 H5 Z M30 15 H70 V45 H30 Z\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-shape",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><circle cx=\"50\" cy=\"30\" r=\"25\"/></clipPath></defs><rect width=\"100\" height=\"60\" fill=\"#F2C14E\" clip-path=\"url(#c)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-nested-groups",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\"><rect x=\"10\" y=\"5\" width=\"80\" height=\"50\" rx=\"10\"/></clipPath></defs><g clip-path=\"url(#c)\"><g opacity=\"0.8\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/><circle cx=\"50\" cy=\"30\" r=\"22\" fill=\"#1B2A4A\"/></g></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-colors",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"14\" height=\"25\" fill=\"tomato\"/><rect x=\"18\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(20, 120, 220)\"/><rect x=\"34\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgba(20,120,220,0.5)\"/><rect x=\"50\" y=\"2\" width=\"14\" height=\"25\" fill=\"rgb(10%, 60%, 30%)\"/><rect x=\"66\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8\"/><rect x=\"82\" y=\"2\" width=\"14\" height=\"25\" fill=\"#4C8DFF80\"/><rect x=\"2\" y=\"32\" width=\"14\" height=\"25\" fill=\"#4C88\"/><rect x=\"18\" y=\"32\" width=\"14\" height=\"25\" fill=\"hsl(200, 60%, 50%)\"/><rect x=\"34\" y=\"32\" width=\"14\" height=\"25\" fill=\"transparent\"/><rect x=\"50\" y=\"32\" width=\"14\" height=\"25\" fill=\"RED\"/><rect x=\"66\" y=\"32\" width=\"14\" height=\"25\" fill=\"  #A73366  \"/><rect x=\"82\" y=\"32\" width=\"14\" height=\"25\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-invalid",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"notacolor\"/><rect x=\"55\" y=\"5\" width=\"40\" height=\"40\" fill=\"#12345\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-current-color",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><g color=\"#3FCF8E\"><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"currentColor\"/></g><circle cx=\"72\" cy=\"30\" r=\"20\" fill=\"currentColor\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-none-and-opacity",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" fill=\"none\"/><rect x=\"10\" y=\"10\" width=\"40\" height=\"40\" fill=\"#FF6B1A\" fill-opacity=\"0\"/><circle cx=\"60\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" opacity=\"0\"/><ellipse cx=\"70\" cy=\"30\" rx=\"25\" ry=\"12\" fill=\"#F2C14E\" fill-opacity=\"0.35\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-style",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" style=\"fill: #1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"40\" height=\"40\" style=\" fill:#FF6B1A ; fill-opacity: 0.7 ;\"/><circle cx=\"65\" cy=\"30\" r=\"20\" style=\"fill:#3FCF8E;opacity:0.5\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-display",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><g display=\"none\"><rect width=\"50\" height=\"50\" fill=\"red\"/></g><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\" style=\"display:none\"/><rect x=\"60\" y=\"10\" width=\"30\" height=\"30\" fill=\"#F2C14E\" display=\"inline\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-shape-rendering",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" shape-rendering=\"geometricPrecision\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" shape-rendering=\"auto\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-shape-rect-radii",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect x=\"2\" y=\"2\" width=\"30\" height=\"25\" rx=\"6\" fill=\"#3FCF8E\"/><rect x=\"35\" y=\"2\" width=\"30\" height=\"25\" ry=\"8\" fill=\"#FF6B1A\"/><rect x=\"68\" y=\"2\" width=\"30\" height=\"25\" rx=\"40\" fill=\"#4C8DFF\"/><rect x=\"2\" y=\"32\" width=\"30\" height=\"25\" rx=\"4\" ry=\"10\" fill=\"#F2C14E\"/><rect x=\"35\" y=\"32\" width=\"30\" height=\"25\" rx=\"auto\" ry=\"5\" fill=\"#A73366\"/><rect x=\"68\" y=\"32\" width=\"30\" height=\"25\" rx=\"-3\" ry=\"6\" fill=\"#E8E2CF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-shape-degenerate",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5\" y=\"5\" width=\"0\" height=\"40\" fill=\"red\"/><rect x=\"5\" y=\"5\" width=\"-10\" height=\"40\" fill=\"red\"/><circle cx=\"50\" cy=\"30\" r=\"0\" fill=\"red\"/><ellipse cx=\"50\" cy=\"30\" rx=\"10\" ry=\"0\" fill=\"red\"/><line x1=\"0\" y1=\"0\" x2=\"100\" y2=\"60\" fill=\"red\"/><path d=\"M10 10\" fill=\"red\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-shape-ellipse-one-radius",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><ellipse cx=\"30\" cy=\"30\" rx=\"20\" fill=\"#3FCF8E\"/><ellipse cx=\"70\" cy=\"30\" ry=\"15\" fill=\"#FF6B1A\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-path-commands",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"m5 5 h30 v20 h-30 z M45 5 l20 0 l0 20 l-20 0 Z M75 5 H95 V25 H75 Z\" fill=\"#3FCF8E\"/><path d=\"M5 35 C 15 30 25 60 35 50 S 45 35 50 45 Q 60 60 70 45 T 95 45 L95 58 L5 58 Z\" fill=\"#FF6B1A\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-path-numbers",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5,5L45,5,45,25,5,25z M50 5 l.5.5 40 0 0 20-40 0z M5 30 L1e1 55 L4.5e1 55 L45 30 Z\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-path-unclosed",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 L45 10 L25 50\" fill=\"#3FCF8E\"/><polyline points=\"55,5 95,10 75,50 60,30\" fill=\"#FF6B1A\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-path-nonzero-overlap",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path d=\"M5 5 H60 V50 H5 Z M30 10 H95 V55 H30 Z\" fill=\"#A73366\"/><path d=\"M5 30 H95 V40 H5 Z M50 2 V58 H55 V2 Z\" fill=\"#F2C14E\" fill-rule=\"nonzero\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-path-evenodd-style",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><path style=\"fill-rule:evenodd\" d=\"M5 5 H95 V55 H5 Z M25 15 H75 V45 H25 Z\" fill=\"#3FCF8E\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-points-separators",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><polygon points=\"5,5 45,5 45,55 5,55,\" fill=\"#3FCF8E\"/><polygon points=\" 55 5,95 5 95 55   55,55 70\" fill=\"#FF6B1A\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-paint-inert-stroke",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><rect width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><rect x=\"5.5\" y=\"5.5\" width=\"40\" height=\"40\" fill=\"#3FCF8E\" stroke=\"none\" stroke-width=\"3\" stroke-opacity=\"0.5\" stroke-miterlimit=\"10\" stroke-linecap=\"round\" stroke-linejoin=\"bevel\" stroke-dasharray=\"4 2\" stroke-dashoffset=\"1\"/><circle cx=\"70\" cy=\"30\" r=\"20\" fill=\"#FF6B1A\" style=\"stroke:none;stroke-miterlimit:10;stroke-width:2\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-doc-version",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" version=\"1.1\" baseProfile=\"full\"><rect x=\"10\" y=\"10\" width=\"80\" height=\"40\" rx=\"6\" fill=\"#4C8DFF\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-grad-explicit-defaults",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\" color=\"#E85D75\"><defs><linearGradient id=\"g\" gradientUnits=\"objectBoundingBox\" spreadMethod=\"pad\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"currentColor\"/><stop offset=\"1\" stop-color=\"#4C8DFF\"/></linearGradient><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fx=\"0.5\" fy=\"0.5\" fr=\"0\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#3FCF8E\"/></radialGradient></defs><rect x=\"5\" y=\"5\" width=\"50\" height=\"50\" fill=\"url(#g)\"/><circle cx=\"75\" cy=\"30\" r=\"20\" fill=\"url(#r)\"/></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-clip-explicit",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 60\"><defs><clipPath id=\"c\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"10\" y=\"8\" width=\"80\" height=\"44\" rx=\"12\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"100\" height=\"60\" fill=\"#3FCF8E\"/></g><g clip-path=\"none\"><circle cx=\"50\" cy=\"30\" r=\"10\" fill=\"#1B2A4A\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+},
+{
+"name": "gate-doc-metadata",
+"svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" xmlns:inkscape=\"http://www.inkscape.org/namespaces/inkscape\" viewBox=\"0 0 100 60\" version=\"1.1\" xml:space=\"preserve\" enable-background=\"new 0 0 100 60\"><title>t</title><desc>d</desc><metadata><x xmlns=\"urn:x\"><y/></x></metadata><sodipodi:namedview pagecolor=\"#ffffff\"/><g inkscape:label=\"Layer 1\" inkscape:groupmode=\"layer\" class=\"layer\"><rect class=\"a\" width=\"100\" height=\"60\" fill=\"#1B2A4A\"/><circle cx=\"50\" cy=\"30\" r=\"20\" fill=\"#3FCF8E\"/></g></svg>",
+"sizes": [
+[
+128,
+128
+],
+[
+200,
+120
+],
+[
+97,
+61
+]
+]
+}
+]
+}

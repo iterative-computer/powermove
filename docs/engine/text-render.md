@@ -1,0 +1,313 @@
+# Text rendering
+
+Native text uses exact outline coverage in output pixels followed by ordered
+float paint. Legacy text retains Canvas2D's layout and mask weight; resting
+and perspective-projected text also retains its source pixel grid and filtering.
+The font registry and layout contract
+are described in [text.md](text.md).
+
+## Authored layout
+
+Level 1 keeps `Compat::line_runs` and Blink measurement over HarfRust.
+Advances, UTF-16 wrapping, baseline (`size × 0.82`), leading, tracking,
+effective size, variation coordinates, optical sizing and window font-cache
+seeds are unchanged. Range typography and animator poses still come from
+`pm-eval`. Level 2 uses the shared Parley frame for layout, carets, bounds,
+picks and painting.
+
+Level 1 resting text paints into the authored layer canvas at the compositor's
+continuous quarter-step density, including its ceil-rounded dimensions and
+anchor, then samples that texture through the world transform. Resting means
+uniform positive scale within 5% of 100%, without rotation or skew; fractional
+translation keeps the local glyph strike and baseline phase. Other affine
+transforms paint directly at output resolution, including 3D planes whose
+projected homography is affine and in front of the camera. During viewer
+playback, read-ahead frames reuse the local raster for plain 2D text where
+possible. Perspective planes keep the local canvas and project it through
+their homography. Level 2 uses
+`Quad::Device`: transforms affect its outlines at the requested output size.
+
+Layout is an exact gate independent of pixels. Raster improvements must
+never be accepted as a reason for changing an advance or line break.
+
+Ink boxes describe what is drawn, at both levels (TEXT-INK-1). Outline
+glyphs keep their control boxes; level 1 keeps Blink's canonical-path
+arithmetic for them. A color glyph's box is its drawn area from the
+painter's own placement (`scene::drawn_color_glyph_ink`, shared by native
+and WASM): the strike's nonzero texels at the full-em size with the
+authored Apple shift, grown by the bilinear reach when enlarged, or the
+COLR painted and clip bounds. A device pixel is nonzero exactly when its
+square meets that box. Canvas measured emoji by CoreText's metric
+rectangle rounded out and outset 1 px; selections do not show that slack.
+Typography anchoring is placement, so it keeps Canvas's box
+(`MeasuredLine::anchor_ink`, `TextRaster::anchor_box`): recorded
+`fontAnchorBounds` are that box, and saved layers render where today's app
+renders them. Advances and line breaks are unchanged.
+
+## What is drawn
+
+Plain text paints every wrapped line with its layout alignment and baseline.
+Animated text uses the existing evaluated range font, color, opacity,
+transform and blur for each posed unit. Equal poses may share a draw, but
+source-over order remains authored order.
+
+Captions paint the rounded box, then each word's stroke and fill. Word
+opacity and scale act about its center. Caption stroke width remains
+`2 × stroke × size / styleSize`, with round joins and miter limit 2.
+Hidden captions draw nothing, including in snapshot and export requests.
+
+Rejected CSS fill setters keep the restored style: plain text starts with
+its default; an animated glyph starts with black; caption fill restores
+the box fill, or black without a box. Invalid `hexToRgba` output follows
+the same rejection rule. Unsupported styles report a text failure rather
+than silently substituting a color.
+
+## Legacy Canvas masks
+
+On macOS, smoothed, axis-aligned level 1 fills below the large-strike boundary
+use CoreGraphics' black-on-white RGB glyph mask with subpixel quantization
+disabled, at Skia's quarter-pixel horizontal phase and whole-pixel baseline.
+The inverted pixel luminance passes through the measured Skia mask-gamma
+table selected by the paint's canonical luminance bucket. A fitted dilation
+and exponent cannot reproduce that hinting and discrete preblend.
+`pm-text/render/canvas2d.rs` shares font instancing with the CoreText reference
+and retains an 8 MiB mask cache. Its immutable fonts move with their owning
+render thread; bitmap contexts stay within one call.
+
+Synthesized bold uses its stroked outline's geometric A8 coverage and the
+same mask preblend, matching Skia's path-generated strikes. CoreGraphics font
+dilation does not apply to that path. Its cache also keys the source scale,
+since fake-bold width is computed before the device transform.
+Legacy typography metrics also measure synthesized bold and italic on the
+canonical 64px path, so recorded font anchors compare the same styled bounds.
+
+Color glyphs, strokes, large or transformed glyph strikes
+retain their existing painters. `TextWeight::Exact` and level 2 retain exact
+outline coverage. Layout and font choice are unchanged.
+
+## Outlines and coverage
+
+Skrifa reads each glyph outline at its run's variation location. Paths and
+placement use kurbo f64 geometry. User coordinates at level 1 and normalized
+coordinates at level 2 keep their original meanings. Font identity, glyph,
+size, variation and synthetic style participate in outline cache identity;
+a font-generation change drops the old outlines and bitmap glyphs.
+
+Synthetic italic retains the y-down shear `−1/4`. Synthetic bold retains
+the authored framing width:
+
+```
+t = clamp((size − 9) / 27, 0, 1)
+width = size × (1/24 + (1/32 − 1/24) × t)
+```
+
+The outline is filled and framed with that width, using kurbo geometry.
+Caption strokes also use kurbo, rather than a fixed-point or A8-mask
+stroker. Path tolerances are measured in device pixels.
+
+Eligible outlines paint their pixel area directly from cached glyph-local
+contours and a conservative row-to-edge index. Whole and fractional placement
+are separated before f32 upload. Curves are flattened within 1e-4 device
+pixels, or 1e-5 for outlines no larger than 32 device pixels. A geometric
+certificate preserves already disjoint nonzero boundaries; uncertain paths
+use the nonzero union resolver.
+
+Large or compound draws use the shared R32Float area renderer. Its cells
+align with device pixels, retain 1/16384 pixel coordinate precision and tile
+large items. Both paths use the same resolved f64 line geometry and ordered
+paint. The explicit CPU comparison mode uses `vello_cpu`; its 8-bit coverage
+is not production precision. Coverage has no luminance preblend or stem
+dilation.
+
+**Geometry reuse.** Nonzero resolution commutes with an invertible linear
+map, so the 32 MiB path cache keeps each outline's lines resolved in its own
+space, flattened at the device tolerance divided by the top of its
+quarter-octave scale bucket (2^(k/4)); every transform in the bucket stays
+within the device tolerance, with at most 2^(1/8) more lines. The rasterizers
+apply the linear map, then the translation, in f64. Animated rotation never
+rebuilds geometry; animated scale rebuilds four times per doubling instead of
+every frame. A singular transform is resolved after it, as before. Glyphs the
+8 MiB GPU edge cache misses upload together, in 32 KB chunks through a reused
+scratch, one texture per chunk.
+
+**TEXT-RASTER-1:** exact outline coverage remains the native and explicit
+Exact painter. Legacy macOS fills use the Canvas masks described above to
+preserve authored pixels. Neither path changes font selection or layout.
+Legacy text and captions use the same resting-versus-device-coverage decision
+on 2D layers and affine 3D planes, using the projected transform for planes.
+Plain 2D text on non-final read-ahead frames, resting cases, and perspective
+planes retain local canvas density and bilinear sampling. Native level-2
+planes retain their perspective-density raster and output resampler.
+
+**TEXT-SMOOTH-1:** frames draw with the authored platform weight by default
+(`TextWeight::Smoothed`): legacy macOS fills use the Canvas masks above;
+level 2 uses its CoreText smoothing fit. Unsupported Canvas mask cases retain
+outline dilation and the fitted paint-luminance coverage curve. Strokes,
+bitmap and COLR glyphs retain their painters. `TextWeight::Exact` keeps plain
+coverage; raster gates judge that mode against an independent reference,
+and `text_weight` judges the default against the measured Canvas stems in
+`tools/visual-parity/text-weight-probe.mjs`.
+
+## Paint and blend domain
+
+CSS colors retain their parsed float values through painting. The sRGB8
+output rule is CSS Color 4 binary-search gamut mapping with local MINDE:
+constant OKLCh lightness and hue, chroma reduction, deltaEOK JND 0.02.
+`pm_color::css_srgb` and `wgsl::CSS_GAMUT` provide that boundary operation.
+Float and wide-gamut working values remain extended. Alpha is applied after
+mapping the straight output color; ordinary in-gamut values stay exact.
+
+Coverage multiplies paint alpha. Ordered premultiplied source-over runs in
+float at working precision. It does not quantize after each glyph. The
+project's existing blend-domain selection controls color compositing;
+coverage itself never carries a color-space transfer. Color glyph images
+retain premultiplication throughout filtering and paint.
+
+The GPU paint pass is `pm-render/src/shaders/text.wgsl`. Its CPU counterpart
+checks paint arithmetic over known coverage. A CPU/GPU agreement check is
+an implementation check, not the independent raster-quality reference.
+
+Animator text blur retains its authored sigma, transformed to output pixels
+by the world scale. A separable Gaussian paints and filters a float save
+layer, including ink outside the output rectangle that can contribute
+through the kernel. The kernel uses erf CDF differences, reaches
+`ceil(8 × sigma)` pixels, and is not renormalized. Transparent samples
+outside the source are zero. It uses neither the old quantized downscale
+plan nor an 8-bit save layer.
+
+## Color glyphs
+
+COLR v0/v1 keeps Fontations' paint graph as an authored command program:
+palette and foreground colors, transforms, clips, solid/linear/radial/sweep
+paints, layer order and composite modes. The consumer rasterizes the program
+in its working encoding before upload. Stable content keys include every
+command, color and transform. The independent reference interprets the same
+commands with separate f64 coverage, paint and blend formulas. Integer N32
+span blitters are not part of the renderer.
+
+Color bitmap glyphs retain their authored placement at both levels. Apple
+Color Emoji uses the face's full-em advance at the requested size, including
+the small-size advance differences. Its existing whole-pixel downward
+`apple_emoji_shift` remains. Minification clips each inverse output-pixel quadrilateral against source
+texel squares and integrates premultiplied values in the working domain.
+This also handles transforms that shrink one axis while enlarging another.
+Enlargement uses centered bilinear reconstruction. Transforms use the exact glyph
+position. Emoji size and shift are geometry, separate from the filter.
+
+## Storage and lifetime
+
+Coverage pages are temporary frame resources. Coverage and paint record
+into the same frame command encoder. A page returns to the target pool
+after submission; another layer cannot overwrite coverage still in use.
+
+Painted rasters retain only bounded ink crops, keyed by scene contents,
+crop, working encoding and font generation. A private target pool and 4 MiB
+raster cache reuse exact dimensions. Evicted targets can be recycled only
+at the next frame, after the prior submission; at most 2 MiB waits for that
+handoff. Explicit trimming releases handles without destroying textures that
+recorded commands may still reference. No full level 1 backing canvas,
+platform mask atlas, SDF atlas or per-glyph N32 paint image remains.
+
+The font registry retains its existing window/session seed scoping. Both
+preview and export use the originating window's layout seeds. Changing a
+font generation invalidates glyph resources before the next layer.
+
+## Routing
+
+A renderer with fonts paints text and captions natively. `Renderer::set_text_fonts`
+installs the host's full-font provider; the viewer, job engine and CLI use
+the same path. A renderer without fonts, an unanswered font query or an
+unsupported color reports a named text failure. The extension raster
+service and deprecated compatibility APIs remain available while the Use
+New Engine setting exists.
+
+Level 2's shared evaluated frame remains the source for interaction and
+painting: resting styled ink anchors typography, posed ink sizes the
+compatibility raster, and the padded resting selection supports bounds and
+picks even while staggered text is hidden. See [text.md](text.md) for those
+semantics.
+
+## Quality gates
+
+The text pixel gates explicitly replace byte equality with today's app
+with [gate-policy.md](gate-policy.md)'s reference-closeness rule. Today's
+captures remain a witness; they are not the raster target. The historical
+FONTS-R residual ratchet is superseded by that policy and must not return.
+
+The independent reference uses f64 compositing and supersampled outline
+coverage from `pm-reference`, at exact layout positions. It judges engine
+and today against the same reference, including maximum, p99.9, mean and
+per-pixel regression bounds. Reference-unmodelled content keeps its prior
+bound against today; it must be reported rather than silently excluded.
+No case may hide a worse maximum behind a better mean. A 32-cell reference
+miss triggers whole-image refinement through 256–2048 cells. Consecutive
+references must converge within 1e-4 on geometry and 0.01 CV per modeled
+channel; the selected whole image faces the original gate bounds. G-T1
+records separate raw float and mapped sRGB8 results.
+
+- `pm-text` layout tests and the layout-only corpus comparison keep line
+  breaks, advances and glyph positions exact.
+- `text_raster` checks requested raster geometry and reference quality on
+  captured plain text, captions, color glyphs and transformed text.
+- `text_corpus` checks composed text, with the original projects and the
+  text-isolated witnesses both counted. Non-text pixels take G-C2's f64
+  proof. Text the reference cannot model yet fails unless it is a measured
+  owned pending entry (`fixtures/text-corpus-pending.json`, owners L4/L6),
+  admitted only when the same authored text passes the outline reference in
+  isolation or every pixel over today's 2 CV bar lies in a mask band.
+- `text_gpu`, `text_colors`, `text_level2` and `text_level2_semantics` check
+  paint precision, color semantics, transformations and interaction.
+- `pm-text`'s bitmap test holds color-glyph ink to the painted pixels at
+  several sizes and sub-pixel phases; `pm-eval`'s `color_ink` holds level 1
+  measurement to it; G-T5 checks the installed app's selection and font
+  anchor against its own drawn pixels.
+- G-C2 checks the complete frame and preview/export contract.
+- `pm-reference` tests the independent coverage, color and blend formulas.
+
+Measured corrections and their current evidence belong in
+[quality-ledger.md](quality-ledger.md). Captures, per-case measurements and
+review images stay outside Git. A failing or incomplete reference class
+remains a gap in the lane report; a changed raster alone never qualifies it.
+
+## Reproduction
+
+Build outside the machine-wide Electron lock:
+
+```sh
+source engine/env.sh
+cd engine
+cargo check --workspace
+cargo clippy --workspace --all-targets
+cargo test -p pm-text --features render,corpus-tools
+cargo test -p pm-eval --test color_ink
+cargo test -p pm-render
+cargo test -p pm-reference
+cargo run -p pm-protocol --bin pm-protocol-gen -- --check
+```
+
+Engine wall-clock numbers under shared machine load are diagnostic. Paired app
+latency is qualified only in the orchestrator's quiet window, without
+loosening the existing threshold; the native app's harness is
+[tools/perf-gate](../../tools/perf-gate/README.md).
+
+The Electron app gates below are historical: `apps/desktop`, its addons and
+`pm-perfbench` (with the `text_cold` and `typing_60` ratchets) were removed.
+They ran from a v1 checkout. Before them, build the addons and renderer in `apps/desktop`.
+The bridge must exist at `engine/target/pm-bridge/pm_bridge.node`; removing
+`engine/target` removes the development bridge too.
+
+```sh
+cd apps/desktop
+bun run build:engine
+bun run build
+POWERMOVE_NEW_ENGINE=1 \
+  ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+  bunx playwright test --config playwright.consumers.config.ts --workers=1 \
+  e2e/canvas-text.spec.ts e2e/captions.spec.ts e2e/font-anchor.spec.ts \
+  e2e/split-text.spec.ts e2e/text-animators.spec.ts \
+  e2e/text-layout-resize.spec.ts e2e/native-engine-text-level2.spec.ts
+```
+
+Only the actual Electron/Playwright invocation holds the lock. Use the
+consumers configuration to avoid rebuilding inside it. Disposable profiles
+and harness temporary directories must be removed on success and failure.

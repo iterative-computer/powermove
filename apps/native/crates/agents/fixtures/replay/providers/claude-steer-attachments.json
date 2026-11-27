@@ -1,0 +1,32 @@
+{
+  "synthetic": true,
+  "frames": [
+    {
+      "kind": "steer",
+      "value": {
+        "id": "run",
+        "prompt": "Make it blue",
+        "images": [
+          "/workspace/reference.png"
+        ]
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Make it blue\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /workspace/reference.png"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "reference": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "editions": [
+    {
+      "id": "compat-v1/light",
+      "scheme": "light",
+      "accessibility": {
+        "reduce_transparency": false,
+        "increase_contrast": false,
+        "reduce_motion": false
+      },
+      "file": "light.css",
+      "sha256": "eb7d90c1e3905a912eee5b578bbc7bc397a4f7baee48b7594dbf5b088ede8b51"
+    },
+    {
+      "id": "compat-v1/light-solid",
+      "scheme": "light",
+      "accessibility": {
+        "reduce_transparency": true,
+        "increase_contrast": false,
+        "reduce_motion": false
+      },
+      "file": "light-solid.css",
+      "sha256": "fcfbfcb450d2ea3223f53aed34b037cf7b69d966b36a08372f0e89faa0e386a1"
+    },
+    {
+      "id": "compat-v1/light-contrast",
+      "scheme": "light",
+      "accessibility": {
+        "reduce_transparency": false,
+        "increase_contrast": true,
+        "reduce_motion": false
+      },
+      "file": "light-contrast.css",
+      "sha256": "45b6713cc1c238f149f0916fa4e92f97b26c8e3a54516720b7c847af6a97c134"
+    },
+    {
+      "id": "compat-v1/light-contrast-solid",
+      "scheme": "light",
+      "accessibility": {
+        "reduce_transparency": true,
+        "increase_contrast": true,
+        "reduce_motion": false
+      },
+      "file": "light-contrast-solid.css",
+      "sha256": "b04a203135491d862c01a34a5a5aa50036a5f9db533aac311b483756b9c6874f"
+    },
+    {
+      "id": "compat-v1/dark",
+      "scheme": "dark",
+      "accessibility": {
+        "reduce_transparency": false,
+        "increase_contrast": false,
+        "reduce_motion": false
+      },
+      "file": "dark.css",
+      "sha256": "cf56a6304b473816ce4a82898a02c229044ea9534dfe97a99993b18cbc16acb6"
+    },
+    {
+      "id": "compat-v1/dark-solid",
+      "scheme": "dark",
+      "accessibility": {
+        "reduce_transparency": true,
+        "increase_contrast": false,
+        "reduce_motion": false
+      },
+      "file": "dark-solid.css",
+      "sha256": "f2e2ea32cfcfde50829e24620b0ec7bed9f69d481a70269515a23b6989e7e478"
+    },
+    {
+      "id": "compat-v1/dark-contrast",
+      "scheme": "dark",
+      "accessibility": {
+        "reduce_transparency": false,
+        "increase_contrast": true,
+        "reduce_motion": false
+      },
+      "file": "dark-contrast.css",
+      "sha256": "e30b6a902763223f146a404f009e38199e652e622575ed1cf86d09b90759d438"
+    },
+    {
+      "id": "compat-v1/dark-contrast-solid",
+      "scheme": "dark",
+      "accessibility": {
+        "reduce_transparency": true,
+        "increase_contrast": true,
+        "reduce_motion": false
+      },
+      "file": "dark-contrast-solid.css",
+      "sha256": "b18f6f85f540046a6cecf1b95e7611fa1c1ad0e3701f3b0ab4a0403d207b0010"
+    }
+  ]
+}

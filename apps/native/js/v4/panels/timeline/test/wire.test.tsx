@@ -1,0 +1,818 @@
+import { describe, expect, test } from "bun:test";
+import { TimelinePanel } from "../panel";
+import { checkFrame } from "../model";
+import type { Intent, PropertyRow } from "../model";
+import { states, frame, layer } from "./fixtures";
+import { recorder, nativeValidators } from "./helpers";
+import type { SurfaceRoot } from "../../../src/renderer";
+import type { Commit } from "../../../src/protocol";
+
+function replay(commits: Commit[], flags: string[] = []) {
+  const result = Bun.spawnSync([nativeValidators().surface, ...flags], {
+    stdin: Buffer.from(commits.map((c) => JSON.stringify(c)).join("\n") + "\n"),
+  });
+  expect(result.exitCode).toBe(0);
+  return result.stdout
+    .toString()
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+}
+function tree(root: SurfaceRoot) {
+  const visit = (node: typeof root.host.root): unknown => ({
+    type: node.type,
+    props: node.props,
+    ...(node.textContent && !node.children.length
+      ? { text: node.textContent }
+      : {}),
+    ...(node.children.length ? { children: node.children.map(visit) } : {}),
+  });
+  return visit(root.host.root);
+}
+function byId(root: SurfaceRoot, id: string) {
+  return [...root.host.nodes.values()].find((n) => n.props.id === id)!;
+}
+function focusIds(root: SurfaceRoot, focus: number[]) {
+  return focus.map(
+    (id) =>
+      root.host.nodes.get(id)!.props.id ?? root.host.nodes.get(id)!.props.label,
+  );
+}
+async function drive(
+  root: SurfaceRoot,
+  id: string,
+  type = "click",
+  detail = {},
+) {
+  await root.drive(byId(root, id).id, type, detail);
+}
+
+describe("timeline: accepted six-op trees (provisional placeholders, not visual acceptance)", () => {
+  for (const [name, make] of Object.entries(states))
+    test(name, async () => {
+      const { root, commits } = recorder();
+      const f = checkFrame(make(), { first: 0, visible: 10 });
+      await root.render(<TimelinePanel frame={f} send={() => {}} />);
+      for (const result of replay(commits)) {
+        expect(result.accepted).toBe(true);
+        expect(result.diagnostics).toEqual([]);
+        expect(result.wireDiagnostics).toEqual([]);
+        expect(result.accessibilityNodes).toBe(
+          Object.keys(result.nodes).length,
+        );
+      }
+      expect(tree(root)).toMatchSnapshot();
+      await root.dispose();
+    });
+});
+
+test("Scale gives both full percentage wells and the link space in one row", async () => {
+  const { root, commits } = recorder();
+  const f = states["scale-compound"]();
+  const row = f.window.rows[0] as PropertyRow;
+  row.axes = [100, 200].map((value, i) => ({
+    path: i === 0 ? "scale.x" : "scale.y",
+    readout: `${value} %`,
+    numeric: { value, unit: "%", precision: 1, step: 1, binding: `scale:${i}` },
+  }));
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  const x = byId(root, "timeline:value:property:scale:scale.x");
+  const y = byId(root, "timeline:value:property:scale:scale.y");
+  const link = byId(root, "timeline:scale-link:property:scale");
+  expect(x.props).toMatchObject({ value: 100, unit: "%", precision: 1 });
+  expect(y.props).toMatchObject({ value: 200, unit: "%", precision: 1 });
+  expect(x.parent).toBe(y.parent);
+  expect(x.parent?.parent).toBe(link.parent);
+  expect(x.parent?.props.style).toMatchObject({
+    width: { token: "metrics.value_column" },
+    flexShrink: 0,
+    gap: { token: "space.xs" },
+  });
+  const accepted = replay(commits).at(-1);
+  expect(accepted.accepted).toBe(true);
+  expect(accepted.diagnostics).toEqual([]);
+  await root.dispose();
+});
+
+test("one track-area focus stop, non-focusable rows, conditional graph menu and tabs", async () => {
+  const { root, commits } = recorder();
+  await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  // The tab row has tabs and their menus, then Layers / Tracks; the head over
+  // the layer column (play, time, graph switch), then the tracks.
+  expect(focusIds(root, replay(commits).at(-1).focusOrder)).toEqual([
+    "timeline:tab:launch",
+    "P0-0:Layers",
+    "timeline:play",
+    "timeline:time",
+    "timeline:graph",
+    "timeline:tracks",
+  ]);
+  await root.render(
+    <TimelinePanel frame={states["graph-empty"]()} send={() => {}} />,
+  );
+  expect(focusIds(root, replay(commits).at(-1).focusOrder)).toContain(
+    "timeline:graph-options",
+  );
+  expect(byId(root, "timeline:tab-close:launch")).toBeUndefined();
+  expect(byId(root, "timeline:tracks").props.label).toBe("Layers");
+  expect(byId(root, "timeline:row:layer:headline").props["aria-selected"]).toBe(
+    false,
+  );
+  await root.dispose();
+});
+
+test("header actions preserve model enums and composition identity", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel
+      frame={states["rename-and-tabs"]()}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  for (const id of [
+    "timeline:play",
+    "timeline:time",
+    "timeline:tab:end",
+    "timeline:tab-close:launch",
+  ])
+    await drive(root, id);
+  const tracks = [...root.host.nodes.values()].find(
+    (n) => n.props.role === "radio" && n.props.label === "Tracks",
+  )!;
+  await root.drive(tracks.id, "click");
+  expect(actions).toEqual([
+    { type: "play" },
+    { type: "timeEdit" },
+    { type: "tab", id: "end", close: false },
+    { type: "tab", id: "launch", close: true },
+    { type: "mode", mode: "Tracks" },
+  ]);
+  await root.dispose();
+});
+
+test("header keeps the graph switch and only shows options when the graph is open", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  const send = (a: Intent) => actions.push(a);
+  // The switch returns to the graph view last shown: start from Graph.
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), view: "Graph" }} send={send} />,
+  );
+  await root.render(<TimelinePanel frame={frame()} send={send} />);
+  // Layers mode, dope sheet: no graph options.
+  expect(byId(root, "timeline:graph-options")).toBeUndefined();
+  expect(byId(root, "timeline:view")).toBeUndefined();
+  await drive(root, "timeline:graph");
+  // Shown: the switch is lit and turns it off; the options appear.
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), view: "Combined" }} send={send} />,
+  );
+  expect(byId(root, "timeline:graph-options")).toBeDefined();
+  await drive(root, "timeline:graph");
+  // Off again, it comes back to the view last shown (layer bars kept).
+  await root.render(
+    <TimelinePanel frame={{ ...frame(), view: "DopeSheet" }} send={send} />,
+  );
+  await drive(root, "timeline:graph");
+  expect(actions).toEqual([
+    { type: "view", view: "Graph" },
+    { type: "view", view: "DopeSheet" },
+    { type: "view", view: "Combined" },
+  ]);
+  await root.dispose();
+});
+
+test("Tracks header has no Snapping button or reserved slot", async () => {
+  const { root } = recorder();
+  await root.render(
+    <TimelinePanel
+      frame={{ ...frame(), mode: "Tracks", shyLayers: true }}
+      send={() => {}}
+    />,
+  );
+  expect(byId(root, "timeline:snap")?.props.id).toBeUndefined();
+  const controls = byId(root, "timeline:graph").parent!;
+  expect(controls.children.map((node) => node.props.id)).toEqual([
+    "timeline:graph",
+    "timeline:hide-shy",
+  ]);
+  await root.dispose();
+});
+
+test("a layer row's switches keep fixed columns at its trailing edge; the name gives way", async () => {
+  const { root } = recorder();
+  await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  const row = byId(root, "timeline:row:layer:headline");
+  const [name, switches] = row.children;
+  // The name side shrinks (and clips) first; the switches never shrink.
+  expect(name.props.style).toMatchObject({
+    flexShrink: 1,
+    overflow: "hidden",
+  });
+  expect(switches.props.style).toMatchObject({ flexShrink: 0 });
+  // The whole header is a source; interactive children keep their own pointer handlers.
+  expect(row.props.metadata).toMatchObject({ nativeRow: "layer:headline" });
+  expect(
+    byId(root, "timeline:name:layer:headline").props.metadata,
+  ).toMatchObject({
+    timelineLayerDrag: { layer: "headline" },
+  });
+  // Parent, cube and visibility are visible at rest. Lock keeps its space:
+  // the host draws its blank until the pointer is over the row, then the
+  // switch in that column (`hoverOnly` / `hoverHide`, no publication).
+  expect(switches.children.length).toBe(5);
+  expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
+  expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
+  for (const name of ["shy", "solo"])
+    expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
+  const lock = byId(root, "timeline:lock:layer:headline");
+  expect(lock.props.metadata).toMatchObject({ hoverOnly: true });
+  const at = switches.children.indexOf(lock);
+  expect(switches.children[at + 1].props.metadata).toEqual({ hoverHide: true });
+  for (const slot of switches.children)
+    if (slot !== lock && slot !== switches.children[at + 1])
+      expect(slot.props.metadata?.hoverOnly).toBeUndefined();
+  // The row is the hover group, with its hovered fill.
+  expect(row.props.metadata).toMatchObject({
+    hoverGroup: true,
+    hoverStyle: { background: { token: "colors.hover" } },
+  });
+  // Every column holds a switch's width (a hit target), drawn or not.
+  for (const slot of switches.children)
+    expect(slot.props.style).toMatchObject({
+      minWidth: { token: "metrics.hit" },
+    });
+  // Hovered: every switch, in the same four columns.
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        window: { total: 1, first: 0, rows: [{ ...layer(), hovered: true }] },
+      })}
+      send={() => {}}
+    />,
+  );
+  const hovered = byId(root, "timeline:row:layer:headline").children[1];
+  expect(hovered.children.length).toBe(4);
+  for (const name of ["parent", "threeD", "lock", "visibility"])
+    expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
+  expect(
+    byId(root, "timeline:lock:layer:headline").props.metadata?.hoverOnly,
+  ).toBeUndefined();
+  await root.dispose();
+});
+
+test("selected rows take the accent only while the timeline holds the keyboard (PM-367)", async () => {
+  const { root } = recorder();
+  const selected = { ...layer(), selected: true };
+  const style = () => byId(root, "timeline:row:layer:headline").props.style;
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 1, first: 0, rows: [selected] } })}
+      send={() => {}}
+    />,
+  );
+  expect(style()).toMatchObject({
+    background: { token: "colors.timeline_selected" },
+    color: { token: "colors.accent_text" },
+  });
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        focused: false,
+        window: { total: 1, first: 0, rows: [selected] },
+      })}
+      send={() => {}}
+    />,
+  );
+  expect(style()).toMatchObject({
+    background: { token: "colors.selected_fill" },
+  });
+  expect(style()).not.toMatchObject({ color: { token: "colors.accent_text" } });
+  expect(byId(root, "timeline:name:layer:headline").props.style).toMatchObject({
+    color: { token: "colors.text" },
+  });
+  await root.dispose();
+});
+
+test("an empty composition: the layer area holds a centred, inset invitation; the tab uses its dedicated pill height", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 0, first: 0, rows: [] } })}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  const empty = byId(root, "timeline:empty");
+  // Fills the layer area under the head, never the head or the tracks.
+  expect(empty.props.style).toMatchObject({
+    position: "absolute",
+    inset: "fill",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: { token: "metrics.inset" },
+    padding: { token: "metrics.inset" },
+  });
+  // v1's empty composition: a heading, what to add first, then the drop.
+  const [sentence, buttons, drop] = empty.children;
+  expect(sentence.props.style).toMatchObject({
+    textAlign: "center",
+    whiteSpace: "normal",
+  });
+  expect(drop.props.style).toMatchObject({ textAlign: "center" });
+  // Each is a push button (a control's hit target and hover), not text,
+  // in v1's order: Text, Shape, Solid, Null, Import….
+  expect(buttons.children.map((b) => b.props.label)).toEqual([
+    "Text",
+    "Shape",
+    "Solid",
+    "Null",
+    "Import…",
+  ]);
+  expect(
+    buttons.children.every(
+      (b) => b.props["data-pm-component"] === "push-button",
+    ),
+  ).toBe(true);
+  expect(buttons.children[1].props.title).toBe("Shape (⇧⌘Y)");
+  await drive(root, "timeline:empty:newText");
+  await drive(root, "timeline:empty:import");
+  expect(actions).toEqual([
+    { type: "run", command: "newText" },
+    { type: "run", command: "import" },
+  ]);
+  // The empty block is not a row of the outline.
+  expect(byId(root, "timeline:tracks").children.length).toBe(0);
+  // The composition tab: centred in the bar at its dedicated pill height.
+  expect(byId(root, "timeline:tabs").props.style).toMatchObject({
+    alignItems: "center",
+  });
+  expect(byId(root, "timeline:tab:launch").props.style).toMatchObject({
+    height: { token: "metrics.comp_tab_height" },
+  });
+  await root.dispose();
+});
+
+test("modifiers reach native selection, child switches never also select the row", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel frame={states.hover()} send={(a) => actions.push(a)} />,
+  );
+  await drive(root, "timeline:row:layer:headline", "click", {
+    shiftKey: true,
+    metaKey: true,
+  });
+  await drive(root, "timeline:lock:layer:headline");
+  await drive(root, "timeline:threeD:layer:headline");
+  expect(actions).toEqual([
+    {
+      type: "selectRow",
+      id: "layer:headline",
+      modifiers: {
+        shiftKey: true,
+        metaKey: true,
+        altKey: false,
+        ctrlKey: false,
+      },
+    },
+    { type: "switch", id: "layer:headline", name: "lock" },
+    { type: "switch", id: "layer:headline", name: "threeD" },
+  ]);
+  await root.dispose();
+});
+
+test("locked key/value controls are disabled, layer selection remains available", async () => {
+  const { root, commits } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel frame={states.disabled()} send={(a) => actions.push(a)} />,
+  );
+  const diamond = byId(root, "timeline:diamond:property:opacity");
+  const value = byId(root, "timeline:value:property:opacity");
+  expect(diamond.props.disabled).toBe(true);
+  expect(value.props.disabled).toBe(true);
+  await root.drive(diamond.id, "click");
+  expect(actions).toEqual([]);
+  await drive(root, "timeline:row:layer:headline");
+  expect(actions[0].type).toBe("selectRow");
+  expect(replay(commits).at(-1).focusOrder).not.toContain(diamond.id);
+  await root.dispose();
+});
+
+test("property navigation, key toggle and linked scale keep original native IDs", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel
+      frame={states["scale-compound"]()}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  for (const name of ["previous", "diamond", "next", "scale-link"])
+    await drive(root, `timeline:${name}:property:scale`);
+  expect(actions).toEqual([
+    {
+      type: "adjacentKey",
+      layer: "headline",
+      path: "scale",
+      direction: "previous",
+    },
+    { type: "keyToggle", layer: "headline", path: "scale" },
+    {
+      type: "adjacentKey",
+      layer: "headline",
+      path: "scale",
+      direction: "next",
+    },
+    { type: "scaleLink", layer: "headline" },
+  ]);
+  await root.dispose();
+});
+
+test("native key admission owns shortcuts; panel forwards modifiers/repeat, adding no chords", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel frame={frame()} send={(a) => actions.push(a)} />,
+  );
+  const keys = [
+    " ",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "j",
+    "k",
+    "i",
+    "o",
+    "[",
+    "]",
+    "b",
+    "n",
+    "p",
+    "s",
+    "r",
+    "t",
+    "a",
+    "u",
+    "m",
+    "f",
+    "e",
+    "l",
+    "`",
+    "F3",
+    "F9",
+    "ArrowUp",
+    "ArrowDown",
+    "Enter",
+    "Escape",
+    "Shift",
+    "Tab",
+  ];
+  for (const key of keys)
+    await drive(root, "timeline:tracks", "keydown", {
+      key,
+      shiftKey: true,
+      metaKey: true,
+      repeat: true,
+    });
+  expect(actions).toEqual(
+    keys.map((key) => ({
+      type: "keyDown",
+      event: { key, shiftKey: true, metaKey: true, repeat: true },
+    })),
+  );
+  await root.dispose();
+});
+
+test("60k projection mounts only the bounded native window and exposes full count as pending AX metadata", async () => {
+  const { root, commits } = recorder();
+  await root.render(
+    <TimelinePanel frame={states["60k-rows"]()} send={() => {}} />,
+  );
+  expect(
+    [...root.host.nodes.values()].filter(
+      (n) => n.props["data-pm-component"] === "tree-item",
+    ),
+  ).toHaveLength(30);
+  expect(byId(root, "timeline:tracks").props.metadata).toMatchObject({
+    totalRows: 60000,
+    firstRow: 29990,
+    indexDigits: 5,
+  });
+  // Bounded by the visible window, not the 60k rows (each row now holds
+  // its four switch columns, drawn or held open).
+  expect(root.host.nodes.size).toBeLessThan(500);
+  expect(replay(commits).at(-1).accessibilityNodes).toBe(root.host.nodes.size);
+  await root.dispose();
+});
+
+test("playback changes time/transport only, without row operations or new row nodes", async () => {
+  const { root, commits } = recorder();
+  const send = () => {};
+  await root.render(<TimelinePanel frame={frame()} send={send} />);
+  const row = byId(root, "timeline:row:layer:headline");
+  const descendants = new Set<number>();
+  const visit = (node: typeof row) => {
+    descendants.add(node.id);
+    node.children.forEach(visit);
+  };
+  visit(row);
+  const prior = commits.length;
+  await root.render(<TimelinePanel frame={states.playing()} send={send} />);
+  expect(byId(root, "timeline:row:layer:headline").id).toBe(row.id);
+  expect(
+    commits
+      .slice(prior)
+      .flatMap((c) => c.ops)
+      .filter((op) => "id" in op && descendants.has(op.id)),
+  ).toEqual([]);
+  await root.dispose();
+});
+
+test("actual AccessKit tree exposes panel/outline labels, selection, disabled values and spoken time", async () => {
+  const { root, commits } = recorder();
+  const f = states.disabled();
+  f.window.rows[0].selected = true;
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  const tree = replay(commits).at(-1).accessibility;
+  const ax = (id: string) =>
+    tree.find((node: { id: number }) => node.id === byId(root, id).id);
+  expect(ax("timeline")).toMatchObject({ role: "Group", label: "Timeline" });
+  expect(ax("timeline:tracks")).toMatchObject({
+    role: "Tree",
+    label: "Layers",
+  });
+  expect(ax("timeline:row:layer:headline")).toMatchObject({
+    role: "TreeItem",
+    selected: true,
+    label: "Headline, text layer, 0:00 to 0:10",
+  });
+  expect(ax("timeline:value:property:opacity")).toMatchObject({
+    role: "NumberInput",
+    disabled: true,
+    value: "100 percent",
+  });
+  expect(ax("timeline:time")).toMatchObject({
+    label: "Current time",
+    value: "0 hours 0 minutes 4 seconds 15 frames",
+  });
+  expect(ax("timeline:render-bar")).toMatchObject({
+    role: "Label",
+    label: "Rendered 0:00 to 0:12, rendering 0:12 to 0:14",
+  });
+  await root.dispose();
+});
+
+test("all sixteen scheme/accessibility token combinations accept the panel without literal visuals", async () => {
+  const { root, commits } = recorder();
+  await root.render(<TimelinePanel frame={states.hover()} send={() => {}} />);
+  for (let mask = 0; mask < 16; mask++) {
+    const flags = [
+      "--light",
+      "--contrast",
+      "--transparency",
+      "--motion",
+    ].filter((_, index) => mask & (1 << index));
+    for (const result of replay(commits, flags)) {
+      expect(result.accepted).toBe(true);
+      expect(result.diagnostics).toEqual([]);
+    }
+  }
+  await root.dispose();
+});
+
+test("joined property values expose separate native axis scrub targets", async () => {
+  const { root, commits } = recorder();
+  const f = states["scale-compound"]();
+  const row = f.window.rows.find(
+    (r) => r.kind === "property" && r.path === "scale",
+  )!;
+  if (row.kind !== "property") throw new Error("missing scale row");
+  row.axes = [
+    { path: "scale.x", readout: "100" },
+    { path: "scale.y", readout: "125" },
+  ];
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  for (const path of ["scale.x", "scale.y"]) {
+    const value = byId(root, `timeline:value:${row.id}:${path}`);
+    expect(value.props.metadata).toEqual({
+      timelineScrub: { layer: row.layer, path },
+    });
+  }
+  const native = replay(commits).at(-1);
+  expect(native.accepted).toBe(true);
+  expect(native.diagnostics).toEqual([]);
+  await root.dispose();
+});
+
+test("graph switch is icon-only and retains its accessible toggle", async () => {
+  const { root } = recorder();
+  await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  const graph = byId(root, "timeline:graph");
+  expect(graph.props.label).toBe("Graph Editor");
+  expect(graph.props.title).toBe("Show Graph Editor (⇧F3)");
+  expect(graph.children.length).toBe(0);
+  await root.render(
+    <TimelinePanel frame={states["graph-empty"]()} send={() => {}} />,
+  );
+  expect(byId(root, "timeline:graph").props["aria-pressed"]).toBe(true);
+  await root.dispose();
+});
+
+test("group children retain the number column and shift right at depths 0/1/2", async () => {
+  const { root } = recorder();
+  for (const depth of [0, 1, 2]) {
+    const row = { ...layer(), depth };
+    await root.render(
+      <TimelinePanel
+        frame={{ ...frame(), window: { total: 1, first: 0, rows: [row] } }}
+        send={() => {}}
+      />,
+    );
+    const indents = [...root.host.nodes.values()].filter(
+      (n) =>
+        (n.props.metadata as Record<string, unknown> | undefined)
+          ?.timelineIndent !== undefined,
+    );
+    expect(indents.length).toBe(1);
+    const spacers = indents[0].children.filter(
+      (n) =>
+        (n.props.style as Record<string, { token?: string }> | undefined)?.width
+          ?.token === "metrics.timeline_indent",
+    );
+    expect(spacers.length).toBe(depth);
+    expect(spacers.length * 12).toBe([0, 12, 24][depth]);
+    expect(JSON.stringify(tree(root))).toContain("01");
+  }
+  await root.dispose();
+});
+
+test("effect headings validate without editable controls and static layers hide disclosure", async () => {
+  const { root, commits } = recorder();
+  const staticLayer = { ...layer(), canOpen: false };
+  const heading = {
+    id: '["effect","headline","blur"]',
+    kind: "heading" as const,
+    layer: "headline",
+    label: "Blur",
+    accessibilityLabel: "Blur",
+    depth: 1,
+    selected: false,
+    focused: false,
+    hovered: false,
+    locked: false,
+  };
+  const f = frame({
+    window: { total: 2, first: 0, rows: [staticLayer, heading] },
+  });
+  checkFrame(f, { first: 0, visible: 10 });
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  expect(byId(root, `timeline:disclosure:${staticLayer.id}`)).toBeUndefined();
+  expect(byId(root, `timeline:heading:${heading.id}`).props.label).toBe("Blur");
+  for (const result of replay(commits)) expect(result.accepted).toBe(true);
+  await root.dispose();
+});
+
+test("track headers keep the disclosure column and toggle their lane", async () => {
+  const { root } = recorder();
+  const openTrack = {
+    id: '["track","Video",0]',
+    kind: "track" as const,
+    track: "V1",
+    label: "V1",
+    accessibilityLabel: "V1",
+    depth: 0,
+    selected: false,
+    focused: false,
+    hovered: false,
+    locked: false,
+    audio: false,
+    enabled: true,
+    canOpen: true,
+    expanded: true,
+  };
+  const bareTrack = {
+    ...openTrack,
+    id: '["track","Video",1]',
+    track: "V2",
+    label: "V2",
+    accessibilityLabel: "V2",
+    canOpen: false,
+    expanded: false,
+  };
+  const actions: Intent[] = [];
+  const chevron = `timeline:disclosure:${openTrack.id}`;
+  const f = frame({
+    mode: "Tracks",
+    window: { total: 2, first: 0, rows: [openTrack, bareTrack] },
+  });
+  checkFrame(f, { first: 0, visible: 10 });
+  await root.render(<TimelinePanel frame={f} send={(a) => actions.push(a)} />);
+  expect(byId(root, `timeline:disclosure:${bareTrack.id}`)).toBeUndefined();
+  expect(byId(root, chevron)?.props.metadata).toMatchObject({
+    requiredSymbol: "chevron.down",
+  });
+  await drive(root, chevron, "click");
+  expect(actions).toEqual([
+    { type: "disclosure", id: openTrack.id, open: false, all: false },
+  ]);
+  await drive(root, chevron, "click", {
+    altKey: true,
+  });
+  expect(actions[1]).toEqual({
+    type: "disclosure",
+    id: openTrack.id,
+    open: false,
+    all: true,
+  });
+  f.window.rows = [{ ...openTrack, expanded: false }, bareTrack];
+  await root.render(
+    <TimelinePanel frame={{ ...f }} send={(a) => actions.push(a)} />,
+  );
+  expect(byId(root, chevron).props.metadata).toMatchObject({
+    requiredSymbol: "chevron.right",
+  });
+  await drive(root, chevron, "click");
+  expect(actions[2]).toEqual({
+    type: "disclosure",
+    id: openTrack.id,
+    open: true,
+    all: false,
+  });
+  await root.dispose();
+});
+
+test("reorder sources belong to layer headers and pause during inline rename", async () => {
+  const { root } = recorder();
+  const header = layer();
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 1, first: 0, rows: [header] } })}
+      send={() => {}}
+    />,
+  );
+  for (const id of ["disclosure", "parent", "visibility"])
+    expect(
+      (
+        byId(root, `timeline:${id}:${header.id}`).props.metadata as Record<
+          string,
+          unknown
+        >
+      )?.timelineLayerDrag,
+    ).toBeUndefined();
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        window: {
+          total: 1,
+          first: 0,
+          rows: [
+            {
+              ...header,
+              nameEditor: { value: header.label, binding: "rename" },
+            },
+          ],
+        },
+      })}
+      send={() => {}}
+    />,
+  );
+  expect(
+    (
+      byId(root, `timeline:row:${header.id}`).props.metadata as Record<
+        string,
+        unknown
+      >
+    ).timelineLayerDrag,
+  ).toBeNull();
+  expect(byId(root, `timeline:rename:${header.id}`)).toBeDefined();
+  await root.dispose();
+});
+
+// PM-698 review: the lock is the same native button whether it shows on
+// hover or because the layer is locked, so a click sent to the button the
+// person saw lands after the lock toggled (a second click is not dropped).
+test("a row's lock keeps its native button through a lock toggle", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  const send = (a: Intent) => actions.push(a);
+  const row = (locked: boolean) =>
+    frame({ window: { total: 1, first: 0, rows: [{ ...layer(), locked }] } });
+  await root.render(<TimelinePanel frame={row(false)} send={send} />);
+  const first = byId(root, "timeline:lock:layer:headline");
+  expect(first.props.metadata).toMatchObject({ hoverOnly: true });
+  const id = first.id;
+  await root.render(<TimelinePanel frame={row(true)} send={send} />);
+  const locked = byId(root, "timeline:lock:layer:headline");
+  expect(locked.id).toBe(id);
+  expect(locked.props.metadata?.hoverOnly).toBeUndefined();
+  await root.render(<TimelinePanel frame={row(false)} send={send} />);
+  expect(byId(root, "timeline:lock:layer:headline").id).toBe(id);
+  // A click on the button as first painted still reaches its layer.
+  await root.drive(id, "click", {});
+  expect(actions).toEqual([{ type: "switch", id: "layer:headline", name: "lock" }]);
+  await root.dispose();
+});

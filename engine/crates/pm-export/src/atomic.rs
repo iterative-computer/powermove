@@ -1,0 +1,800 @@
+//! Atomic output through a temporary file in the destination folder (section 17).
+//!
+//! The encoder writes `.<name>.<random>.partial.<ext>` next to the destination, so the
+//! final move is a rename on the same volume. Nothing appears at the destination
+//! until the file is complete and verified; a failed or cancelled export removes the
+//! temporary file. With [`Overwrite::Fail`] the move is no-clobber (a hard link, then
+//! unlinking the temporary name), so an existing file is never replaced.
+//!
+//! PNG sequences are folders: the frames go into a temporary folder
+//! `.<name>.<random>.partial` beside the destination, which becomes the destination
+//! folder on commit (a rename, which never replaces a folder that holds anything).
+//! [`Overwrite::Replace`] moves each frame into an existing folder instead, replacing
+//! frames of the same name, then removes the frames of an earlier, longer export of the
+//! same sequence (`<name>_<digits>.<ext>` with the same name, digit count and extension)
+//! so the folder never holds a mix of old and new frames. Every other file stays.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::Error;
+use crate::settings::Overwrite;
+
+/// A temporary output file that becomes the destination on [`AtomicOutput::commit`].
+#[derive(Debug)]
+pub struct AtomicOutput {
+    destination: PathBuf,
+    temp: PathBuf,
+    /// Its entry in the app's ledger of export temporaries ([`set_ledger`]),
+    /// written before the temporary exists and removed once it is gone.
+    ledger: Option<PathBuf>,
+    overwrite: Overwrite,
+    mode: Option<u32>,
+    committed: bool,
+    /// The output is a folder of files (PNG sequences).
+    folder: bool,
+}
+
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mixed = crate::dither::hash_u32(std::process::id() ^ nanos as u32) as u64
+        | (crate::dither::hash_u32((nanos >> 32) as u32 ^ 0x9e37_79b9) as u64) << 32;
+    format!("{mixed:016x}")
+}
+
+impl AtomicOutput {
+    /// Prepares a temporary path next to `destination`. Fails when the folder does not
+    /// exist or, with [`Overwrite::Fail`], when the destination already exists.
+    pub fn new(destination: &Path, overwrite: Overwrite, mode: Option<u32>) -> Result<Self, Error> {
+        let name = destination
+            .file_name()
+            .ok_or_else(|| Error::InvalidSpec("destination has no file name".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let folder = match destination.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        if !folder.is_dir() {
+            return Err(Error::Io(format!(
+                "destination folder {} does not exist",
+                folder.display()
+            )));
+        }
+        if overwrite == Overwrite::Fail && fs::symlink_metadata(destination).is_ok() {
+            return Err(Error::Exists(destination.to_path_buf()));
+        }
+        if overwrite == Overwrite::InPlace {
+            return Err(Error::InvalidSpec(
+                "an in-place destination is opened with AtomicOutput::in_place".into(),
+            ));
+        }
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+            _ => (name.clone(), String::new()),
+        };
+        let temp = folder.join(format!(".{stem}.{}.partial{ext}", unique_suffix()));
+        Ok(Self {
+            ledger: record(&temp, false),
+            destination: destination.to_path_buf(),
+            temp,
+            overwrite,
+            mode,
+            committed: false,
+            folder: false,
+        })
+    }
+
+    /// A temporary file beside `host_file`, a file host services created for the
+    /// job (`Overwrite::InPlace`): the work file is `<host file>.<random>.partial.<ext>`,
+    /// so a host that removes the job's temporary file can also remove anything
+    /// named after it, and the commit renames the work file over the host's file.
+    pub fn in_place(host_file: &Path, extension: &str, mode: Option<u32>) -> Result<Self, Error> {
+        let name = host_file
+            .file_name()
+            .ok_or_else(|| Error::InvalidSpec("destination has no file name".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let folder = match host_file.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        if !folder.is_dir() {
+            return Err(Error::Io(format!(
+                "destination folder {} does not exist",
+                folder.display()
+            )));
+        }
+        let ext = if extension.is_empty() {
+            String::new()
+        } else {
+            format!(".{extension}")
+        };
+        let temp = folder.join(format!("{name}.{}.partial{ext}", unique_suffix()));
+        Ok(Self {
+            ledger: record(&temp, false),
+            destination: host_file.to_path_buf(),
+            temp,
+            overwrite: Overwrite::InPlace,
+            mode,
+            committed: false,
+            folder: false,
+        })
+    }
+
+    /// A temporary folder for a folder output (PNG sequences) at `destination`
+    /// (with [`Overwrite::InPlace`], the empty folder host services created for the
+    /// job). The temporary folder is created now, owner-only.
+    pub fn folder(
+        destination: &Path,
+        overwrite: Overwrite,
+        mode: Option<u32>,
+    ) -> Result<Self, Error> {
+        let name = destination
+            .file_name()
+            .ok_or_else(|| Error::InvalidSpec("destination has no folder name".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let parent = match destination.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        if !parent.is_dir() {
+            return Err(Error::Io(format!(
+                "destination folder {} does not exist",
+                parent.display()
+            )));
+        }
+        let existing = fs::symlink_metadata(destination).ok();
+        match overwrite {
+            Overwrite::Fail if existing.is_some() => {
+                return Err(Error::Exists(destination.to_path_buf()));
+            }
+            Overwrite::InPlace if !existing.as_ref().is_some_and(|m| m.is_dir()) => {
+                return Err(Error::InvalidSpec(
+                    "an in-place folder output needs the host's folder".into(),
+                ));
+            }
+            Overwrite::Replace if existing.as_ref().is_some_and(|m| !m.is_dir()) => {
+                return Err(Error::Exists(destination.to_path_buf()));
+            }
+            _ => {}
+        }
+        let temp = match overwrite {
+            Overwrite::InPlace => parent.join(format!("{name}.{}.partial", unique_suffix())),
+            _ => parent.join(format!(".{name}.{}.partial", unique_suffix())),
+        };
+        let ledger = record(&temp, true);
+        if let Err(e) = create_private_dir(&temp) {
+            forget(ledger.as_deref());
+            return Err(e);
+        }
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            ledger,
+            temp,
+            overwrite,
+            mode,
+            committed: false,
+            folder: true,
+        })
+    }
+
+    /// Where the encoder writes.
+    pub fn temp_path(&self) -> &Path {
+        &self.temp
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    /// Whether this output is a folder.
+    pub fn is_folder(&self) -> bool {
+        self.folder
+    }
+
+    /// Moves the finished temporary file into place and returns the destination.
+    pub fn commit(mut self) -> Result<PathBuf, Error> {
+        if self.folder {
+            return self.commit_folder();
+        }
+        let meta = fs::metadata(&self.temp)
+            .map_err(|e| Error::Io(format!("{}: {e}", self.temp.display())))?;
+        if meta.len() == 0 {
+            return Err(Error::Io("the encoder wrote an empty file".into()));
+        }
+        if let Some(mode) = self.mode {
+            set_mode(&self.temp, mode)?;
+        }
+        match self.overwrite {
+            Overwrite::Replace | Overwrite::InPlace => {
+                // InPlace replaces a host-owned scratch file. User outputs must
+                // survive Replace, including outputs from earlier versions (N4).
+                if self.overwrite == Overwrite::Replace {
+                    archive_existing(&self.destination)?;
+                }
+                fs::rename(&self.temp, &self.destination).map_err(|e| {
+                    Error::Io(format!("moving into {}: {e}", self.destination.display()))
+                })?;
+            }
+            Overwrite::Fail => {
+                match fs::hard_link(&self.temp, &self.destination) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&self.temp);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                        return Err(Error::Exists(self.destination.clone()));
+                    }
+                    // A check followed by rename could overwrite a raced user
+                    // file. Use the platform's atomic no-replace operation (N4).
+                    Err(_) => rename_no_replace(&self.temp, &self.destination)?,
+                }
+            }
+        }
+        self.committed = true;
+        remove_sidecars(&self.temp);
+        forget(self.ledger.take().as_deref());
+        Ok(self.destination.clone())
+    }
+}
+
+impl AtomicOutput {
+    fn commit_folder(mut self) -> Result<PathBuf, Error> {
+        let io = |e: io::Error, p: &Path| Error::Io(format!("{}: {e}", p.display()));
+        let mut files: Vec<PathBuf> = fs::read_dir(&self.temp)
+            .map_err(|e| io(e, &self.temp))?
+            .map(|e| e.map(|e| e.path()).map_err(|e| io(e, &self.temp)))
+            .collect::<Result<_, _>>()?;
+        files.sort();
+        if files.is_empty() {
+            return Err(Error::Io("the encoder wrote no files".into()));
+        }
+        for f in &files {
+            let len = fs::metadata(f).map_err(|e| io(e, f))?.len();
+            if len == 0 {
+                return Err(Error::Io(format!("{} is empty", f.display())));
+            }
+            if let Some(mode) = self.mode {
+                set_mode(f, mode)?;
+            }
+        }
+        match self.overwrite {
+            Overwrite::Replace if self.destination.is_dir() => {
+                let names: Vec<String> = files
+                    .iter()
+                    .filter_map(|f| f.file_name()?.to_str().map(str::to_owned))
+                    .collect();
+                for f in &files {
+                    let to = self.destination.join(f.file_name().expect("a file"));
+                    archive_existing(&to)?;
+                    fs::rename(f, &to).map_err(|e| io(e, &to))?;
+                }
+                let _ = fs::remove_dir(&self.temp);
+                // Only after every new frame is in place: stale frames of the same
+                // sequence from an earlier, longer export.
+                remove_stale_frames(&self.destination, &names)?;
+            }
+            _ => {
+                if let Some(mode) = self.mode {
+                    // Folders keep the owner's search bit with an owner-only mode.
+                    set_mode(&self.temp, mode | ((mode & 0o444) >> 2))?;
+                }
+                // rename(2) replaces a destination folder only when it is empty:
+                // the host's own folder (in place), or nothing at all.
+                fs::rename(&self.temp, &self.destination).map_err(|e| {
+                    if e.kind() == io::ErrorKind::DirectoryNotEmpty
+                        || e.kind() == io::ErrorKind::AlreadyExists
+                        || e.raw_os_error() == Some(libc::ENOTEMPTY)
+                    {
+                        Error::Exists(self.destination.clone())
+                    } else {
+                        io(e, &self.destination)
+                    }
+                })?;
+            }
+        }
+        self.committed = true;
+        forget(self.ledger.take().as_deref());
+        Ok(self.destination.clone())
+    }
+}
+
+/// `<name>_<digits>.<ext>` split into (name, digit count, ext).
+fn frame_parts(file: &str) -> Option<(&str, usize, &str)> {
+    let (stem, ext) = file.rsplit_once('.')?;
+    let (name, digits) = stem.rsplit_once('_')?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && !ext.is_empty())
+        .then_some((name, digits.len(), ext))
+}
+
+/// Removes files in `folder` that belong to the same frame sequence as `written`
+/// (same name, digit count and extension) but were not written by this export.
+fn remove_stale_frames(folder: &Path, written: &[String]) -> Result<(), Error> {
+    let mut sequences: Vec<(&str, usize, &str)> =
+        written.iter().filter_map(|n| frame_parts(n)).collect();
+    sequences.sort_unstable();
+    sequences.dedup();
+    if sequences.is_empty() {
+        return Ok(());
+    }
+    let entries =
+        fs::read_dir(folder).map_err(|e| Error::Io(format!("{}: {e}", folder.display())))?;
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let stale = frame_parts(&name).is_some_and(|parts| sequences.contains(&parts))
+            && !written.iter().any(|w| w == &name)
+            && entry.file_type().is_ok_and(|t| t.is_file());
+        if stale {
+            let path = entry.path();
+            archive_existing(&path)?;
+            fs::remove_file(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+        }
+    }
+    Ok(())
+}
+
+/// Retain replaced and stale user outputs. Scratch cleanup never calls this.
+/// A copy of the file at `path` goes into `.powermove-export-archive` beside
+/// it; nothing there is fine.
+pub fn archive_existing(path: &Path) -> Result<(), Error> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::Io(e.to_string())),
+        Ok(meta) if meta.is_dir() => return Err(Error::Exists(path.to_path_buf())),
+        Ok(_) => {}
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let archive = parent.join(".powermove-export-archive");
+    match create_private_dir(&archive) {
+        Ok(()) => {}
+        Err(_)
+            if fs::symlink_metadata(&archive)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) => {}
+        Err(e) => return Err(e),
+    }
+    let mut name = std::ffi::OsString::from(format!("{}-", unique_suffix()));
+    name.push(
+        path.file_name()
+            .ok_or_else(|| Error::InvalidSpec("archive source has no name".into()))?,
+    );
+    let to = archive.join(name);
+    let mut source = fs::File::open(path).map_err(|e| Error::Io(e.to_string()))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut target = options.open(to).map_err(|e| Error::Io(e.to_string()))?;
+    io::copy(&mut source, &mut target).map_err(|e| Error::Io(e.to_string()))?;
+    target.sync_all().map_err(|e| Error::Io(e.to_string()))
+}
+
+fn rename_no_replace(from: &Path, to: &Path) -> Result<(), Error> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let from = std::ffi::CString::new(from.as_os_str().as_bytes())
+            .map_err(|e| Error::Io(e.to_string()))?;
+        let target = std::ffi::CString::new(to.as_os_str().as_bytes())
+            .map_err(|e| Error::Io(e.to_string()))?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(from.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            return Err(Error::Exists(to.to_path_buf()));
+        }
+        Err(Error::Io(format!("atomic no-replace move: {error}")))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = from;
+        Err(Error::Io(format!(
+            "atomic no-replace move unavailable for {}",
+            to.display()
+        )))
+    }
+}
+
+fn create_private_dir(path: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
+            .map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+    }
+}
+
+impl Drop for AtomicOutput {
+    fn drop(&mut self) {
+        if !self.committed {
+            remove_temporary(&self.temp, self.folder);
+        }
+        forget(self.ledger.take().as_deref());
+    }
+}
+
+fn remove_temporary(temp: &Path, folder: bool) {
+    if folder {
+        // Only the output's own temporary folder, which it created.
+        let _ = fs::remove_dir_all(temp);
+    } else {
+        let _ = fs::remove_file(temp);
+        remove_sidecars(temp);
+    }
+}
+
+/// Where this process records its export temporaries: the app's profile.
+/// A forced end (a quit signal's deadline, a crash) runs no drop, so the
+/// next launch removes what the ledger names, and nothing else (PM-478).
+static LEDGER: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Records every temporary made from now on in `dir` (`None`: stop).
+pub fn set_ledger(dir: Option<PathBuf>) {
+    *LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// Writes the ledger entry naming `temp`, durable before the temporary is
+/// made. `None` when no ledger is set or it cannot be written (the export
+/// goes on; only a forced end then leaves the file).
+fn record(temp: &Path, folder: bool) -> Option<PathBuf> {
+    use std::io::Write;
+    let dir = LEDGER.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    fs::create_dir_all(&dir).ok()?;
+    let entry = dir.join(format!("{}.temp", unique_suffix()));
+    let mut file = fs::File::create(&entry).ok()?;
+    let kind = if folder { "folder" } else { "file" };
+    let pid = std::process::id();
+    file.write_all(format!("{kind}\n{}\n{pid}\n", temp.display()).as_bytes()).ok()?;
+    file.sync_all().ok()?;
+    if let Ok(d) = fs::File::open(&dir) {
+        let _ = d.sync_all();
+    }
+    Some(entry)
+}
+
+fn forget(entry: Option<&Path>) {
+    if let Some(entry) = entry {
+        let _ = fs::remove_file(entry);
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+}
+
+/// At launch, before any export runs: removes each temporary an earlier
+/// export recorded in `dir` and never removed (a forced end), then its entry.
+/// Only the recorded path: a temporary's own name (`.partial`), never a
+/// search by pattern; an entry that cannot be read is dropped. Returns what
+/// it removed.
+pub fn clean_ledger(dir: &Path) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("temp") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let mut lines = text.lines();
+        let (kind, temp) = (lines.next(), lines.next().map(PathBuf::from));
+        // The process that made it is still at work (another instance): not
+        // a leftover.
+        let pid = lines.next().and_then(|p| p.parse::<i32>().ok());
+        if pid.is_some_and(|pid| pid != std::process::id() as i32 && alive(pid)) {
+            continue;
+        }
+        if let (Some(kind @ ("file" | "folder")), Some(temp)) = (kind, temp)
+            && temp.is_absolute()
+            && temp
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(".partial"))
+            && fs::symlink_metadata(&temp).is_ok()
+        {
+            remove_temporary(&temp, kind == "folder");
+            removed.push(temp);
+        }
+        let _ = fs::remove_file(&path);
+    }
+    removed
+}
+
+/// Removes files named `<temp file name>.<anything>`: AVAssetWriter keeps a
+/// `.sb-<uuid>` work file next to an MP4 it optimizes for network use, and leaves it
+/// behind when writing is cancelled.
+fn remove_sidecars(temp: &Path) {
+    let (Some(folder), Some(name)) = (temp.parent(), temp.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &Path, _: u32) -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pm-export-atomic-{name}-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn temp_file_lives_next_to_the_destination_and_vanishes_on_drop() {
+        let dir = scratch("drop");
+        let dest = dir.join("Clip.mov");
+        let out = AtomicOutput::new(&dest, Overwrite::Fail, None).unwrap();
+        let temp = out.temp_path().to_path_buf();
+        assert_eq!(temp.parent(), Some(dir.as_path()));
+        let name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(".Clip.") && name.ends_with(".partial.mov"),
+            "{name}"
+        );
+        fs::write(&temp, b"partial").unwrap();
+        let sidecar = dir.join(format!("{name}.sb-1234"));
+        fs::write(&sidecar, b"work").unwrap();
+        fs::write(dir.join("Unrelated.mov"), b"keep").unwrap();
+        drop(out);
+        assert!(!temp.exists() && !dest.exists() && !sidecar.exists());
+        assert!(dir.join("Unrelated.mov").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn commit_moves_into_place_with_the_requested_mode() {
+        let dir = scratch("commit");
+        let dest = dir.join("Agent.mp4");
+        let out = AtomicOutput::new(&dest, Overwrite::Fail, Some(0o600)).unwrap();
+        fs::write(out.temp_path(), b"movie").unwrap();
+        let temp = out.temp_path().to_path_buf();
+        assert_eq!(out.commit().unwrap(), dest);
+        assert_eq!(fs::read(&dest).unwrap(), b"movie");
+        assert!(!temp.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fail_policy_never_clobbers_and_replace_does() {
+        let dir = scratch("clobber");
+        let dest = dir.join("Out.mov");
+        fs::write(&dest, b"old").unwrap();
+        assert!(matches!(
+            AtomicOutput::new(&dest, Overwrite::Fail, None),
+            Err(Error::Exists(_))
+        ));
+        // A file that appears while the export runs is not replaced either.
+        fs::remove_file(&dest).unwrap();
+        let out = AtomicOutput::new(&dest, Overwrite::Fail, None).unwrap();
+        fs::write(out.temp_path(), b"new").unwrap();
+        fs::write(&dest, b"raced").unwrap();
+        let temp = out.temp_path().to_path_buf();
+        assert!(matches!(out.commit(), Err(Error::Exists(_))));
+        assert_eq!(fs::read(&dest).unwrap(), b"raced");
+        assert!(!temp.exists(), "the failed commit drops the temporary file");
+        let out = AtomicOutput::new(&dest, Overwrite::Replace, None).unwrap();
+        fs::write(out.temp_path(), b"new").unwrap();
+        out.commit().unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn in_place_writes_beside_the_host_file_and_renames_over_it() {
+        let dir = scratch("inplace");
+        let host = dir.join(".powermove-0123456789abcdef.part");
+        fs::write(&host, b"").unwrap();
+        let out = AtomicOutput::in_place(&host, "mov", Some(0o600)).unwrap();
+        let temp = out.temp_path().to_path_buf();
+        let name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(".powermove-0123456789abcdef.part.") && name.ends_with(".partial.mov"),
+            "{name}"
+        );
+        fs::write(&temp, b"movie").unwrap();
+        assert_eq!(out.commit().unwrap(), host);
+        assert_eq!(fs::read(&host).unwrap(), b"movie");
+        assert!(!temp.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&host).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // A dropped in-place output leaves the host's file to the host.
+        let out = AtomicOutput::in_place(&host, "mp4", None).unwrap();
+        fs::write(out.temp_path(), b"partial").unwrap();
+        let temp = out.temp_path().to_path_buf();
+        drop(out);
+        assert!(!temp.exists() && host.exists());
+        assert!(AtomicOutput::new(&host, Overwrite::InPlace, None).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_archives_user_bytes_and_archive_failure_keeps_destination() {
+        let dir = scratch("archive");
+        let dest = dir.join("old.mp4");
+        fs::write(&dest, b"authored original").unwrap();
+        let out = AtomicOutput::new(&dest, Overwrite::Replace, None).unwrap();
+        fs::write(out.temp_path(), b"new export").unwrap();
+        out.commit().unwrap();
+        let archive = dir.join(".powermove-export-archive");
+        let entries: Vec<_> = fs::read_dir(&archive).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            fs::read(entries[0].as_ref().unwrap().path()).unwrap(),
+            b"authored original"
+        );
+        fs::remove_dir_all(&archive).unwrap();
+        fs::write(&archive, b"not a directory").unwrap();
+        let out = AtomicOutput::new(&dest, Overwrite::Replace, None).unwrap();
+        fs::write(out.temp_path(), b"would replace").unwrap();
+        assert!(out.commit().is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"new export");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_replace_rename_keeps_a_raced_destination() {
+        let dir = scratch("rename-race");
+        let from = dir.join("temp");
+        let to = dir.join("destination");
+        fs::write(&from, b"new").unwrap();
+        fs::write(&to, b"raced user file").unwrap();
+        assert!(matches!(
+            rename_no_replace(&from, &to),
+            Err(Error::Exists(_))
+        ));
+        assert_eq!(fs::read(&to).unwrap(), b"raced user file");
+        fs::remove_file(&to).unwrap();
+        rename_no_replace(&from, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"new");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn empty_output_and_missing_folders_fail() {
+        let dir = scratch("empty");
+        let out = AtomicOutput::new(&dir.join("E.mov"), Overwrite::Fail, None).unwrap();
+        fs::write(out.temp_path(), b"").unwrap();
+        assert!(out.commit().is_err());
+        assert!(!dir.join("E.mov").exists());
+        assert!(AtomicOutput::new(&dir.join("missing/E.mov"), Overwrite::Fail, None).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn folder_outputs_appear_whole_and_never_replace_a_folder_with_files() {
+        let dir = scratch("folder");
+        let dest = dir.join("Frames");
+        let out = AtomicOutput::folder(&dest, Overwrite::Fail, Some(0o600)).unwrap();
+        assert!(out.is_folder() && out.temp_path().is_dir());
+        fs::write(out.temp_path().join("Frames_00000.png"), b"png").unwrap();
+        fs::write(out.temp_path().join("Frames_00001.png"), b"png").unwrap();
+        assert!(
+            !dest.exists(),
+            "nothing at the destination before the commit"
+        );
+        assert_eq!(out.commit().unwrap(), dest);
+        assert!(dest.join("Frames_00001.png").is_file());
+        // Fail: an existing folder is not replaced.
+        assert!(matches!(
+            AtomicOutput::folder(&dest, Overwrite::Fail, None),
+            Err(Error::Exists(_))
+        ));
+        // Replace: frames of the same name are replaced, frames of the earlier,
+        // longer export of the same sequence go, and other files stay (other
+        // sequences, other digit counts or extensions, folders).
+        fs::write(dest.join("notes.txt"), b"mine").unwrap();
+        fs::write(dest.join("Frames_00002.png"), b"old").unwrap();
+        fs::write(dest.join("Other_00001.png"), b"other").unwrap();
+        fs::write(dest.join("Frames_001.png"), b"digits").unwrap();
+        fs::write(dest.join("Frames_00001.tif"), b"tif").unwrap();
+        fs::create_dir(dest.join("Frames_00009.png")).unwrap();
+        let out = AtomicOutput::folder(&dest, Overwrite::Replace, None).unwrap();
+        fs::write(out.temp_path().join("Frames_00000.png"), b"new").unwrap();
+        let temp = out.temp_path().to_path_buf();
+        out.commit().unwrap();
+        assert_eq!(fs::read(dest.join("Frames_00000.png")).unwrap(), b"new");
+        assert!(!dest.join("Frames_00001.png").exists());
+        assert!(!dest.join("Frames_00002.png").exists());
+        let mut archived: Vec<_> = fs::read_dir(dest.join(".powermove-export-archive"))
+            .unwrap()
+            .map(|entry| fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        archived.sort();
+        assert_eq!(
+            archived,
+            vec![b"old".to_vec(), b"png".to_vec(), b"png".to_vec()]
+        );
+        assert_eq!(fs::read(dest.join("notes.txt")).unwrap(), b"mine");
+        assert_eq!(fs::read(dest.join("Other_00001.png")).unwrap(), b"other");
+        assert!(dest.join("Frames_001.png").exists() && dest.join("Frames_00001.tif").exists());
+        assert!(dest.join("Frames_00009.png").is_dir());
+        assert!(!temp.exists());
+        // A dropped folder output removes only its own temporary folder.
+        let out = AtomicOutput::folder(&dir.join("Other"), Overwrite::Fail, None).unwrap();
+        fs::write(out.temp_path().join("a.png"), b"x").unwrap();
+        let temp = out.temp_path().to_path_buf();
+        drop(out);
+        assert!(!temp.exists() && dest.join("notes.txt").exists());
+        // In place: the host's empty folder is replaced by the finished one.
+        let host = dir.join(".powermove-0123456789abcdef.part");
+        fs::create_dir(&host).unwrap();
+        let out = AtomicOutput::folder(&host, Overwrite::InPlace, None).unwrap();
+        fs::write(out.temp_path().join("f_00000.png"), b"x").unwrap();
+        assert_eq!(out.commit().unwrap(), host);
+        assert!(host.join("f_00000.png").exists());
+        // An empty output is refused.
+        let out = AtomicOutput::folder(&dir.join("Empty"), Overwrite::Fail, None).unwrap();
+        assert!(out.commit().is_err());
+        assert!(!dir.join("Empty").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

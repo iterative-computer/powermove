@@ -1,0 +1,300 @@
+{
+  "baseline": "v1.2.0",
+  "source": "apps/desktop/src/main/codex/app-server-runner.test.ts; unmodified runner, FakeAppServer test pattern",
+  "frames": [
+    {
+      "kind": "run",
+      "value": {
+        "id": "oracle-run",
+        "cwd": "/workspace/agent",
+        "prompt": "Make a progressive blur effect",
+        "schema": {
+          "type": "object"
+        },
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "ultra",
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialize",
+        "id": 1,
+        "params": {
+          "clientInfo": {
+            "name": "powermove_agent",
+            "title": "Powermove Agent",
+            "version": "1.0.0"
+          },
+          "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialized",
+        "params": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "thread/start",
+        "id": 2,
+        "params": {
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+          "ephemeral": true,
+          "config": {
+            "mcp_servers": {}
+          },
+          "model": "gpt-6.1-sol",
+          "serviceName": "powermove"
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "thr_123"
+          }
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/start",
+        "id": 3,
+        "params": {
+          "threadId": "thr_123",
+          "input": [
+            {
+              "type": "text",
+              "text": "Make a progressive blur effect"
+            }
+          ],
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandboxPolicy": {
+            "type": "readOnly"
+          },
+          "model": "gpt-6.1-sol",
+          "effort": "ultra",
+          "outputSchema": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 3,
+        "result": {
+          "turn": {
+            "id": "turn_456",
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": "q-rpc",
+        "method": "item/tool/requestUserInput",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "itemId": "q1",
+          "questions": [
+            {
+              "id": "style",
+              "header": "Style",
+              "question": "Which style?",
+              "options": [
+                {
+                  "label": "Soft",
+                  "description": "Subtle"
+                }
+              ],
+              "isOther": true,
+              "isSecret": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "question",
+        "itemId": "q1",
+        "questions": [
+          {
+            "id": "style",
+            "header": "Style",
+            "question": "Which style?",
+            "options": [
+              {
+                "label": "Soft",
+                "description": "Subtle"
+              }
+            ],
+            "allowOther": true,
+            "secret": false
+          }
+        ],
+        "transport": "reply",
+        "blocking": true
+      }
+    },
+    {
+      "kind": "answer",
+      "value": {
+        "id": "oracle-run",
+        "itemId": "q1",
+        "answers": {
+          "style": [
+            "Soft"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "id": "q-rpc",
+        "result": {
+          "answers": {
+            "style": {
+              "answers": [
+                "Soft"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "method": "mcpServer/elicitation/request",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456"
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "id": 1,
+        "result": {
+          "action": "decline",
+          "content": null,
+          "_meta": null
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": "unknown",
+        "method": "unsupported/request",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456"
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "id": "unknown",
+        "error": {
+          "code": -32601,
+          "message": "Powermove does not handle unsupported/request."
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/agentMessage/delta",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "itemId": "answer",
+          "delta": "{\"kind\":\"scene\"}"
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "answer",
+        "text": "{\"kind\":\"scene\"}"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "answer",
+            "type": "agentMessage",
+            "text": "{\"kind\":\"scene\"}"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turn": {
+            "id": "turn_456",
+            "status": "completed",
+            "error": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "result",
+      "value": {
+        "ok": true,
+        "text": "{\"kind\":\"scene\"}",
+        "access": "editor"
+      }
+    }
+  ]
+}

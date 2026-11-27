@@ -1,0 +1,812 @@
+//! The colour commands through a real kernel, down to rendered pixels.
+use super::*;
+use pm_kernel::{
+    KernelActor, KernelConfig, KernelHandle,
+    session::{SessionHandle, SessionSource, ShellCall, ShellReply},
+};
+use pm_protocol::color::Precision;
+use pm_protocol::common::{Size, Ticks};
+use pm_render::{MapResolver, RenderRequest, Renderer};
+use serde_json::json;
+
+fn channel(value: f64) -> serde_json::Value {
+    json!({ "v": value, "kf": [], "expr": null })
+}
+
+fn layer(id: &str, ty: &str, d: serde_json::Value) -> serde_json::Value {
+    let p: serde_json::Map<_, _> = [
+        ("position.x", 0.0),
+        ("position.y", 0.0),
+        ("position.z", 0.0),
+        ("anchor.x", 0.0),
+        ("anchor.y", 0.0),
+        ("anchor.z", 0.0),
+        ("scale.x", 100.0),
+        ("scale.y", 100.0),
+        ("scale.z", 100.0),
+        ("rotation", 0.0),
+        ("rotation.x", 0.0),
+        ("rotation.y", 0.0),
+        ("orientation.x", 0.0),
+        ("orientation.y", 0.0),
+        ("orientation.z", 0.0),
+        ("opacity", 100.0),
+        ("skew", 0.0),
+        ("perspective", 50.0),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), channel(v)))
+    .collect();
+    json!({
+        "id": id, "type": ty, "name": id, "from": 0, "dur": 1, "on": true, "lock": false,
+        "shy": false, "collapsed": true, "threeD": false, "solo": false, "color": "#4C8DFF",
+        "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
+        "p": p, "fx": [], "transitionIn": null, "transitionOut": null, "masks": [], "d": d
+    })
+}
+
+fn fixture() -> (tempfile::TempDir, KernelActor, SessionHandle) {
+    let dir = tempfile::tempdir().unwrap();
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(dir.path().join("journals")),
+        ..Default::default()
+    });
+    let k = actor.handle();
+    crate::mcp::attach(&k, dir.path()).unwrap();
+    let solid = layer(
+        "solid",
+        "solid",
+        json!({ "color": "#408040", "w": 16, "h": 16 }),
+    );
+    let mut clip = layer("clip", "video", json!({ "asset": "A", "w": 16, "h": 16 }));
+    clip["on"] = json!(false);
+    let project = json!({
+        "id": "test", "name": "Base", "compId": "c", "w": 16, "h": 16, "fps": 30, "dur": 1,
+        "bg": "#000000", "layers": [solid, clip], "comps": {},
+        "assets": { "A": { "id": "A", "name": "A", "kind": "video" } }
+    });
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::Open {
+            id: "test".into(),
+            source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("project opens")
+    };
+    (dir, actor, session)
+}
+
+fn published(k: &KernelHandle) -> Arc<Published> {
+    k.published("test").unwrap()
+}
+
+#[test]
+fn panel_settings_choose_what_the_engine_counts() {
+    let config = scope_config(true, true, true);
+    assert_eq!(config.signal, ScopeSignal::Pq);
+    assert_eq!(config.matrix, ScopeMatrix::Rec2020);
+    assert_eq!(config.stage, ScopeStage::Output);
+    let config = scope_config(false, false, false);
+    assert_eq!(config.signal, ScopeSignal::Display);
+    assert_eq!(config.matrix, ScopeMatrix::Rec709);
+    assert_eq!(config.stage, ScopeStage::Picture);
+    let more = more_menu(false, false, false, true);
+    assert_eq!(more.len(), 8);
+    assert_eq!(more[6]["label"], "Read: Picture");
+    assert_eq!(more[6]["checked"], true);
+    assert_eq!(more[7]["checked"], false);
+    assert_eq!(more[0]["checked"], true);
+    assert_eq!(more[1]["checked"], false);
+    assert_eq!(more[4]["disabled"], true);
+    assert_eq!(more[4]["tooltip"], "This project has no values above SDR.");
+}
+
+#[test]
+fn every_camera_reading_is_one_the_engine_parses() {
+    for log in CAMERA_LOGS {
+        let member = serde_json::json!({ "transfer": log.transfer, "primaries": log.primaries });
+        let (reading, issues) = pm_media::interpret::Interpretation::from_json(&member);
+        assert!(issues.is_empty(), "{}: {issues:?}", log.label);
+        assert!(reading.transfer.is_some() && reading.primaries.is_some());
+    }
+}
+
+#[test]
+fn camera_log_is_one_undoable_interpretation_that_keeps_other_overrides() {
+    let (_dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let p = published(&k);
+    let log = CAMERA_LOGS.iter().find(|l| l.transfer == "logC4").copied();
+    let command = interpret_command(&p, "clip", log).unwrap();
+    k.call_blocking("test", transact(&p, "Interpret Footage", vec![command]))
+        .unwrap();
+    let p = published(&k);
+    let assets = p.snapshot.root().unwrap().get("assets").unwrap();
+    let interpret = assets
+        .get("A")
+        .unwrap()
+        .get("interpret")
+        .unwrap()
+        .to_value();
+    assert_eq!(
+        interpret.get("transfer").and_then(Value::as_str),
+        Some("logC4")
+    );
+    assert_eq!(
+        interpret.get("primaries").and_then(Value::as_str),
+        Some("awgGen4")
+    );
+    let reading = pm_render::footage::interpretation(assets.get("A").unwrap()).unwrap();
+    assert_eq!(reading.transfer, Some(pm_protocol::color::Transfer::LogC4));
+    let command = interpret_command(&p, "clip", None).unwrap();
+    k.call_blocking("test", transact(&p, "Interpret Footage", vec![command]))
+        .unwrap();
+    let p = published(&k);
+    let assets = p.snapshot.root().unwrap().get("assets").unwrap();
+    assert!(assets.get("A").unwrap().get("interpret").is_none());
+    assert!(interpret_command(&p, "solid", log).is_err());
+    actor.shutdown();
+}
+
+#[test]
+fn applying_a_cube_reaches_rendered_pixels_through_the_kernel() {
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let p = published(&k);
+    let source = dir.path().join("Invert.cube");
+    std::fs::write(
+        &source,
+        "LUT_3D_SIZE 2\n1 1 1\n0 1 1\n1 0 1\n0 0 1\n1 1 0\n0 1 0\n1 0 0\n0 0 0\n",
+    )
+    .unwrap();
+    let retained = retain_lut(dir.path(), &source).unwrap();
+    assert_ne!(retained, source);
+    std::fs::remove_file(&source).unwrap();
+    let commands = lut_commands(&p, "solid", "grade", "Invert.cube", &retained, &none()).unwrap();
+    k.call_blocking("test", transact(&p, "Apply LUT", commands))
+        .unwrap();
+    let p = published(&k);
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("grade".into(), retained);
+    let mut renderer = Renderer::headless().unwrap();
+    renderer
+        .set_main_effects_for_document(&p.snapshot.document)
+        .unwrap();
+    let frame = renderer
+        .render(
+            &p.snapshot.document,
+            &p.snapshot.open_comp().unwrap(),
+            Ticks::ZERO,
+            &RenderRequest::sized(Size::new(16, 16), Precision::Float32),
+            &resolver,
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    let expected = [0x40, 0x80, 0x40].map(|v: u32| 1.0 - v as f32 / 255.0);
+    for c in 0..3 {
+        assert!((pixels[c] - expected[c]).abs() < 1e-3, "{:?}", &pixels[..4]);
+    }
+    actor.shutdown();
+}
+
+#[test]
+fn the_clean_aperture_switches_on_and_off_and_keeps_other_overrides() {
+    let (_dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let apply = |command| {
+        k.call_blocking(
+            "test",
+            transact(&published(&k), "Interpret Footage", vec![command]),
+        )
+        .unwrap();
+    };
+    let reading = || {
+        let p = published(&k);
+        let root = p.snapshot.root().unwrap();
+        root.get("assets")
+            .and_then(|assets| assets.get("A"))
+            .and_then(pm_render::footage::interpretation)
+            .unwrap_or_default()
+    };
+    apply(interpret_command(&published(&k), "clip", Some(CAMERA_LOGS[0])).unwrap());
+    apply(clean_aperture_command(&published(&k), "clip").unwrap());
+    assert_eq!(reading().clean_aperture, Some(true));
+    assert!(reading().transfer.is_some(), "the log reading stays");
+    apply(clean_aperture_command(&published(&k), "clip").unwrap());
+    assert_eq!(reading().clean_aperture, None);
+    assert!(reading().transfer.is_some(), "the log reading stays");
+    assert!(clean_aperture_command(&published(&k), "solid").is_err());
+    actor.shutdown();
+}
+
+#[test]
+fn a_cube_fills_the_effects_browsers_empty_lut_effect() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let p = published(&k);
+    let definition = saved_builtin_definition(
+        &p.snapshot.document,
+        "applyColorLut",
+        Some(&Value::from(2)),
+        0.,
+        0.,
+    )
+    .unwrap();
+    let add = EffectCommand::Add(Box::new(AddEffect {
+        layer_id: "solid".into(),
+        effect_id: "browser".into(),
+        definition,
+        parameters: Map::new(),
+        inputs: None,
+        open: true,
+        enabled: true,
+        enabled_animation: None,
+        index: None,
+    }));
+    k.call_blocking("test", transact(&p, "Add Effect", vec![add.into()]))
+        .unwrap();
+    let p = published(&k);
+    let path = dir.path().join("Grade.cube");
+    let commands = lut_commands(&p, "solid", "grade", "Grade.cube", &path, &none()).unwrap();
+    k.call_blocking("test", transact(&p, "Apply LUT", commands))
+        .unwrap();
+    let p = published(&k);
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, "solid").unwrap();
+    let effects = pm_kernel::model::layer_at(root, &at)
+        .unwrap()
+        .get("fx")
+        .unwrap()
+        .to_value();
+    let effects = effects.as_array().unwrap();
+    assert_eq!(effects.len(), 1, "the empty effect takes the file");
+    let asset = effects[0].get("inputs").unwrap().get("lut").unwrap();
+    assert_eq!(asset.get("assetId").unwrap().as_str(), Some("grade"));
+    actor.shutdown();
+}
+
+fn none() -> std::collections::BTreeSet<String> {
+    Default::default()
+}
+
+/// The layer's `fx`, as saved.
+fn effects_of(k: &KernelHandle, layer: &str) -> Vec<serde_json::Value> {
+    let p = published(k);
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, layer).unwrap();
+    let effects = pm_kernel::model::layer_at(root, &at)
+        .unwrap()
+        .get("fx")
+        .unwrap()
+        .to_value();
+    serde_json::from_str(&pm_model::json::to_canonical_string(&effects)).unwrap()
+}
+
+#[test]
+fn applying_a_lut_relinks_the_one_whose_file_is_missing() {
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let apply = |asset: &str, name: &str, missing: &std::collections::BTreeSet<String>| {
+        let p = published(&k);
+        let path = dir.path().join(name);
+        let commands = lut_commands(&p, "solid", asset, name, &path, missing).unwrap();
+        k.call_blocking("test", transact(&p, "Apply LUT", commands))
+            .unwrap();
+    };
+    apply("first", "Look.cube", &none());
+    // The file went away: the next LUT takes the same effect, and its format
+    // follows the new file.
+    apply("second", "Look.3dl", &["first".to_owned()].into());
+    let effects = effects_of(&k, "solid");
+    assert_eq!(effects.len(), 1, "the relink adds no second effect");
+    assert_eq!(effects[0]["inputs"]["lut"]["assetId"], "second");
+    let p = published(&k);
+    let format = p.snapshot.root().unwrap().get("assets").unwrap();
+    assert_eq!(
+        format
+            .get("second")
+            .unwrap()
+            .get("format")
+            .unwrap()
+            .to_value()
+            .as_str(),
+        Some("3dl")
+    );
+    // A LUT that still reads is left alone: another one stacks.
+    apply("third", "Other.cube", &none());
+    assert_eq!(effects_of(&k, "solid").len(), 2);
+    actor.shutdown();
+}
+
+#[test]
+fn a_cube_over_the_size_limit_is_refused_at_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Huge.cube");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(pm_color::lut::MAX_FILE_BYTES + 1).unwrap();
+    assert_eq!(
+        retain_lut(dir.path(), &path).unwrap_err(),
+        "This LUT is too large."
+    );
+}
+
+#[test]
+fn a_malformed_cube_never_reaches_the_kernel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Broken.cube");
+    std::fs::write(&path, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
+    assert!(retain_lut(dir.path(), &path).is_err());
+}
+
+/// Import CDL… puts the correction on the layer's Color Wheels (adding one
+/// when there is none) in one Undo step; Export CDL… reads the same
+/// correction back at the playhead, and refuses a grade a CDL can't hold.
+#[test]
+fn a_cdl_is_imported_onto_color_wheels_and_exported_back() {
+    let (_dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let cdl = pm_color::cdl::parse(
+        r#"<ColorCorrection id="shot"><SOPNode><Slope>1.1 0.98 0.9</Slope>
+        <Offset>-0.02 0 0.015</Offset><Power>0.95 1 1.05</Power></SOPNode>
+        <SatNode><Saturation>1.2</Saturation></SatNode></ColorCorrection>"#,
+    )
+    .unwrap();
+    let run = |label: &str, commands: Vec<Command>| {
+        let p = published(&k);
+        let ack = k
+            .call_blocking("test", transact(&p, label, commands))
+            .unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+    };
+    let same = |a: &pm_color::cdl::Cdl, b: &pm_color::cdl::Cdl| {
+        for c in 0..3 {
+            assert!((a.slope[c] - b.slope[c]).abs() < 1e-9, "{a:?} {b:?}");
+            assert!((a.offset[c] - b.offset[c]).abs() < 1e-9, "{a:?} {b:?}");
+            assert!((a.power[c] - b.power[c]).abs() < 1e-9, "{a:?} {b:?}");
+        }
+        assert!((a.saturation - b.saturation).abs() < 1e-9);
+    };
+    assert_eq!(
+        layer_cdl(&published(&k), "solid", 0.).unwrap_err(),
+        "The layer has no Color Wheels to export as a CDL."
+    );
+    // No Color Wheels yet: one is added, holding the correction.
+    run(
+        "Import CDL",
+        cdl_commands(&published(&k), "solid", &cdl, 0.).unwrap(),
+    );
+    let effects = effects_of(&k, "solid");
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0]["type"], "colorWheels");
+    assert_eq!(effects[0]["p"]["gainRed"]["v"], 1.1);
+    let back = layer_cdl(&published(&k), "solid", 0.).unwrap();
+    same(&back, &cdl);
+    assert!(back.id.is_some(), "named after the layer");
+    // A second import sets the same Color Wheels.
+    let other = pm_color::cdl::Cdl {
+        slope: [0.9, 1., 1.2],
+        ..Default::default()
+    };
+    run(
+        "Import CDL",
+        cdl_commands(&published(&k), "solid", &other, 0.).unwrap(),
+    );
+    assert_eq!(effects_of(&k, "solid").len(), 1, "no second Color Wheels");
+    same(&layer_cdl(&published(&k), "solid", 0.).unwrap(), &other);
+    let wheels = effects_of(&k, "solid")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A keyed control is read at the playhead, between its keys.
+    let key = |value: f64, time: f64| -> Command {
+        let mut set = pm_kernel::commands::properties::SetProperty::new(
+            "solid",
+            &format!("{wheels}.gainRed"),
+            Value::from(value),
+            time,
+        );
+        set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
+        pm_kernel::PropertyCommand::Set(set).into()
+    };
+    run("Key", vec![key(1., 0.), key(2., 1.)]);
+    let between = layer_cdl(&published(&k), "solid", 0.5).unwrap();
+    assert!((between.slope[0] - 1.5).abs() < 1e-9, "{between:?}");
+    // Exposure is not a CDL's: export says so.
+    run(
+        "Exposure",
+        vec![
+            pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+                "solid",
+                &format!("{wheels}.exposure"),
+                Value::from(1.),
+                0.,
+            ))
+            .into(),
+        ],
+    );
+    let error = layer_cdl(&published(&k), "solid", 0.).unwrap_err();
+    assert!(error.contains("set Exposure to 0"), "{error}");
+    // A correction the wheels can't hold is refused before any edit.
+    let error = cdl_commands(
+        &published(&k),
+        "solid",
+        &pm_color::cdl::Cdl {
+            slope: [9., 1., 1.],
+            ..Default::default()
+        },
+        0.,
+    )
+    .unwrap_err();
+    assert!(error.contains("outside what Color Wheels hold"), "{error}");
+    actor.shutdown();
+}
+
+/// The numbers an agent reads off the Scopes panel: shares, histogram
+/// bands and their lit range, the waveform's range per band and the
+/// vectorscope's centre and hue, from counts known by construction.
+#[test]
+fn an_agent_reads_what_the_scopes_counted() {
+    let (levels, columns, bins) = (8usize, 4usize, 5usize);
+    let config = ScopeConfig {
+        levels: levels as u32,
+        columns: columns as u32,
+        vector_bins: bins as u32,
+        stage: ScopeStage::Output,
+        ..ScopeConfig::PANEL
+    };
+    // Ten pixels: four at level 2 in column 0, six at level 7 in column 3.
+    let mut waveform = vec![0u32; levels * columns];
+    waveform[2 * columns] = 4;
+    waveform[7 * columns + 3] = 6;
+    let mut luma = vec![0u32; levels];
+    luma[2] = 4;
+    luma[7] = 6;
+    // All ten at Cb = -0.25, Cr = +0.25 (bins 1 and 3 of 5): hue 135°.
+    let mut vectorscope = vec![0u32; bins * bins];
+    vectorscope[3 * bins + 1] = 10;
+    let frame = ScopeFrame {
+        config,
+        pixels: 10,
+        waveform,
+        parade: [
+            vec![0; levels * columns],
+            vec![0; levels * columns],
+            vec![0; levels * columns],
+        ],
+        vectorscope,
+        luma_histogram: luma.clone(),
+        histogram: [luma.clone(), luma.clone(), luma],
+        under: 1,
+        over: 3,
+        outside: 0,
+        invalid: 0,
+    };
+    let s = scope_summary(&frame);
+    assert_eq!(s["stage"], "Output");
+    assert_eq!(s["overPercent"], 30.0);
+    assert_eq!(s["underPercent"], 10.0);
+    assert_eq!(s["luma"]["lowest"], 28.6);
+    assert_eq!(s["luma"]["highest"], 100.0);
+    assert_eq!(s["luma"]["bands"][7], 60.0);
+    let bands = s["waveformBands"].as_array().unwrap();
+    assert_eq!(bands.len(), 4);
+    assert_eq!(
+        (bands[0]["low"].clone(), bands[0]["high"].clone()),
+        (serde_json::json!(28.6), serde_json::json!(28.6))
+    );
+    assert_eq!(bands[3]["high"], 100.0);
+    assert!(bands[1]["low"].is_null());
+    assert_eq!(s["vectorscope"]["meanHueDegrees"], 135.0);
+    assert_eq!(s["vectorscope"]["meanCb"], -0.25);
+    assert!(
+        s["luma"]["highestNits"].is_null(),
+        "display levels have no cd/m²"
+    );
+    // On PQ the top level is 10,000 cd/m² and level 2 of 8 reads its light.
+    let pq = ScopeFrame {
+        config: ScopeConfig {
+            signal: ScopeSignal::Pq,
+            ..frame.config
+        },
+        ..frame
+    };
+    let s = scope_summary(&pq);
+    assert_eq!(s["luma"]["highestNits"], 10000.0);
+    let expected = (pm_color::tonemap::pq_eotf(2. / 7.) * 10.).round() / 10.;
+    assert_eq!(s["waveformBands"][0]["lowNits"], expected);
+}
+
+#[test]
+fn the_viewer_opens_on_the_outputs_view_and_keeps_a_chosen_one() {
+    use crate::viewer2::OutputMode;
+    use pm_protocol::color::ProjectOutput::{Hlg, Pq, Sdr};
+    assert_eq!(super::default_view(Sdr), OutputMode::Sdr);
+    assert_eq!(super::default_view(Pq), OutputMode::Pq);
+    assert_eq!(super::default_view(Hlg), OutputMode::Hlg);
+    assert_eq!(super::next_view(Sdr, Hlg, OutputMode::Sdr), OutputMode::Hlg);
+    assert_eq!(super::next_view(Hlg, Pq, OutputMode::Hlg), OutputMode::Pq);
+    assert_eq!(super::next_view(Pq, Sdr, OutputMode::Pq), OutputMode::Sdr);
+    // EDR, chosen by the person, survives a change of output.
+    assert_eq!(super::next_view(Pq, Hlg, OutputMode::Edr), OutputMode::Edr);
+    assert_eq!(super::next_view(Sdr, Pq, OutputMode::Hlg), OutputMode::Hlg);
+}
+
+/// A clip's grade is a stack (PM-504): Color Wheels, a curve and a LUT go on
+/// one clip as three blocks in that order; Load LUT… on a clip that already
+/// has a LUT with its file adds another block instead of replacing it.
+#[test]
+fn wheels_a_curve_and_luts_stack_on_one_clip() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    for (id, kind, version) in [("w", "colorWheels", None), ("c", "colorCurves", None)] {
+        let p = published(&k);
+        let definition =
+            saved_builtin_definition(&p.snapshot.document, kind, version.as_ref(), 0., 0.).unwrap();
+        let add = EffectCommand::Add(Box::new(AddEffect {
+            layer_id: "solid".into(),
+            effect_id: id.into(),
+            definition,
+            parameters: Map::new(),
+            inputs: None,
+            open: true,
+            enabled: true,
+            enabled_animation: None,
+            index: None,
+        }));
+        k.call_blocking("test", transact(&p, "Add", vec![add.into()]))
+            .unwrap();
+    }
+    for name in ["One.cube", "Two.cube"] {
+        let p = published(&k);
+        let path = dir.path().join(name);
+        let asset = name.trim_end_matches(".cube").to_lowercase();
+        let commands = lut_commands(&p, "solid", &asset, name, &path, &none()).unwrap();
+        k.call_blocking("test", transact(&p, "Apply LUT", commands))
+            .unwrap();
+    }
+    let effects = effects_of(&k, "solid");
+    let kinds: Vec<_> = effects
+        .iter()
+        .map(|e| e["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "colorWheels",
+            "colorCurves",
+            "applyColorLut",
+            "applyColorLut"
+        ]
+    );
+    let luts: Vec<_> = effects[2..]
+        .iter()
+        .map(|e| e["inputs"]["lut"]["assetId"].as_str().unwrap())
+        .collect();
+    assert_eq!(luts, ["one", "two"]);
+    actor.shutdown();
+}
+
+/// A testsrc clip as FFmpeg writes it (MPEG-4, yuv420p), `w`×`h`, 2 s at 30 fps.
+fn testsrc(dir: &std::path::Path, w: u32, h: u32) -> std::path::PathBuf {
+    let ffmpeg = std::path::PathBuf::from(
+        std::env::var_os("PM_FFMPEG_DIR").expect("source native-env.sh before this test"),
+    )
+    .join("bin/ffmpeg");
+    let path = dir.join("clipA-testsrc.mp4");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("testsrc=size={w}x{h}:rate=30:duration=2"))
+        .args(["-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    path
+}
+
+/// The picture at `time`, rendered as the export renders it.
+fn export_frame(k: &KernelHandle, clip: &std::path::Path, size: (u32, u32), time: f64) -> Vec<f32> {
+    let p = k.published("video").unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    renderer
+        .set_main_effects_for_document(&p.snapshot.document)
+        .unwrap();
+    let mut request =
+        RenderRequest::sized(Size::new(size.0, size.1), Precision::Float16);
+    request.export = true;
+    request.output_kind = pm_render::OutputKind::Final;
+    let mut media = pm_export::render::MediaPaths::default();
+    media.insert("clip", clip.to_path_buf());
+    let frame = pm_export::render::render_frame(
+        &mut renderer,
+        &p.snapshot.document,
+        &p.snapshot.open_comp().unwrap(),
+        Ticks::new((time * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64).unwrap(),
+        &request,
+        &media,
+        &pm_export::render::Unrestricted,
+        1,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    frame.rgba
+}
+
+/// The picture at `time` as the viewer's engine draws it while paused,
+/// paused at rest (the settled picture), playing and captured, in that order.
+fn viewer_frames(
+    headless: &mut pm_engine_service::Headless,
+    k: &KernelHandle,
+    clip: &std::path::Path,
+    size: (u32, u32),
+    time: f64,
+) -> Vec<Vec<f32>> {
+    use pm_engine_service::{FrameSpec, Moment, Output, Scene};
+    let p = k.published("video").unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.insert("clip", clip.to_path_buf());
+    let scene = Scene {
+        doc: p.snapshot.document.clone(),
+        comp: p.snapshot.open_comp().unwrap(),
+        media: Arc::new(media),
+        content: p.revision(),
+    };
+    let output = Output {
+        width: size.0,
+        height: size.1,
+        display: 0,
+        headroom: 1.,
+        crop: None,
+    };
+    let at = Ticks::new((time * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64)
+        .unwrap();
+    let exact = FrameSpec::exact(at, output);
+    let paused = FrameSpec {
+        exact: false,
+        ..exact
+    };
+    let settled = FrameSpec {
+        settled: true,
+        ..paused
+    };
+    let playing = FrameSpec {
+        moment: Moment::Playing,
+        decode_deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(20)),
+        ..paused
+    };
+    [paused, settled, playing, exact]
+        .into_iter()
+        .map(|spec| {
+            headless
+                .frame_spec_settled(&scene, spec, &Default::default())
+                .unwrap()
+                .into_iter()
+                .flat_map(|[r, g, b]| [r as f32, g as f32, b as f32, 1.])
+                .collect()
+        })
+        .collect()
+}
+
+/// The share of pixels with a colour channel more than 2/255 apart. Gamma
+/// leaves a channel at 0 or 1 where it is, and most of testsrc's colour is
+/// there: its mean colour hardly moves, so pixels are counted instead.
+fn changed_pixels(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let changed = a
+        .chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .filter(|(x, y)| (0..3).any(|c| (x[c] - y[c]).abs() > 2. / 255.))
+        .count();
+    changed as f64 / (a.len() / 4) as f64
+}
+
+/// PM-482: Color Wheels added and dragged as the Color panel does it, on an
+/// imported video clip, whole or cut by a split, change the exported picture.
+#[test]
+fn a_colour_wheels_grade_changes_a_video_clips_picture() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    use pm_kernel::commands::properties::SetProperty;
+    const W: u32 = 160;
+    const H: u32 = 90;
+    for split in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = testsrc(dir.path(), W, H);
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let k = actor.handle();
+        let mut video = layer(
+            "v",
+            "video",
+            json!({ "asset": "clip", "w": W, "h": H, "fit": "contain", "trim": 0, "speed": 1 }),
+        );
+        video["dur"] = json!(2);
+        video["p"]["position.x"] = channel(f64::from(W) / 2.);
+        video["p"]["position.y"] = channel(f64::from(H) / 2.);
+        let project = json!({
+            "id": "video", "name": "Video", "compId": "c", "w": W, "h": H, "fps": 30, "dur": 2,
+            "bg": "#000000", "layers": [video], "comps": {},
+            "assets": { "clip": { "id": "clip", "name": "clipA-testsrc.mp4", "kind": "video",
+                "format": "mp4", "w": W, "h": H, "dur": 2, "fps": 30 } }
+        });
+        k.open(
+            "video",
+            pm_kernel::OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+        let at = 1.5;
+        let target = if split {
+            let p = k.published("video").unwrap();
+            let cut = pm_kernel::commands::timing::TimingCommand::Split {
+                layer_ids: vec!["v".into()],
+                time: 1.0,
+                new_ids: vec!["v2".into()],
+            };
+            k.call_blocking("video", transact(&p, "Split", vec![cut.into()]))
+                .unwrap();
+            "v2"
+        } else {
+            "v"
+        };
+        let plain = export_frame(&k, &clip, (W, H), at);
+        let mut headless = pm_engine_service::Headless::new().unwrap();
+        let plain_viewer = viewer_frames(&mut headless, &k, &clip, (W, H), at);
+        let p = k.published("video").unwrap();
+        let definition =
+            saved_builtin_definition(&p.snapshot.document, "colorWheels", None, 0., 0.).unwrap();
+        let add = EffectCommand::Add(Box::new(AddEffect {
+            layer_id: target.into(),
+            effect_id: "wheels".into(),
+            definition,
+            parameters: Map::new(),
+            inputs: None,
+            open: true,
+            enabled: true,
+            enabled_animation: None,
+            index: None,
+        }));
+        k.call_blocking("video", transact(&p, "Add Color Wheels", vec![add.into()]))
+            .unwrap();
+        let p = k.published("video").unwrap();
+        let gamma: Vec<Command> = [("gammaRed", 0.21), ("gammaGreen", -0.10), ("gammaBlue", 0.35)]
+            .into_iter()
+            .map(|(key, v)| {
+                pm_kernel::PropertyCommand::Set(SetProperty::new(
+                    target,
+                    format!("wheels.{key}"),
+                    Value::from(v),
+                    at,
+                ))
+                .into()
+            })
+            .collect();
+        k.call_blocking("video", transact(&p, "Gamma", gamma)).unwrap();
+        let graded = export_frame(&k, &clip, (W, H), at);
+        let changed = changed_pixels(&plain, &graded);
+        assert!(
+            changed > 0.05,
+            "split={split}: the grade changed {changed} of the picture's pixels"
+        );
+        let graded_viewer = viewer_frames(&mut headless, &k, &clip, (W, H), at);
+        for (n, (plain, graded)) in plain_viewer.iter().zip(&graded_viewer).enumerate() {
+            let changed = changed_pixels(plain, graded);
+            assert!(
+                changed > 0.05,
+                "split={split}: the grade changed {changed} of the viewer's pixels ({n})"
+            );
+        }
+        actor.shutdown();
+    }
+}

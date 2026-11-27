@@ -1,0 +1,538 @@
+use pm_acceptance::{fixture, keyboard, scenarios};
+macro_rules! checks {
+    ($($name:ident => $id:literal),* $(,)?)=>{$(
+        #[test] fn $name() {let s=scenarios::all().into_iter().find(|s|s.id==$id).unwrap();(s.run)().unwrap();}
+    )*}
+}
+checks! {
+    effect_validator => "A532",
+    wave5_lint => "A539", wave5_simplify => "A529",
+    wave5_slip => "B258",
+    wave5_strips => "A504", wave5_scene => "A508", wave5_list_media => "A513", wave5_manage_media => "A516", wave5_video => "A530", wave5_captions => "A550", wave5_video_refusals => "W057.mcp-refusals",
+    mcp_union => "A494", mcp_timeline => "A503", mcp_manage => "A505", mcp_layout => "A520",
+    shuttle => "W079.shuttle", ripple_delete => "W080.ripple-delete", ripple_trim => "W080.ripple-trim", roll => "W081.roll", slide => "W081.slide", source_edit => "W082.source", linked_av => "W083.links",
+    composition_settings => "W009.settings", authored_mask => "W048.mask", authored_text => "W049.text", authored_easing => "W061.easing",
+    mcp_list => "A495", mcp_create => "A496", mcp_open => "A497",
+    mcp_start => "A498", mcp_finish => "A501", mcp_selection => "A517",
+    mcp_rollback => "A531", library_lifecycle => "W006.library",
+    portable_history => "W007.portable", journal_recovery => "W004.journal",
+    atomic_batch => "W030.atomic", interleaved_writers => "W030.interleaved",
+    lock_admission => "W030.lock", disconnect_rollback => "W033.disconnect",
+    pending_errors => "W033.unavailable", selection_transient => "W046.selection",
+    work_area => "W052.work", markers => "W053.markers", strips => "W055.strips",
+    split_continuity => "W056.split", source_handles => "W057.slip",
+    keyframe_identity => "W060.keys", group_identity => "W062.groups",
+    authored_f64 => "W063.properties", actor_history => "W075.history",
+    engine_double => "W076.engine-hook", surface_double => "W032.surface-hook",
+}
+#[test]
+fn corpus_json() {
+    fixture::corpus_fixture("json").unwrap();
+}
+#[test]
+fn corpus_pmv3() {
+    fixture::corpus_fixture("pmv3").unwrap();
+}
+#[test]
+fn corpus_pmv4() {
+    fixture::corpus_fixture("pmv4").unwrap();
+}
+/// Shipped bindings with no v1.2.0 registry row in w1-keymap.md: native
+/// additions, pinned here (id, chord, command, arguments as JSON) so none
+/// goes unchecked.
+const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
+    ("G2AddDefaultTransition", "cmd+alt+d", "addDefaultTransition", "[]"),
+    ("native.timelineSplitTool", "c", "timeline.tool:split", "[]"),
+    ("native.agentPause", "cmd+shift+.", "agent.pause", "[]"),
+    ("native.agentStop", "cmd+alt+.", "agent.stop", "[]"),
+    ("native.agentUndoTurn", "cmd+alt+z", "agent.undoTurn", "[]"),
+    ("native.agentSteer", "cmd+shift+'", "agent.steer", "[]"),
+    ("K196", "`", "maximizePanel", "[]"),
+    ("K197", "m", "toggleLayerStrips", "[]"),
+    ("main.viewer.tab", "tab", "composition.flowchart", "[]"),
+    ("native.skimming", "alt+s", "toggleSkimming", "[]"),
+    (
+        "native.audioSkimming",
+        "alt+shift+s",
+        "toggleAudioSkimming",
+        "[]",
+    ),
+    ("native.newNull", "cmd+alt+shift+y", "newNull", "[]"),
+    ("native.newNull.ctrl", "ctrl+alt+shift+y", "newNull", "[]"),
+    ("native.newCamera", "cmd+alt+shift+c", "newCamera", "[]"),
+    ("native.renameLayer", "enter", "renameLayer", "[]"),
+    // Premiere's Apply Default Transitions to Selection (⌘D is Duplicate).
+    (
+        "native.addDefaultTransition",
+        "shift+d",
+        "addDefaultTransition",
+        "[]",
+    ),
+    // Menu-only commands: shipped without a key, so the person can assign one.
+    ("native.saveTake", "", "native.saveTake", "[]"),
+    ("native.speedDuration", "", "speedDuration", "[]"),
+    (
+        "native.addCompositionToTimeline",
+        "",
+        "native.addCompositionToTimeline",
+        "[]",
+    ),
+    ("native.addLayerFromAsset", "", "native.addLayerFromAsset", "[]"),
+    // Transport: the shuttle is tried before the keys' shipped meanings.
+    ("native.shuttleBackward", "j", "shuttleBackward", "[]"),
+    ("native.shuttleStop", "k", "shuttleStop", "[]"),
+    ("native.shuttleForward", "l", "shuttleForward", "[]"),
+    (
+        "native.shuttleBackward.start",
+        "ctrl+j",
+        "shuttleBackward",
+        "[true]",
+    ),
+    // Editing from the keyboard.
+    (
+        "native.rippleDelete",
+        "shift+backspace",
+        "rippleDelete",
+        "[]",
+    ),
+    (
+        "native.rippleDelete.forward",
+        "shift+delete",
+        "rippleDelete",
+        "[]",
+    ),
+    (
+        "native.nudgeLayerTime.earlier",
+        "alt+pageup",
+        "nudgeLayerTime",
+        "[-1]",
+    ),
+    (
+        "native.nudgeLayerTime.later",
+        "alt+pagedown",
+        "nudgeLayerTime",
+        "[1]",
+    ),
+    (
+        "native.nudgeLayerTime.earlier10",
+        "alt+shift+pageup",
+        "nudgeLayerTime",
+        "[-10]",
+    ),
+    (
+        "native.nudgeLayerTime.later10",
+        "alt+shift+pagedown",
+        "nudgeLayerTime",
+        "[10]",
+    ),
+    ("native.addKeyframe", "alt+k", "timeline.addKeyframe", "[]"),
+    (
+        "native.keyProperty.p",
+        "alt+shift+p",
+        "timeline.keyProperty:p",
+        "[]",
+    ),
+    (
+        "native.keyProperty.s",
+        "alt+shift+s",
+        "timeline.keyProperty:s",
+        "[]",
+    ),
+    (
+        "native.keyProperty.r",
+        "alt+shift+r",
+        "timeline.keyProperty:r",
+        "[]",
+    ),
+    (
+        "native.keyProperty.t",
+        "alt+shift+t",
+        "timeline.keyProperty:t",
+        "[]",
+    ),
+    (
+        "native.keyProperty.a",
+        "alt+shift+a",
+        "timeline.keyProperty:a",
+        "[]",
+    ),
+    // The timeline's and the viewer's own keys.
+    ("native.addMarker", "*", "timeline.addMarker", "[]"),
+    (
+        "native.addMarker.shift",
+        "shift+8",
+        "timeline.addMarker",
+        "[]",
+    ),
+    (
+        "native.addMarker.ctrl",
+        "ctrl+8",
+        "timeline.addMarker",
+        "[]",
+    ),
+    ("native.timelineZoomIn", "=", "timeline.zoomIn", "[]"),
+    ("native.timelineZoomOut", "-", "timeline.zoomOut", "[]"),
+    ("native.timelineFit", "\\", "timeline.fit", "[]"),
+    (
+        "native.toggleHold",
+        "cmd+alt+h",
+        "timeline.toggleHold",
+        "[]",
+    ),
+    ("native.safeAreas", "'", "viewer.safeAreas", "[]"),
+    ("native.guides", "cmd+;", "viewer.guides", "[]"),
+    ("native.showRed", "alt+1", "viewer.showRed", "[]"),
+    ("native.showGreen", "alt+2", "viewer.showGreen", "[]"),
+    ("native.showBlue", "alt+3", "viewer.showBlue", "[]"),
+    ("native.showAlpha", "alt+4", "viewer.showAlpha", "[]"),
+    ("native.showAlphaOverlay", "alt+5", "viewer.showAlphaOverlay", "[]"),
+    ("native.zoom200", "cmd+2", "viewer.zoom200", "[]"),
+    ("native.rulers", "cmd+r", "viewer.rulers", "[]"),
+    ("native.grid", "cmd+'", "viewer.grid", "[]"),
+    (
+        "native.projectSettings",
+        "cmd+shift+,",
+        "projectSettings",
+        "[]",
+    ),
+    ("native.rippleTrimIn", "alt+shift+[", "rippleTrimIn", "[]"),
+    ("native.rippleTrimOut", "alt+shift+]", "rippleTrimOut", "[]"),
+    ("native.extendEdit", "shift+x", "extendEdit", "[]"),
+    (
+        "native.slipLayers.left",
+        "cmd+alt+left",
+        "slipLayers",
+        "[-1]",
+    ),
+    (
+        "native.slipLayers.right",
+        "cmd+alt+right",
+        "slipLayers",
+        "[1]",
+    ),
+    (
+        "native.slipLayers.left10",
+        "cmd+alt+shift+left",
+        "slipLayers",
+        "[-10]",
+    ),
+    (
+        "native.slipLayers.right10",
+        "cmd+alt+shift+right",
+        "slipLayers",
+        "[10]",
+    ),
+    ("native.slideLayer.left", "alt+,", "slideLayer", "[-1]"),
+    ("native.slideLayer.right", "alt+.", "slideLayer", "[1]"),
+    (
+        "native.slideLayer.left10",
+        "alt+shift+,",
+        "slideLayer",
+        "[-10]",
+    ),
+    (
+        "native.slideLayer.right10",
+        "alt+shift+.",
+        "slideLayer",
+        "[10]",
+    ),
+    ("native.timeRemap", "cmd+alt+t", "timeRemapLayers", "[]"),
+    ("native.timeReverse", "cmd+alt+r", "reverseLayers", "[]"),
+    ("native.freezeFrame", "alt+f", "freezeFrame", "[]"),
+    (
+        "native.dimension",
+        "0",
+        "studio.view",
+        r#"["look","toggle"]"#,
+    ),
+    (
+        "native.view.persp",
+        "5",
+        "studio.view",
+        r#"["nav","persp"]"#,
+    ),
+    (
+        "native.view.numpad.persp",
+        "numpad5",
+        "studio.view",
+        r#"["nav","persp"]"#,
+    ),
+    (
+        "native.view.roll-left",
+        "shift+numpad4",
+        "studio.view",
+        r#"["nav","roll-left"]"#,
+    ),
+    (
+        "native.view.roll-right",
+        "shift+numpad6",
+        "studio.view",
+        r#"["nav","roll-right"]"#,
+    ),
+    ("native.fly", "shift+`", "studio.view", r#"["fly",""]"#),
+    (
+        "native.view.front",
+        "1",
+        "studio.view",
+        r#"["nav","front"]"#,
+    ),
+    (
+        "native.view.numpad.front",
+        "numpad1",
+        "studio.view",
+        r#"["nav","front"]"#,
+    ),
+    (
+        "native.view.right",
+        "3",
+        "studio.view",
+        r#"["nav","right"]"#,
+    ),
+    (
+        "native.view.numpad.right",
+        "numpad3",
+        "studio.view",
+        r#"["nav","right"]"#,
+    ),
+    ("native.view.top", "7", "studio.view", r#"["nav","top"]"#),
+    (
+        "native.view.numpad.top",
+        "numpad7",
+        "studio.view",
+        r#"["nav","top"]"#,
+    ),
+    (
+        "native.view.opposite",
+        "9",
+        "studio.view",
+        r#"["nav","opposite"]"#,
+    ),
+    (
+        "native.view.numpad.opposite",
+        "numpad9",
+        "studio.view",
+        r#"["nav","opposite"]"#,
+    ),
+    (
+        "native.view.orbit-down",
+        "2",
+        "studio.view",
+        r#"["nav","orbit-down"]"#,
+    ),
+    (
+        "native.view.numpad.orbit-down",
+        "numpad2",
+        "studio.view",
+        r#"["nav","orbit-down"]"#,
+    ),
+    (
+        "native.view.orbit-left",
+        "4",
+        "studio.view",
+        r#"["nav","orbit-left"]"#,
+    ),
+    (
+        "native.view.numpad.orbit-left",
+        "numpad4",
+        "studio.view",
+        r#"["nav","orbit-left"]"#,
+    ),
+    (
+        "native.view.orbit-right",
+        "6",
+        "studio.view",
+        r#"["nav","orbit-right"]"#,
+    ),
+    (
+        "native.view.numpad.orbit-right",
+        "numpad6",
+        "studio.view",
+        r#"["nav","orbit-right"]"#,
+    ),
+    (
+        "native.view.orbit-up",
+        "8",
+        "studio.view",
+        r#"["nav","orbit-up"]"#,
+    ),
+    (
+        "native.view.numpad.orbit-up",
+        "numpad8",
+        "studio.view",
+        r#"["nav","orbit-up"]"#,
+    ),
+    (
+        "native.view.left",
+        "ctrl+3",
+        "studio.view",
+        r#"["nav","left"]"#,
+    ),
+    (
+        "native.view.bottom",
+        "ctrl+7",
+        "studio.view",
+        r#"["nav","bottom"]"#,
+    ),
+    (
+        "native.view.numpad.back",
+        "ctrl+numpad1",
+        "studio.view",
+        r#"["nav","back"]"#,
+    ),
+    (
+        "native.view.numpad.left",
+        "ctrl+numpad3",
+        "studio.view",
+        r#"["nav","left"]"#,
+    ),
+    (
+        "native.view.numpad.bottom",
+        "ctrl+numpad7",
+        "studio.view",
+        r#"["nav","bottom"]"#,
+    ),
+    (
+        "native.view.numpad.pan-down",
+        "ctrl+numpad2",
+        "studio.view",
+        r#"["nav","pan-down"]"#,
+    ),
+    (
+        "native.view.numpad.pan-left",
+        "ctrl+numpad4",
+        "studio.view",
+        r#"["nav","pan-left"]"#,
+    ),
+    (
+        "native.view.numpad.pan-right",
+        "ctrl+numpad6",
+        "studio.view",
+        r#"["nav","pan-right"]"#,
+    ),
+    (
+        "native.view.numpad.pan-up",
+        "ctrl+numpad8",
+        "studio.view",
+        r#"["nav","pan-up"]"#,
+    ),
+    (
+        "native.dimension.numpad",
+        "numpad0",
+        "studio.view",
+        r#"["look","toggle"]"#,
+    ),
+    (
+        "native.view.cameraToView",
+        "ctrl+alt+0",
+        "studio.view",
+        r#"["nav","camera-to-view"]"#,
+    ),
+    (
+        "native.view.numpad.cameraToView",
+        "ctrl+alt+numpad0",
+        "studio.view",
+        r#"["nav","camera-to-view"]"#,
+    ),
+    (
+        "native.view.numpad.selected",
+        "numpad.",
+        "studio.view",
+        r#"["nav","selected"]"#,
+    ),
+    (
+        "native.view.numpad.zoomIn",
+        "numpad+",
+        "studio.view",
+        r#"["nav","zoom-in"]"#,
+    ),
+    (
+        "native.view.numpad.zoomOut",
+        "numpad-",
+        "studio.view",
+        r#"["nav","zoom-out"]"#,
+    ),
+];
+#[test]
+fn every_shipped_binding_under_seven_routing_contexts() {
+    let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
+    let shipped = keyboard::production::shipped();
+    assert_eq!(shipped.len(), 300);
+    assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
+    for real in &shipped {
+        let binding = match c.bindings.iter().find(|b| b.id == real.id) {
+            Some(b) => b.clone(),
+            None => {
+                let (id, chord, command, args) = *NATIVE_BINDINGS
+                    .iter()
+                    .find(|n| n.0 == real.id)
+                    .unwrap_or_else(|| panic!("{} is neither in the catalog nor pinned", real.id));
+                pm_acceptance::catalog::Binding {
+                    id: id.into(),
+                    chord: chord.into(),
+                    command: command.into(),
+                    args: serde_json::from_str(args).unwrap(),
+                    priority: i64::from(real.priority),
+                    in_fields: real.in_fields,
+                    repeat: real.repeat,
+                    loose: real.loose,
+                    workflow: String::new(),
+                    source: String::new(),
+                }
+            }
+        };
+        for context in keyboard::CONTEXTS {
+            keyboard::check(&binding, context).unwrap();
+        }
+    }
+    // Every pinned row is a shipped one: a row removed from the keymap
+    // leaves the list too.
+    for (id, ..) in NATIVE_BINDINGS {
+        assert!(shipped.iter().any(|b| b.id == *id), "{id} is not shipped");
+    }
+}
+#[test]
+fn corpus_copy_refuses_symlinks_and_never_overwrites_source() {
+    let source = fixture::Scratch::new().unwrap();
+    let dest = fixture::Scratch::new().unwrap();
+    let path = source.0.join("synthetic.pmv");
+    std::fs::write(&path, b"not a project").unwrap();
+    assert!(scenarios::corpus_copy(&path, 0).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"not a project");
+    let copy = dest.copy(&path, 0).unwrap();
+    assert_ne!(copy, path);
+    assert!(dest.copy(&path, 0).is_err());
+    #[cfg(unix)]
+    {
+        let link = source.0.join("link.pmv");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(dest.copy(&link, 1).is_err());
+    }
+}
+
+/// The merged kernel fix must keep the exact authored rate through persistence.
+#[test]
+fn fractional_fps_stays_exact_now_that_the_kernel_keeps_authored_rates() {
+    let scenario = scenarios::all()
+        .into_iter()
+        .find(|s| s.id == "W071.fractional-rate")
+        .unwrap();
+    let result = pm_acceptance::runner::execute(
+        scenario.id,
+        scenario.workflow,
+        "supporting-probe",
+        scenario.title,
+        scenario.run,
+    );
+    assert_eq!(
+        result.status,
+        pm_acceptance::runner::Status::Pass,
+        "{}",
+        result.reason
+    );
+}
+
+#[test]
+fn frozen_replace_and_sequential_set_preserve_complete_authored_curves() {
+    pm_acceptance::curve_oracle::replace().unwrap();
+    pm_acceptance::curve_oracle::set().unwrap();
+}

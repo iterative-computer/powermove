@@ -1,0 +1,21 @@
+{
+ "name": "starfield-hdr",
+ "kind": "shader",
+ "covers": [
+  "hdr-output",
+  "helper-hash",
+  "iTime"
+ ],
+ "prompt": "Starfield flying toward the camera. Make the brightest stars overbright (values above 1) so a glow effect can pick them up later.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "707d4fcc89ec23fc14038b68828a55812ef29dacc5736bb416abc722cd8aec7c",
+  "seconds": 38.671,
+  "generated": "2026-10-17T07:32:09.688Z"
+ },
+ "code": "// Starfield flying toward the camera.\n// Brightest (\"hot\") stars are overbright (> 1.0) so a downstream glow/bloom can key on them.\nuniform float uSpeed;     // @param 0.12 0 1.5\nuniform float uDensity;   // @param 0.55 0.05 1\nuniform float uHotRatio;  // @param 0.08 0 0.5\nuniform float uHotGain;   // @param 4.0 1 12\nuniform float uStreak;    // @param 1.5 0 6\nuniform vec3  uTint;      // @param #C6D6FF\nuniform vec3  uHotTint;   // @param #FFE6C4\nuniform vec3  uBg;        // @param #020309\n\n#define LAYERS 6\n\nvec3 starLayer(vec2 p, vec2 n, float z, float seed, float depth) {\n  vec2 q = p * z + seed * vec2(13.17, 7.73);\n  vec2 id = floor(q);\n  vec2 gv = fract(q) - 0.5;\n  float stretch = 1.0 + uStreak * depth * depth * length(p);\n  vec3 acc = vec3(0.0);\n  for (int y = -1; y <= 1; y++) {\n    for (int x = -1; x <= 1; x++) {\n      vec2 o = vec2(float(x), float(y));\n      vec2 cid = id + o + seed;\n      if (hash(cid) > uDensity) continue;\n      vec2 off = vec2(hash(cid + 3.1), hash(cid + 7.4)) - 0.5;\n      vec2 d = gv - o - off * 0.8;\n      // elongate along the radial (motion) direction\n      float dr = dot(d, n);\n      float dt = d.x * n.y - d.y * n.x;\n      float r = length(vec2(dr / stretch, dt));\n      float b = pow(hash(cid + 11.3), 3.0);\n      float hot = step(1.0 - uHotRatio, hash(cid + 19.7));\n      float size = mix(0.015, 0.05, b) + 0.03 * hot;\n      float core = 1.0 - smoothstep(0.0, size, r);\n      float glow = 0.0012 / (r * r + 0.0012);\n      float inten = (0.25 + 0.75 * b) * (core + 0.35 * glow);\n      inten *= mix(1.0, uHotGain, hot);\n      vec3 c = mix(uTint, uHotTint, hot) * mix(0.85, 1.15, hash(cid + 5.5));\n      acc += c * inten;\n    }\n  }\n  return acc;\n}\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  vec2 n = p / (length(p) + 1e-4);\n  float t = iTime * uSpeed;\n  vec3 col = uBg;\n  for (int i = 0; i < LAYERS; i++) {\n    float k = float(i) / float(LAYERS) + t;\n    float depth = fract(k);\n    float cycle = floor(k);\n    float seed = floor(hash1(float(i) * 7.31 + cycle * 31.7) * 997.0);\n    // perspective: world z shrinks linearly → screen positions accelerate outward\n    float z = mix(22.0, 0.7, depth);\n    float fade = smoothstep(0.0, 0.3, depth) * (1.0 - smoothstep(0.88, 1.0, depth));\n    col += starLayer(p, n, z, seed, depth) * fade * (0.35 + 0.9 * depth);\n  }\n  // intentionally unclamped: hot stars exceed 1.0 for glow pickup\n  fragColor = vec4(col, 1.0);\n}",
+ "definition": null,
+ "summary": "I wrote a starfield shader layer that flies toward the camera through 6 looping depth layers. Stars speed up and stretch outward as they approach, and a random 8% of stars are \"hot\" and multiplied by uHotGain = 4.0, so their values go well above 1.0 for a glow effect to pick up. I couldn't compile or render it because no Powermove tools were attached to this run. The output isn't clamped, but the values above 1 only survive if the render target stores float/HDR values. The other controls are uSpeed, uDensity, uHotRatio, uStreak, uTint, uHotTint and uBg."
+}

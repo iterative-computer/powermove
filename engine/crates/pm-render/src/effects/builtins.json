@@ -1,0 +1,868 @@
+{
+ "vertex": "#version 300 es\nprecision highp float;\nin vec2 a_pos;\nuniform mat3 u_m;\nuniform vec2 u_res;\nuniform vec2 u_pxOrigin;\nuniform vec4 u_uv;           // xy = offset, zw = scale\nout vec2 v_uv;               // content space (top-left origin)\nout vec2 v_st;               // fbo space\nout vec2 v_px;               // comp pixels\nvoid main(){\n  v_uv = u_uv.xy + a_pos * u_uv.zw;\n  v_st = vec2(a_pos.x, 1.0 - a_pos.y);\n  vec3 p = u_m * vec3(a_pos, 1.0);\n  v_px = p.xy / p.z + u_pxOrigin;\n  gl_Position = vec4((p.x / u_res.x) * 2.0 - p.z, p.z - (p.y / u_res.y) * 2.0, 0.0, p.z);\n}",
+ "definitions": [
+  {
+   "id": "blur",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0; uniform int u_pass;\nvoid main(){\n\n      float r = u_p0;\n      if (r < .25) { o = texture(u_tex, v_st); return; }\n      vec2 dir = u_pass == 0 ? vec2(1.,0.) : vec2(0.,1.);\n      float sigma = r * .5;\n      vec4 sum = vec4(0.); float wsum = 0.;\n      int N = int(clamp(r*.6, 3., 28.));\n      for (int i = -28; i <= 28; i++) {\n        if (i < -N || i > N) continue;\n        float x = float(i) / float(N) * r;\n        float w = exp(-(x*x)/(2.*sigma*sigma+1e-4));\n        sum += texture(u_tex, v_st + dir * u_texel * x) * w; wsum += w;\n      }\n      o = sum / max(wsum, 1e-4);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1784,
+    "bodyUtf8Len": 1784
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 24,
+     "min": 0,
+     "max": 400,
+     "step": 0.5
+    }
+   ],
+   "flags": {
+    "passes": 2,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [
+     "amount"
+    ],
+    "clamp": false
+   }
+  },
+  {
+   "id": "motionblurDir",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1;\nvoid main(){\n\n      float a = radians(u_p1); vec2 dir = vec2(cos(a), sin(a)) * u_texel * u_p0;\n      vec4 s = vec4(0.);\n      for (int i = 0; i < 17; i++) { float t = (float(i)/16.0 - .5); s += texture(u_tex, v_st + dir * t); }\n      o = s / 17.0;\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1465,
+    "bodyUtf8Len": 1465
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 30,
+     "min": 0,
+     "max": 300,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "angle",
+     "default": 0,
+     "min": -360,
+     "max": 360,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [
+     "amount"
+    ],
+    "clamp": false
+   }
+  },
+  {
+   "id": "sharpen",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st);\n      vec4 b = texture(u_tex,v_st+vec2(u_texel.x,0.))+texture(u_tex,v_st-vec2(u_texel.x,0.))\n             + texture(u_tex,v_st+vec2(0.,u_texel.y))+texture(u_tex,v_st-vec2(0.,u_texel.y));\n      o = vec4(clamp(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), 0., 4.), c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1529,
+    "bodyUtf8Len": 1529
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 40,
+     "min": 0,
+     "max": 300,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "glow",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2; uniform int u_pass; uniform sampler2D u_orig;\nvoid main(){\n\n      if (u_pass == 0) {\n        vec4 c = texture(u_tex, v_st);\n        float l = luma(c.rgb / max(c.a, .001));\n        float k = smoothstep(u_p0/100. - .08, u_p0/100. + .08, l);\n        o = c * k; return;\n      }\n      vec2 dir = u_pass == 1 ? vec2(1.,0.) : vec2(0.,1.);\n      float r = max(u_p1, .5); float sigma = r * .5;\n      vec4 sum = vec4(0.); float ws = 0.;\n      for (int i = -20; i <= 20; i++) {\n        float x = float(i)/20.0*r; float w = exp(-(x*x)/(2.*sigma*sigma+1e-4));\n        sum += texture(u_tex, v_st + dir*u_texel*x) * w; ws += w;\n      }\n      o = sum / max(ws,1e-4);\n      if (u_pass == 2) o = texture(u_orig, v_st) + o * (u_p2/100.);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1941,
+    "bodyUtf8Len": 1941
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "threshold",
+     "default": 55,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "radius",
+     "default": 60,
+     "min": 0,
+     "max": 400,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "intensity",
+     "default": 90,
+     "min": 0,
+     "max": 400,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 3,
+    "keepOrig": true,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [
+     "radius"
+    ],
+    "clamp": false
+   }
+  },
+  {
+   "id": "color",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2,u_p3,u_p4;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a;\n      x *= pow(2., u_p0);\n      x = (x - .5) * (1. + u_p1/100.) + .5;\n      float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.);\n      if (abs(u_p3) > .01) { vec3 hsv = rgb2hsv(max(x,0.)); hsv.x = fract(hsv.x + u_p3/360.); x = hsv2rgb(hsv); }\n      x += vec3(u_p4, u_p4*.06, -u_p4) * .0035;\n      o = vec4(clamp(x,0.,8.) * c.a, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1684,
+    "bodyUtf8Len": 1684
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "exposure",
+     "default": 0,
+     "min": -4,
+     "max": 4,
+     "step": 0.01
+    },
+    {
+     "type": "number",
+     "key": "contrast",
+     "default": 0,
+     "min": -100,
+     "max": 100,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "saturation",
+     "default": 0,
+     "min": -100,
+     "max": 200,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "hue",
+     "default": 0,
+     "min": -180,
+     "max": 180,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "temperature",
+     "default": 0,
+     "min": -100,
+     "max": 100,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "levels",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a;\n      x = clamp((x - u_p0/100.) / max(u_p1/100. - u_p0/100., 1e-3), 0., 1.);\n      x = pow(x, vec3(1./max(u_p2,.01)));\n      o = vec4(x * c.a, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1486,
+    "bodyUtf8Len": 1486
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "inBlack",
+     "default": 0,
+     "min": 0,
+     "max": 100,
+     "step": 0.5
+    },
+    {
+     "type": "number",
+     "key": "inWhite",
+     "default": 100,
+     "min": 0,
+     "max": 100,
+     "step": 0.5
+    },
+    {
+     "type": "number",
+     "key": "gamma",
+     "default": 1,
+     "min": 0.1,
+     "max": 4,
+     "step": 0.01
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "duotone",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform vec3 u_c0,u_c1; uniform float u_p2;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a; float l = luma(x);\n      vec3 t = mix(u_c0, u_c1, smoothstep(0., 1., l));\n      o = vec4(mix(x, t, u_p2/100.) * c.a, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1474,
+    "bodyUtf8Len": 1474
+   },
+   "params": [
+    {
+     "type": "color",
+     "key": "shadow",
+     "default": "#1b2a4a"
+    },
+    {
+     "type": "color",
+     "key": "highlight",
+     "default": "#ffd66b"
+    },
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 100,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "grain",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st);\n      float n = hash(floor(v_px/max(u_p1,.1)) + fract(u_time)*137.0) - .5;\n      o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1410,
+    "bodyUtf8Len": 1410
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 12,
+     "min": 0,
+     "max": 100,
+     "step": 0.5
+    },
+    {
+     "type": "number",
+     "key": "size",
+     "default": 1.4,
+     "min": 0.3,
+     "max": 8,
+     "step": 0.1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "vignette",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st);\n      vec2 q = (v_uv - .5) * 2.0;\n      float d = length(q) * .72;\n      float v = 1. - smoothstep(1. - u_p1/100., 1.0, d) * (u_p0/100.);\n      o = vec4(c.rgb * v, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1438,
+    "bodyUtf8Len": 1438
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 45,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "feather",
+     "default": 60,
+     "min": 1,
+     "max": 100,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "chroma",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec2 dir = (vec2(v_uv.x, 1. - v_uv.y) - .5);\n      vec2 d = dir * u_texel * u_p0 * 2.0;\n      float r = texture(u_tex, v_st + d).r;\n      vec4 g = texture(u_tex, v_st);\n      float b = texture(u_tex, v_st - d).b;\n      o = vec4(r, g.g, b, g.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1477,
+    "bodyUtf8Len": 1477
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 6,
+     "min": 0,
+     "max": 80,
+     "step": 0.5
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [
+     "amount"
+    ],
+    "clamp": false
+   }
+  },
+  {
+   "id": "pixelate",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      float block = max(u_p0, 1.);\n      vec2 local = v_px - u_pxOrigin;\n      vec2 center = (floor(local / block) + .5) * block;\n      vec2 uv = vec2(center.x / u_res.x, 1. - center.y / u_res.y);\n      o = texture(u_tex, uv);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1453,
+    "bodyUtf8Len": 1453
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "size",
+     "default": 16,
+     "min": 1,
+     "max": 200,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "posterize",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a<.0005){o=c;return;}\n      vec3 x = c.rgb/c.a; float n = max(u_p0,2.);\n      o = vec4(floor(x*n+.5)/n*c.a, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1383,
+    "bodyUtf8Len": 1383
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "levels",
+     "default": 6,
+     "min": 2,
+     "max": 64,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "displace",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2;\nvoid main(){\n\n      vec2 p = vec2(v_uv.x, 1. - v_uv.y) * u_p1 * 3.0 + vec2(u_time * u_p2, u_time * u_p2 * .7);\n      vec2 d = vec2(fbm(p) - .5, fbm(p + 31.7) - .5) * u_p0 * u_texel * 2.0;\n      o = texture(u_tex, v_st + d);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1446,
+    "bodyUtf8Len": 1446
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 24,
+     "min": 0,
+     "max": 400,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "scale",
+     "default": 2.2,
+     "min": 0.2,
+     "max": 20,
+     "step": 0.1
+    },
+    {
+     "type": "number",
+     "key": "speed",
+     "default": 0.4,
+     "min": -4,
+     "max": 4,
+     "step": 0.05
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [
+     "amount"
+    ],
+    "clamp": false
+   }
+  },
+  {
+   "id": "shadow",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2,u_p3; uniform vec3 u_c4; uniform int u_pass; uniform sampler2D u_orig;\nvoid main(){\n\n      if (u_pass == 0) {\n        float a = radians(u_p1); vec2 off = vec2(cos(a), -sin(a)) * u_p0 * u_texel;\n        o = vec4(0.,0.,0., texture(u_tex, v_st - off).a);\n        return;\n      }\n      vec2 dir = u_pass == 1 ? vec2(1.,0.) : vec2(0.,1.);\n      float r = max(u_p2, .5); float sigma = r*.5; vec4 sum = vec4(0.); float ws = 0.;\n      for (int i=-18;i<=18;i++){ float x=float(i)/18.*r; float w=exp(-(x*x)/(2.*sigma*sigma+1e-4));\n        sum += texture(u_tex, v_st + dir*u_texel*x)*w; ws+=w; }\n      vec4 sh = sum/max(ws,1e-4);\n      if (u_pass == 2) {\n        vec4 o0 = texture(u_orig, v_st);\n        float sa = sh.a * (u_p3/100.);\n        vec3 sc = u_c4 * sa;\n        o = vec4(o0.rgb + sc * (1.-o0.a), o0.a + sa * (1.-o0.a));\n      } else o = sh;\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 2061,
+    "bodyUtf8Len": 2061
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "distance",
+     "default": 20,
+     "min": 0,
+     "max": 400,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "angle",
+     "default": 135,
+     "min": -360,
+     "max": 360,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "softness",
+     "default": 40,
+     "min": 0,
+     "max": 300,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "opacity",
+     "default": 60,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    },
+    {
+     "type": "color",
+     "key": "color",
+     "default": "#000000"
+    }
+   ],
+   "flags": {
+    "passes": 3,
+    "keepOrig": true,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [
+     "distance",
+     "softness"
+    ],
+    "clamp": false
+   }
+  },
+  {
+   "id": "invert",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a<.0005){o=c;return;}\n      vec3 x = c.rgb/c.a; o = vec4(mix(x, 1.-x, u_p0/100.)*c.a, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 1361,
+    "bodyUtf8Len": 1361
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 100,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "gradient",
+   "kind": "effect",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform vec3 u_startColor,u_endColor;\n       uniform float u_angle,u_centerX,u_centerY,u_spread,u_midpoint,u_radial,u_shade,u_dither,u_amount;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a;\n      vec2 p = (vec2(v_uv.x, 1. - v_uv.y) - .5) - vec2(u_centerX, -u_centerY) / 200.;\n      float span = max(u_spread / 100., .001);\n      float a = radians(u_angle);\n      /* Aspect-correct the radial distance so the rings stay circular. */\n      float t = u_radial > .5\n        ? length(p * vec2(u_coordRes.x / max(u_coordRes.y, 1.), 1.)) * 2. / span\n        : dot(p, vec2(cos(a), -sin(a))) / span + .5;\n      /* Static per-pixel jitter breaks 8-bit banding without shimmering. */\n      t = clamp(t + (hash(v_px) - .5) * u_dither * .004, 0., 1.);\n      t = pow(t, log(.5) / log(clamp(u_midpoint / 100., .01, .99)));\n      vec3 g = mix(u_startColor, u_endColor, t);\n      if (u_shade > .5) { vec3 h = rgb2hsv(g); g = hsv2rgb(vec3(h.x, h.y, rgb2hsv(max(x, 0.)).z)); }\n      o = vec4(mix(x, g, u_amount / 100.) * c.a, c.a);\n}",
+    "bodyLineOffset": 0,
+    "bodyUtf16Len": 2273,
+    "bodyUtf8Len": 2273
+   },
+   "params": [
+    {
+     "type": "color",
+     "key": "startColor",
+     "default": "#ffffff"
+    },
+    {
+     "type": "color",
+     "key": "endColor",
+     "default": "#000000"
+    },
+    {
+     "type": "number",
+     "key": "angle",
+     "default": 90,
+     "min": -360,
+     "max": 360,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "centerX",
+     "default": 0,
+     "min": -100,
+     "max": 100,
+     "step": 0.5
+    },
+    {
+     "type": "number",
+     "key": "centerY",
+     "default": 0,
+     "min": -100,
+     "max": 100,
+     "step": 0.5
+    },
+    {
+     "type": "number",
+     "key": "spread",
+     "default": 100,
+     "min": 1,
+     "max": 400,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "midpoint",
+     "default": 50,
+     "min": 1,
+     "max": 99,
+     "step": 0.5
+    },
+    {
+     "type": "toggle",
+     "key": "radial",
+     "default": false
+    },
+    {
+     "type": "toggle",
+     "key": "shade",
+     "default": false
+    },
+    {
+     "type": "number",
+     "key": "dither",
+     "default": 1,
+     "min": 0,
+     "max": 20,
+     "step": 0.1
+    },
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 100,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": true,
+    "viewportSafe": true,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "crossfade",
+   "kind": "transition",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from, u_to;\nuniform float u_prog;\nuniform vec2 u_res, u_texel;\nuniform float u_time;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_from, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n\n\nvoid main(){\no = mix(texture(u_from, v_st), texture(u_to, v_st), clamp(u_prog, 0.0, 1.0));\n}\n",
+    "bodyLineOffset": 27,
+    "bodyUtf16Len": 77,
+    "bodyUtf8Len": 77
+   },
+   "params": [],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": false,
+    "viewportSafe": false,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "wipe",
+   "kind": "transition",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from, u_to;\nuniform float u_prog;\nuniform vec2 u_res, u_texel;\nuniform float u_time;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_from, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n\nuniform float u_angle;\nuniform float u_softness;\n#define u_p0 u_angle\n#define u_p1 u_softness\nvoid main(){\n\n      float a = radians(u_angle);\n      vec2 dir = vec2(cos(a), sin(a));\n      float span = max(abs(dir.x) + abs(dir.y), 0.0001);\n      float pos = dot(v_st - 0.5, dir) / span + 0.5;\n      float feather = max(u_softness / 200.0, 0.0001);\n      float edge = mix(-feather, 1.0 + feather, clamp(u_prog, 0.0, 1.0));\n      float reveal = 1.0 - smoothstep(edge - feather, edge + feather, pos);\n      o = mix(texture(u_from, v_st), texture(u_to, v_st), reveal);\n}\n",
+    "bodyLineOffset": 30,
+    "bodyUtf16Len": 455,
+    "bodyUtf8Len": 455
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "angle",
+     "default": 0,
+     "min": -360,
+     "max": 360,
+     "step": 1
+    },
+    {
+     "type": "number",
+     "key": "softness",
+     "default": 8,
+     "min": 0,
+     "max": 100,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": false,
+    "viewportSafe": false,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "slide",
+   "kind": "transition",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from, u_to;\nuniform float u_prog;\nuniform vec2 u_res, u_texel;\nuniform float u_time;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_from, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n\nuniform float u_direction;\n#define u_p0 u_direction\nvoid main(){\n\n      float p = clamp(u_prog, 0.0, 1.0);\n      float a = radians(u_direction);\n      vec2 dir = vec2(cos(a), -sin(a));\n      vec2 fromUV = v_st - dir * p;\n      vec2 toUV = v_st + dir * (1.0 - p);\n      float fromInside = step(0.0, fromUV.x) * step(fromUV.x, 1.0) * step(0.0, fromUV.y) * step(fromUV.y, 1.0);\n      float toInside = step(0.0, toUV.x) * step(toUV.x, 1.0) * step(0.0, toUV.y) * step(toUV.y, 1.0);\n      vec4 fromColor = texture(u_from, clamp(fromUV, 0.0, 1.0)) * fromInside;\n      vec4 toColor = texture(u_to, clamp(toUV, 0.0, 1.0)) * toInside;\n      o = toColor + fromColor * (1.0 - toColor.a);\n}\n",
+    "bodyLineOffset": 28,
+    "bodyUtf16Len": 610,
+    "bodyUtf8Len": 610
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "direction",
+     "default": 0,
+     "min": 0,
+     "max": 360,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": false,
+    "viewportSafe": false,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  },
+  {
+   "id": "zoom",
+   "kind": "transition",
+   "version": 0,
+   "origin": "builtIn",
+   "renderer": null,
+   "glsl": {
+    "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from, u_to;\nuniform float u_prog;\nuniform vec2 u_res, u_texel;\nuniform float u_time;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_from, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n\nuniform float u_amount;\n#define u_p0 u_amount\nvoid main(){\n\n      float p = clamp(u_prog, 0.0, 1.0);\n      float amount = u_amount / 100.0;\n      vec2 fromUV = 0.5 + (v_st - 0.5) * (1.0 - p * amount);\n      vec2 toUV = 0.5 + (v_st - 0.5) * (1.0 + (1.0 - p) * amount);\n      o = mix(texture(u_from, fromUV), texture(u_to, toUV), p);\n}\n",
+    "bodyLineOffset": 28,
+    "bodyUtf16Len": 272,
+    "bodyUtf8Len": 272
+   },
+   "params": [
+    {
+     "type": "number",
+     "key": "amount",
+     "default": 25,
+     "min": 0,
+     "max": 200,
+     "step": 1
+    }
+   ],
+   "flags": {
+    "passes": 1,
+    "keepOrig": false,
+    "backdrop": false,
+    "rawShader": false,
+    "viewportSafe": false,
+    "viewportPadding": [],
+    "clamp": false
+   }
+  }
+ ]
+}

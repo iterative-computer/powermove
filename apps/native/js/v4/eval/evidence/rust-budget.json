@@ -1,0 +1,7 @@
+{
+  "nativeNodes": 1000,
+  "p50Ms": 1.547899,
+  "p95Ms": 1.7494349999999999,
+  "samples": 100,
+  "scope": "JSON decode, whole-commit validation, staging, publication; no renderer or IPC"
+}

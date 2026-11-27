@@ -1,0 +1,528 @@
+//! The timeline's drawn materials: layer and clip strips, the playhead and the
+//! trim grip. A strip is a slab of tinted glass on the solid timeline canvas,
+//! derived from the layer's hue for the appearance it stands in.
+//!
+//! On the dark canvas (`Tokens::strip`): glass, as the owner's reference. A
+//! translucent, saturated slab (the timeline's grid and the row behind show
+//! through) deeper at its top and more luminous toward its foot, a 1 px rim
+//! of light in its own hue inside the edge instead of an outline, brightest
+//! along the top and its corners, and semibold names (3:1, large-bold text) in a
+//! pale tint of the hue, or a deep shade where a tint cannot hold that and
+//! on yellow, orange, green, cyan and blue, whose slabs are as bright as the
+//! reference's amber. As
+//! bright and saturated as the owner's reference: each hue as vivid as sRGB
+//! allows. Hover and selection brighten and whiten the rim.
+//!
+//! On the light canvas (`Tokens::strip_light`): a pale tint of the hue, a
+//! step deeper at the top and lighter in the foot, a 1 px rim in a deeper
+//! shade of the hue with white light along the top, and names in a dark
+//! shade of the hue. Hover deepens the rim; selection is a 2 px ring in the
+//! hue's deepest shade on a body a step deeper. A dark slab on a near-white
+//! canvas reads as a weight, not as glass, so nothing here is shared with
+//! the dark recipe but the hue.
+//!
+//! Both have continuous corners about a quarter of the strip's height and
+//! the ruler's grid reading through the body. Strips are drawn by the
+//! timeline renderer (hundreds on screen while scrolling), never a system
+//! view.
+use crate::{
+    Scheme, Tokens,
+    color::{mix, oklch, oklch_fit, to_oklch},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StripState {
+    Rest,
+    /// The pointer is over the strip: the rim brightens toward white.
+    Hover,
+    /// Selected: a full white rim.
+    Selected,
+    /// Being moved or trimmed: lifted (drop shadow) and more translucent.
+    Dragging,
+    /// Muted, hidden or offline: chroma and opacity drop.
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Strip {
+    /// Body gradient, top to bottom: deep and saturated, then luminous. One
+    /// smooth ramp over the whole height: no band starts or stops inside it.
+    pub top: u32,
+    pub bottom: u32,
+    /// The body where a name holds the least contrast: on the dark canvas
+    /// its lightest part under a name (the foot of the descenders), on the
+    /// light canvas its deepest (the top). Labels hold their contrast here.
+    pub under_label: u32,
+    /// Body opacity over the canvas: glass, so the grid and the row behind
+    /// show through (a dragged strip, lifted, a little more).
+    pub opacity: f32,
+    /// The rim: a ring of light just inside the edge, even all round, as
+    /// (colour, alpha), `ring_width` points wide.
+    pub ring: (u32, f32),
+    pub ring_width: f32,
+    /// Light falling on the top edge, as (colour, alpha): a line inside the
+    /// top edge that thins out round the top corners and is gone by the
+    /// straight sides, so the rim is brightest along the top and corners
+    /// with nothing cut off.
+    pub light: (u32, f32),
+    /// Light pooled at the foot of the glass, as (colour, alpha at the
+    /// bottom edge): the slab's own hue a step more luminous, rising
+    /// `GLOW_REACH` of the way up and gone by the foot of a name's
+    /// descenders, so the ground a name stands on is the body's alone.
+    /// Only under a dark name: none (alpha 0) where the name is pale.
+    pub glow: (u32, f32),
+    /// The ruler's grid where it passes through the body, as (colour, alpha
+    /// at the strip's top edge): a top-lit line that fades to nothing
+    /// `GRID_FADE` of the way down.
+    pub grid: (u32, f32),
+    /// Drop shadow under a dragged strip as (colour, alpha, y, blur); alpha 0 = none.
+    pub shadow: (u32, f32, f32, f32),
+    /// Names and glyphs on the strip, in its own hue: a pale tint on the
+    /// dark canvas, a dark shade on the light one.
+    pub foreground: u32,
+    /// Marks (caption chips): the hue again, between body and foreground.
+    pub primary: u32,
+    /// An audio clip's waveform, as (colour, alpha at its base): light
+    /// caught inside the glass. On the dark canvas a pale tint of the
+    /// slab's own hue, lighter than the slab (the reference's pale peach on
+    /// amber); on the light canvas, where the slab is already pale, a soft
+    /// mid-tone of the hue a small lightness step under the slab.
+    pub wave: (u32, f32),
+    /// The level line on a hovered or selected audio clip, as (colour,
+    /// alpha): a hairline in the hue's light tone, never dark.
+    pub level: (u32, f32),
+}
+
+/// The playhead, as v1 (Electron) draws it: a 1 px accent line under an
+/// accent pin (flat top, pointed foot) resting on the foot of the ruler.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Playhead {
+    pub color: u32,
+    /// A soft seam of the canvas colour either side, so the line reads over
+    /// strips of any hue, as (colour, alpha).
+    pub halo: (u32, f32),
+    pub line: f32,
+    /// The pin's width and height (pt).
+    pub head: f32,
+    /// The gap between the pin's point and the foot of the ruler (pt).
+    pub head_foot: f32,
+}
+
+/// The trim grip: a short rounded pill inside the hovered strip's near edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrimGrip {
+    pub color: u32,
+    pub width: f32,
+    /// Share of the strip's height.
+    pub height: f32,
+    /// Distance from the strip's edge to the pill.
+    pub inset: f32,
+}
+
+/// How far down a strip its name's descenders reach (a share of its height).
+const LABEL_FOOT: f32 = 0.78;
+/// The contrast a strip's name holds on the dark canvas: names are semibold
+/// (large-bold text, 3:1), with a little room over that floor.
+const NAME_CONTRAST: f32 = 3.2;
+/// How far down a strip the ruler's grid line reaches before it has faded
+/// out: about half its height (the owner's reference).
+pub const GRID_FADE: f32 = 0.5;
+/// How far up a strip the light pooled at its foot reaches (a share of its
+/// height): the band under a name's descenders.
+pub const GLOW_REACH: f32 = 1. - LABEL_FOOT;
+
+/// The light canvas's strip, in OKLCH lightness unless said otherwise.
+struct LightStrip {
+    /// The body: its top, a step deeper, and its foot.
+    top: f32,
+    bottom: f32,
+    /// The hue's chroma in the body (moderate: a tint, not a paint).
+    chroma: f32,
+    /// How much of the canvas a disabled body covers.
+    faded: f32,
+    /// The rim's shade, the selected ring's, a name's lightest shade, and
+    /// the shade of waveforms and marks.
+    rim: f32,
+    ring: f32,
+    label: f32,
+    mark: f32,
+    /// The waveform's tone and the level line's.
+    wave: f32,
+    level: f32,
+    /// How much deeper a selected body is.
+    selected_step: f32,
+}
+const LIGHT: LightStrip = LightStrip {
+    top: 0.85,
+    bottom: 0.915,
+    chroma: 0.09,
+    faded: 0.5,
+    rim: 0.6,
+    ring: 0.42,
+    label: 0.38,
+    mark: 0.54,
+    wave: 0.74,
+    level: 0.64,
+    selected_step: 0.045,
+};
+
+impl Tokens {
+    /// Corner of a strip `height` points tall: about a quarter of its height.
+    pub fn strip_radius(&self, height: f32) -> f32 {
+        (height * 0.27).clamp(self.metrics.inner_radius, self.metrics.panel_radius)
+    }
+    /// Even space between neighbouring strips, so each reads as its own object.
+    pub fn strip_gap(&self) -> f32 {
+        self.metrics.border * 2.
+    }
+    /// The strip material for a layer colour (`colors.labels.*`) in `state`.
+    pub fn strip(&self, fill: u32, state: StripState) -> Strip {
+        let dark = self.scheme == Scheme::Dark;
+        let (_, chroma, hue) = to_oklch(fill);
+        // Neutral labels stay neutral; coloured ones are lifted to one chroma.
+        let coloured = chroma >= 0.012;
+        let chroma = match (coloured, state) {
+            (false, _) => 0.,
+            (true, StripState::Disabled) => 0.04,
+            (true, _) => 0.15,
+        };
+        let selected = state == StripState::Selected;
+        if self.accessibility.increase_contrast {
+            let (body, ink) = if dark {
+                (oklch(0.42, chroma * 0.7, hue), 0xffffff)
+            } else {
+                // Increase Contrast on the light canvas: a flat pale body
+                // outlined and named in the ink.
+                (oklch(0.88, chroma * 0.5, hue), self.colors.text)
+            };
+            let edge = if selected {
+                1.
+            } else if dark {
+                0.6
+            } else {
+                0.7
+            };
+            return Strip {
+                top: body,
+                bottom: body,
+                under_label: body,
+                opacity: 1.,
+                ring: (ink, edge),
+                ring_width: if selected { 2. } else { 1. },
+                light: (ink, 0.),
+                glow: (ink, 0.),
+                grid: (ink, 0.),
+                shadow: (0, 0., 0., 0.),
+                foreground: ink,
+                primary: ink,
+                wave: (ink, 0.55),
+                level: (ink, 1.),
+            };
+        }
+        if !dark {
+            return self.strip_light(hue, coloured, state);
+        }
+        let disabled = state == StripState::Disabled;
+        // Yellow, orange, green, cyan and blue are light hues: as bright as
+        // the reference's amber slab, under a dark name and over a
+        // waveform in a deeper shade of the hue (a pale one cannot read on
+        // them), which needs the slab a little less see-through to hold its
+        // contrast. Violet, red and pink stay the deeper slab under a pale
+        // name, as the reference's violet does.
+        let light_hue = coloured && ((35. ..110.).contains(&hue) || (120. ..280.).contains(&hue));
+        // Glass: the timeline's grid and the row behind show through the
+        // body (a dragged strip a little more, lifted off them).
+        let glass = if light_hue { 0.9 } else { 0.86 };
+        let opacity = match state {
+            // A light hue's dark name needs its slab as it is.
+            StripState::Dragging if !light_hue => glass - 0.1,
+            StripState::Disabled => 0.55,
+            _ => glass,
+        };
+        // A selected strip is a step brighter as well as white-rimmed.
+        let lift = if selected { 0.03 } else { 0. };
+        // As bright and saturated as the reference's slabs, each as vivid as
+        // sRGB allows the hue.
+        let vivid = match (coloured, disabled) {
+            (false, _) => 0.,
+            (true, true) => 0.06,
+            (true, false) => 0.26,
+        };
+        // As the reference's slab: deep and saturated at the top, more
+        // luminous toward the foot (the light hues the reference's amber).
+        // Yellow, green and cyan hold a dark name with room to spare, so
+        // their slabs go a step brighter again, where sRGB gives those hues
+        // their fullest colour: green reads vivid, never muted.
+        let bright_hue = coloured && (60. ..230.).contains(&hue);
+        let (top, foot) = match (bright_hue, light_hue) {
+            (true, _) => (0.67, 0.78),
+            (_, true) => (0.64, 0.74),
+            _ => (0.52, 0.64),
+        };
+        let lit = oklch_fit(top + lift, vivid, hue);
+        let body = oklch_fit(foot + lift, vivid * 0.9, hue);
+        let under = |bottom: u32| mix(lit, bottom, LABEL_FOOT);
+        let landed = |c: u32| mix(self.colors.panel, c, opacity);
+        let under_label = under(body);
+        // Names are semibold, so they hold 3:1 (large-bold text) from the
+        // slab's top to the foot of their descenders, veiled outside the
+        // work area too: a pale tint of the hue where that holds, else a
+        // deep shade of it.
+        let (veil, veil_alpha) = self.work_area_veil();
+        let holds = |name: u32| {
+            [lit, under_label].iter().all(|ground| {
+                let ground = landed(*ground);
+                crate::color::contrast(name, ground) >= NAME_CONTRAST
+                    && crate::color::contrast(name, mix(ground, veil, veil_alpha)) >= NAME_CONTRAST
+            })
+        };
+        let pale = || {
+            (0..=12)
+                .map(|step| oklch_fit(0.85 + step as f32 * 0.01, vivid * 0.4, hue))
+                .find(|name| holds(*name))
+        };
+        let shade = || {
+            (0..=19)
+                .map(|step| oklch_fit(0.3 - step as f32 * 0.015, vivid * 0.6, hue))
+                .find(|name| holds(*name))
+        };
+        let foreground = if light_hue {
+            shade().or_else(pale)
+        } else {
+            pale().or_else(shade)
+        }
+        // A saturated shade can miss the contrast target where black clears it.
+        .or_else(|| holds(0x000000).then_some(0x000000))
+        .unwrap_or(0xffffff);
+        // The rim's light is the palest tint of the hue; under the pointer
+        // it brightens toward white, selected it is white.
+        let tint = oklch(0.9, chroma * 0.55, hue);
+        let whiter = mix(tint, 0xffffff, 0.6);
+        let (ring, light) = match state {
+            StripState::Rest => ((tint, 0.2), (tint, 0.6)),
+            StripState::Hover => ((whiter, 0.42), (whiter, 0.8)),
+            StripState::Selected => ((0xffffff, 0.92), (0xffffff, 0.)),
+            StripState::Dragging => ((whiter, 0.42), (whiter, 0.8)),
+            StripState::Disabled => ((tint, 0.08), (tint, 0.2)),
+        };
+        // A disabled strip is the faded slab as it lands on the canvas,
+        // still solid: the grid fades inside it as in any other.
+        let solid = |c: u32| if disabled { landed(c) } else { c };
+        Strip {
+            // More chroma at the top, where the slab is deepest.
+            top: solid(lit),
+            bottom: solid(body),
+            under_label: solid(under_label),
+            opacity: if disabled { 1. } else { opacity },
+            ring,
+            ring_width: if selected { 2. } else { 1. },
+            light,
+            // The foot a step more luminous and as vivid as the hue allows:
+            // the glass glows where the light pools, under the name.
+            glow: (
+                oklch_fit(
+                    foot + lift + if bright_hue { 0.1 } else { 0.14 },
+                    vivid,
+                    hue,
+                ),
+                // A collapsed layer's summary marks stand in that band in the
+                // name's ink: a dark ink gains from the glow, a pale one would
+                // lose to it, so the slabs with a pale name keep a plain foot.
+                match (to_oklch(foreground).0 < 0.5, disabled) {
+                    (false, _) => 0.,
+                    (_, true) => 0.12,
+                    _ => 0.6,
+                },
+            ),
+            grid: (tint, if disabled { 0.12 } else { 0.6 }),
+            shadow: if state == StripState::Dragging {
+                (0x000000, 0.45, 6., 16.)
+            } else {
+                (0, 0., 0., 0.)
+            },
+            foreground,
+            // The waveform is the slab's foot pushed toward white (the deep
+            // hues further, so they still read lighter), at half strength:
+            // the reference's pale peach on amber.
+            wave: (
+                mix(
+                    body,
+                    0xffffff,
+                    match (bright_hue, light_hue) {
+                        (true, _) => 0.82,
+                        (_, true) => 0.74,
+                        _ => 0.78,
+                    },
+                ),
+                if disabled { 0.24 } else { 0.5 },
+            ),
+            level: (mix(body, 0xffffff, 0.8), if disabled { 0.4 } else { 0.85 }),
+            // Marks stand on the foot, the body's lightest part:
+            // the palest step of the hue that still reads there.
+            // On the light hues' bright slab the marks are a deep shade.
+            primary: if light_hue {
+                (0..=12)
+                    .map(|step| oklch_fit(0.4 - step as f32 * 0.02, vivid * 0.6, hue))
+                    .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .unwrap_or(0x000000)
+            } else {
+                // Else the pale step that reads best: a mark stays the hue's.
+                let pale = (0..=12).map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue));
+                pale.clone()
+                    .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .or_else(|| {
+                        pale.max_by(|a, b| {
+                            crate::color::contrast(*a, solid(body))
+                                .total_cmp(&crate::color::contrast(*b, solid(body)))
+                        })
+                    })
+                    .unwrap_or(0xffffff)
+            },
+        }
+    }
+    /// The strip on the light canvas (see the module's note).
+    fn strip_light(&self, hue: f32, coloured: bool, state: StripState) -> Strip {
+        let l = &LIGHT;
+        let disabled = state == StripState::Disabled;
+        let selected = state == StripState::Selected;
+        let chroma = match (coloured, disabled) {
+            (false, _) => 0.,
+            (true, true) => l.chroma * 0.3,
+            (true, false) => l.chroma,
+        };
+        // A selected strip is a step deeper and fuller as well as ringed.
+        let (deeper, fuller) = if selected {
+            (l.selected_step, 1.2)
+        } else {
+            (0., 1.)
+        };
+        let deep = oklch(l.top - deeper, chroma * fuller, hue);
+        let body = oklch(l.bottom - deeper, chroma * fuller * 0.85, hue);
+        let opacity = match state {
+            StripState::Dragging => 0.88,
+            StripState::Disabled => l.faded,
+            _ => 1.,
+        };
+        // The rim: a deeper shade of the hue round the slab, white light
+        // along its top. A neutral strip takes the ink's own grey.
+        let edge = oklch(l.rim, chroma * 1.3, hue);
+        let ring = oklch(l.ring, (chroma * 1.6).min(0.17), hue);
+        let (ring, light) = match state {
+            StripState::Rest => ((edge, 0.36), (0xffffff, 0.85)),
+            StripState::Hover => ((edge, 0.68), (0xffffff, 1.)),
+            StripState::Selected => ((ring, 1.), (0xffffff, 0.)),
+            StripState::Dragging => ((edge, 0.6), (0xffffff, 1.)),
+            StripState::Disabled => ((edge, 0.16), (0xffffff, 0.4)),
+        };
+        // Names are the hue's dark shade, as light as still holds 4.5:1 on
+        // the deepest part of the body as it lands on the canvas.
+        let landed = mix(self.colors.panel, deep, opacity);
+        let foreground = (0..=12)
+            .map(|step| oklch(l.label - step as f32 * 0.02, (chroma * 1.3).min(0.14), hue))
+            .find(|label| crate::color::contrast(*label, landed) >= 4.6)
+            .unwrap_or(self.colors.text);
+        let solid = |c: u32| {
+            if disabled {
+                mix(self.colors.panel, c, opacity)
+            } else {
+                c
+            }
+        };
+        Strip {
+            top: solid(deep),
+            bottom: solid(body),
+            under_label: solid(deep),
+            opacity: if disabled { 1. } else { opacity },
+            ring,
+            ring_width: if selected { 2. } else { 1. },
+            light,
+            glow: (edge, 0.),
+            grid: (edge, if disabled { 0.1 } else { 0.3 }),
+            shadow: if state == StripState::Dragging {
+                (0x000000, 0.22, 6., 16.)
+            } else {
+                (0, 0., 0., 0.)
+            },
+            foreground,
+            primary: oklch(l.mark, (chroma * 1.4).min(0.15), hue),
+            // A soft mid-tone of the hue: about a 0.13 lightness step under
+            // the slab's foot once laid on it, never a dark shade.
+            wave: (
+                oklch(l.wave, (chroma * 1.25).min(0.15), hue),
+                if disabled { 0.35 } else { 0.8 },
+            ),
+            level: (
+                oklch(l.level, (chroma * 1.5).min(0.15), hue),
+                if disabled { 0.4 } else { 0.9 },
+            ),
+        }
+    }
+    /// A graph curve's ink for channel `path`, the `index`th curve shown:
+    /// X red, Y green and Z blue, any other channel in turn the ink, yellow,
+    /// violet and teal (v1's graph). Each is its layer colour's hue at one
+    /// lightness and chroma per appearance, so curves read alike on the
+    /// timeline canvas and differ by hue alone.
+    pub fn graph_curve(&self, path: &str, index: usize) -> u32 {
+        let l = &self.colors.labels;
+        let hue = if path.ends_with(".x") {
+            Some(l.red)
+        } else if path.ends_with(".y") {
+            Some(l.green)
+        } else if path.ends_with(".z") {
+            Some(l.blue)
+        } else {
+            [None, Some(l.yellow), Some(l.violet), Some(l.teal)][index % 4]
+        };
+        let Some(fill) = hue else {
+            return self.colors.text;
+        };
+        let (_, _, hue) = to_oklch(fill);
+        if self.scheme == Scheme::Dark {
+            oklch(0.74, 0.13, hue)
+        } else {
+            oklch(0.56, 0.14, hue)
+        }
+    }
+    /// A selected key's ring in the graph: v1's green, in this appearance.
+    pub fn graph_key_selected(&self) -> u32 {
+        let (_, _, hue) = to_oklch(self.colors.labels.green);
+        if self.scheme == Scheme::Dark {
+            oklch(0.83, 0.15, hue)
+        } else {
+            oklch(0.6, 0.15, hue)
+        }
+    }
+    /// The graph's selected direction handles: v1's yellow, in this appearance.
+    pub fn graph_handle_selected(&self) -> u32 {
+        let (_, _, hue) = to_oklch(self.colors.labels.yellow);
+        if self.scheme == Scheme::Dark {
+            oklch(0.83, 0.13, hue)
+        } else {
+            oklch(0.62, 0.14, hue)
+        }
+    }
+    pub fn playhead(&self) -> Playhead {
+        Playhead {
+            // Powermove orange, as v1: the ruler's one bright mark.
+            color: self.colors.accent,
+            halo: (self.colors.panel, 0.6),
+            line: self.metrics.border,
+            head: 11.,
+            head_foot: 1.,
+        }
+    }
+    pub fn trim_grip(&self) -> TrimGrip {
+        TrimGrip {
+            // White on the dark canvas's deep strips, the ink on the light
+            // canvas's pale ones.
+            color: if self.scheme == Scheme::Dark {
+                0xffffff
+            } else {
+                self.colors.text
+            },
+            width: 3.,
+            height: 0.6,
+            inset: 4.,
+        }
+    }
+}

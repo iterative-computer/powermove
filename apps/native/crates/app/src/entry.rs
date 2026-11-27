@@ -1,0 +1,693 @@
+//! How a project reaches a window from outside an editor: Finder, a drop on
+//! the Dock icon, `open`, `powermove://` links (pm-services `entrypoints`) and
+//! Project Library ▸ Open in New Window.
+//!
+//! A project that is already open brings its window forward. Otherwise the
+//! project opens in the frontmost editor when that window is empty, and in a
+//! new window when it isn't: windows own their projects, so an open from
+//! Finder never replaces the one a person is working in.
+use crate::session::Controller;
+use gpui::*;
+use pm_kernel::session::ShellReply;
+use pm_services::entrypoints::{AuthLink, EntryHook, EntryQueue};
+use std::{collections::VecDeque, path::PathBuf};
+
+/// What a new editor window opens instead of restoring its last project.
+pub enum Pending {
+    File(PathBuf),
+    /// A received project keeps its underlying file through the window change.
+    ReceivedFile(PathBuf, gpui_macos::ReceivedDrop),
+    /// A project in the library, by id (a copy offered from its file's window).
+    Library(String),
+    /// A project an agent opened while its window showed another: already
+    /// open in the kernel, this window shows it.
+    Session(pm_kernel::session::SessionHandle),
+    /// A project the Project Library's worker already opened.
+    Adopt {
+        reply: Box<ShellReply>,
+        name: String,
+        file: Option<PathBuf>,
+    },
+}
+
+#[derive(Default)]
+struct Entries {
+    queue: EntryQueue,
+    /// Set once the first editor window exists (first-launch copy is done).
+    ready: bool,
+    next_window: VecDeque<Pending>,
+    editors: Vec<(WeakEntity<Controller>, AnyWindowHandle)>,
+}
+impl Global for Entries {}
+
+/// URLs from LaunchServices. Files queue until the library is attached.
+pub fn receive(urls: Vec<String>, cx: &mut App) {
+    for raw in urls {
+        #[cfg(debug_assertions)]
+        if let Some(state) = raw.strip_prefix("powermove://review/billing/") {
+            crate::cloud::review_billing(state, cx);
+            continue;
+        }
+        // Back from Stripe Checkout or the Portal (the billing return page).
+        if crate::cloud::billing_return(&raw).is_some() {
+            crate::cloud::billing_returned(cx);
+            continue;
+        }
+        // Development builds: on-screen reviews reach a menu command without
+        // pressing a menu item (which could bring the app forward);
+        // `review/command/<name>/<arg>/…` passes string arguments.
+        #[cfg(debug_assertions)]
+        if let Some(command) = raw.strip_prefix("powermove://review/command/") {
+            pm_shell::send_menu_command(command);
+            continue;
+        }
+        // `review/filedrop/<x,y;x,y;…>/<paths>`: files dragged in from
+        // Finder along a pointer path and dropped at its last point, as
+        // macOS delivers them (`FileDropEvent`), through the window's own
+        // hit testing (the drop as the release GPUI makes of Submit, never
+        // activating the app). `review/pointer/<x,y;x,y;…>`: a press at the first
+        // point, moves along the path, a release at the last (an in-app
+        // drag). Window points; one frame between steps.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/filedrop/") {
+            if let Some((points, paths)) = rest.split_once('/') {
+                let paths: Vec<PathBuf> =
+                    url::form_urlencoded::parse(format!("x={paths}").as_bytes())
+                        .next()
+                        .map(|(_, v)| v.lines().map(PathBuf::from).collect())
+                        .unwrap_or_default();
+                review_input(review_points(points), Some(paths), cx);
+            }
+            continue;
+        }
+        // `review/key/<keystroke>`: one key pressed and let go in the
+        // editor window (`space`, `escape`, `right`), where it has focus.
+        #[cfg(debug_assertions)]
+        if let Some(key) = raw.strip_prefix("powermove://review/key/") {
+            review_key(key, cx);
+            continue;
+        }
+        #[cfg(debug_assertions)]
+        if let Some(points) = raw.strip_prefix("powermove://review/pointer/") {
+            review_input(review_points(points), None, cx);
+            continue;
+        }
+        // `review/scroll/<built-in window>/<points>`: a sheet taller than
+        // its window, scrolled down by that much (a window in the background
+        // gets no wheel events, so reviews reach its lower rows here).
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/scroll/") {
+            if let Some((panel, by)) = rest.split_once('/')
+                && let Ok(by) = by.parse::<f32>()
+            {
+                for controller in editors(cx) {
+                    if let Some(view) = controller.read(cx).builtins.views.get(panel).cloned() {
+                        view.update(cx, |v, cx| v.review_scroll_by(by, cx));
+                    }
+                }
+            }
+            continue;
+        }
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/skim/") {
+            let editors = cx.default_global::<Entries>().editors.clone();
+            if let Some((editor, _)) = editors.first() {
+                crate::skimming::review_sweep(editor.clone(), rest, cx);
+            }
+            continue;
+        }
+        // `review/cloud-code/<email>` sends a sign-in code, and
+        // `review/cloud-code/<email>/<code>` checks it: the sign-in sheet's
+        // two Continue steps (`cloud::send_code`, `cloud::verify_code`), for
+        // a background review that can't type into the sheet.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/cloud-code/") {
+            let decode = |s: &str| {
+                url::form_urlencoded::parse(format!("x={s}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default()
+            };
+            match rest.split_once('/') {
+                Some((email, code)) => {
+                    crate::cloud::verify_code(decode(email), decode(code), cx, |result, _| {
+                        eprintln!("review: verify code: {:?}", result.map(|_| ()));
+                    })
+                }
+                None => crate::cloud::send_code(decode(rest), cx, |result, _| {
+                    eprintln!("review: send code: {result:?}");
+                }),
+            }
+            continue;
+        }
+        // `review/account-menu/<label>`: Home's account menu item, as its
+        // NSMenu callback runs it (no menu item is pressed).
+        #[cfg(debug_assertions)]
+        if let Some(label) = raw.strip_prefix("powermove://review/account-menu/") {
+            let label = url::form_urlencoded::parse(format!("x={label}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let editors = editors(cx);
+            let library = editors
+                .iter()
+                .find(|e| e.read(cx).home_visible)
+                .or(editors.first())
+                .and_then(|e| e.read(cx).library.clone());
+            if let Some(library) = library {
+                library.update(cx, |v, cx| v.review_account_menu(&label, cx));
+            }
+            continue;
+        }
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/library-row/") {
+            review_library_row(rest, cx);
+            continue;
+        }
+        // `review/viewer/<View menu title>`: the viewer's render actions.
+        #[cfg(debug_assertions)]
+        if let Some(title) = raw.strip_prefix("powermove://review/viewer/") {
+            let title = url::form_urlencoded::parse(format!("x={title}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let editors = cx.default_global::<Entries>().editors.clone();
+            if let Some(action) = crate::viewer2::review_action(&title)
+                && let Some(editor) = editors.into_iter().find_map(|(e, _)| e.upgrade())
+            {
+                editor.update(cx, |v, cx| v.viewer_action(action, cx));
+            }
+            continue;
+        }
+        // `review/hit/<x,y>/<file>`: the view AppKit finds at a window point
+        // (top-left origin, points) and its registered drag ancestors.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/hit/") {
+            if let Some((at, file)) = rest.split_once('/') {
+                let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                let _ = std::fs::write(file, review_hit(at));
+            }
+            continue;
+        }
+        // `review/thumbs/<file>`: the Project grid's thumbnail state.
+        #[cfg(debug_assertions)]
+        if let Some(file) = raw.strip_prefix("powermove://review/thumbs/") {
+            let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let mut out = String::new();
+            for controller in editors(cx) {
+                let c = controller.read(cx);
+                out.push_str(&format!(
+                    "{} published={} originals={}\n",
+                    c.thumbs.report(),
+                    c.published.is_some(),
+                    c.media_base.originals.len()
+                ));
+            }
+            let _ = std::fs::write(file, out);
+            continue;
+        }
+        // `review/dragtypes/<file>`: every view of every window that is
+        // registered for drags (AppKit's candidates for a drop), written
+        // to `file`: its class, frame in the window, whether hidden, types.
+        #[cfg(debug_assertions)]
+        if let Some(file) = raw.strip_prefix("powermove://review/dragtypes/") {
+            let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let _ = std::fs::write(file, review_drag_types());
+            continue;
+        }
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/files/") {
+            review_files(rest, cx);
+            continue;
+        }
+        let failure = admit(&mut cx.default_global::<Entries>().queue, &raw);
+        if let Some(text) = failure {
+            crate::error_log::shared(cx).borrow_mut().push("Open", text);
+        }
+    }
+    drain(cx);
+}
+
+#[cfg(debug_assertions)]
+fn review_hit(at: &str) -> String {
+    use objc2_app_kit::NSApplication;
+    let Some((x, y)) = at
+        .split_once(',')
+        .and_then(|(x, y)| Some((x.parse::<f64>().ok()?, y.parse::<f64>().ok()?)))
+    else {
+        return "bad point".into();
+    };
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    let mut out = String::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isVisible() {
+            continue;
+        }
+        let Some(content) = window.contentView() else {
+            continue;
+        };
+        let Some(frame) = (unsafe { content.superview() }) else {
+            continue;
+        };
+        let height = frame.bounds().size.height;
+        let point = objc2_foundation::NSPoint::new(x, height - y);
+        let mut view = frame.hitTest(point);
+        out.push_str(&format!("window {:?}\n", window.title().to_string()));
+        while let Some(v) = view {
+            out.push_str(&format!(
+                "  {} drag-types={}\n",
+                v.class().name().to_string_lossy(),
+                v.registeredDraggedTypes().count()
+            ));
+            view = unsafe { v.superview() };
+        }
+    }
+    out
+}
+
+#[cfg(debug_assertions)]
+fn review_drag_types() -> String {
+    use objc2_app_kit::{NSApplication, NSView};
+    fn walk(view: &NSView, depth: usize, out: &mut String) {
+        let types = view.registeredDraggedTypes();
+        if types.count() > 0 {
+            let frame = view.convertRect_toView(view.bounds(), None);
+            let names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+            out.push_str(&format!(
+                "{:depth$}{} frame=({:.0},{:.0} {:.0}x{:.0}) hidden={} types={}\n",
+                "",
+                view.class().name().to_string_lossy(),
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+                view.isHiddenOrHasHiddenAncestor(),
+                names.join(","),
+            ));
+        }
+        for child in view.subviews().iter() {
+            walk(&child, depth + 1, out);
+        }
+    }
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    let mut out = String::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        out.push_str(&format!(
+            "window {:?} visible={}\n",
+            window.title().to_string(),
+            window.isVisible()
+        ));
+        if let Some(root) = window.contentView().and_then(|v| unsafe { v.superview() }) {
+            walk(&root, 1, &mut out);
+        }
+    }
+    out
+}
+
+/// `<project name>/<context-menu label>`, percent-encoded, on Home.
+#[cfg(debug_assertions)]
+fn review_library_row(rest: &str, cx: &mut App) {
+    let decode = |s: &str| {
+        url::form_urlencoded::parse(format!("x={s}").as_bytes())
+            .next()
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default()
+    };
+    let Some((name, label)) = rest.split_once('/').map(|(n, l)| (decode(n), decode(l))) else {
+        return;
+    };
+    // The window showing Home, else any window with one.
+    let editors = editors(cx);
+    let target = editors
+        .iter()
+        .find(|e| e.read(cx).home_visible)
+        .or(editors.first())
+        .and_then(|e| e.read(cx).library.clone());
+    if let Some(library) = target {
+        library.update(cx, |v, cx| v.review_row_menu(&name, &label, cx));
+    }
+}
+
+/// `<drop|sequence|figma|answer|pasteboard>/<paths>`, percent-encoded and newline-separated,
+/// on the first editor: what a Finder drop on the window, or the open panel of
+/// File ▸ Import Image Sequence…, hands over; `answer` is what the next open
+/// panel (Import, Locate File…) returns. The system open panel takes no
+/// background input, so reviews choose files here.
+#[cfg(debug_assertions)]
+fn review_files(rest: &str, cx: &mut App) {
+    let Some((route, paths)) = rest.split_once('/') else {
+        return;
+    };
+    let paths: Vec<PathBuf> = url::form_urlencoded::parse(format!("x={paths}").as_bytes())
+        .next()
+        .map(|(_, v)| v.lines().map(PathBuf::from).collect())
+        .unwrap_or_default();
+    if route == "answer" {
+        crate::platform::answer_next_open_panel(paths);
+        return;
+    }
+    // Paste reads the pasteboard named here (none: the general one again).
+    if route == "pasteboard" {
+        let name = paths.first().map(|p| p.to_string_lossy().into_owned());
+        crate::platform::review_pasteboard(name.filter(|n| !n.is_empty()));
+        return;
+    }
+    let route = route.to_owned();
+    let editors = cx.default_global::<Entries>().editors.clone();
+    if let Some(editor) = editors.into_iter().find_map(|(e, _)| e.upgrade()) {
+        editor.update(cx, |v, cx| match route.as_str() {
+            "drop" => v.import_dropped(paths, cx),
+            "sequence" => {
+                let at = Some((v.time(), None));
+                v.choose_sequence(paths, None, true, at, None, cx)
+            }
+            // What Paste reads from the pasteboard, from a file: reviews
+            // never overwrite the person's clipboard.
+            "figma" => {
+                if let Some(html) = paths.first().and_then(|p| std::fs::read_to_string(p).ok()) {
+                    v.paste_figma_html(html, None, cx);
+                }
+            }
+            _ => {}
+        });
+    }
+}
+
+/// Queues one URL; the Error Log line when it can't be opened.
+fn admit(queue: &mut EntryQueue, raw: &str) -> Option<&'static str> {
+    match url::Url::parse(raw) {
+        Ok(url) if url.scheme() == "file" => match url.to_file_path() {
+            Ok(path) => queue
+                .push_file(path)
+                .err()
+                .map(|_| "Powermove opens Powermove projects (.pmv files)."),
+            Err(()) => Some("That file couldn’t be opened."),
+        },
+        // Never log the link itself: a sign-in link carries a token.
+        _ => queue
+            .push_link(raw)
+            .err()
+            .map(|_| "Ignored a powermove:// link that is not a sign-in."),
+    }
+}
+
+/// Called for every editor window the app creates.
+pub fn register(controller: &Entity<Controller>, window: AnyWindowHandle, cx: &mut App) {
+    let entries = cx.default_global::<Entries>();
+    entries
+        .editors
+        .retain(|(editor, _)| editor.upgrade().is_some());
+    entries.editors.push((controller.downgrade(), window));
+    if !entries.ready {
+        entries.ready = true;
+        cx.defer(|cx| {
+            let packaged = crate::platform::bundle_id().as_deref()
+                == Some(pm_update_policy::update_distribution::PRODUCTION_ID);
+            let _ = EntryQueue::register(packaged, false, &mut Hook { cx });
+            drain(cx);
+        });
+    }
+}
+
+/// The editor in the window with this id, if it is still open.
+pub fn editor(window: u64, cx: &App) -> Option<Entity<Controller>> {
+    cx.try_global::<Entries>()?
+        .editors
+        .iter()
+        .find(|(_, w)| w.window_id().as_u64() == window)
+        .and_then(|(e, _)| e.upgrade())
+}
+
+/// Every editor window's controller that is still open.
+pub fn editors(cx: &App) -> Vec<Entity<Controller>> {
+    cx.try_global::<Entries>()
+        .map(|e| e.editors.iter().filter_map(|(e, _)| e.upgrade()).collect())
+        .unwrap_or_default()
+}
+
+/// Every open editor's controller with its window.
+pub fn editor_windows(cx: &App) -> Vec<(Entity<Controller>, AnyWindowHandle)> {
+    cx.try_global::<Entries>()
+        .map(|e| {
+            e.editors
+                .iter()
+                .filter_map(|(e, w)| Some((e.upgrade()?, *w)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The new window's opening, taken once by the window factory.
+pub fn take_for_new_window(cx: &mut App) -> Option<Pending> {
+    cx.default_global::<Entries>().next_window.pop_front()
+}
+
+pub fn open_in_new_window(pending: Pending, cx: &mut App) {
+    cx.default_global::<Entries>()
+        .next_window
+        .push_back(pending);
+    // Not inside the caller's entity update: the factory updates new entities.
+    cx.defer(pm_shell::open_editor);
+}
+
+/// Tabs mode: a project opened as a tab of `leader`'s window, in a window of
+/// its own joined to that window's tabs (`Controller::replace_project`).
+pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
+    cx.default_global::<Entries>()
+        .next_window
+        .push_back(pending);
+    cx.defer(move |cx| pm_shell::open_editor_tab(cx, leader));
+}
+
+fn drain(cx: &mut App) {
+    if !cx.default_global::<Entries>().ready {
+        return;
+    }
+    let mut queue = std::mem::take(&mut cx.global_mut::<Entries>().queue);
+    // The hook never fails: an open reports its own failure (S004 alert and
+    // Error Log row) in the window it was given.
+    let _ = queue.drain(&mut Hook { cx });
+    cx.global_mut::<Entries>().queue = queue;
+}
+
+struct Hook<'a> {
+    cx: &'a mut App,
+}
+impl EntryHook for Hook<'_> {
+    /// The Powermove Cloud sign-in waiting in its browser step takes it; a
+    /// link nothing waits for is ignored, as v1.2.0 does, with a log line.
+    fn auth(&mut self, link: &AuthLink) -> pm_services::Result<()> {
+        if !crate::cloud::receive_link(link.state(), link.token(), self.cx) {
+            crate::error_log::shared(self.cx)
+                .borrow_mut()
+                .push("Open", "Ignored a sign-in link: no sign-in is waiting.");
+        }
+        Ok(())
+    }
+    fn open_project(&mut self, path: &std::path::Path) -> pm_services::Result<()> {
+        let cx = &mut *self.cx;
+        let id = crate::session::stable_id(path);
+        let editors = cx.global::<Entries>().editors.clone();
+        let live: Vec<_> = editors
+            .iter()
+            .filter_map(|(editor, window)| Some((editor.upgrade()?, *window)))
+            .collect();
+        // Already open: that window comes forward (only if the app is active).
+        if let Some((editor, _)) = live
+            .iter()
+            .find(|(e, _)| e.read(cx).session.as_ref().is_some_and(|s| s.project == id))
+        {
+            gpui_macos::child_window::raise_if_active(&editor.read(cx).host.borrow().window);
+            return Ok(());
+        }
+        let active = cx.active_window();
+        let empty = |e: &Entity<Controller>, cx: &App| {
+            let v = e.read(cx);
+            v.session.is_none() && !v.opening
+        };
+        let target = live
+            .iter()
+            .filter(|(e, _)| empty(e, cx))
+            .min_by_key(|(_, w)| Some(*w) != active)
+            .map(|(e, _)| e.clone());
+        // One project per window: with no empty window the front one's
+        // project gives way (asking about unsaved work first).
+        let target = target.or_else(|| {
+            live.iter()
+                .find(|(_, w)| Some(*w) == active)
+                .map(|(e, _)| e.clone())
+        });
+        match target {
+            Some(editor) => {
+                let path = path.to_path_buf();
+                editor.update(cx, |v, cx| v.open_file(path, cx));
+            }
+            None => open_in_new_window(Pending::File(path.to_path_buf()), cx),
+        }
+        Ok(())
+    }
+    /// Only the shipped bundle claims `powermove://`, as v1.2.0's packaged app
+    /// does. Development and beta bundles never touch LaunchServices defaults.
+    fn register_associations(&mut self, _extension: &str, scheme: &str) -> pm_services::Result<()> {
+        self.cx.register_url_scheme(scheme).detach();
+        Ok(())
+    }
+}
+
+#[cfg(debug_assertions)]
+fn review_points(text: &str) -> Vec<Point<Pixels>> {
+    text.split(';')
+        .filter_map(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some(point(px(x.parse().ok()?), px(y.parse().ok()?)))
+        })
+        .collect()
+}
+
+/// The steps of a review pointer path (module notes on `review/filedrop`
+/// and `review/pointer`): a file drop when `paths` is given, else a press,
+/// moves and a release.
+#[cfg(debug_assertions)]
+fn review_steps(points: &[Point<Pixels>], paths: Option<Vec<PathBuf>>) -> Vec<PlatformInput> {
+    let (Some(&first), Some(&last)) = (points.first(), points.last()) else {
+        return vec![];
+    };
+    let moves = |pressed| {
+        points.iter().map(move |&position| {
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position,
+                pressed_button: pressed,
+                modifiers: Modifiers::default(),
+            })
+        })
+    };
+    match paths {
+        Some(paths) => std::iter::once(PlatformInput::FileDrop(FileDropEvent::Entered {
+            position: first,
+            paths: ExternalPaths(paths.into()),
+        }))
+        .chain(
+            points
+                .iter()
+                .map(|&position| PlatformInput::FileDrop(FileDropEvent::Pending { position })),
+        )
+        // The release GPUI makes of a drop's Submit, without the app
+        // activation Submit brings (a review never brings the app forward).
+        .chain([
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: last,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            }),
+            PlatformInput::FileDrop(FileDropEvent::Exited),
+        ])
+        .collect(),
+        None => std::iter::once(PlatformInput::MouseMove(MouseMoveEvent {
+            position: first,
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        }))
+        .chain(std::iter::once(PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: first,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        })))
+        .chain(moves(Some(MouseButton::Left)))
+        .chain(std::iter::once(PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: last,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })))
+        .collect(),
+    }
+}
+
+/// Sends a review pointer path into the first editor window, one step a
+/// frame, so each event meets the hitboxes the last frame drew.
+#[cfg(debug_assertions)]
+fn review_key(key: &str, cx: &mut App) {
+    let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {
+        return;
+    };
+    let Ok(keystroke) = gpui::Keystroke::parse(key) else {
+        return;
+    };
+    let _ = cx.update_window(handle, |_, window, cx| {
+        window.dispatch_event(
+            PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }), cx);
+    });
+}
+
+#[cfg(debug_assertions)]
+fn review_input(points: Vec<Point<Pixels>>, paths: Option<Vec<PathBuf>>, cx: &mut App) {
+    let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {
+        return;
+    };
+    let steps = review_steps(&points, paths);
+    cx.spawn(async move |cx| {
+        for step in steps {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(32))
+                .await;
+            if cx
+                .update_window(handle, |_, window, cx| {
+                    window.dispatch_event(step, cx);
+                    window.refresh();
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntryQueue, admit};
+    #[test]
+    fn finder_files_and_links_are_admitted_and_others_explained() {
+        let mut queue = EntryQueue::default();
+        assert_eq!(admit(&mut queue, "file:///tmp/Launch%20Film.pmv"), None);
+        assert_eq!(admit(&mut queue, "file:///tmp/Launch%20Film.PMV"), None);
+        assert_eq!(admit(&mut queue, "powermove://auth?state=s&token=t"), None);
+        assert_eq!(queue.pending(), (1, 2));
+        assert_eq!(
+            admit(&mut queue, "file:///tmp/notes.txt"),
+            Some("Powermove opens Powermove projects (.pmv files).")
+        );
+        for link in [
+            "powermove://store/x",
+            "powermove://auth?state=s",
+            "nonsense",
+        ] {
+            assert_eq!(
+                admit(&mut queue, link),
+                Some("Ignored a powermove:// link that is not a sign-in.")
+            );
+        }
+        assert_eq!(queue.pending(), (1, 2));
+    }
+}
+

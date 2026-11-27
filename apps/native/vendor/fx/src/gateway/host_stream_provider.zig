@@ -1,0 +1,1087 @@
+const std = @import("std");
+const stream_provider = @import("../core/agent/stream_provider.zig");
+const io_mod = @import("../core/shared/io.zig");
+const gateway_client = @import("client.zig");
+const vercel_protocol = @import("vercel_protocol.zig");
+const vercel_failure_diagnostics = @import("vercel_failure_diagnostics.zig");
+const chat_completions_protocol = @import("chat_completions_protocol.zig");
+const credential_authority = @import("../core/auth/credential_authority.zig");
+
+const Allocator = std.mem.Allocator;
+const max_error_body_bytes = 1024 * 1024;
+const cooperative_pulse_interval_ms = 50;
+
+pub const Transport = struct {
+    context: ?*anyopaque,
+    open_fn: *const fn (?*anyopaque, []const u8, []const u8, []const u8, []const u8) anyerror!i32,
+    status_fn: *const fn (?*anyopaque, i32, *u16) i32,
+    next_fn: *const fn (?*anyopaque, i32, []u8) i32,
+    close_fn: *const fn (?*anyopaque, i32) void,
+    // Optional logical-completion signal, independent of HTTP EOF or close.
+    consumed_fn: ?*const fn (?*anyopaque, i32) void = null,
+    // Optional: an opened response's Retry-After in whole seconds, or -1 when
+    // it has none. Read once its status is ready; a host without it leaves
+    // waits on fx's own backoff.
+    retry_after_fn: ?*const fn (?*anyopaque, i32) i32 = null,
+
+    fn open(self: Transport, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
+        return self.open_fn(self.context, method, url, headers, body);
+    }
+
+    fn status(self: Transport, handle: i32, status_out: *u16) i32 {
+        return self.status_fn(self.context, handle, status_out);
+    }
+
+    fn next(self: Transport, handle: i32, out: []u8) i32 {
+        return self.next_fn(self.context, handle, out);
+    }
+
+    pub fn close(self: Transport, handle: i32) void {
+        self.close_fn(self.context, handle);
+    }
+
+    fn consumed(self: Transport, handle: i32) void {
+        if (self.consumed_fn) |notify| notify(self.context, handle);
+    }
+};
+
+/// The HTTP status a host reported, or null when `code` is outside 100 to 599.
+/// A host can report any `u16`, and `std.http.Status` cannot hold most of them.
+pub fn httpStatus(code: u16) ?std.http.Status {
+    if (code < 100 or code > 599) return null;
+    return @fromBackingInt(@intCast(code));
+}
+
+pub const ProviderContext = struct {
+    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
+    endpoint: Endpoint,
+    transport: Transport,
+};
+
+pub const Endpoint = union(enum) {
+    fixed: []const u8,
+    resolve: *const fn () []const u8,
+
+    fn url(self: Endpoint) []const u8 {
+        return switch (self) {
+            .fixed => |fixed| fixed,
+            .resolve => |resolve| resolve(),
+        };
+    }
+};
+
+pub fn provider(context: *ProviderContext) stream_provider.Provider {
+    return .{
+        .context = context,
+        .stream_fn = stream,
+        .build_request_fn = buildRequest,
+        .project_replay_fn = vercel_protocol.selectReplayParts,
+    };
+}
+
+pub fn initContext(
+    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
+    endpoint: Endpoint,
+    transport: Transport,
+) ProviderContext {
+    return .{ .build_fn = build_fn, .endpoint = endpoint, .transport = transport };
+}
+
+test "host provider selects replay without changing canonical input" {
+    const Unused = struct {
+        fn build(_: Allocator, _: stream_provider.RequestData) ![]u8 {
+            return error.UnexpectedRequest;
+        }
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !i32 {
+            return error.UnexpectedRequest;
+        }
+        fn status(_: ?*anyopaque, _: i32, _: *u16) i32 {
+            return -1;
+        }
+        fn next(_: ?*anyopaque, _: i32, _: []u8) i32 {
+            return -1;
+        }
+        fn close(_: ?*anyopaque, _: i32) void {}
+    };
+    const types = @import("../core/shared/types.zig");
+    const alloc = std.testing.allocator;
+    var context = initContext(Unused.build, .{ .fixed = "https://example.invalid" }, .{
+        .context = null,
+        .open_fn = Unused.open,
+        .status_fn = Unused.status,
+        .next_fn = Unused.next,
+        .close_fn = Unused.close,
+    });
+    const adapter = provider(&context);
+    const parts = "[{\"type\":\"reasoning\",\"text\":\"retained\"},{\"type\":\"tool-call\",\"toolCallId\":\"read\"},{\"type\":\"text\",\"offset\":0,\"length\":6}]";
+    const replay = types.ProviderReplay{
+        .source = .{ .provider = .gateway, .model = "fixture-model" },
+        .parts_json = parts,
+    };
+    const calls = [_]types.ToolCall{.{ .id = "read", .name = "read_file", .arguments_json = "{}" }};
+    const unchanged = (try adapter.projectReplay(alloc, replay, &calls, true, true)).?;
+    try std.testing.expect(unchanged.parts_json.ptr == parts.ptr);
+
+    const selected = (try adapter.projectReplay(alloc, replay, &calls, false, true)).?;
+    defer alloc.free(selected.parts_json);
+    try std.testing.expectEqualStrings("[{\"type\":\"reasoning\",\"text\":\"retained\"},{\"type\":\"tool-call\",\"toolCallId\":\"read\"}]", selected.parts_json);
+    try std.testing.expectEqualStrings(parts, replay.parts_json);
+    try std.testing.expect(selected.matches(replay.source));
+    try std.testing.expectEqual(@as(?types.ProviderReplay, null), try adapter.projectReplay(alloc, replay, &.{}, false, false));
+    try std.testing.expectEqual(@as(?types.ProviderReplay, null), try adapter.projectReplay(alloc, null, &.{}, true, true));
+    try std.testing.expectError(error.InvalidProviderState, adapter.projectReplay(alloc, .{
+        .source = replay.source,
+        .parts_json = "{}",
+    }, &.{}, false, true));
+}
+
+fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
+    if (deadlineExpired(request.deadline)) return error.Timeout;
+    const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
+    const transport = context.transport;
+    const payload = request.prepared_request_body orelse
+        try context.build_fn(alloc, request.data());
+    defer if (request.prepared_request_body == null) alloc.free(payload);
+    const auth = if (request.credential.secret()) |credential|
+        try alloc.print("Bearer {s}", .{credential})
+    else
+        null;
+    defer if (auth) |value| alloc.free(value);
+
+    var headers: std.ArrayList(std.http.Header) = .empty;
+    defer headers.deinit(alloc);
+    try headers.appendSlice(alloc, &.{
+        .{ .name = "content-type", .value = "application/json" },
+        .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
+        .{ .name = "X-Title", .value = "fx" },
+        .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
+        .{ .name = "ai-language-model-specification-version", .value = "4" },
+        .{ .name = "ai-language-model-id", .value = request.model },
+        .{ .name = "ai-language-model-streaming", .value = "true" },
+    });
+    if (auth) |value| try headers.append(alloc, .{ .name = "authorization", .value = value });
+    if (request.credential.tenant()) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
+    if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
+        .{ .name = "x-session-id", .value = session_id },
+        .{ .name = "x-session-affinity", .value = session_id },
+    });
+
+    const opened = try openPost(alloc, transport, request, context.endpoint.url(), headers.items, payload);
+    defer transport.close(opened.handle);
+    if (opened.status != .ok) {
+        const body = try readErrorBody(alloc, transport, opened.handle, request);
+        // Gateway reports the last provider it tried, so a provider's size
+        // rejection can arrive as a 400 from a later fallback. A 429 whose
+        // body names a used-up quota is not a rate limit a wait outlives.
+        const kind = gateway_client.httpFailureKind(alloc, stream_provider.FailureKind.fromHttpStatus(opened.status), body);
+        const size_rejected = kind == .invalid_request and vercel_failure_diagnostics.providerRejectedRequestSize(alloc, body);
+        return .{ .failed = .{
+            .kind = if (size_rejected) .request_too_large else kind,
+            .http_status = opened.status,
+            .detail = try chat_completions_protocol.redactOwnedErrorBody(alloc, body, request.credential.secret()),
+            .retry_after_seconds = opened.retry_after_seconds,
+            .ownership = .owned,
+        } };
+    }
+
+    var reader: HostStreamReader = undefined;
+    reader.init(
+        transport,
+        opened.handle,
+        request.cancel_flag,
+        request.deadline,
+        request.cooperative_pulse,
+    );
+    var events = request.events;
+    const completion = gateway_client.consumeGatewaySseStream(
+        alloc,
+        &reader.interface,
+        &events,
+        stream_provider.EventSink.onContentChunk,
+        stream_provider.EventSink.onToolStart,
+        stream_provider.EventSink.onReasoningChunk,
+        request.cancel_flag,
+        request.content_capture_limit,
+        .{ .messages = request.messages, .current_turn_messages = request.current_turn_messages },
+    ) catch |err| switch (err) {
+        error.ReadFailed => return readFailure(&reader, request.cancel_flag),
+        else => return err,
+    };
+    signalConsumed(transport, opened.handle, request, completion);
+    return .{ .completed = .{
+        .completion = completion,
+        .ownership = .owned,
+    } };
+}
+
+pub const OpenedPost = struct {
+    handle: i32,
+    status: std.http.Status,
+    retry_after_seconds: ?u64 = null,
+};
+
+/// Admits the request, sends one POST through the host and waits for its HTTP
+/// status. On success the caller owns `handle` and must close it with
+/// `transport.close`; on error the handle is already closed. Headers reach the
+/// host as a JSON list of `{name, value}` objects.
+pub fn openPost(
+    alloc: Allocator,
+    transport: Transport,
+    request: stream_provider.ModelRequest,
+    endpoint: []const u8,
+    headers: []const std.http.Header,
+    payload: []const u8,
+) !OpenedPost {
+    var headers_json: std.Io.Writer.Allocating = .init(alloc);
+    defer headers_json.deinit();
+    try std.json.Stringify.value(headers, .{}, &headers_json.writer);
+
+    try request.admission.admit();
+    request.delivery.markPossiblySent();
+    const handle = try transport.open("POST", endpoint, headers_json.writer.buffered(), payload);
+    if (handle < 0) return error.HostStreamFailed;
+    errdefer transport.close(handle);
+
+    var status_code: u16 = 0;
+    while (true) {
+        if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+        if (deadlineExpired(request.deadline)) return error.Timeout;
+        const status_result = transport.status(handle, &status_code);
+        if (status_result == 1) break;
+        if (status_result == -2) return error.Cancelled;
+        if (status_result < 0) return error.HostStreamFailed;
+        try pulse(request.cooperative_pulse);
+    }
+    const http_status = httpStatus(status_code) orelse return error.HostStreamFailed;
+    const retry_after: ?u64 = if (transport.retry_after_fn) |read| blk: {
+        const seconds = read(transport.context, handle);
+        break :blk if (seconds < 0) null else @intCast(seconds);
+    } else null;
+    return .{ .handle = handle, .status = http_status, .retry_after_seconds = retry_after };
+}
+
+pub const GetResponse = struct {
+    status: std.http.Status,
+    /// Owned by the caller.
+    body: []u8,
+};
+
+/// Sends one GET through the host and reads its whole body, up to
+/// `max_body_bytes`. Checks `cancel_flag` and `deadline` before every host
+/// call, and pulses while the host has nothing ready, so a single-threaded
+/// runtime keeps serving input meanwhile. Headers reach the host as a JSON
+/// list of `{name, value}` objects. The handle is closed before returning.
+pub fn get(
+    alloc: Allocator,
+    transport: Transport,
+    url: []const u8,
+    headers: []const std.http.Header,
+    max_body_bytes: usize,
+    cancel_flag: *std.atomic.Value(bool),
+    deadline: ?std.Io.Clock.Timestamp,
+    cooperative_pulse: ?stream_provider.CooperativePulse,
+) !GetResponse {
+    var headers_json: std.Io.Writer.Allocating = .init(alloc);
+    defer headers_json.deinit();
+    try std.json.Stringify.value(headers, .{}, &headers_json.writer);
+
+    if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+    const handle = try transport.open("GET", url, headers_json.writer.buffered(), "");
+    if (handle < 0) return error.HostStreamFailed;
+    defer transport.close(handle);
+
+    var status_code: u16 = 0;
+    while (true) {
+        if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+        if (deadlineExpired(deadline)) return error.Timeout;
+        const status_result = transport.status(handle, &status_code);
+        if (status_result == 1) break;
+        if (status_result == -2) return error.Cancelled;
+        if (status_result < 0) return error.HostStreamFailed;
+        try pulse(cooperative_pulse);
+    }
+    const http_status = httpStatus(status_code) orelse return error.HostStreamFailed;
+    const body = try readBody(alloc, transport, handle, max_body_bytes, cancel_flag, deadline, cooperative_pulse);
+    return .{ .status = http_status, .body = body };
+}
+
+/// Reads a non-success response body, bounded. The caller owns the bytes.
+pub fn readErrorBody(
+    alloc: Allocator,
+    transport: Transport,
+    handle: i32,
+    request: stream_provider.ModelRequest,
+) ![]u8 {
+    return readBody(alloc, transport, handle, max_error_body_bytes, request.cancel_flag, request.deadline, request.cooperative_pulse);
+}
+
+pub const ReadFailure = error{ Timeout, Cancelled, HostStreamFailed };
+
+/// Names why a `HostStreamReader` stopped with `error.ReadFailed`.
+pub fn readFailure(reader: *const HostStreamReader, cancel_flag: *std.atomic.Value(bool)) ReadFailure {
+    if (reader.timed_out) return error.Timeout;
+    if (cancel_flag.load(.seq_cst) or reader.aborted) return error.Cancelled;
+    return error.HostStreamFailed;
+}
+
+/// Tells the host a response was consumed in full, once the completion is valid
+/// and uncancelled, so it may release the response before the stream closes.
+pub fn signalConsumed(
+    transport: Transport,
+    handle: i32,
+    request: stream_provider.ModelRequest,
+    completion: @import("../core/shared/types.zig").ModelCompletion,
+) void {
+    const types = @import("../core/shared/types.zig");
+    if (transport.consumed_fn != null and
+        !request.cancel_flag.load(.seq_cst) and
+        types.classifyProviderCompletion(completion) == .completed and
+        types.authoritativeToolAdmission(completion) == .admitted and
+        completion.provider_failure_cause == null)
+    {
+        transport.consumed(handle);
+    }
+}
+
+test "host statuses outside 100 to 599 are not HTTP statuses" {
+    for ([_]u16{ 0, 99, 600, 1023, 1024, 65535 }) |code| {
+        try std.testing.expectEqual(@as(?std.http.Status, null), httpStatus(code));
+    }
+    try std.testing.expectEqual(@as(?std.http.Status, .@"continue"), httpStatus(100));
+    try std.testing.expectEqual(@as(?std.http.Status, .ok), httpStatus(200));
+    try std.testing.expectEqual(@as(u16, 599), @backingInt(httpStatus(599).?));
+}
+
+test "host provider signals logical consumption only after valid uncancelled completion" {
+    const FakeTransport = struct {
+        body: []const u8,
+        status_code: u16 = 200,
+        offset: usize = 0,
+        read_error: ?i32 = null,
+        cancel_on_content: bool = false,
+        cancel_flag: std.atomic.Value(bool) = .init(false),
+        consumed_calls: usize = 0,
+        consumed_handle: ?i32 = null,
+        consumed_after_close: bool = false,
+        eof_calls: usize = 0,
+        close_calls: usize = 0,
+        content_calls: usize = 0,
+        content_calls_at_consumption: usize = 0,
+
+        fn build(_: Allocator, _: stream_provider.RequestData) ![]u8 {
+            return error.UnexpectedRequest;
+        }
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !i32 {
+            return 7;
+        }
+        fn status(raw: ?*anyopaque, _: i32, status_out: *u16) i32 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            status_out.* = self.status_code;
+            return 1;
+        }
+        fn next(raw: ?*anyopaque, _: i32, out: []u8) i32 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const len = @min(out.len, self.body.len - self.offset);
+            if (len == 0) {
+                if (self.read_error) |err| return err;
+                self.eof_calls += 1;
+                return 0;
+            }
+            @memcpy(out[0..len], self.body[self.offset..][0..len]);
+            self.offset += len;
+            return @intCast(len);
+        }
+        fn close(raw: ?*anyopaque, _: i32) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.close_calls += 1;
+        }
+        fn consumed(raw: ?*anyopaque, handle: i32) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.consumed_calls += 1;
+            self.consumed_handle = handle;
+            self.consumed_after_close = self.close_calls != 0;
+            self.content_calls_at_consumption = self.content_calls;
+        }
+        fn emit(raw: *anyopaque, event: stream_provider.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (event == .content_delta) {
+                self.content_calls += 1;
+                if (self.cancel_on_content) self.cancel_flag.store(true, .seq_cst);
+            }
+        }
+        fn admit(_: *anyopaque) !void {}
+    };
+    const text = "data: {\"type\":\"text-delta\",\"id\":\"t\",\"delta\":\"answer\"}\n\n";
+    const stop = "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\"}}\n\n";
+    const cases = [_]struct {
+        body: []const u8,
+        status: u16 = 200,
+        read_error: ?i32 = null,
+        cancel_on_content: bool = false,
+        optional_callback: bool = true,
+        expected_consumed: bool = false,
+        expected_error: ?anyerror = null,
+    }{
+        .{ .body = text ++ stop, .expected_consumed = true },
+        .{ .body = "data: {\"type\":\"tool-call\",\"toolCallId\":\"c\",\"toolName\":\"test_tool\",\"input\":{}}\n\n" ++
+            "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\"}}\n\n", .expected_consumed = true },
+        .{ .body = text ++ "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"other\"}}\n\n", .expected_consumed = true },
+        .{ .body = text ++ stop, .optional_callback = false },
+        .{ .body = text },
+        .{ .body = "data: [DONE]\n\n" },
+        .{ .body = text ++ "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"error\"}}\n\n" },
+        .{ .body = text ++ "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"content-filter\"}}\n\n" },
+        .{ .body = text ++ "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"length\"}}\n\n" },
+        .{ .body = "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\"}}\n\n" },
+        .{ .body = text ++ "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\"},\"code\":\"gateway_stream_timeout\"}\n\n" },
+        // A call with an empty id gets an fx id, so the reply is valid.
+        .{ .body = "data: {\"type\":\"tool-call\",\"toolCallId\":\"\",\"toolName\":\"test_tool\",\"input\":{}}\n\n" ++
+            "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\"}}\n\n", .expected_consumed = true },
+        .{ .body = text ++ stop, .cancel_on_content = true },
+        .{ .body = "upstream failure", .status = 500 },
+        .{ .body = text ++ stop, .status = 0, .expected_error = error.HostStreamFailed },
+        .{ .body = text ++ stop, .status = 1024, .expected_error = error.HostStreamFailed },
+        .{ .body = text ++ stop, .status = 65535, .expected_error = error.HostStreamFailed },
+        .{ .body = text, .read_error = -1, .expected_error = error.HostStreamFailed },
+        .{ .body = "data: {not-json}\n\n", .expected_error = error.MalformedGatewaySseEvent },
+    };
+    for (cases, 0..) |case, index| {
+        var fake: FakeTransport = .{
+            .body = case.body,
+            .status_code = case.status,
+            .read_error = case.read_error,
+            .cancel_on_content = case.cancel_on_content,
+        };
+        errdefer std.debug.print("host consumption case={d} consumed={d} eof={d} closed={d}\n", .{ index, fake.consumed_calls, fake.eof_calls, fake.close_calls });
+        var context = initContext(FakeTransport.build, .{ .fixed = "https://example.invalid" }, .{
+            .context = &fake,
+            .open_fn = FakeTransport.open,
+            .status_fn = FakeTransport.status,
+            .next_fn = FakeTransport.next,
+            .close_fn = FakeTransport.close,
+            .consumed_fn = if (case.optional_callback) FakeTransport.consumed else null,
+        });
+        var delivery: stream_provider.DeliveryCertainty = .init();
+        var attempt: stream_provider.AttemptEvidence = .{};
+        const result = stream(&context, std.testing.allocator, .{
+            .credential = .host_managed,
+            .model = "fixture-model",
+            .retry_count = 0,
+            .messages = &.{},
+            .tool_choice = .auto,
+            .provider_options = .{},
+            .prepared_request_body = "{}",
+            .trace_ctx = .{},
+            .content_capture_limit = null,
+            .delivery = &delivery,
+            .attempt_evidence = &attempt,
+            .events = .{ .context = &fake, .emit_fn = FakeTransport.emit },
+            .admission = .{ .context = &fake, .admit_fn = FakeTransport.admit },
+            .cancel_flag = &fake.cancel_flag,
+        });
+        if (case.expected_error) |expected| {
+            try std.testing.expectError(expected, result);
+        } else {
+            var owned = try result;
+            defer owned.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.expected_consumed)), fake.consumed_calls);
+        try std.testing.expectEqual(if (case.expected_consumed) @as(?i32, 7) else null, fake.consumed_handle);
+        try std.testing.expect(!fake.consumed_after_close);
+        try std.testing.expectEqual(@as(usize, 1), fake.close_calls);
+        if (case.expected_consumed) {
+            try std.testing.expectEqual(fake.content_calls, fake.content_calls_at_consumption);
+            try std.testing.expectEqual(@as(usize, 0), fake.eof_calls);
+        }
+    }
+}
+
+fn buildRequest(
+    raw: ?*anyopaque,
+    alloc: Allocator,
+    request: stream_provider.RequestData,
+) anyerror![]u8 {
+    const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
+    return context.build_fn(alloc, request);
+}
+
+fn pulse(value: ?stream_provider.CooperativePulse) !void {
+    if (value) |callback| try callback.pulse();
+}
+
+pub fn deadlineExpired(deadline: ?std.Io.Clock.Timestamp) bool {
+    const value = deadline orelse return false;
+    const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+    return !std.Io.Clock.Timestamp.compare(now, .lt, value);
+}
+
+/// Reads a response body whole, failing once it exceeds `max_bytes`. The
+/// caller owns the bytes.
+fn readBody(
+    alloc: Allocator,
+    transport: Transport,
+    handle: i32,
+    max_bytes: usize,
+    cancel_flag: *std.atomic.Value(bool),
+    deadline: ?std.Io.Clock.Timestamp,
+    cooperative_pulse: ?stream_provider.CooperativePulse,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+        if (deadlineExpired(deadline)) return error.Timeout;
+        const count = transport.next(handle, &chunk);
+        if (count == -3) {
+            try pulse(cooperative_pulse);
+            continue;
+        }
+        if (count == -2) return error.Cancelled;
+        if (count < 0) return error.HostStreamFailed;
+        if (count == 0) break;
+        const len: usize = @intCast(count);
+        if (len > max_bytes - out.items.len) return error.HostStreamFailed;
+        try out.appendSlice(alloc, chunk[0..len]);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Adapts one open host response into a `std.Io.Reader` that honors the
+/// request's cancellation, deadline and cooperative pulses.
+pub const HostStreamReader = struct {
+    transport: Transport = undefined,
+    handle: i32 = -1,
+    cancel_flag: *std.atomic.Value(bool) = undefined,
+    deadline: ?std.Io.Clock.Timestamp = null,
+    cooperative_pulse: ?stream_provider.CooperativePulse = null,
+    last_cooperative_pulse: ?std.Io.Clock.Timestamp = null,
+    aborted: bool = false,
+    timed_out: bool = false,
+    buffer: [16 * 1024]u8 = undefined,
+    interface: std.Io.Reader = undefined,
+
+    pub fn init(
+        self: *@This(),
+        transport: Transport,
+        handle: i32,
+        cancel_flag: *std.atomic.Value(bool),
+        deadline: ?std.Io.Clock.Timestamp,
+        cooperative_pulse: ?stream_provider.CooperativePulse,
+    ) void {
+        self.* = .{
+            .transport = transport,
+            .handle = handle,
+            .cancel_flag = cancel_flag,
+            .deadline = deadline,
+            .cooperative_pulse = cooperative_pulse,
+            .last_cooperative_pulse = if (cooperative_pulse != null)
+                std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)
+            else
+                null,
+        };
+        self.interface = .{ .vtable = &.{ .stream = streamReader, .readVec = readVec }, .buffer = &self.buffer, .seek = 0, .end = 0 };
+    }
+
+    fn readVec(reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const self: *@This() = @alignCast(@fieldParentPtr("interface", reader));
+        if (self.cancel_flag.load(.seq_cst)) return self.abortRead();
+        for (data) |dest| if (dest.len > 0) return self.readHost(dest);
+        const dest = reader.buffer[reader.end..];
+        if (dest.len == 0) return 0;
+        const count = try self.readHost(dest);
+        reader.end += count;
+        return 0;
+    }
+
+    fn abortRead(self: *@This()) std.Io.Reader.Error {
+        self.aborted = true;
+        return error.ReadFailed;
+    }
+
+    fn abortDeadline(self: *@This()) std.Io.Reader.Error {
+        self.timed_out = true;
+        return error.ReadFailed;
+    }
+
+    fn pulseAt(self: *@This(), now: std.Io.Clock.Timestamp) !void {
+        if (self.cooperative_pulse == null) return;
+        self.last_cooperative_pulse = now;
+        try pulse(self.cooperative_pulse);
+    }
+
+    fn pulseIfDueAt(self: *@This(), now: std.Io.Clock.Timestamp) !void {
+        if (self.cooperative_pulse == null) return;
+        const last_pulse = self.last_cooperative_pulse orelse return;
+        const elapsed_ms = last_pulse.durationTo(now).raw.toMilliseconds();
+        if (elapsed_ms < cooperative_pulse_interval_ms) return;
+        try self.pulseAt(now);
+    }
+
+    fn readHost(self: *@This(), dest: []u8) std.Io.Reader.Error!usize {
+        while (true) {
+            if (self.cancel_flag.load(.seq_cst)) return self.abortRead();
+            if (deadlineExpired(self.deadline)) return self.abortDeadline();
+            if (self.cooperative_pulse != null) {
+                self.pulseIfDueAt(std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)) catch return error.ReadFailed;
+            }
+            if (self.cancel_flag.load(.seq_cst)) return self.abortRead();
+            const count = self.transport.next(self.handle, dest);
+            if (count == -3) {
+                if (self.cooperative_pulse != null) {
+                    self.pulseAt(std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)) catch return error.ReadFailed;
+                }
+                continue;
+            }
+            if (count == -2) return self.abortRead();
+            if (count < 0) return error.ReadFailed;
+            if (count == 0) return error.EndOfStream;
+            return @intCast(count);
+        }
+    }
+
+    fn streamReader(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const dest = limit.slice(try writer.writableSliceGreedy(1));
+        var data: [1][]u8 = .{dest};
+        const count = readVec(reader, &data) catch |err| return err;
+        writer.advance(count);
+        return count;
+    }
+};
+
+test "error response bodies are bounded" {
+    const FakeTransport = struct {
+        body: []const u8,
+        offset: usize = 0,
+
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) anyerror!i32 {
+            return 1;
+        }
+
+        fn status(_: ?*anyopaque, _: i32, status_out: *u16) i32 {
+            status_out.* = 500;
+            return 1;
+        }
+
+        fn next(raw: ?*anyopaque, _: i32, out: []u8) i32 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const len = @min(out.len, self.body.len - self.offset);
+            if (len == 0) return 0;
+            @memcpy(out[0..len], self.body[self.offset..][0..len]);
+            self.offset += len;
+            return @intCast(len);
+        }
+
+        fn close(_: ?*anyopaque, _: i32) void {}
+    };
+
+    const body = try std.testing.allocator.alloc(u8, max_error_body_bytes + 1);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'x');
+    var fake = FakeTransport{ .body = body };
+    const transport = Transport{
+        .context = &fake,
+        .open_fn = FakeTransport.open,
+        .status_fn = FakeTransport.status,
+        .next_fn = FakeTransport.next,
+        .close_fn = FakeTransport.close,
+    };
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    try std.testing.expectError(
+        error.HostStreamFailed,
+        readBody(std.testing.allocator, transport, 1, max_error_body_bytes, &cancel_flag, null, null),
+    );
+}
+
+/// A host that answers one GET as a test scripts it.
+const ScriptedGet = struct {
+    pending_statuses: usize = 0,
+    status_result: i32 = 1,
+    not_ready_reads: usize = 0,
+    chunks: []const []const u8 = &.{},
+    chunk: usize = 0,
+    opens: usize = 0,
+    closes: usize = 0,
+    method: []const u8 = "",
+    headers_buf: [256]u8 = undefined,
+    headers: []const u8 = "",
+    body_len: usize = 0,
+
+    fn transport(self: *ScriptedGet) Transport {
+        return .{ .context = self, .open_fn = open, .status_fn = status, .next_fn = next, .close_fn = close };
+    }
+
+    fn open(raw: ?*anyopaque, method: []const u8, _: []const u8, headers: []const u8, body: []const u8) anyerror!i32 {
+        const self: *ScriptedGet = @ptrCast(@alignCast(raw.?));
+        self.opens += 1;
+        self.method = method;
+        @memcpy(self.headers_buf[0..headers.len], headers);
+        self.headers = self.headers_buf[0..headers.len];
+        self.body_len = body.len;
+        return 7;
+    }
+
+    fn status(raw: ?*anyopaque, _: i32, status_out: *u16) i32 {
+        const self: *ScriptedGet = @ptrCast(@alignCast(raw.?));
+        if (self.pending_statuses > 0) {
+            self.pending_statuses -= 1;
+            return 0;
+        }
+        status_out.* = 200;
+        return self.status_result;
+    }
+
+    fn next(raw: ?*anyopaque, _: i32, out: []u8) i32 {
+        const self: *ScriptedGet = @ptrCast(@alignCast(raw.?));
+        if (self.not_ready_reads > 0) {
+            self.not_ready_reads -= 1;
+            return -3;
+        }
+        if (self.chunk == self.chunks.len) return 0;
+        const bytes = self.chunks[self.chunk];
+        self.chunk += 1;
+        @memcpy(out[0..bytes.len], bytes);
+        return @intCast(bytes.len);
+    }
+
+    fn close(raw: ?*anyopaque, _: i32) void {
+        const self: *ScriptedGet = @ptrCast(@alignCast(raw.?));
+        self.closes += 1;
+    }
+};
+
+/// Counts pulses, and sets `cancel_flag` on the first when one is given.
+const CountingPulse = struct {
+    count: usize = 0,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+
+    fn run(raw: *anyopaque) anyerror!void {
+        const self: *CountingPulse = @ptrCast(@alignCast(raw));
+        self.count += 1;
+        if (self.cancel_flag) |flag| flag.store(true, .seq_cst);
+    }
+
+    fn callback(self: *CountingPulse) stream_provider.CooperativePulse {
+        return .{ .ctx = self, .run = run };
+    }
+};
+
+test "a host GET waits for its status and body while pulsing, then closes" {
+    var host: ScriptedGet = .{ .pending_statuses = 2, .not_ready_reads = 1, .chunks = &.{ "hello ", "world" } };
+    var pulses: CountingPulse = .{};
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    const response = try get(
+        std.testing.allocator,
+        host.transport(),
+        "https://usage.example.test/v1/report",
+        &.{.{ .name = "authorization", .value = "Bearer test-key" }},
+        64,
+        &cancel_flag,
+        null,
+        pulses.callback(),
+    );
+    defer std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(std.http.Status.ok, response.status);
+    try std.testing.expectEqualStrings("hello world", response.body);
+    try std.testing.expectEqualStrings("GET", host.method);
+    try std.testing.expectEqualStrings("[{\"name\":\"authorization\",\"value\":\"Bearer test-key\"}]", host.headers);
+    try std.testing.expectEqual(@as(usize, 0), host.body_len);
+    // Two pending statuses and one read with nothing ready.
+    try std.testing.expectEqual(@as(usize, 3), pulses.count);
+    try std.testing.expectEqual(@as(usize, 1), host.closes);
+}
+
+test "a host GET stops at its limit, on cancellation, on a failed status and at its deadline" {
+    const io = std.testing.io;
+    const Case = struct {
+        host: ScriptedGet,
+        max_body_bytes: usize = 64,
+        cancelled_before: bool = false,
+        cancel_on_pulse: bool = false,
+        expired: bool = false,
+        expected: anyerror,
+    };
+    const cases = [_]Case{
+        .{ .host = .{ .chunks = &.{ "hello ", "world" } }, .max_body_bytes = 5, .expected = error.HostStreamFailed },
+        .{ .host = .{}, .cancelled_before = true, .expected = error.Cancelled },
+        .{ .host = .{ .pending_statuses = 1 }, .cancel_on_pulse = true, .expected = error.Cancelled },
+        .{ .host = .{ .status_result = -1 }, .expected = error.HostStreamFailed },
+        .{ .host = .{ .status_result = -2 }, .expected = error.Cancelled },
+        .{ .host = .{ .pending_statuses = 1 }, .expired = true, .expected = error.Timeout },
+    };
+    for (cases) |case| {
+        var host = case.host;
+        var cancel_flag = std.atomic.Value(bool).init(case.cancelled_before);
+        var pulses: CountingPulse = .{ .cancel_flag = if (case.cancel_on_pulse) &cancel_flag else null };
+        const deadline: ?std.Io.Clock.Timestamp = if (case.expired) std.Io.Clock.Timestamp.now(io, .awake) else null;
+        try std.testing.expectError(case.expected, get(
+            std.testing.allocator,
+            host.transport(),
+            "https://usage.example.test/v1/report",
+            &.{},
+            case.max_body_bytes,
+            &cancel_flag,
+            deadline,
+            pulses.callback(),
+        ));
+        // A request that was sent is always closed, once.
+        try std.testing.expectEqual(host.opens, host.closes);
+        try std.testing.expectEqual(@as(usize, if (case.cancelled_before) 0 else 1), host.opens);
+    }
+}
+
+test "a key quoted in a gateway error never reaches the failure detail" {
+    const FakeTransport = struct {
+        body: []const u8,
+        offset: usize = 0,
+        cancel_flag: std.atomic.Value(bool) = .init(false),
+
+        fn build(_: Allocator, _: stream_provider.RequestData) ![]u8 {
+            return error.UnexpectedRequest;
+        }
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !i32 {
+            return 3;
+        }
+        fn status(_: ?*anyopaque, _: i32, status_out: *u16) i32 {
+            status_out.* = 403;
+            return 1;
+        }
+        fn next(raw: ?*anyopaque, _: i32, out: []u8) i32 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const len = @min(out.len, self.body.len - self.offset);
+            @memcpy(out[0..len], self.body[self.offset..][0..len]);
+            self.offset += len;
+            return @intCast(len);
+        }
+        fn close(_: ?*anyopaque, _: i32) void {}
+        fn emit(_: *anyopaque, _: stream_provider.Event) void {}
+        fn admit(_: *anyopaque) !void {}
+    };
+    const key = "gw-key-0123456789";
+    const cases = [_]struct {
+        body: []const u8,
+        credential: @import("../core/shared/types.zig").CredentialLease,
+        expected: []const u8,
+    }{
+        .{
+            .body = "{\"detail\":\"bad credential Bearer " ++ key ++ "\"}",
+            .credential = .{ .direct = .{ .secret_bytes = key } },
+            .expected = "{\"detail\":\"bad credential Bearer *****************\"}",
+        },
+        // An escaped copy decodes to the key, so it is masked once decoded.
+        .{
+            .body = "{\"detail\":\"\\u0067w-key-0123456789\"}",
+            .credential = .{ .direct = .{ .secret_bytes = key } },
+            .expected = "{\"detail\":\"*****************\"}",
+        },
+        .{
+            .body = "rejected " ++ key,
+            .credential = .{ .direct = .{ .secret_bytes = key } },
+            .expected = "rejected *****************",
+        },
+        // A host-managed request carries no key here; the host masks its own.
+        .{
+            .body = "{\"detail\":\"bad credential Bearer " ++ key ++ "\"}",
+            .credential = .host_managed,
+            .expected = "{\"detail\":\"bad credential Bearer " ++ key ++ "\"}",
+        },
+    };
+    for (cases) |case| {
+        var fake: FakeTransport = .{ .body = case.body };
+        var context = initContext(FakeTransport.build, .{ .fixed = "https://example.invalid" }, .{
+            .context = &fake,
+            .open_fn = FakeTransport.open,
+            .status_fn = FakeTransport.status,
+            .next_fn = FakeTransport.next,
+            .close_fn = FakeTransport.close,
+        });
+        var delivery: stream_provider.DeliveryCertainty = .init();
+        var attempt: stream_provider.AttemptEvidence = .{};
+        var result = try stream(&context, std.testing.allocator, .{
+            .credential = case.credential,
+            .model = "fixture-model",
+            .retry_count = 0,
+            .messages = &.{},
+            .tool_choice = .auto,
+            .provider_options = .{},
+            .prepared_request_body = "{}",
+            .trace_ctx = .{},
+            .content_capture_limit = null,
+            .delivery = &delivery,
+            .attempt_evidence = &attempt,
+            .events = .{ .context = &fake, .emit_fn = FakeTransport.emit },
+            .admission = .{ .context = &fake, .admit_fn = FakeTransport.admit },
+            .cancel_flag = &fake.cancel_flag,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(case.expected, result.failed.detail.?);
+    }
+}
+
+test "host stream reader omits pulse timing state without callback" {
+    const FakeTransport = struct {
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) anyerror!i32 {
+            return 1;
+        }
+
+        fn status(_: ?*anyopaque, _: i32, _: *u16) i32 {
+            return 1;
+        }
+
+        fn next(_: ?*anyopaque, _: i32, _: []u8) i32 {
+            return 0;
+        }
+
+        fn close(_: ?*anyopaque, _: i32) void {}
+    };
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var reader: HostStreamReader = undefined;
+    reader.init(.{
+        .context = null,
+        .open_fn = FakeTransport.open,
+        .status_fn = FakeTransport.status,
+        .next_fn = FakeTransport.next,
+        .close_fn = FakeTransport.close,
+    }, 1, &cancel_flag, null, null);
+
+    try std.testing.expect(reader.last_cooperative_pulse == null);
+}
+
+test "host stream reader stops at its provider deadline" {
+    const FakeTransport = struct {
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) anyerror!i32 {
+            return 1;
+        }
+        fn status(_: ?*anyopaque, _: i32, _: *u16) i32 {
+            return 0;
+        }
+        fn next(_: ?*anyopaque, _: i32, _: []u8) i32 {
+            return -3;
+        }
+        fn close(_: ?*anyopaque, _: i32) void {}
+    };
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var reader: HostStreamReader = undefined;
+    reader.init(.{
+        .context = null,
+        .open_fn = FakeTransport.open,
+        .status_fn = FakeTransport.status,
+        .next_fn = FakeTransport.next,
+        .close_fn = FakeTransport.close,
+    }, 1, &cancel_flag, std.Io.Clock.Timestamp.now(std.testing.io, .awake), null);
+    var buffer: [1]u8 = undefined;
+    try std.testing.expectError(error.ReadFailed, reader.readHost(&buffer));
+    try std.testing.expect(reader.timed_out);
+}
+
+test "host stream reader throttles cooperative pulses" {
+    const PulseTrace = struct {
+        calls: usize = 0,
+
+        fn run(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+        }
+    };
+    const awake_timestamp = struct {
+        fn at(milliseconds: i64) std.Io.Clock.Timestamp {
+            return .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(@as(i96, milliseconds) * std.time.ns_per_ms),
+            };
+        }
+    }.at;
+
+    var trace: PulseTrace = .{};
+    var reader: HostStreamReader = .{
+        .cooperative_pulse = .{ .ctx = &trace, .run = PulseTrace.run },
+        .last_cooperative_pulse = awake_timestamp(100),
+    };
+
+    try reader.pulseIfDueAt(awake_timestamp(149));
+    try std.testing.expectEqual(@as(usize, 0), trace.calls);
+    try reader.pulseIfDueAt(awake_timestamp(150));
+    try std.testing.expectEqual(@as(usize, 1), trace.calls);
+    try reader.pulseIfDueAt(awake_timestamp(199));
+    try std.testing.expectEqual(@as(usize, 1), trace.calls);
+    try reader.pulseIfDueAt(awake_timestamp(200));
+    try std.testing.expectEqual(@as(usize, 2), trace.calls);
+}
+
+test "a host's Retry-After and status reach the failure, and a host without one leaves the wait to fx" {
+    const FakeTransport = struct {
+        retry_after: i32,
+        admitted: usize = 0,
+        cancel_flag: std.atomic.Value(bool) = .init(false),
+
+        fn build(_: Allocator, _: stream_provider.RequestData) ![]u8 {
+            return error.UnexpectedRequest;
+        }
+        fn open(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !i32 {
+            return 3;
+        }
+        fn status(_: ?*anyopaque, _: i32, status_out: *u16) i32 {
+            status_out.* = 529;
+            return 1;
+        }
+        fn next(_: ?*anyopaque, _: i32, out: []u8) i32 {
+            _ = out;
+            return 0;
+        }
+        fn close(_: ?*anyopaque, _: i32) void {}
+        fn retryAfter(raw: ?*anyopaque, _: i32) i32 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return self.retry_after;
+        }
+        fn emit(_: *anyopaque, _: stream_provider.Event) void {}
+        fn admit(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.admitted += 1;
+        }
+    };
+    const cases = [_]struct { retry_after: i32, callback: bool, expected: ?u64 }{
+        .{ .retry_after = 7, .callback = true, .expected = 7 },
+        .{ .retry_after = 0, .callback = true, .expected = 0 },
+        .{ .retry_after = std.math.maxInt(i32), .callback = true, .expected = std.math.maxInt(i32) },
+        .{ .retry_after = -1, .callback = true, .expected = null },
+        .{ .retry_after = 7, .callback = false, .expected = null },
+    };
+    for (cases) |case| {
+        var fake: FakeTransport = .{ .retry_after = case.retry_after };
+        var context = initContext(FakeTransport.build, .{ .fixed = "https://example.invalid" }, .{
+            .context = &fake,
+            .open_fn = FakeTransport.open,
+            .status_fn = FakeTransport.status,
+            .next_fn = FakeTransport.next,
+            .close_fn = FakeTransport.close,
+            .retry_after_fn = if (case.callback) FakeTransport.retryAfter else null,
+        });
+        var delivery: stream_provider.DeliveryCertainty = .init();
+        var attempt: stream_provider.AttemptEvidence = .{};
+        var result = try stream(&context, std.testing.allocator, .{
+            .credential = .host_managed,
+            .model = "fixture-model",
+            .retry_count = 0,
+            .messages = &.{},
+            .tool_choice = .auto,
+            .provider_options = .{},
+            .prepared_request_body = "{}",
+            .trace_ctx = .{},
+            .content_capture_limit = null,
+            .delivery = &delivery,
+            .attempt_evidence = &attempt,
+            .events = .{ .context = &fake, .emit_fn = FakeTransport.emit },
+            .admission = .{ .context = &fake, .admit_fn = FakeTransport.admit },
+            .cancel_flag = &fake.cancel_flag,
+        });
+        defer result.deinit(std.testing.allocator);
+        const failure = result.failed;
+        try std.testing.expectEqual(stream_provider.FailureKind.server_error, failure.kind);
+        try std.testing.expectEqual(@as(?std.http.Status, @fromBackingInt(529)), failure.http_status);
+        try std.testing.expectEqual(case.expected, failure.retry_after_seconds);
+    }
+}

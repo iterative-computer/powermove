@@ -1,0 +1,6299 @@
+//! Window-owned v4 runtime lifecycle and shell integration. The main thread
+//! only publishes immutable trees and enqueues input; JavaScript runs on owners.
+use crate::{session::Controller, v4_view::SurfaceView};
+use gpui::{prelude::*, *};
+use pm_builtins::{BUILTIN_PANELS, Builtins, PlatformRequest, Publication};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    rc::Rc,
+    sync::Arc,
+};
+pub(crate) type MediaProbeInputs = (
+    crate::media_refresh::Inputs,
+    BTreeMap<String, std::path::PathBuf>,
+    BTreeMap<String, std::path::PathBuf>,
+    u64,
+);
+/// At most one readiness read per host. New publications replace the
+/// desired inputs in the controller; completion replans against the latest.
+#[derive(Default)]
+pub(crate) struct MediaProbeRefresh {
+    settled: Option<MediaProbeInputs>,
+    pending: Option<(u64, MediaProbeInputs)>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaProbePlan {
+    Reuse,
+    Waiting,
+    Start(u64),
+}
+// A host is replaced with Default on document changes. IDs must still be
+// unique so an old worker cannot finish the new host's read.
+static NEXT_MEDIA_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+fn same_probe_inputs(a: &MediaProbeInputs, b: &MediaProbeInputs) -> bool {
+    a.0.same(&b.0) && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
+}
+impl MediaProbeRefresh {
+    pub(crate) fn plan(&mut self, inputs: MediaProbeInputs) -> MediaProbePlan {
+        if self
+            .settled
+            .as_ref()
+            .is_some_and(|old| same_probe_inputs(old, &inputs))
+        {
+            return MediaProbePlan::Reuse;
+        }
+        if self.pending.is_some() {
+            return MediaProbePlan::Waiting;
+        }
+        let serial = NEXT_MEDIA_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pending = Some((serial, inputs));
+        MediaProbePlan::Start(serial)
+    }
+    /// Settle only a current completion. The caller publishes Unknown on a
+    /// current error, so it never rebinds an older observation to new inputs.
+    pub(crate) fn finish(&mut self, serial: u64, latest: Option<&MediaProbeInputs>) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|(pending, _)| *pending != serial)
+        {
+            return false;
+        }
+        let (_, inputs) = self.pending.take().unwrap();
+        if latest.is_none_or(|latest| !same_probe_inputs(&inputs, latest)) {
+            return false;
+        }
+        self.settled = Some(inputs);
+        true
+    }
+}
+
+/// The viewer overlays a native Metal layer and must join each shell repaint,
+/// including the loading reveal, even when its panel publication is unchanged.
+/// The Agent panel hosts AppKit push buttons (`Open`, `Show in Finder`,
+/// `Answer`) inside its own scrolling conversation view; caching its GPUI
+/// paint prevents `NativeControl` slots from restaging on wheel scroll,
+/// causing buttons to vanish, lag, or miss clicks.
+/// The timeline's body can reuse its retained paint.
+pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElement {
+    if matches!(id, "viewer" | "agent") {
+        view.clone().into_any_element()
+    } else {
+        view.clone()
+            .cached(StyleRefinement::default().size_full())
+            .into_any_element()
+    }
+}
+
+/// The scroll container owns input and offset; panels paint no scrollbar chrome.
+fn panel_scroll_body(
+    id: &str,
+    body: f32,
+    handle: &ScrollHandle,
+    content: AnyElement,
+) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(body))
+        .child(
+            div()
+                .id(SharedString::from(format!("panel-body-{id}")))
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(handle)
+                .child(content),
+        )
+        .into_any_element()
+}
+/// How long a panel's scroll thumb stays after the last scroll.
+const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
+/// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
+const SCROLL_BAR: f32 = 9.;
+const SCROLL_THUMB_INSET: f32 = 2.;
+/// A panel body's overlay scroll thumb (the original app's thin one: 9 pt,
+/// inset 2 pt, text ink at `translucency.faint`), when its content is taller
+/// than its slot of `width` × `height`.
+fn scroll_thumb(
+    handle: &ScrollHandle,
+    width: f32,
+    height: f32,
+    t: &pm_design::Tokens,
+) -> Option<AnyElement> {
+    let max = f32::from(handle.max_offset().y);
+    if max <= 0.5 || height <= 0. {
+        return None;
+    }
+    let content = height + max;
+    let length = (height * height / content).max(t.metrics.hit);
+    let offset = (-f32::from(handle.offset().y)).clamp(0., max);
+    let top = (height - length) * offset / max;
+    let thick = SCROLL_BAR - SCROLL_THUMB_INSET * 2.;
+    Some(
+        div()
+            .absolute()
+            .top(px(top + SCROLL_THUMB_INSET))
+            .left(px(width
+                - thick
+                - SCROLL_THUMB_INSET
+                - t.metrics.border * 2.))
+            .w(px(thick))
+            .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
+            .rounded(px(thick / 2.))
+            .bg(pm_shell::kit::ink(
+                t.colors.text,
+                t.translucency.faint * 0.8,
+            ))
+            .into_any_element(),
+    )
+}
+/// Rows the font picker lists at once; typing narrows the rest.
+const FONT_PAGE: usize = 80;
+/// Rows the 3D model part picker lists at once; typing narrows the rest.
+const PART_PAGE: usize = 120;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PartMenuView {
+    #[default]
+    Tree,
+    ByMaterial,
+    Modified,
+}
+pub struct PartMenuState {
+    pub runtime: Arc<Builtins>,
+    pub request_id: u64,
+    pub layer: String,
+    pub current: Option<String>,
+    pub parts: Vec<Value>,
+    pub view: PartMenuView,
+    pub show_raw: bool,
+}
+
+fn parse_hex_rgb(hex: &str) -> Option<u32> {
+    let hex = hex.strip_prefix('#')?;
+    (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten()
+}
+
+fn build_part_choices(state: &PartMenuState) -> Vec<pm_shell::transient::Choice> {
+    use pm_shell::transient::Choice;
+    let mut choices = Vec::new();
+    let modified_count = state
+        .parts
+        .iter()
+        .filter(|p| p["modified"] == true)
+        .count();
+    let distinct_materials: std::collections::BTreeSet<&str> = state
+        .parts
+        .iter()
+        .filter_map(|p| p["material"].as_str())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let has_trimmed = state
+        .parts
+        .iter()
+        .any(|p| p["label"].as_str() != p["rawName"].as_str());
+
+    // Whole Model sits at the very top with checkmark when no sub-part is active.
+    choices.push(
+        Choice::new("Whole Model", "partPick:__whole__")
+            .checked(state.current.is_none())
+            .with_hover("partHover:"),
+    );
+
+    // Compact in-place filter/view toggles (keep the menu open via `stays(true)`).
+    if modified_count > 0 || distinct_materials.len() >= 2 || has_trimmed {
+        if state.view != PartMenuView::Tree {
+            choices.push(
+                Choice::new("Show All Parts (Tree)", "partFilter:tree")
+                    .within("View")
+                    .stays(true),
+            );
+        }
+        if distinct_materials.len() >= 2 && state.view != PartMenuView::ByMaterial {
+            choices.push(
+                Choice::new("Group by Material", "partFilter:material")
+                    .within("View")
+                    .stays(true),
+            );
+        }
+        if modified_count > 0 && state.view != PartMenuView::Modified {
+            choices.push(
+                Choice::new(
+                    format!("Modified Only ({modified_count})"),
+                    "partFilter:modified",
+                )
+                .within("View")
+                .with_modified(true)
+                .stays(true),
+            );
+        }
+        if has_trimmed {
+            choices.push(
+                Choice::new(
+                    if state.show_raw {
+                        "Use Clean Names"
+                    } else {
+                        "Show Raw Node Names"
+                    },
+                    "partFilter:raw",
+                )
+                .within("View")
+                .stays(true),
+            );
+        }
+    }
+
+    let make_row = |part: &Value, category: &str, indent: u8| -> Option<Choice> {
+        let key = part["v"].as_str()?;
+        let clean = part["label"].as_str().unwrap_or("Part");
+        let raw = part["rawName"].as_str().unwrap_or(clean);
+        let material = part["material"].as_str();
+        let label = if state.show_raw { raw } else { clean };
+        let mut aliases = Vec::new();
+        if raw != label {
+            aliases.push(raw.to_owned());
+        }
+        if clean != label {
+            aliases.push(clean.to_owned());
+        }
+        if let Some(mat) = material
+            && !mat.is_empty()
+            && mat != label
+        {
+            aliases.push(mat.to_owned());
+        }
+        let mut choice = Choice::new(label, format!("partPick:{key}"))
+            .checked(state.current.as_deref() == Some(key))
+            .within(category)
+            .with_indent(indent)
+            .with_modified(part["modified"] == true)
+            .with_hover(format!("partHover:{}:{key}", state.layer))
+            .with_aliases(aliases);
+        if let Some(rgb) = part["swatch"].as_str().and_then(parse_hex_rgb) {
+            choice = choice.with_swatch(rgb);
+        }
+        Some(choice)
+    };
+
+    match state.view {
+        PartMenuView::Tree => {
+            for part in &state.parts {
+                let depth = part["depth"].as_u64().unwrap_or(0).min(6) as u8;
+                if let Some(choice) = make_row(part, "Parts", depth) {
+                    choices.push(choice);
+                }
+            }
+        }
+        PartMenuView::ByMaterial => {
+            let mut grouped: std::collections::BTreeMap<String, Vec<&Value>> = Default::default();
+            for part in &state.parts {
+                let group = part["material"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Structure / Groups")
+                    .to_owned();
+                grouped.entry(group).or_default().push(part);
+            }
+            for (group, items) in grouped {
+                let header = format!("{group} ({})", items.len());
+                for part in items {
+                    if let Some(choice) = make_row(part, &header, 0) {
+                        choices.push(choice);
+                    }
+                }
+            }
+        }
+        PartMenuView::Modified => {
+            for part in state.parts.iter().filter(|p| p["modified"] == true) {
+                if let Some(choice) = make_row(part, "Modified", 0) {
+                    choices.push(choice);
+                }
+            }
+        }
+    }
+    choices
+}
+#[derive(Default)]
+pub struct Host {
+    /// The font picker's open request: the panel's runtime and the request
+    /// it answers when a face is chosen (or nothing).
+    pub font_pick: Option<(Arc<Builtins>, u64)>,
+    /// The 3D model part picker's open request and in-place filter state.
+    pub part_pick: Option<PartMenuState>,
+    /// The Agent panel's open menu: its runtime, the request it answers,
+    /// and each row's `(value, optional deleteValue)`.
+    agent_pick: Option<(
+        Arc<Builtins>,
+        u64,
+        Vec<(Value, Option<Value>)>,
+        Option<pm_shell::transient::ComposerPicker>,
+    )>,
+    /// The Agent panel is in the workspace's docks (pinned), and whether its
+    /// toolbar item has parked it (hidden, its place kept).
+    pub agent_docked: bool,
+    pub agent_shown: bool,
+    pub agent_parked: bool,
+    agent_working: bool,
+    /// Where the Agent popover was last put down, from its editor's
+    /// top-left corner (GPUI points): it reopens there in this window.
+    pub agent_place: Option<(f32, f32)>,
+    project: Option<String>,
+    document: Option<u64>,
+    application: bool,
+    pub runtime: Option<Arc<Builtins>>,
+    pending: BTreeMap<String, Publication>,
+    pub views: BTreeMap<String, Entity<SurfaceView>>,
+    /// Layer 3: live v4 extension UI slots embedded inside built-in panels
+    /// keyed by `<owner>@slot:<slotId>`.
+    pending_slots: BTreeMap<String, Publication>,
+    slots: BTreeMap<String, Entity<SurfaceView>>,
+    pub natives: crate::v4_view::Natives,
+    pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
+    /// Mirrors `TimelineSurface::has_expanded_properties` so `follow_playback`
+    /// never re-entrantly borrows `TimelineSurface` during ruler scrubs.
+    timeline_expanded_properties: Option<Rc<std::cell::Cell<bool>>>,
+    /// Where the shell last placed the timeline panel, and its header height;
+    /// `None` while it isn't drawn. The native playhead and timecode follow it.
+    pub timeline_place: Option<(pm_shell::layout::Rect, f32)>,
+    /// The viewer panel's rect (its bar is the top `metrics.header`), for the
+    /// bar's native timecode layer while playing.
+    pub viewer_place: Option<pm_shell::layout::Rect>,
+    frame_outline: crate::playback::FrameOutline,
+    pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
+    /// The window's open panels, and closed built-ins whose isolates are going.
+    open: BTreeSet<String>,
+    parking: BTreeSet<String>,
+    memory_recovery: BTreeMap<String, MemoryRecovery>,
+    /// The clip painters' revision the timeline last asked for.
+    painters: u64,
+    /// v4 extensions' viewer overlays (`overlays.viewer`).
+    pub overlays: Option<Entity<crate::viewer_overlays::ViewerOverlays>>,
+    clock: crate::playback::PanelClock,
+    /// The frame (ticks) Properties last followed while playing.
+    followed: Option<i64>,
+    /// When Properties last followed while playing (`FOLLOW_EVERY` apart).
+    followed_at: Option<std::time::Instant>,
+    /// A ruler scrub is under way (the timeline says); `scrubbed`: the time
+    /// moved during it, so the other panels hear it once it ends.
+    pub(crate) scrubbing: bool,
+    scrubbed: bool,
+    /// The last time a scrub asked for: written to the kernel when it ends.
+    pub(crate) scrub_time: Option<f64>,
+    headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
+    /// Each panel body's scroll (owner request 2026-11-14: side panels
+    /// scroll when their content is taller than their slot), kept across
+    /// splitter drags and tab switches.
+    scrolls: BTreeMap<String, ScrollHandle>,
+    /// Each side panel's body, a cached view: a wheel step on it only
+    /// replays its drawing at the new offset (PM-311).
+    bodies: BTreeMap<String, Entity<PanelBody>>,
+    scrolled_at: BTreeMap<String, std::time::Instant>,
+    pub(crate) ready: BTreeSet<String>,
+    generations: BTreeMap<String, u64>,
+    pub(crate) requests: VecDeque<PlatformRequest>,
+    pub windows: BTreeMap<String, AnyWindowHandle>,
+    /// The size each panel window was opened at (the Agent popover's, for the
+    /// MCP panel tools).
+    pub window_sizes: BTreeMap<String, (f32, f32)>,
+    opening_windows: BTreeSet<String>,
+    /// When the Agent popover last gave way to a press in its editor (the
+    /// toolbar's Agent item among them), so that same press's toggle does
+    /// not open it again.
+    agent_dismissed: Option<std::time::Instant>,
+    /// Select part of the screen is up: the popover stepped aside for it and
+    /// is not dismissed by the editor taking key meanwhile.
+    agent_picking: bool,
+    /// The Settings page the next show asks for (Keyboard Shortcuts…).
+    pub settings_page: Option<String>,
+    /// The development switch's Powermove harness is on: the Agent panel's
+    /// way to an account is Settings › Providers.
+    pub providers: bool,
+    /// The Settings window's AppKit chrome while this editor hosts it, and
+    /// where its back and forward go (PM-375).
+    pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
+    pub(crate) settings_history: crate::settings_window::History,
+    pub(crate) settings_form: Option<crate::settings_window::form::Form>,
+    /// This editor's entity while it hosts Settings (its picker lists the
+    /// other editors' projects without reading this one, being updated).
+    pub(crate) settings_me: Option<gpui::EntityId>,
+    /// Hears the Settings window close however it closes (its close button,
+    /// ⌘W), so a closed window is forgotten and nothing shows it again
+    /// (PM-397).
+    pub(crate) settings_watch: Option<gpui::Subscription>,
+    pub export_job: Option<crate::export_coordinator::Job>,
+    pub export_retry: Option<crate::export_coordinator::Frozen>,
+    pub export_destination: Option<crate::export_coordinator::Destination>,
+    /// Projects whose offline clips the person chose to export without, this
+    /// session: their later exports go without them and say so, not asking again.
+    pub export_without_offline: BTreeSet<String>,
+    pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
+    pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
+    media_probes: Arc<pm_builtins::delivery::MediaProbes>,
+    /// The last settled observations and the single worker reading media.
+    media_probe_refresh: MediaProbeRefresh,
+    /// Whether the cached readiness belongs to the current resolved inputs.
+    pub(crate) media_observation_current: bool,
+    /// Bumped whenever published readiness changes: what the status line's
+    /// offline count is kept by (`FrameFacts::offline`).
+    pub media_observed: u64,
+    updating: bool,
+    // A queued full update takes precedence over a view or clock update.
+    again: Option<bool>,
+    /// The panels on screen (`shown_panels`), and the built-ins that waited
+    /// while a pointer gesture was under way (`crate::gesture_publish`).
+    pub(crate) shown: BTreeSet<String>,
+    pub(crate) deferral: crate::gesture_publish::Deferral,
+    /// The status line asked for the missing files; the next update hands it
+    /// to the panels' workers (never their locks on the main thread).
+    pub(crate) show_missing: bool,
+    /// The application Agent panel's runs while a project is open.
+    agent_carry: Option<pm_builtins::AgentCarry>,
+}
+fn media_stamp(published: &pm_kernel::Published) -> pm_panel_media::Stamp {
+    pm_panel_media::Stamp {
+        project: published.project.clone(),
+        document: published.snapshot.doc_id,
+        revision: published.revision(),
+    }
+}
+impl Controller {
+    pub fn start_builtins(&mut self, cx: &mut Context<Self>) {
+        let application = self.session.is_none();
+        let project = self
+            .session
+            .as_ref()
+            .map(|s| s.project.clone())
+            .unwrap_or_else(|| "builtin-application".into());
+        let document = self.published.as_ref().map(|p| p.snapshot.doc_id);
+        if self.builtins.project.as_ref() == Some(&project)
+            && self.builtins.document == document
+            && self.builtins.application == application
+        {
+            return;
+        }
+        self.host.borrow_mut().set_contributed_bindings(
+            "native.agent.cite.",
+            [crate::v4_quote::cite_binding()],
+        );
+        if let Some(job) = &self.builtins.export_job {
+            job.cancel.store(true, std::sync::atomic::Ordering::Release);
+        }
+        let mut carry = self.builtins.agent_carry.take();
+        if let Some(runtime) = self.builtins.runtime.take() {
+            carry = carry.or_else(|| runtime.carry_agent());
+            runtime.close();
+        }
+        let windows = std::mem::take(&mut self.builtins.windows);
+        // The Settings window stays open across the restart: its chrome,
+        // where its back and forward go, and that this editor hosts it.
+        if let Some(form) = &mut self.builtins.settings_form {
+            form.reset();
+        }
+        let settings = (
+            self.builtins.settings_chrome.take(),
+            self.builtins.settings_form.take(),
+            std::mem::take(&mut self.builtins.settings_history),
+            self.builtins.settings_me.take(),
+            self.builtins.settings_watch.take(),
+        );
+        self.builtins = Host::default();
+        self.builtins.windows = windows;
+        (
+            self.builtins.settings_chrome,
+            self.builtins.settings_form,
+            self.builtins.settings_history,
+            self.builtins.settings_me,
+            self.builtins.settings_watch,
+        ) = settings;
+        self.builtins.agent_carry = carry;
+        self.builtins.project = Some(project.clone());
+        self.builtins.document = document;
+        self.builtins.application = application;
+        if !application {
+            let delegate = Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let tokens = self.host.borrow().tokens.clone();
+            let (kernel, outline) = (self.kernel.clone(), self.builtins.natives.outline.clone());
+            let offline = self.offline_media();
+            let surface = cx.new(|cx| {
+                crate::timeline_surface::TimelineSurface::new(
+                    kernel,
+                    project.clone(),
+                    tokens,
+                    delegate,
+                    outline,
+                    offline,
+                    cx,
+                )
+            });
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("timeline".into(), surface.clone().into());
+            self.builtins.timeline_expanded_properties =
+                Some(surface.read(cx).expanded_properties_flag());
+            self.builtins.timeline = Some(surface);
+            let host = Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let (kernel, tokens) = (self.kernel.clone(), self.host.borrow().tokens.clone());
+            let gizmos =
+                cx.new(|_| crate::gizmo::GizmoSurface::new(kernel, project.clone(), tokens, host));
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("viewer.gizmos".into(), gizmos.clone().into());
+            self.builtins.gizmos = Some(gizmos);
+            let controller = cx.entity().downgrade();
+            *self.builtins.natives.gain_preview.borrow_mut() = Some(controller.clone());
+            *self.builtins.natives.sample_color.borrow_mut() = Some(Rc::new(move |at, cx| {
+                let owner = controller.upgrade().ok_or("Editor closed")?;
+                let v = owner.read(cx);
+                let slot = v
+                    .host
+                    .borrow()
+                    .viewer_rect
+                    .get()
+                    .ok_or("Viewer is not visible")?;
+                let scale = v.view.scale.get();
+                let x = (f64::from(f32::from(at.x) - slot.x)
+                    - (slot.w as f64 - v.dimensions[0] * scale) / 2.
+                    - v.view.shown_pan()[0])
+                    / scale;
+                let y = (f64::from(f32::from(at.y) - slot.y)
+                    - (slot.h as f64 - v.dimensions[1] * scale) / 2.
+                    - v.view.shown_pan()[1])
+                    / scale;
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || x < 0.
+                    || y < 0.
+                    || x >= v.dimensions[0]
+                    || y >= v.dimensions[1]
+                {
+                    return Err("Click inside the composition".into());
+                }
+                let viewer = v.viewer.as_ref().ok_or("Viewer unavailable")?;
+                let time = pm_protocol::common::Ticks::new(
+                    (v.time() * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
+                )
+                .map_err(|e| e.to_string())?;
+                viewer
+                    .sample_color(
+                        time,
+                        pm_protocol::common::Size {
+                            width: v.dimensions[0].round() as u32,
+                            height: v.dimensions[1].round() as u32,
+                        },
+                        [x.floor() as u32, y.floor() as u32],
+                    )
+                    .map_err(|e| e.to_string())
+            }));
+
+            let host: Rc<dyn crate::gizmo::Host> =
+                Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let tokens = self.host.borrow().tokens.clone();
+            let overlays = cx.new(|_| crate::viewer_overlays::ViewerOverlays::new(host, tokens));
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("viewer.overlays".into(), overlays.clone().into());
+            self.builtins.overlays = Some(overlays);
+        }
+        self.start_extensions(cx);
+        let (tx, rx) = async_channel::bounded(1);
+        let wake = move || {
+            let _ = tx.try_send(());
+        };
+        let created = if application {
+            Builtins::application(self.kernel.clone(), wake, self.builtins.agent_carry.take())
+        } else {
+            Builtins::new(self.kernel.clone(), &project, wake)
+        };
+        let mut runtime = match created {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                self.message = format!("Panels could not start: {e}");
+                self.settled(&project);
+                return;
+            }
+        };
+        runtime.set_presets_folder(&self.mcp.profile);
+        let mut environment = pm_agents::launch::Environment::current(
+            self.mcp.profile.clone(),
+            pm_mcp::catalog::names(),
+            pm_mcp::catalog::composition_names(),
+        );
+        if cfg!(feature = "aero-trial")
+            || (cfg!(debug_assertions)
+                && (environment
+                    .vars
+                    .get("PM_AERO_DEV")
+                    .is_some_and(|value| value == "1")
+                    || self.mcp.profile.join("aero-dev").is_file()))
+        {
+            environment.aero = Some(crate::mcp::aero_launcher());
+            // Aero runs only on Powermove inference: the Powermove account.
+            environment.powermove = crate::cloud::aero_account(cx);
+        }
+        self.builtins.providers = environment.aero.is_some();
+        environment.compatible = Some(Arc::new(crate::providers::Chat {
+            profile: self.mcp.profile.clone(),
+        }));
+        // Settings › Providers' Keychain and network only with the switch on:
+        // with it off, nothing new is read or fetched (P1-5).
+        let open = if environment.aero.is_some() {
+            crate::provider_keys::attach(&mut environment)
+        } else {
+            Arc::new(pm_agents::account::open_in_browser)
+        };
+        runtime.set_agent_environment(environment, open);
+        let observation_kernel = self.kernel.clone();
+        runtime.set_agent_capture(Arc::new(move |project, document, revision, time| {
+            let matches = || {
+                observation_kernel
+                    .published(project)
+                    .is_some_and(|p| p.snapshot.doc_id == document && p.revision() == revision)
+            };
+            if !matches() {
+                return Err("Document changed before frame capture".into());
+            }
+            let png = crate::mcp::still(project, time, 960)?;
+            if !matches() {
+                return Err("Document changed during frame capture".into());
+            }
+            Ok(png)
+        }));
+        let coedit_host = self.mcp.clone();
+        runtime.set_agent_completion(Arc::new(move |operation, project, run, payload| {
+            if operation == "begin" {
+                coedit_host.begin_builtin_turn(project, run);
+            }
+            crate::mcp::completion(operation, project, run, payload)
+        }));
+        runtime.set_agent_notices(crate::notifications::sink(self.window_key));
+        crate::media_thumbs::set_agent_cache(self.profile.join("caches").join("agent-thumbnails"));
+        runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
+        let mut tickets = vec![];
+        for panel in BUILTIN_PANELS.iter() {
+            if application && !panel.application {
+                continue;
+            }
+            if panel.parks && runtime.defer_mount(&panel.id) {
+                continue;
+            }
+            tickets.push((panel.id.clone(), runtime.mount(&panel.id)));
+        }
+        let runtime = Arc::new(runtime);
+        self.builtins.runtime = Some(runtime.clone());
+        if let Some(timeline) = &self.builtins.timeline {
+            timeline.update(cx, |timeline, _| timeline.set_outline_runtime(&runtime));
+        }
+        // Recover may have received the extension publication before this
+        // runtime existed. Replay it, including surfaces mounted in Home's
+        // retired runtime, even if discovery's revision has not changed.
+        self.extensions.panel_runtime_changed();
+        self.drain_extensions(cx);
+        self.poll_linked_sync(cx);
+        self.wire_effect_desk();
+        let check = runtime.clone();
+        let mounting = project.clone();
+        cx.spawn(async move |this, cx| {
+            for (id, ticket) in tickets {
+                let result = match ticket {
+                    Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                    Err(error) => Err(error),
+                };
+                let _ = this.update(cx, |v, cx| {
+                    if !v
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| Arc::ptr_eq(r, &check))
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(generation) => {
+                            v.builtin_did_mount(&check, id, generation, cx);
+                        }
+                        // The owner also reports memory failures when there's
+                        // no ticket. The wake/drain handles both cases once.
+                        Err(error) if error.is_memory() => {}
+                        Err(error) => {
+                            check.close_panel(&id);
+                            v.message = format!("Panel {id} could not start: {error}");
+                            eprintln!("{}", v.message);
+                        }
+                    }
+                    v.drain_builtins(cx);
+                });
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.settled(&mounting);
+                v.bound_open_wait(&mounting, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        // Weak: the runtime owns this loop's sender, so a strong handle kept
+        // the realms (their isolates) alive after the editor closed.
+        let runtime = Arc::downgrade(&runtime);
+        cx.spawn(async move |this, cx| {
+            while rx.recv().await.is_ok() {
+                if this
+                    .update(cx, |v, cx| {
+                        if v.builtins
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|r| std::ptr::eq(Arc::as_ptr(r), runtime.as_ptr()))
+                        {
+                            v.poll_linked_sync(cx);
+                            v.drain_builtins(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Every panel of `project` has mounted or failed: the open is over,
+    /// unless its viewer waits for effects its extensions are still loading.
+    pub(crate) fn settled(&mut self, project: &str) {
+        if self.settling.as_deref() == Some(project) && self.awaiting_extension_effects() {
+            self.extensions.settle_after = Some(project.to_owned());
+            return;
+        }
+        self.finish_open(project);
+    }
+    /// The open of `project` is over: its panels show it.
+    pub(crate) fn finish_open(&mut self, project: &str) {
+        if self.settling.as_deref() == Some(project) {
+            self.settling = None;
+            self.opening_name = None;
+            // No panel shows its ghost any more: its picture goes.
+            self.ghost_retire();
+            self.open_timer.mark("settled", serde_json::json!({}));
+            self.busy = None;
+            // Bound to the open that brought `project`: they run only if this
+            // window still shows it.
+            let shown = self.session.as_ref().is_some_and(|s| s.project == project);
+            let (run, dropped) = self.after_open.settle(self.settling_open, shown);
+            if let Some(note) = dropped {
+                self.message = note;
+            }
+            for (name, args) in run {
+                self.host.borrow().send_command(&name, args);
+            }
+            if shown && std::mem::take(&mut self.workspace_after_open) {
+                self.host.borrow().send_command("bringWorkspace", vec![]);
+            }
+        }
+    }
+    /// A surface extension's first commit landed; its panel can render and its
+    /// platform requests are accepted.
+    pub fn surface_ready(&mut self, id: String, generation: u64) {
+        self.builtins.memory_recovery.remove(&id);
+        self.builtins.generations.insert(id.clone(), generation);
+        self.builtins.ready.insert(id);
+    }
+}
+impl Host {
+    fn owns_runtime(&self, runtime: &Arc<Builtins>) -> bool {
+        self.runtime
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, runtime))
+    }
+
+    fn recovery_in_progress_or_failed(&self, id: &str) -> bool {
+        matches!(
+            self.memory_recovery.get(id),
+            Some(MemoryRecovery::Restarting | MemoryRecovery::Failed)
+        )
+    }
+
+    fn set_media_observation_current(&mut self, current: bool) {
+        if self.media_observation_current != current {
+            self.media_observation_current = current;
+            self.media_observed += 1;
+        }
+    }
+
+    /// An unmounted surface: its view and anything it published go with it, so a
+    /// rebuilt graph starts from its own first commit.
+    /// A panel whose realm is being replaced (a reload or a fork swap) keeps
+    /// its view: the old tree stays on screen until the new generation's first
+    /// publication installs there. A view built mid-swap missed GPUI's input
+    /// until the pane next re-rendered.
+    pub fn keep_surface(&mut self, id: &str) {
+        self.pending.remove(id);
+        self.generations.remove(id);
+    }
+    pub fn forget_surface(&mut self, id: &str) {
+        self.ready.remove(id);
+        self.pending.remove(id);
+        self.views.remove(id);
+        self.headers.remove(id);
+        self.generations.remove(id);
+    }
+}
+impl Controller {
+    /// The observed media runtime with each video's proxy and optimized
+    /// media and Always Play Original, as the pro media service has them.
+    fn rendition_runtime(&self) -> pm_panel_media::readiness::ObservedRuntime {
+        use crate::pro_media::Status;
+        use pm_panel_media::ProxyStatus;
+        let (Some(project), Some(published)) = (
+            self.session.as_ref().map(|s| s.project.clone()),
+            self.published.as_ref(),
+        ) else {
+            return self.builtins.media_runtime.clone();
+        };
+        let status = |s: Status, observed: &ProxyStatus| match s {
+            Status::Absent => observed.clone(),
+            Status::Queued => ProxyStatus::Queued,
+            Status::Creating { percent } => ProxyStatus::Generating { percent },
+            Status::Ready => ProxyStatus::Ready {
+                version: "generated".into(),
+            },
+            Status::Failed => ProxyStatus::Failed("The task couldn’t be completed.".into()),
+        };
+        let observed = if self.builtins.media_observation_current {
+            self.builtins.media_runtime.clone()
+        } else {
+            pm_panel_media::readiness::ObservedRuntime::default()
+        };
+        observed
+            .with_posters(
+                media_stamp(published),
+                self.project_assets()
+                    .into_iter()
+                    .filter_map(|id| self.thumbs.key(&id).map(|key| (id, key))),
+            )
+            .with_states(|id, state| {
+                let (proxy, optimized) = self.pro_media.status(
+                    &project,
+                    id,
+                    self.media_base
+                        .originals
+                        .get(id)
+                        .map(std::path::PathBuf::as_path),
+                );
+                state.proxy = status(proxy, &state.proxy);
+                state.optimized = status(optimized, &state.optimized);
+                state.play_original = self.pro_media.plays_original(&project, id);
+            })
+    }
+    /// Readiness depends only on the media inputs, so an edit that left them
+    /// alone moves the observation to its revision without any worker.
+    fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let inputs = crate::media_refresh::Inputs::published(&published);
+        if !self.media_refresh.catalog_ready(&inputs) {
+            self.builtins.set_media_observation_current(false);
+            return;
+        }
+        let originals = self.media.originals.clone();
+        let proxies = self.media.proxies.clone();
+        let stamp = media_stamp(&published);
+        let serial = match self.builtins.media_probe_refresh.plan((
+            inputs,
+            originals.clone(),
+            proxies.clone(),
+            self.media_refresh.observation_epoch(),
+        )) {
+            MediaProbePlan::Reuse => {
+                self.builtins.set_media_observation_current(true);
+                self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
+                self.builtins.media_observed += 1;
+                return;
+            }
+            MediaProbePlan::Waiting => {
+                self.builtins.set_media_observation_current(false);
+                return;
+            }
+            MediaProbePlan::Start(serial) => {
+                self.builtins.set_media_observation_current(false);
+                serial
+            }
+        };
+        let probes = self.builtins.media_probes.clone();
+        cx.spawn(async move |this, cx| {
+            let observed = cx
+                .background_executor()
+                .spawn(async move {
+                    pm_builtins::delivery::observe_media(
+                        &published.project,
+                        &published.snapshot,
+                        &originals,
+                        &proxies,
+                        &probes,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                let latest = v
+                    .published
+                    .as_ref()
+                    .map(|p| {
+                        (
+                            crate::media_refresh::Inputs::published(p),
+                            v.media.originals.clone(),
+                            v.media.proxies.clone(),
+                            v.media_refresh.observation_epoch(),
+                        )
+                    })
+                    .filter(|inputs| v.media_refresh.catalog_ready(&inputs.0));
+                if !v
+                    .builtins
+                    .media_probe_refresh
+                    .finish(serial, latest.as_ref())
+                {
+                    // The one in-flight read finished against older inputs.
+                    // Start only the latest read, never a backlog of imports.
+                    v.update_builtins(cx);
+                    return;
+                }
+                match observed {
+                    Ok(observed) => {
+                        v.builtins.media_runtime = match &v.published {
+                            Some(p) => observed.rebound(media_stamp(p)),
+                            None => observed,
+                        };
+                    }
+                    Err(error) => {
+                        v.message = error;
+                        // A failed read is settled until the inputs change.
+                        // Old readiness is not proof of these new inputs.
+                        let unknown = pm_panel_media::readiness::ObservedRuntime::default();
+                        v.builtins.media_runtime = match &v.published {
+                            Some(p) => unknown.rebound(media_stamp(p)),
+                            None => unknown,
+                        };
+                    }
+                }
+                v.builtins.media_observed += 1;
+                v.update_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn facts(&self, cx: &App) -> Value {
+        let (mut facts, io) = self.facts_deferred(cx);
+        io.resolve(&mut facts);
+        facts
+    }
+    /// `facts` with Settings' file-system reads (Storage's original-app
+    /// lock, the Project header's poster) left for `FactsIo::resolve`,
+    /// which `update_builtins` runs on its worker.
+    fn facts_deferred(&self, cx: &App) -> (Value, crate::settings_window::FactsIo) {
+        let (header, poster) = self.settings_header_deferred(cx);
+        let io = crate::settings_window::FactsIo {
+            storage: self.storage_settings_io(),
+            poster,
+        };
+        let status = self.viewer.as_ref().map(|v| v.status());
+        let playing = self.playing();
+        // Auto's measured resolution; 0 until a frame has drawn.
+        // Layers left out of the frame on screen, by ID, so Properties can say
+        // so on that layer only (3d-studio.md §10).
+        let failures: serde_json::Map<String, Value> = status
+            .as_ref()
+            .map(|s| {
+                s.layer_failures
+                    .iter()
+                    .map(|f| (f.layer.clone(), json!(f.message)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let effective = status
+            .as_ref()
+            .map(|s| s.effective_quality)
+            .filter(|q| *q > 0.)
+            .unwrap_or(1.);
+        let facts = json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
+            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"timelineShown":self.timeline_shown,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "mediaSettings":self.media_settings_fact(),"storageSettings":Value::Null,"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":header,"settingsVersion":crate::updates::current_version(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            // The Agent panel is a popover while its own window is open, a docked panel otherwise.
+            "agentPopover":self.builtins.opening_windows.contains("agent")
+                || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))});
+        (facts, io)
+    }
+    /// Paused, panels follow the playhead. Playing, only Properties does
+    /// (`follow_playback`): the playhead and timecode are CALayers fed from
+    /// the display link.
+    pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
+        let (playing, time) = (self.playing(), self.time());
+        // Extensions follow playback themselves; the host coalesces the updates.
+        if let Some(host) = &self.extensions.host {
+            host.publish_time(time, playing);
+        }
+        self.sync_viewer_stage();
+        let due = self.builtins.clock.due(time, playing);
+        // Scrubbing the ruler, Properties (and Timeline when it has expanded
+        // property rows) follow the time as they do in playback (each new
+        // frame, off the main thread); the other panels hear it once the scrub
+        // ends. The playhead and timecode are CALayers.
+        if self.builtins.scrubbing && !playing {
+            if due {
+                self.builtins.scrubbed = true;
+                if let Some(gizmos) = &self.builtins.gizmos {
+                    gizmos.update(cx, |g, cx| g.refresh(cx));
+                }
+            }
+            self.follow_playback(time, playing, cx);
+            return;
+        }
+        let rested = std::mem::take(&mut self.builtins.scrubbed);
+        if !due && !rested {
+            if playing {
+                self.follow_playback(time, playing, cx);
+            }
+            return;
+        }
+        if let Some(gizmos) = &self.builtins.gizmos {
+            gizmos.update(cx, |g, cx| g.refresh(cx));
+        }
+        self.update_view_builtins(cx);
+    }
+    /// Playing or scrubbing, Properties — and Timeline when it shows expanded
+    /// property rows — display the evaluated values and at-playhead keyframe
+    /// state of each frame (v1's inspector refreshed at 15 Hz): only those
+    /// panels publish, once per new frame, one batch at a time off the main
+    /// thread, skipping frames while an update is under way rather than
+    /// queueing behind playback or ruler scrubs.
+    fn follow_playback(&mut self, time: f64, playing: bool, cx: &mut Context<Self>) {
+        let Some(frame) = crate::session::frame_start_at(self.rate, time) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if self.builtins.updating
+            || self.builtins.followed == Some(frame)
+            || !follow_due(
+                self.builtins.followed,
+                self.builtins.followed_at,
+                frame,
+                now,
+            )
+        {
+            return;
+        }
+        let mut panels: Vec<&'static str> = Vec::with_capacity(2);
+        if self.builtins.open.contains("inspector")
+            && self.builtins.ready.contains("inspector")
+            && follows_selection(self.published.as_deref())
+        {
+            panels.push("inspector");
+        }
+        if self.builtins.open.contains("timeline")
+            && self.builtins.ready.contains("timeline")
+            && self
+                .builtins
+                .timeline_expanded_properties
+                .as_ref()
+                .is_some_and(|flag| flag.get())
+        {
+            panels.push("timeline");
+        }
+        if panels.is_empty() {
+            return;
+        }
+        self.builtins.followed_at = Some(now);
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        self.builtins.followed = Some(frame);
+        let time = frame as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        self.builtins.updating = true;
+        let check = runtime.clone();
+        let started = std::time::Instant::now();
+        cx.spawn(async move |this, cx| {
+            let tickets = cx
+                .background_executor()
+                .spawn(async move {
+                    panels
+                        .into_iter()
+                        .filter_map(|panel| {
+                            runtime
+                                .follow_time(panel, time, playing)
+                                .map(|ticket| (panel, ticket))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            for (panel, ticket) in tickets {
+                if let Some(Err(error)) = match ticket {
+                    Ok(ticket) => Some(ticket.await.map(|_| ())),
+                    Err(error) => Some(Err(error)),
+                } && error != pm_runtime_v8::Error::Superseded
+                {
+                    eprintln!("Panel {panel} update: {error}");
+                }
+            }
+            let _ = this.update(cx, |v, cx| {
+                if !v
+                    .builtins
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| Arc::ptr_eq(r, &check))
+                {
+                    return;
+                }
+                v.builtins.updating = false;
+                {
+                    let _span = crate::diag::span("follow.drain");
+                    v.drain_builtins(cx);
+                }
+                crate::diag::line(
+                    json!({"follow": "playback", "ms": started.elapsed().as_secs_f64() * 1000.}),
+                );
+                if let Some(full) = v.builtins.again.take() {
+                    v.update_builtins_scoped(full, cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Escape during a drag restores through the kernel gesture that drag owns.
+    pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        let timeline = self.builtins.timeline.clone();
+        let gizmos = self.builtins.gizmos.clone();
+        let views: Vec<_> = self.builtins.views.values().cloned().collect();
+        self.mixer_cancel(cx)
+            || timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
+            || gizmos.is_some_and(|g| {
+                // A text session ends here (it reads nothing of this
+                // controller, and its keys keep their order, PM-459); a
+                // pointer gesture's end reads the controller through its
+                // host, so it ends after this update (PM-480).
+                if g.update(cx, |g, cx| g.finish_text(false, cx)) {
+                    return true;
+                }
+                if !g.read(cx).gesture_to_cancel() {
+                    return false;
+                }
+                cx.defer(move |cx| {
+                    g.update(cx, |g, cx| {
+                        g.cancel(cx);
+                    })
+                });
+                true
+            })
+            || views
+                .into_iter()
+                .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
+    }
+    /// The font picker (v1's): our menu under the field that opened it, a
+    /// search over every installed family, each row in its own face, the
+    /// current one checked and in view. An agent's pick is claimed by label
+    /// as for every panel menu, so no menu is left on screen for it.
+    fn font_menu(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        request: &pm_builtins::PlatformRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let families = crate::colour_panel::font_families();
+        let current = request.input["current"].as_str().unwrap_or_default();
+        if let Some(previous) = self.builtins.font_pick.take() {
+            previous.0.platform_reply(previous.1, Ok(Value::Null));
+        }
+        let options: Vec<Value> = families.iter().map(|f| json!({"label": f})).collect();
+        if let Some(choice) = pm_shell::agent_menu::claim(
+            &pm_shell::agent_menu_windows(&self.host.borrow().window),
+            &options,
+        ) {
+            let family = choice.and_then(|i| families.get(i)).cloned();
+            runtime.platform_reply(request.id, Ok(json!(family)));
+            return;
+        }
+        let anchor = request.input["anchor"].as_u64().and_then(|id| {
+            let view = self.builtins.views.get(&request.panel)?;
+            let b = view.read(cx).anchor_bounds(id)?;
+            Some(pm_shell::layout::Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            })
+        });
+        let choices = families
+            .iter()
+            .map(|f| {
+                pm_shell::transient::Choice::new(f.clone(), format!("fontPick:{f}"))
+                    .checked(f == current)
+                    .in_font(f.clone())
+            })
+            .collect();
+        self.builtins.font_pick = Some((runtime.clone(), request.id));
+        let _ = window;
+        self.host.borrow_mut().open_menu(
+            None,
+            choices,
+            anchor,
+            Vec::new(),
+            Some(FONT_PAGE),
+            Some(format!("dismissFontPicker:{}", request.id)),
+            "Search fonts",
+            None,
+        );
+    }
+    /// Searchable 3D Model Part picker: clean prefix-stripped hierarchy,
+    /// material swatches, modified indicators, in-place view switches, and
+    /// live 3D viewport hover highlighting.
+    fn part_menu(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        request: &pm_builtins::PlatformRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(prev) = self.builtins.part_pick.take() {
+            prev.runtime.platform_reply(prev.request_id, Ok(Value::Null));
+        }
+        let layer = request.input["layer"].as_str().unwrap_or("").to_owned();
+        let current = request.input["current"].as_str().map(str::to_owned);
+        let parts = request.input["parts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let anchor = request.input["anchor"].as_u64().and_then(|id| {
+            let view = self.builtins.views.get(&request.panel)?;
+            let b = view.read(cx).anchor_bounds(id)?;
+            Some(pm_shell::layout::Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            })
+        });
+        let state = PartMenuState {
+            runtime: runtime.clone(),
+            request_id: request.id,
+            layer,
+            current,
+            parts,
+            view: PartMenuView::Tree,
+            show_raw: false,
+        };
+        let choices = build_part_choices(&state);
+        self.builtins.part_pick = Some(state);
+        self.host.borrow_mut().open_menu(
+            None,
+            choices,
+            anchor,
+            Vec::new(),
+            Some(PART_PAGE),
+            Some(format!("dismissPartPicker:{}", request.id)),
+            "Search parts or materials",
+            None,
+        );
+    }
+    pub fn dismiss_part_picker(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self
+            .builtins
+            .part_pick
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == id)
+        {
+            self.part_picked("", cx);
+        }
+    }
+    pub fn part_picked(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.part_hovered("", cx);
+        if let Some(pending) = self.builtins.part_pick.take() {
+            let value = if key.is_empty() {
+                Value::Null
+            } else {
+                json!(key)
+            };
+            pending.runtime.platform_reply(pending.request_id, Ok(value));
+        }
+    }
+    pub fn part_filter(&mut self, action: &str) {
+        let Some(state) = self.builtins.part_pick.as_mut() else {
+            return;
+        };
+        match action {
+            "tree" => state.view = PartMenuView::Tree,
+            "material" => state.view = PartMenuView::ByMaterial,
+            "modified" => state.view = PartMenuView::Modified,
+            "raw" => state.show_raw = !state.show_raw,
+            _ => return,
+        }
+        let choices = build_part_choices(state);
+        let dismiss = Some(format!("dismissPartPicker:{}", state.request_id));
+        self.host.borrow_mut().update_menu(choices, None, dismiss);
+    }
+    pub fn part_hovered(&mut self, spec: &str, cx: &mut Context<Self>) {
+        let target = if spec.is_empty() {
+            None
+        } else {
+            spec.split_once(':')
+                .filter(|(l, k)| !l.is_empty() && !k.is_empty())
+                .map(|(l, k)| (l.to_owned(), k.to_owned()))
+        };
+        let assets = target.as_ref().map(|_| -> Arc<dyn pm_scene3d::geometry::AssetGeometry> {
+            Arc::new(pm_scene3d::geometry::FileAssets::new(
+                self.media.originals.clone().into_iter().collect(),
+            ))
+        });
+        let time = self.time();
+        if let Some(gizmos) = self.builtins.gizmos.clone() {
+            gizmos.update(cx, |g, cx| g.set_hovered_part(target, assets, time, cx));
+        }
+    }
+    fn part_pick_mode(&mut self, layer: String, cx: &mut Context<Self>) {
+        if let Some(gizmos) = self.builtins.gizmos.clone() {
+            let active = gizmos.update(cx, |g, cx| g.toggle_part_pick(layer, cx));
+            self.note(
+                if active {
+                    "Pick Model Part — Click a part in the 3D viewport (Esc to cancel)".into()
+                } else {
+                    String::new()
+                },
+                cx,
+            );
+        }
+    }
+    /// Blender-inspired Shift+A 3D Add menu: searchable categorized choices for
+    /// meshes, Blender-style lights, 3D null/empty, camera, light presets,
+    /// environments, and nature.
+    pub(crate) fn open_studio_add_menu(&mut self) {
+        let choices = studio_add_choices();
+        let anchor = self.host.borrow().viewer_rect.get().map(|r| {
+            let width = 320f32.min(r.w.max(200.));
+            pm_shell::layout::Rect {
+                x: r.x + (r.w - width) / 2.,
+                y: r.y + (r.h * 0.12).min(56.),
+                w: width,
+                h: 0.,
+            }
+        });
+        self.host.borrow_mut().open_add_menu(choices, anchor);
+    }
+    /// The Agent panel's pop-up menus (threads, model, access, slash): the
+    /// field menu under the control that asked, standing above the popover
+    /// when the panel is shown there.
+    fn agent_menu(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        request: &pm_builtins::PlatformRequest,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_shell::transient::ComposerPicker;
+        let picker = ComposerPicker::named(request.input["picker"].as_str());
+        let search = picker.map(|kind| {
+            matches!(kind, ComposerPicker::Model | ComposerPicker::Threads)
+                && request.input["search"] == true
+        });
+        let options = request.input["options"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let anchor = request.input["anchor"].as_u64().and_then(|id| {
+            let view = self.builtins.views.get(&request.panel)?;
+            let b = view.read(cx).anchor_bounds(id)?;
+            Some(pm_shell::layout::Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            })
+        });
+        let owner = self.agent_popover_window(cx);
+        // The composer pill's two menus (the model picker and the reasoning
+        // menu) are their own popovers (PM-727), answered as the menus are:
+        // the chosen row's value.
+        if request.input["picker"] == "chooser" {
+            let spec = pm_shell::ChooserSpec::from_request(&request.input);
+            let values: Vec<(Value, Option<Value>)> =
+                options.iter().map(|o| (o["value"].clone(), None)).collect();
+            let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
+            if request.input["refresh"] == true {
+                if let Some((owner, _, current, None)) = &mut self.builtins.agent_pick
+                    && Arc::ptr_eq(owner, runtime)
+                    && self.host.borrow_mut().update_chooser(spec, None)
+                {
+                    *current = values;
+                }
+                runtime.platform_reply(request.id, Ok(Value::Null));
+                return;
+            }
+            if let Some((previous, id, _, _)) = self.builtins.agent_pick.take() {
+                previous.platform_reply(id, Ok(Value::Null));
+            }
+            let mut host = self.host.borrow_mut();
+            let shown = if request.input["update"] == true {
+                host.update_chooser(spec, dismiss)
+            } else if let Some(anchor) = anchor {
+                host.open_chooser(owner, anchor, spec, dismiss);
+                true
+            } else {
+                false
+            };
+            drop(host);
+            if shown {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values, None));
+            } else {
+                runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            return;
+        }
+        let choices = options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let mut c = pm_shell::transient::Choice::new(
+                    o["label"].as_str().unwrap_or_default(),
+                    format!("agentPick:{i}"),
+                );
+                if picker == Some(ComposerPicker::Model)
+                    && let Some(provider) = o["provider"].as_str()
+                {
+                    c = c.for_provider(provider);
+                }
+                if let Some(category) = o["category"].as_str() {
+                    c = c.within(category);
+                }
+                if let Some(detail) = o["detail"].as_str() {
+                    c = c.detail(detail);
+                }
+                if let Some(on) = o["checked"].as_bool() {
+                    c = c.checked(on);
+                }
+                if let Some(icon) = o["icon"].as_str() {
+                    c.menu_icon = match icon {
+                        "plus" => Some("plus"),
+                        _ => None,
+                    };
+                }
+                if o["separatorAfter"] == true {
+                    c = c.separator_after();
+                }
+                if o["deleteValue"].is_string() {
+                    c = c.with_delete(format!("agentPickDelete:{i}"));
+                }
+                c.informational = o["informational"] == true;
+                c.is_default = o["default"] == true;
+                // A provider row keeps the menu open: its models follow.
+                c.stays(o["stays"] == true)
+            })
+            .collect();
+        let values: Vec<(Value, Option<Value>)> = options
+            .iter()
+            .map(|o| {
+                let delete = o["deleteValue"].as_str().map(|s| Value::String(s.to_owned()));
+                (o["value"].clone(), delete)
+            })
+            .collect();
+        if request.input["refresh"] == true {
+            // An account update can arrive while the user is choosing. Keep
+            // the existing reply id, and update its row indices along with the menu.
+            if let Some((owner, _, current, Some(ComposerPicker::Model))) = &mut self.builtins.agent_pick
+                && Arc::ptr_eq(owner, runtime)
+                && self.host.borrow_mut().update_menu(choices, search, None)
+            {
+                *current = values;
+            }
+            runtime.platform_reply(request.id, Ok(Value::Null));
+            return;
+        }
+        if let Some((previous, id, _, _)) = self.builtins.agent_pick.take() {
+            previous.platform_reply(id, Ok(Value::Null));
+        }
+        // The rows of a menu still open after a row that stays was chosen:
+        // they replace the open menu's in place, no closing and reopening.
+        let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
+        if request.input["update"] == true {
+            if self.host.borrow_mut().update_menu(choices, search, dismiss) {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
+            } else {
+                runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            return;
+        }
+        // Composer menus are never displayed without a measured trigger.
+        if picker.is_some() && anchor.is_none() {
+            runtime.platform_reply(request.id, Ok(Value::Null));
+            return;
+        }
+        self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
+        let other_triggers = request.input["anchor"]
+            .as_u64()
+            .and_then(|id| {
+                let view = self.builtins.views.get(&request.panel)?;
+                Some(view.read(cx).other_menu_triggers(id))
+            })
+            .unwrap_or_default();
+        let mut host = self.host.borrow_mut();
+        if picker == Some(ComposerPicker::Model) {
+            host.set_model_picker_profile(&self.profile);
+        }
+        host.open_menu(
+            owner,
+            choices,
+            anchor,
+            other_triggers,
+            None,
+            dismiss,
+            request.input["placeholder"].as_str().unwrap_or("Search"),
+            picker.zip(search),
+        );
+    }
+    /// The Agent popover's own window, while the panel is shown there (not
+    /// docked): what its menus and questions stand on, so answering them
+    /// leaves the popover open (a sheet on the editor took key from it).
+    fn agent_popover_window(&self, cx: &mut App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        (!self.builtins.agent_docked)
+            .then(|| self.builtins.windows.get("agent").copied())
+            .flatten()
+            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten()
+    }
+    /// Ignore a dismissal that belonged to a picker the caller replaced.
+    pub fn dismiss_agent_picker(&mut self, id: u64) {
+        if self.builtins.agent_pick.as_ref().is_some_and(|pending| pending.1 == id) {
+            self.agent_picked("");
+        }
+    }
+    pub fn dismiss_font_picker(&mut self, id: u64) {
+        if self.builtins.font_pick.as_ref().is_some_and(|pending| pending.1 == id) {
+            self.font_picked("");
+        }
+    }
+    /// The Agent menu's answer: a row's value, or none when it closed unchosen.
+    pub fn agent_picked(&mut self, index: &str) {
+        if let Some((runtime, id, values, _)) = self.builtins.agent_pick.take() {
+            let value = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| values.get(i).map(|(v, _)| v.clone()))
+                .unwrap_or(Value::Null);
+            runtime.platform_reply(id, Ok(value));
+        }
+    }
+    /// The Agent menu's trailing delete button answer: the row's `deleteValue`.
+    pub fn agent_picked_delete(&mut self, index: &str) {
+        if let Some((runtime, id, values, _)) = self.builtins.agent_pick.take() {
+            let value = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| values.get(i).and_then(|(_, delete)| delete.clone()))
+                .unwrap_or(Value::Null);
+            runtime.platform_reply(id, Ok(value));
+        }
+    }
+    /// The font picker's answer: a family, or none when it closed unchosen.
+    pub fn font_picked(&mut self, family: &str) {
+        if let Some((runtime, id)) = self.builtins.font_pick.take() {
+            let value = if family.is_empty() {
+                Value::Null
+            } else {
+                json!(family)
+            };
+            runtime.platform_reply(id, Ok(value));
+        }
+    }
+    pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
+        self.update_builtins_scoped(true, cx);
+    }
+
+    pub(crate) fn update_view_builtins(&mut self, cx: &mut Context<Self>) {
+        self.update_builtins_scoped(false, cx);
+    }
+
+    fn update_builtins_scoped(&mut self, full: bool, cx: &mut Context<Self>) {
+        let gesture = self.gesture_open();
+        let full = full
+            || self.builtins.runtime.is_none()
+            || self.builtins.show_missing
+            || self.builtins.deferral.owed(gesture);
+        if full {
+            self.sync_keymap();
+            if crate::first_run::take_workspace_request() {
+                self.host.borrow().send_command("firstRunWorkspace", vec![]);
+            }
+        }
+        // Background restored tabs wait for the front tab's first frame.
+        if self.restore_waiting() {
+            return;
+        }
+        if full {
+            self.start_builtins(cx);
+            self.probe_builtin_media(cx);
+            self.want_thumbnails(cx);
+        }
+        if self.builtins.updating {
+            self.builtins.again = Some(full || self.builtins.again == Some(true));
+            return;
+        }
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let (facts, io) = self.facts_deferred(cx);
+        let media = full.then(|| (self.media.originals.clone(), self.rendition_runtime()));
+        let show_missing = std::mem::take(&mut self.builtins.show_missing);
+        // During a drag or scrub only the panels on screen that show the
+        // edited layers publish; the others wait for its end (N2).
+        let selected = follows_selection(self.published.as_deref());
+        let scope = self.builtins.deferral.scope(gesture, &self.builtins.shown);
+        if matches!(scope, crate::gesture_publish::Scope::Live(_)) {
+            self.watch_gesture_end(cx);
+        }
+        self.builtins.updating = true;
+        let check = runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let tickets = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut facts = facts;
+                    io.resolve(&mut facts);
+                    runtime.update_facts(facts);
+                    if let Some((originals, observed)) = media {
+                        runtime.update_media(originals, observed);
+                    }
+                    if show_missing {
+                        runtime.show_missing_media();
+                    }
+                    match scope {
+                        crate::gesture_publish::Scope::All if full => runtime.publish(),
+                        crate::gesture_publish::Scope::All => {
+                            runtime.publish_live(|id| follows_view(id, selected)).0
+                        }
+                        crate::gesture_publish::Scope::Live(live) => {
+                            runtime
+                                .publish_live(|id| {
+                                    live.contains(id) && (full || follows_view(id, selected))
+                                })
+                                .0
+                        }
+                    }
+                })
+                .await;
+            let mut tickets = tickets;
+            if full {
+                tickets.sort_by_key(|(id, _)| if id == "inspector" { 0 } else { 1 });
+            } else {
+                // On transport/view updates, drain timeline and viewer first so
+                // Play/Pause button icons update immediately without waiting
+                // behind Inspector's V8 evaluation.
+                tickets.sort_by_key(|(id, _)| match id.as_str() {
+                    "timeline" => 0,
+                    "viewer" => 1,
+                    "inspector" => 2,
+                    _ => 3,
+                });
+            }
+            for (id, ticket) in tickets {
+                let result = match ticket {
+                    Ok(ticket) => ticket.await.map(|_| ()),
+                    Err(e) => Err(e),
+                };
+                if let Err(error) = result
+                    && error != pm_runtime_v8::Error::Superseded
+                {
+                    eprintln!("Panel {id} update: {error}");
+                }
+                let _ = this.update(cx, |v, cx| {
+                    if v.builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| Arc::ptr_eq(r, &check))
+                    {
+                        v.drain_builtins(cx);
+                    }
+                });
+            }
+            let _ = this.update(cx, |v, cx| {
+                if !v
+                    .builtins
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| Arc::ptr_eq(r, &check))
+                {
+                    return;
+                }
+                v.builtins.updating = false;
+                v.drain_builtins(cx);
+                // A gesture that ended while this ran: the panels that waited
+                // publish now, whether or not its end brought a publication.
+                let owed = v.builtins.deferral.owed(v.gesture_open());
+                let queued = v.builtins.again.take();
+                if owed || queued.is_some() {
+                    v.update_builtins_scoped(owed || queued == Some(true), cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// A drag or scrub holds an edit open (`crate::gesture_publish`).
+    fn gesture_open(&self) -> bool {
+        crate::gesture_publish::gesture_open(
+            self.published.as_ref().is_some_and(|p| p.entry.is_some()),
+            crate::gesture_publish::pointer_held,
+        )
+    }
+    /// Panels waited during a gesture. A release publishes its commit (or
+    /// cancel), and that publication settles them; this watch only covers a
+    /// release that brings none (an edit left open): two ticks after the
+    /// button came up, every realm publishes. Two, so it never races the
+    /// commit's own publication into a second full publish.
+    fn watch_gesture_end(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.deferral.watching {
+            return;
+        }
+        self.builtins.deferral.watching = true;
+        cx.spawn(async move |this, cx| {
+            let mut released = 0;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(8))
+                    .await;
+                let Ok(done) = this.update(cx, |v, cx| {
+                    if !v.builtins.deferral.deferred() {
+                        return true;
+                    }
+                    if v.gesture_open() {
+                        released = 0;
+                        return false;
+                    }
+                    released += 1;
+                    if released >= 2 && !v.builtins.updating {
+                        v.update_builtins(cx);
+                    }
+                    !v.builtins.deferral.deferred()
+                }) else {
+                    return;
+                };
+                if done {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |v, _| v.builtins.deferral.watching = false);
+        })
+        .detach();
+    }
+    /// Closed built-in panels park (their isolates leave the cage account);
+    /// reopened ones start again, the view keeping its tree until the new
+    /// generation publishes. Parking waits for the isolate, off the main thread.
+    pub fn sync_parking(&mut self, open: &[&str], cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        self.builtins.open = open.iter().map(|id| (*id).to_owned()).collect();
+        for id in BUILTIN_PANELS
+            .iter()
+            .filter(|p| p.parks)
+            .map(|p| p.id.as_str())
+        {
+            if self.builtins.recovery_in_progress_or_failed(id) {
+                continue;
+            }
+            let shown = open.contains(&id);
+            if shown && runtime.is_parked(id) {
+                self.unpark(id, cx);
+            } else if !shown
+                && self.builtins.ready.contains(id)
+                && !runtime.is_parked(id)
+                && self.builtins.parking.insert(id.to_owned())
+            {
+                self.builtins.ready.remove(id);
+                self.builtins.keep_surface(id);
+                let (runtime, panel) = (runtime.clone(), id.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let parked = {
+                        let runtime = runtime.clone();
+                        let panel = panel.clone();
+                        cx.background_executor()
+                            .spawn(async move { runtime.park(&panel) })
+                            .await
+                    };
+                    let _ = this.update(cx, |v, cx| {
+                        v.builtins.parking.remove(&panel);
+                        if !parked {
+                            v.builtins.ready.insert(panel.clone());
+                        } else if v.builtins.open.contains(&panel) {
+                            // Opened again while it was going.
+                            v.unpark(&panel, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+    fn unpark(&mut self, panel: &str, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let Some(ticket) = runtime.unpark(panel) else {
+            return;
+        };
+        let id = panel.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result = match ticket {
+                Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                if !v.builtins.owns_runtime(&runtime) {
+                    return;
+                }
+                match result {
+                    Ok(generation) => v.builtin_did_mount(&runtime, id, generation, cx),
+                    Err(error) => {
+                        v.drain_builtins(cx);
+                        if !v.builtins.recovery_in_progress_or_failed(&id) {
+                            v.message = format!("Panel {id} could not start: {error}");
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn builtin_did_mount(
+        &mut self,
+        runtime: &Builtins,
+        id: String,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.builtins.recovery_in_progress_or_failed(&id) {
+            return;
+        }
+        self.builtins.generations.insert(id.clone(), generation);
+        // Restore the open popover/sheet after a project change or a memory
+        // restart, including the Settings page that was showing.
+        let live = self
+            .builtins
+            .windows
+            .get(&id)
+            .is_some_and(|handle| handle.update(cx, |_, _, _| ()).is_ok());
+        if live {
+            let _ = match self.builtins.settings_history.current() {
+                Some(page) if id == "settings" => runtime.show_section(&id, &page),
+                _ => runtime.show(&id),
+            };
+        }
+        self.builtins.ready.insert(id);
+    }
+
+    fn recover_builtin(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        id: String,
+        error: pm_runtime_v8::Error,
+        cx: &mut Context<Self>,
+    ) {
+        if self.builtins.parking.contains(&id) {
+            // The owner has already been asked to retire. Opening the panel
+            // again will mount a fresh realm.
+            return;
+        }
+        self.builtins.forget_surface(&id);
+        let state = MemoryRecovery::after_failure(self.builtins.memory_recovery.get(&id).copied());
+        self.set_panel_recovery(&id, state, cx);
+        if state == MemoryRecovery::Restarting {
+            eprintln!("Panel {id} restarting after {error}");
+            self.restart_builtin(runtime.clone(), id, cx);
+        } else {
+            self.message = format!("{} — Reload", panel_recovery_message(&id, true));
+        }
+        cx.notify();
+    }
+
+    fn restart_builtin(&mut self, runtime: Arc<Builtins>, id: String, cx: &mut Context<Self>) {
+        let check = runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let ticket = cx
+                .background_executor()
+                .spawn({
+                    let id = id.clone();
+                    async move { runtime.restart(&id) }
+                })
+                .await;
+            let result = match ticket {
+                Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                if !v.builtins.owns_runtime(&check)
+                    || v.builtins.memory_recovery.get(&id) != Some(&MemoryRecovery::Restarting)
+                {
+                    return;
+                }
+                match result {
+                    Ok(generation) => {
+                        v.set_panel_recovery(&id, MemoryRecovery::Restarted, cx);
+                        v.builtin_did_mount(&check, id, generation, cx);
+                    }
+                    Err(error) if error.is_memory() => {}
+                    Err(pm_runtime_v8::Error::StaleGeneration) => {
+                        // A user fork took over while the old realm was leaving.
+                        v.builtins.memory_recovery.remove(&id);
+                    }
+                    Err(error) => {
+                        v.message = format!("Panel {id} could not reload: {error}");
+                        eprintln!("{}", v.message);
+                        v.set_panel_recovery(&id, MemoryRecovery::Failed, cx);
+                    }
+                }
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_panel_recovery(&mut self, id: &str, state: MemoryRecovery, cx: &mut Context<Self>) {
+        self.builtins.memory_recovery.insert(id.to_owned(), state);
+        if id == "settings" && self.builtins.settings_form.is_some() {
+            self.mount_settings_form(cx);
+        }
+    }
+
+    pub(crate) fn reload_builtin(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        if self.builtins.memory_recovery.get(id) != Some(&MemoryRecovery::Failed) {
+            return;
+        }
+        self.set_panel_recovery(id, MemoryRecovery::Restarting, cx);
+        if self.message == format!("{} — Reload", panel_recovery_message(id, true)) {
+            self.message.clear();
+        }
+        self.restart_builtin(runtime, id.to_owned(), cx);
+        cx.notify();
+    }
+
+    fn memory_status_panel(&self, id: &str, retry: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.host.borrow().tokens.clone();
+        let panel = id.to_owned();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .p(px(t.space.sm))
+            .bg(pm_shell::kit::ink(t.colors.panel, 1.))
+            .text_color(pm_shell::kit::ink(t.colors.text, 1.))
+            .child(panel_recovery_message(id, retry))
+            .when(retry, |body| {
+                body.child(
+                    div()
+                        .id(SharedString::from(format!("reload-{id}")))
+                        .px(px(12.))
+                        .py(px(4.))
+                        .rounded(px(t.metrics.control_radius))
+                        .bg(pm_shell::kit::ink(t.colors.raised, 1.))
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .aria_label("Reload")
+                        .child("Reload")
+                        .on_click(cx.listener(move |v, _, _, cx| v.reload_builtin(&panel, cx))),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(crate) fn drain_builtins(&mut self, cx: &mut Context<Self>) {
+        self.refresh_native_effects();
+        // Settings › General › Open Projects In may have changed.
+        crate::tabs::follow(&self.kernel, cx);
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        for (id, error) in runtime.take_panel_memory_failures() {
+            self.recover_builtin(&runtime, id, error, cx);
+        }
+        // The Export sheet's checks finished on their worker: its new state
+        // is published, then drained as any other publication.
+        if let Some(Ok(ticket)) = runtime.publish_finished_checks() {
+            cx.spawn(async move |this, cx| {
+                let _ = ticket.await;
+                let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
+        }
+        let mut mounted = false;
+        let mut effect_controls_changed=false;
+        for id in runtime.take_cleared_overlays() {
+            if let Some(overlays) = &self.builtins.overlays {
+                overlays.update(cx, |o, cx| o.clear(&id, cx));
+            }
+        }
+        for id in runtime.take_cleared_slots() {
+            let removed = self.builtins.slots.remove(&id).is_some()
+                | self.builtins.pending_slots.remove(&id).is_some();
+            mounted |= removed;
+        }
+        for p in runtime.take_publications() {
+            if self.builtins.memory_recovery.get(&p.panel) == Some(&MemoryRecovery::Failed) {
+                continue;
+            }
+            effect_controls_changed |= matches!(p.panel.as_str(),"layer-effects"|"inspector");
+            if p.panel.ends_with(pm_builtins::VIEWER_OVERLAY) {
+                if let Some(overlays) = &self.builtins.overlays {
+                    let runtime = runtime.clone();
+                    overlays.update(cx, |o, cx| o.publish(runtime, p, cx));
+                }
+                continue;
+            }
+            if p.panel.contains(pm_builtins::SLOT_PREFIX) {
+                if let Some(view) = self.builtins.slots.get(&p.panel) {
+                    view.update(cx, |v, cx| v.publish(p, cx));
+                } else {
+                    self.builtins.pending_slots.insert(p.panel.clone(), p);
+                    mounted = true;
+                }
+                continue;
+            }
+            if p.panel == "settings"
+                && self.builtins.settings_form.is_some()
+                && !self.builtins.recovery_in_progress_or_failed("settings")
+            {
+                self.publish_settings_form(p, cx);
+            } else if let Some(view) = self.builtins.views.get(&p.panel) {
+                view.update(cx, |v, cx| v.publish(p, cx));
+            } else {
+                self.builtins.pending.insert(p.panel.clone(), p);
+                mounted = true;
+            }
+        }
+        // Effect selection/disclosure is panel UI state, not a document edit.
+        if effect_controls_changed && let Some(gizmos)=&self.builtins.gizmos {
+            gizmos.update(cx,|g,cx|g.refresh(cx));
+        }
+        for error in runtime.take_errors() {
+            eprintln!("v4: {error}");
+        }
+        let (progress, additional_runs) = self.sync_agent_launcher(cx);
+        // A requested popover is not acknowledged until its window exists.
+        let shown = self.builtins.agent_shown || self.builtins.windows.get("agent")
+            .is_some_and(|window| cx.windows().contains(window));
+        let (working, attention, elapsed, background, unread, failed) = runtime.agent_status_with_notice(shown);
+        let was_working = std::mem::replace(&mut self.builtins.agent_working, working);
+        let undo_document = self.session.as_ref()
+            .and_then(|s| self.kernel.published(&s.project))
+            .map(|view| view.snapshot.doc_id);
+        if was_working && !working
+            && let Some((session, document)) = self.session.as_ref().zip(undo_document)
+        {
+            self.mcp.finish_builtin_turn(&session.project, document);
+        }
+        let undo_available = self.session.as_ref().zip(undo_document)
+            .is_some_and(|(session, document)| self.mcp.latest_turn(&session.project, document).is_some());
+        self.host
+            .borrow_mut()
+            .set_agent_status(pm_shell::AgentStatus {
+                working,
+                attention,
+                unread,
+                failed,
+                elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
+                background,
+                progress,
+                additional_runs,
+                paused: self.session.as_ref().is_some_and(|s| self.mcp.is_paused(&s.project)),
+                held: self.session.as_ref().is_some_and(|s| self.mcp.is_held(&s.project)),
+                undo_document,
+                undo_available,
+                undo_feedback: None,
+            });
+        self.sync_v4_commands(&runtime);
+        let painters = runtime.painters_revision();
+        if painters != self.builtins.painters
+            && let Some(timeline) = self.builtins.timeline.clone()
+        {
+            self.builtins.painters = painters;
+            timeline.update(cx, |t, cx| t.repaint_decorations(cx));
+        }
+        self.sync_v4_themes(&runtime, cx);
+        self.sync_v4_chrome(&runtime, cx);
+        self.builtins
+            .requests
+            .extend(runtime.take_platform_requests());
+        if !self.builtins.requests.is_empty() {
+            self.host.borrow().send_command("v4.platform", vec![]);
+        }
+        // Existing panels notify themselves; only a first mount needs the shell.
+        if mounted {
+            cx.notify();
+        }
+    }
+    pub(crate) fn mount_settings_form(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.recovery_in_progress_or_failed("settings") {
+            if let Some(form) = &mut self.builtins.settings_form {
+                let retry = self.builtins.memory_recovery.get("settings")
+                    == Some(&MemoryRecovery::Failed);
+                form.show_memory_status(
+                    &panel_recovery_message("settings", retry),
+                    retry,
+                    &self.host.borrow().tokens,
+                    cx,
+                );
+            }
+            return;
+        }
+        if let Some(publication) = self.builtins.pending.remove("settings") {
+            self.publish_settings_form(publication, cx);
+        }
+    }
+
+    pub(crate) fn cache_closed_settings_form(&mut self) {
+        if let Some(mut form) = self.builtins.settings_form.take()
+            && let Some(publication) = form.take_publication()
+        {
+            self.builtins.pending.insert("settings".into(), publication);
+        }
+    }
+
+    fn publish_settings_form(&mut self, publication: Publication, cx: &mut Context<Self>) {
+        if let Some(form) = self.builtins.settings_form.as_mut() {
+            form.publish(publication, &self.host.borrow().tokens, cx);
+        }
+    }
+
+    fn native_timeline_body(
+        &mut self,
+        bounds: pm_shell::layout::Rect,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.published.as_ref()?.snapshot.root()?;
+        let tokens = self.host.borrow().tokens.clone();
+        let body = (bounds.h - tokens.metrics.header).max(0.);
+        self.builtins.timeline_place = Some((bounds, tokens.metrics.header));
+        let panel = div().w_full().h(px(body)).overflow_hidden();
+        if self.builtins.natives.outline.set_native_only(true)
+            && let Some(timeline) = &self.builtins.timeline
+        {
+            timeline.update(cx, |t, cx| {
+                t.show_pending_scene(cx);
+                cx.notify();
+            });
+        }
+        Some(match &self.builtins.timeline {
+            Some(timeline) => panel.child(timeline.clone()).into_any_element(),
+            None => panel
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(tokens.colors.muted))
+                .child("Opening timeline…")
+                .into_any_element(),
+        })
+    }
+
+    pub fn builtin_panel(
+        &mut self,
+        id: &str,
+        bounds: pm_shell::layout::Rect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match self.builtins.memory_recovery.get(id) {
+            Some(MemoryRecovery::Restarting) => {
+                return Some(self.memory_status_panel(id, false, cx));
+            }
+            Some(MemoryRecovery::Failed) => return Some(self.memory_status_panel(id, true, cx)),
+            _ => {}
+        }
+        if !self.builtins.ready.contains(id) {
+            if id == "timeline" {
+                return self.native_timeline_body(bounds, cx);
+            }
+            return None;
+        }
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return (id == "timeline")
+                .then(|| self.native_timeline_body(bounds, cx))
+                .flatten();
+        };
+        let mut t = self.host.borrow().tokens.clone();
+        if id == "timeline"
+            && let Some(p) = &self.published
+        {
+            let scheme = if t.scheme == pm_design::Scheme::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            let surface = self.extensions.v1_timeline[scheme].clone();
+            t = timeline_chrome(t, &p.workspace, &surface);
+        }
+        if let Some(publication) = self.builtins.pending.remove(id) {
+            let (tokens, natives) = (t.clone(), self.builtins.natives.clone());
+            let outline = natives.outline.clone();
+            let view =
+                cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
+            // Side panels' bodies scroll (`panel_body`): the panel grows
+            // with its content. These panels size to their slot and own their scroll.
+            if !matches!(id, "viewer" | "timeline" | "agent") {
+                view.update(cx, |v, _| v.grows = true);
+            }
+            if id == "timeline" {
+                outline.bind(view.downgrade());
+                if let Some(timeline) = &self.builtins.timeline {
+                    timeline.update(cx, |_, cx| cx.notify());
+                }
+                let wake = self.playback_wake.clone();
+                view.update(cx, |v, cx| {
+                    v.installed = wake;
+                    v.sync_outline_window(cx);
+                });
+            }
+            if id == "inspector"
+                && let Some(layer) = self.extensions.focus_text.take()
+            {
+                view.update(cx, |v, cx| v.focus_text(layer, cx));
+            }
+            self.builtins.views.insert(id.into(), view);
+        }
+        let Some(view) = self.builtins.views.get(id).cloned() else {
+            return if id == "timeline" {
+                self.native_timeline_body(bounds, cx)
+            } else {
+                None
+            };
+        };
+        let build = self
+            .agent_panel_builds
+            .iter()
+            .find(|(_, b)| b.target.as_deref() == Some(id))
+            .and_then(|(slot, _)| self.panel_builds.get(slot))
+            .or_else(|| self.panel_builds.get(id))
+            .cloned();
+        view.update(cx, |v, cx| {
+            v.attach(window, cx);
+            if *v.tokens() != t {
+                v.retheme(t.clone(), cx);
+            }
+            v.set_panel_build(build, cx);
+        });
+        if id == "timeline" {
+            let restored = self.builtins.natives.outline.set_native_only(false);
+            if let Some(timeline) = self.builtins.timeline.clone() {
+                timeline.update(cx, |timeline, cx| {
+                    timeline.set_tokens(t.clone(), cx);
+                    if restored {
+                        timeline.published(cx);
+                    }
+                });
+            }
+            self.builtins.timeline_place = Some((bounds, t.metrics.header));
+        }
+        if id == "viewer" {
+            self.builtins.viewer_place = Some(bounds);
+            let body_h = (bounds.h - t.metrics.header).max(1.);
+            // With Studio 3D views the main viewer is the first pane.
+            let split = self.host.borrow().viewer_split.get();
+            let (body_w, body_h) = if split > 1 {
+                let r = pm_shell::layout::Rect {
+                    x: 0.,
+                    y: 0.,
+                    w: bounds.w,
+                    h: body_h,
+                };
+                let first = pm_shell::layout::view_tiles(r, split, t.metrics.border * 2.)[0];
+                (first.w, first.h)
+            } else {
+                (bounds.w, body_h)
+            };
+            let stage = [body_w as f64, body_h as f64];
+            if self.view.stage != stage {
+                // The chrome's Fit readout and zoom steps measure this slot.
+                self.view.stage = stage;
+                cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
+            }
+            // Shown rulers take a band along the top and the leading edge;
+            // the composition fits inside them (the first pane with 3D views).
+            let inset = t.metrics.inset
+                + if self.rulers {
+                    t.metrics.viewer_ruler
+                } else {
+                    0.
+                };
+            let fit = crate::panels::fit_scale(body_w, body_h, self.dimensions, inset);
+            // Free View fills the whole viewer body; the shot keeps its fit.
+            let free = self
+                .builtins
+                .gizmos
+                .as_ref()
+                .is_some_and(|g| g.read(cx).studio_free());
+            self.view.fill.set(free);
+            let scale = if free {
+                crate::panels::cover_scale(body_w, body_h, self.dimensions)
+            } else {
+                self.view.zoom.unwrap_or(fit).min(self.zoom_limit())
+            };
+            if self.view.scale.replace(scale) != scale
+                && let Some(gizmos) = &self.builtins.gizmos
+            {
+                gizmos.update(cx, |g, cx| g.redraw(cx));
+            }
+            self.host.borrow_mut().viewer_transform(
+                self.dimensions,
+                Some(scale),
+                self.view.shown_pan(),
+            );
+            // A cropped canvas has its edges outside the pane: no outline.
+            let cropped = free || self.host.borrow().viewer_crop.get().is_some();
+            self.builtins.frame_outline.show(
+                &self.host.borrow(),
+                !cropped
+                    && crate::panels::needs_frame_outline(self.background, t.viewer_surround()),
+                t.colors.separator,
+                t.metrics.border,
+            );
+        }
+        let body = (bounds.h - t.metrics.header).max(0.);
+        let keep = {
+            let view = view.clone();
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, cx| view.read(cx).keep_native_slots(window, cx),
+            )
+            .absolute()
+            .size_0()
+        };
+        // These panels lay out to their slot and own their scroll. In Threads,
+        // the conversation scrolls while the composer stays in the slot.
+        if matches!(id, "viewer" | "timeline" | "agent") {
+            let top_slot = match id {
+                "timeline" => self.slot_elements("timeline.toolbar", &t, window, cx),
+                "agent" => self.slot_elements("agent.toolbar", &t, window, cx),
+                _ => vec![],
+            };
+            let bottom_slot = match id {
+                "timeline" => self.slot_elements("timeline.footer", &t, window, cx),
+                _ => vec![],
+            };
+            let hud_slot = if id == "viewer" {
+                self.slot_elements("viewer.hud", &t, window, cx)
+            } else {
+                vec![]
+            };
+            return Some(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(body))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .children(top_slot)
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .w_full()
+                            .overflow_hidden()
+                            .child(fixed_body_view(id, &view)),
+                    )
+                    .children(bottom_slot)
+                    .when(!hud_slot.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .bottom(px(8.))
+                                .left(px(8.))
+                                .right(px(8.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .children(hud_slot),
+                        )
+                    })
+                    .child(keep)
+                    .into_any_element(),
+            );
+        }
+        let handle = self.builtins.scrolls.entry(id.into()).or_default().clone();
+        let shown = self
+            .builtins
+            .scrolled_at
+            .get(id)
+            .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
+        let thumb = (shown || !cx.should_auto_hide_scrollbars())
+            .then(|| scroll_thumb(&handle, bounds.w, body, &t))
+            .flatten();
+        let panel = id.to_owned();
+        view.update(cx, |v, _| v.scrolls_in(&handle));
+        let on_wheel = {
+            let panel = panel.clone();
+            cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
+                v.builtins
+                    .scrolled_at
+                    .insert(panel.clone(), std::time::Instant::now());
+                // The thumb goes once the scrolling has stopped.
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+                cx.notify();
+            })
+        };
+        // Every panel body is a view of its own and a scroll layer (PM-311):
+        // a wheel step inside what it recorded replays it shifted, with no
+        // render or layout of the panel; its AppKit controls sit in the
+        // body's slot region and move with it (P-SLOT-REGION, PM-696).
+        let assets_slots = if id == pm_builtins::PROJECT_PANEL {
+            self.slot_elements("assets.toolbar", &t, window, cx)
+        } else if id == "inspector" {
+            self.slot_elements("inspector.top", &t, window, cx)
+        } else {
+            vec![]
+        };
+        let bottom_slots = if id == "inspector" {
+            self.slot_elements("inspector.bottom", &t, window, cx)
+        } else {
+            vec![]
+        };
+        // As tall as its content, at least its slot.
+        let height = view.read(cx).body_height(body);
+        let panel_body = self
+            .builtins
+            .bodies
+            .entry(id.into())
+            .or_insert_with(|| {
+                cx.new(|_| PanelBody {
+                    id: SharedString::from(format!("panel-body-{id}")),
+                    view: view.clone(),
+                    handle: handle.clone(),
+                    height,
+                })
+            })
+            .clone();
+        panel_body.update(cx, |b, cx| {
+            // Half a point: the content's height is measured again every frame.
+            if (b.height - height).abs() > 0.5 || b.view != view {
+                b.height = height;
+                b.view = view.clone();
+                cx.notify();
+            }
+        });
+        Some(
+            div()
+                .relative()
+                .w_full()
+                .h(px(body))
+                .flex()
+                .flex_col()
+                .on_scroll_wheel(on_wheel)
+                .children(assets_slots)
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .child(panel_body.cached(StyleRefinement::default().size_full())),
+                )
+                .children(bottom_slots)
+                .child(keep)
+                .children(thumb)
+                .into_any_element(),
+        )
+    }
+    /// Layer 3: instantiates and returns all live extension slot views targeting `slot_id`.
+    fn slot_elements(
+        &mut self,
+        slot_id: &str,
+        tokens: &pm_design::Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let suffix = format!("{}{slot_id}", pm_builtins::SLOT_PREFIX);
+        let ready_keys: Vec<String> = self
+            .builtins
+            .pending_slots
+            .keys()
+            .filter(|k| k.ends_with(&suffix))
+            .cloned()
+            .collect();
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            for key in ready_keys {
+                if let Some(publication) = self.builtins.pending_slots.remove(&key) {
+                    let natives = self.builtins.natives.clone();
+                    let t = tokens.clone();
+                    let rt = runtime.clone();
+                    let view = cx.new(|cx| SurfaceView::new(rt, publication, t, natives, window, cx));
+                    view.update(cx, |v, _| v.grows = true);
+                    self.builtins.slots.insert(key, view);
+                }
+            }
+        }
+        let matching: Vec<Entity<SurfaceView>> = self
+            .builtins
+            .slots
+            .iter()
+            .filter(|(k, _)| k.ends_with(&suffix))
+            .map(|(_, v)| v.clone())
+            .collect();
+        matching
+            .into_iter()
+            .map(|view| {
+                view.update(cx, |v, cx| {
+                    v.attach(window, cx);
+                    if v.tokens() != tokens {
+                        v.retheme(tokens.clone(), cx);
+                    }
+                });
+                div().w_full().flex_none().child(view).into_any_element()
+            })
+            .collect()
+    }
+    pub fn builtin_header(
+        &mut self,
+        id: &str,
+        bounds: pm_shell::layout::Rect,
+        tabbed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // Ensure the accepted header and body refer to the same native publication.
+        let _ = self.builtin_panel(id, bounds, window, cx);
+        let view = self.builtins.views.get(id)?.clone();
+        if !view.read(cx).has_header() {
+            return None;
+        }
+        let header = self
+            .builtins
+            .headers
+            .entry(id.into())
+            .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
+            .clone();
+        header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
+        // Beside a group's tabs the header's actions take their own width
+        // (the dock gives them a box as wide as its content): a cached view
+        // is laid out only by the style it is given, so one there, asked for
+        // the full width of a box sized by it, came out with none and the
+        // panel's + and menu did not show. Drawn in place instead.
+        if tabbed {
+            return Some(div().flex().h_full().child(header).into_any_element());
+        }
+        // Alone in its row: cached, drawn again only when its panel changes
+        // (it observes the panel), not with every frame the window draws.
+        let agent_pad = (id == "agent").then(|| {
+            let m = self.host.borrow().tokens.metrics;
+            ((m.agent_gap - m.pill_inset).max(0.), m.gap)
+        });
+        Some(
+            div()
+                .w_full()
+                .when_some(agent_pad, |d, (left, right)| d.pl(px(left)).pr(px(right)))
+                .child(header.cached(StyleRefinement::default().w_full()))
+                .into_any_element(),
+        )
+    }
+    /// Settings › General › Bring My Workspace…: Settings gives way to the
+    /// Agent panel, where a new thread asks for the After Effects workspace.
+    pub(crate) fn bring_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.message = "Open a project to bring your workspace into".into();
+            cx.notify();
+            return;
+        }
+        self.close_settings(cx);
+        window.activate();
+        self.show_builtin("agent", window, cx);
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        // The panel's backing opens with its window: wait for it off the
+        // main thread, then start the thread there too (it saves).
+        let started = cx.background_executor().spawn(async move {
+            let mut result = runtime.bring_workspace();
+            for _ in 0..50 {
+                if result.is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                result = runtime.bring_workspace();
+            }
+            result
+        });
+        cx.spawn(async move |this, cx| {
+            let result = started.await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(true) => "Bringing your After Effects workspace".into(),
+                    Ok(false) => {
+                        "Connect an agent, then send the request in the Agent panel".into()
+                    }
+                    Err(_) => "Could not start the workspace transfer. Try again.".into(),
+                };
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    pub(crate) fn sync_agent_button(&self, cx: &App) {
+        self.host.borrow().set_agent_button_context(
+            self.session.is_some(),
+            self.builtins.agent_shown || self.agent_open(cx),
+        );
+    }
+
+    fn sync_agent_launcher(&self, cx: &App) -> (Option<String>, usize) {
+        self.sync_agent_button(cx);
+        let Some(runtime) = &self.builtins.runtime else {
+            return (None, 0);
+        };
+        let (tasks, revision, active_thread) = runtime.agent_launcher_tasks();
+        let panel_open =
+            self.agent_open(cx) || (self.builtins.agent_docked && !self.builtins.agent_parked);
+        let snapshot = pm_shell::agent_launcher::Snapshot {
+            tasks: tasks
+                .into_iter()
+                .map(|(id, title, step, started_at, attention, running)| {
+                    pm_shell::agent_launcher::Task {
+                        id,
+                        title,
+                        step,
+                        started_at,
+                        attention,
+                        running,
+                    }
+                })
+                .collect(),
+            panel_open,
+            revision,
+            active_thread,
+        };
+        let presence = snapshot.run_summary().map_or((None, 0), |(newest, others)| {
+            ((!newest.step.is_empty()).then(|| newest.step.clone()), others)
+        });
+        self.host.borrow_mut().set_agent_launcher(snapshot);
+        presence
+    }
+    /// Whether the Agent popover is showing (or on its way).
+    pub fn agent_open(&self, cx: &App) -> bool {
+        self.builtins.opening_windows.contains("agent")
+            || self
+                .builtins
+                .windows
+                .get("agent")
+                .is_some_and(|w| cx.windows().contains(w))
+    }
+    /// The Agent popover goes away (Escape, a press outside it, the toolbar
+    /// item, the panel's own close). Its conversation, draft and runs stay
+    /// with the panel's model, so reopening shows them as they were.
+    /// The popover was dragged onto a dock target and the workspace docked
+    /// the panel there: the popover window goes, as Pin's does.
+    pub fn agent_dropped_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.builtins.windows.remove("agent") {
+            let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
+        self.builtins.agent_parked = false;
+        self.update_builtins(cx);
+        cx.notify();
+    }
+    pub fn close_agent(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.builtins.windows.remove("agent") else {
+            return;
+        };
+        let _ = handle.update(cx, |_, w, _| w.remove_window());
+        self.sync_agent_launcher(cx);
+        self.update_builtins(cx);
+        gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
+        cx.notify();
+    }
+    pub(crate) fn open_agent_from_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.builtins.agent_docked || self.builtins.agent_parked {
+            self.host.borrow().send_command("panel:activate:agent", vec![]);
+        } else {
+            self.show_builtin("agent", window, cx);
+        }
+    }
+
+    /// View ▸ Agent and its shortcut toggle the popover or parked panel.
+    pub fn toggle_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.builtins.agent_docked {
+            self.builtins.agent_parked = true;
+            self.host.borrow().send_command("panel:park:agent", vec![]);
+            return;
+        }
+        if std::mem::take(&mut self.builtins.agent_parked) {
+            self.host.borrow().send_command("panel:show:agent", vec![]);
+            return;
+        }
+        let dismissed = self.builtins.agent_dismissed.take();
+        match agent_toggle(self.agent_open(cx), dismissed.map(|at| at.elapsed())) {
+            AgentToggle::Close => self.close_agent(cx),
+            AgentToggle::Open => self.show_builtin("agent", window, cx),
+            AgentToggle::Keep => {}
+        }
+    }
+    /// The popover stopped being the key window. A press in its editor
+    /// (anywhere outside the popover) closes it; another window taking key
+    /// (Settings, a file picker, another app) leaves it open.
+    fn agent_resigned(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.agent_picking {
+            return;
+        }
+        let editor = self.close_window;
+        if agent_dismisses(
+            self.agent_open(cx),
+            editor.is_some() && cx.active_window() == editor,
+        ) {
+            self.close_agent(cx);
+            self.builtins.agent_dismissed = Some(std::time::Instant::now());
+        }
+    }
+    pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The Export sheet stands over a project in front: never over Home,
+        // whatever asked for it (PM-472).
+        if id == "export" && (self.session.is_none() || self.home_visible) {
+            return;
+        }
+        self.start_builtins(cx);
+        if id == "settings" {
+            // Settings › Media shows the protected folders as they are now,
+            // and Settings › Storage what both folders take now.
+            self.refresh_waiting_folders(cx);
+            self.refresh_storage(cx);
+            // Settings is a window of its own, one for the app (PM-375): an
+            // open one comes forward on the page asked for; one another
+            // editor hosts closes, and this editor's opens in its place.
+            self.take_settings_from_others(cx);
+            if let Some(existing) = self.builtins.windows.get(id).copied()
+                && existing.update(cx, |_, w, _| w.activate()).is_ok()
+            {
+                if let Some(page) = self.builtins.settings_page.take()
+                    && let Some(runtime) = self.builtins.runtime.clone()
+                {
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Ok(ticket) = runtime.show_section("settings", &page) {
+                                let _ = ticket.await;
+                            }
+                        })
+                        .detach();
+                }
+                return;
+            }
+        }
+        if self.builtins.opening_windows.contains(id) {
+            return;
+        }
+        if let Some(existing) = self.builtins.windows.get(id).copied()
+            && existing.update(cx, |_, w, _| w.activate()).is_ok()
+        {
+            return;
+        }
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        self.builtins.opening_windows.insert(id.into());
+        if id == "agent" { self.sync_agent_launcher(cx); }
+        let owner = cx.entity();
+        let panel = id.to_string();
+        let m = self.host.borrow().tokens.metrics;
+        let agent_minimum = (id == "agent").then(|| {
+            self.builtins.views.get("agent").map_or_else(
+                || self.host.borrow().tokens.agent_panel_minimum_height(),
+                |view| view.read(cx).agent_panel_minimum_height(),
+            )
+        });
+        let (width, height, kind) = match id {
+            "agent" => (
+                m.agent_width,
+                m.agent_height
+                    .min(f32::from(window.viewport_size().height) - m.toolbar - m.status - 2. * m.gap)
+                    .max(agent_minimum.unwrap()),
+                WindowKind::PopUp,
+            ),
+            "settings" => (
+                pm_shell::settings_window::default_size().0 as f32,
+                pm_shell::settings_window::default_size().1 as f32,
+                WindowKind::Normal,
+            ),
+            _ => (m.sheet_width_wide, m.settings_height, WindowKind::Dialog),
+        };
+        self.builtins
+            .window_sizes
+            .insert(id.into(), (width, height));
+        // The agent popover hangs from the toolbar's trailing Agent button;
+        // other panel windows cascade from the editor's top-left corner.
+        let editor = window.bounds();
+        let origin = if id == "agent" {
+            // Where it was last put down, still inside this window below
+            // its toolbar; else under the toolbar's Agent item.
+            let (x, y) = self.builtins.agent_place.unwrap_or((
+                f32::from(editor.size.width) - width - m.gap,
+                m.toolbar + m.gap,
+            ));
+            let x = x.min(f32::from(editor.size.width) - width).max(0.);
+            let y = y.min(f32::from(editor.size.height) - height).max(m.toolbar);
+            editor.origin + point(px(x), px(y))
+        } else {
+            editor.origin + point(px(m.toolbar), px(m.toolbar))
+        };
+        // Settings opens on the page asked for, else the one it was left on.
+        let page = (id == "settings")
+            .then(|| {
+                self.builtins
+                    .settings_page
+                    .take()
+                    .or_else(pm_shell::settings_window::remembered_section)
+            })
+            .flatten();
+        let id = id.to_owned();
+        let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
+        // Export is a sheet on the window that asked for it; the Agent popover
+        // sits above it as its child window (P-CHILD).
+        let parent = (kind != WindowKind::Normal).then(|| window.window_handle());
+        // Opening GPUI renders the new root synchronously. Do it after this
+        // Controller update so the window can acquire its published panel safely.
+        // The panel's first publication in this window already knows where it is shown.
+        let facts = self.facts(cx);
+        let export_inventory = (id == "export")
+            .then(|| self.published.as_ref())
+            .flatten()
+            .map(|p| {
+                (
+                    p.snapshot.clone(),
+                    crate::project_extensions::Inventory::new(self, &p.snapshot),
+                )
+            });
+        cx.spawn(async move |this, cx| {
+            let told = runtime.clone();
+            let page_for = page.clone();
+            let id_for = id.clone();
+            let show = async move {
+                told.update_facts(facts);
+                if let Some((snapshot, inventory)) = export_inventory {
+                    let bundle = inventory.collect(&snapshot, true);
+                    told.set_export_extensions(json!(bundle.entries));
+                }
+                let shown = match &page_for {
+                    Some(page) => told.show_section(&id_for, page),
+                    None => told.show(&id_for),
+                };
+                if let Ok(ticket) = shown {
+                    let _ = ticket.await;
+                }
+            };
+            // Settings' window comes up at once; its page fills in when the
+            // panel has shown (a first show can take a while).
+            if id == "settings" {
+                cx.background_executor().spawn(show).detach();
+            } else {
+                cx.background_executor().spawn(show).await;
+            }
+            let current = this
+                .update(cx, |v, _| {
+                    let current = v
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| Arc::ptr_eq(r, &runtime));
+                    // A stale open must not leave the panel marked as opening:
+                    // every later Settings/Export/Agent request would be ignored.
+                    if !current {
+                        v.builtins.opening_windows.remove(&id);
+                    }
+                    current
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let dialog = kind == WindowKind::Dialog;
+            let mut options = WindowOptions::new().kind(kind);
+            options.parent = parent;
+            if popover.is_some() {
+                // AppKit never drags the popover: the app moves it by its
+                // header (`popover_drag`), held in the editor, no event
+                // reaching what is under it.
+                options.is_movable = false;
+                options.window_min_size = agent_minimum.map(|height| size(px(m.min_panel), px(height)));
+                // Clear GPUI content over the native material (language §12).
+                options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
+            }
+            if dialog {
+                options.is_resizable = false;
+                options.is_minimizable = false;
+                options.is_movable = false;
+            }
+            let settings = panel == "settings";
+            let result = cx.open_window(
+                options
+                    // Settings uses AppKit chrome under its toolbar.
+                    .titlebar(settings.then(|| TitlebarOptions {
+                        title: Some("Settings".into()),
+                        appears_transparent: false,
+                        ..Default::default()
+                    }))
+                    .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                        origin,
+                        size(px(width), px(height)),
+                    )))),
+                |window, cx| {
+                    if let Some(tokens) = &popover {
+                        pm_shell::popover_frame(window, tokens);
+                    }
+                    cx.new(|cx| {
+                        cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+                        let keys = PopoverKeys::new(cx);
+                        // A sheet's Return and Escape reach it before
+                        // anything inside is clicked.
+                        if panel == "export" {
+                            keys.claim(window, cx);
+                        }
+                        if panel == "agent" {
+                            // Its own keys reach it from the first moment,
+                            // before anything inside is clicked.
+                            keys.claim(window, cx);
+                            // A press anywhere in the editor closes the
+                            // popover, as a popover does (the original app's
+                            // outside-press dismissal).
+                            cx.observe_window_activation(
+                                window,
+                                |this: &mut SurfaceWindow, window, cx| {
+                                    if window.is_window_active() {
+                                        // Key again (a reopen, a return from
+                                        // another window): Escape still reaches
+                                        // it with nothing inside focused.
+                                        this.keys.claim(window, cx);
+                                        return;
+                                    }
+                                    let owner = this.owner.clone();
+                                    cx.spawn(async move |_, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(60))
+                                            .await;
+                                        let _ = owner.update(cx, |v, cx| v.agent_resigned(cx));
+                                    })
+                                    .detach();
+                                },
+                            )
+                            .detach();
+                        }
+                        if panel == "settings" {
+                            cx.observe_window_appearance(
+                                window,
+                                |this: &mut SurfaceWindow, window, cx| {
+                                    if let Some(chrome) = &this.chrome {
+                                        chrome.update_sidebar_appearance();
+                                    }
+                                    cx.notify();
+                                    cx.spawn_in(window, async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(120))
+                                            .await;
+                                        let _ = this.update(cx, |_, cx| cx.notify());
+                                    })
+                                    .detach();
+                                },
+                            )
+                            .detach();
+                        }
+                        SurfaceWindow {
+                            owner,
+                            panel,
+                            keys,
+                            drag: None,
+                            cancelled_press: false,
+                            editor: parent,
+                            chrome: None,
+                        }
+                    })
+                },
+            );
+            let _ = this.update(cx, |v, cx| {
+                v.builtins.opening_windows.remove(&id);
+                let agent = id == "agent";
+                match result {
+                    Ok(handle) => {
+                        // The popover opens ready to type: its composer
+                        // takes the keys once mounted, those typed before it
+                        // included (`SurfaceView::focus_when_ready`).
+                        if id == "agent"
+                            && let Some(view) = v.builtins.views.get("agent").cloned()
+                        {
+                            view.update(cx, |view, cx| {
+                                view.focus_when_ready("agent-composer-text", cx)
+                            });
+                        }
+                        // Settings' AppKit frame goes on once GPUI hears its
+                        // view's size changes (after the window is built).
+                        if settings {
+                            let owner = cx.entity();
+                            cx.defer(move |cx| {
+                                let Ok(view) = handle.update(cx, |_, window, _| {
+                                    pm_shell::settings_window::gpui_view(window)
+                                }) else {
+                                    return;
+                                };
+                                let chrome = view.and_then(|view| {
+                                    crate::settings_window::install(view, owner, cx)
+                                });
+                                // AppKit's layout told GPUI of the view's new
+                                // size while the app was busy (here), which
+                                // GPUI drops: it reads it now.
+                                let _ = handle.update(cx, |w, window, cx| {
+                                    w.chrome = chrome;
+                                    window.bounds_changed(cx);
+                                });
+                            });
+                        }
+                        if settings {
+                            let owner = cx.entity().downgrade();
+                            v.builtins.settings_watch = Some(crate::settings_window::watch_close(
+                                handle.window_id(),
+                                move |cx| {
+                                    let _ = owner.update(cx, |v, cx| v.settings_closed(cx));
+                                },
+                                cx,
+                            ));
+                        }
+                        v.builtins.windows.insert(id, handle.into());
+                        // The panel learns where it is shown now (the
+                        // popover's header has Pin, the docked one does not).
+                        v.update_builtins(cx);
+                    }
+                    Err(error) => v.message = error.to_string(),
+                }
+                if agent {
+                    v.sync_agent_button(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// Closes the Export sheet. The sheet has no close button of its own.
+    pub(crate) fn close_export_sheet(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.builtins.windows.remove("export") {
+            let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
+    }
+    /// A viewer double-click on an imported model's part: Properties opens
+    /// and scrolls to that material slot's section (`None` leaves it).
+    pub fn focus_part(&mut self, layer: &str, slot: Option<u64>, cx: &mut Context<Self>) {
+        let seq = self.part_focus.as_ref().map_or(0, |f| f.2) + 1;
+        self.part_focus = slot.map(|slot| (layer.to_owned(), slot, seq));
+        self.update_builtins(cx);
+        if let Some(slot) = slot
+            && let Some(view) = self.builtins.views.get("inspector").cloned()
+        {
+            view.update(cx, |v, cx| {
+                v.reveal_semantic(format!("section:3d.part.{slot}"), cx)
+            });
+        }
+    }
+    pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(p) = &self.published else {
+            return;
+        };
+        if p.snapshot.open_comp().as_deref() == Some(id) {
+            return;
+        }
+        let Some(root) = p.snapshot.root() else {
+            return;
+        };
+        if pm_kernel::model::comp_node(root, Some(id)).is_none() {
+            return;
+        }
+        if let Some(viewer) = &self.viewer {
+            let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
+        }
+        self.call(
+            pm_kernel::Call::OpenComposition {
+                comp_id: id.into(),
+                document: p.snapshot.doc_id,
+            },
+            cx,
+        );
+    }
+    pub fn focus_builtin_group(
+        &mut self,
+        group: Option<String>,
+        clear_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = &self.published else {
+            return;
+        };
+        let Some(root) = p.snapshot.root() else {
+            return;
+        };
+        if let Some(id) = group.as_deref() {
+            let layers = pm_kernel::model::list_layers(root, None);
+            if !layers.iter().any(|l| l.id == id && l.kind == "group") {
+                return;
+            }
+        }
+        let current = pm_panel_timeline::focused_group_for_published(p);
+        if current == group {
+            return;
+        }
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let kernel = self.kernel.clone();
+        let next_group = group.clone();
+        cx.spawn(async move |_, _| {
+            use pm_kernel::state::{STATE_CHANGED, StateOp, StateTransaction};
+            let mut state = kernel.state();
+            for attempt in 1..=8 {
+                let mut ui = state.ui.get(&project).cloned().unwrap_or_default();
+                let mut timeline = ui.timeline.as_object().cloned().unwrap_or_default();
+                let mut native = timeline
+                    .get("nativeModel")
+                    .and_then(pm_model::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                native.insert(
+                    "focusedGroup",
+                    next_group
+                        .as_deref()
+                        .map(pm_model::Value::from)
+                        .unwrap_or(pm_model::Value::Null),
+                );
+                timeline.insert("nativeModel", pm_model::Value::Object(native));
+                ui.timeline = pm_model::Value::Object(timeline);
+                match kernel
+                    .state_transaction(StateTransaction {
+                        expected_revision: Some(state.revision),
+                        ops: vec![StateOp::Ui {
+                            project: project.clone(),
+                            next: ui,
+                        }],
+                    })
+                    .await
+                {
+                    Some(Ok(_)) | None => break,
+                    Some(Err(pm_kernel::KernelFailure::Storage(m)))
+                        if m == STATE_CHANGED && attempt < 8 =>
+                    {
+                        state = kernel.state();
+                    }
+                    Some(Err(_)) => break,
+                }
+            }
+        })
+        .detach();
+        if clear_selection {
+            self.call(
+                pm_kernel::SelectionCall::Layers {
+                    ids: Vec::new(),
+                    add: false,
+                }
+                .user()
+                .into(),
+                cx,
+            );
+        }
+    }
+    pub fn builtin_platform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        while let Some(request) = self.builtins.requests.pop_front() {
+            // The Export sheet asks for its 3D estimate from its first
+            // snapshot, before the panel is marked ready. The request only
+            // asks the viewer to measure and edits nothing, so it never
+            // waits on the panel.
+            let measure_only = answers_before_ready(&request.operation);
+            if !measure_only
+                && (!self.builtins.ready.contains(&request.panel)
+                    || self.builtins.generations.get(&request.panel) != Some(&request.generation))
+            {
+                runtime.platform_reply(request.id, Err("Panel is not ready".into()));
+                continue;
+            }
+            let result = match request.operation.as_str() {
+                "timeline.effect" | "viewer.action" => {
+                    match request.input["kind"].as_str() {
+                        Some("seek") => {
+                            if let Some(time) = request.input["time"].as_f64() {
+                                self.seek(time);
+                            }
+                        }
+                        Some("status") => {
+                            if let Some(message) = request.input["message"].as_str() {
+                                self.note(message.to_owned(), cx);
+                            }
+                        }
+                        Some("pause") => {
+                            if let Some(viewer) = &self.viewer {
+                                let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
+                            }
+                        }
+                        Some("command") => {
+                            let name = request.input["name"].as_str().unwrap_or("");
+                            let args = request.input["args"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default();
+                            self.host.borrow().send_command(name, args);
+                        }
+                        Some("compositionSettings") => {
+                            self.composition_sheet(
+                                true,
+                                request.input["id"].as_str().map(str::to_owned),
+                                cx,
+                            );
+                        }
+                        Some("openComposition") => {
+                            self.open_builtin_composition(
+                                request.input["id"].as_str().unwrap_or(""),
+                                cx,
+                            );
+                        }
+                        Some("focusGroup") => {
+                            let group = request.input["id"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned);
+                            self.focus_builtin_group(group, true, cx);
+                        }
+                        _ => {
+                            self.message =
+                                format!("Native action unavailable: {}", request.input["action"])
+                        }
+                    }
+                    Ok(Value::Null)
+                }
+                "project.effect" => {
+                    match serde_json::from_value::<pm_panel_media::HostRequest>(
+                        request.input.clone(),
+                    ) {
+                        Ok(effect)
+                            if self.published.as_ref().is_some_and(|p| {
+                                p.project == effect.owner.project
+                                    && p.snapshot.doc_id == effect.owner.document
+                                    && p.revision() == effect.owner.revision
+                            }) =>
+                        {
+                            match effect.effect {
+                                pm_panel_media::Effect::Deleted { message } => {
+                                    let owner = effect.owner;
+                                    crate::v4_native::announce(&self.host.borrow().window, &message);
+                                    let kernel = self.kernel.clone();
+                                    self.action_toast = Some(cx.new(|cx| {
+                                        crate::action_toast::ToastView::new(
+                                            message,
+                                            move |cx| {
+                                                let pending = kernel.call(
+                                                    &owner.project,
+                                                    pm_kernel::Request::new(
+                                                        pm_kernel::Caller::native(),
+                                                        pm_kernel::HistoryCall::Undo,
+                                                    )
+                                                    .with_document(owner.document)
+                                                    .outside_revision(owner.revision),
+                                                );
+                                                cx.spawn(async move |_| {
+                                                    let _ = pending.await;
+                                                })
+                                                .detach();
+                                            },
+                                            cx,
+                                        )
+                                    }));
+                                    cx.notify();
+                                }
+                                pm_panel_media::Effect::OpenComposition(id) => {
+                                    self.open_builtin_composition(&id, cx)
+                                }
+                                pm_panel_media::Effect::CompositionSettings(id) => {
+                                    self.composition_sheet(true, Some(id), cx)
+                                }
+                                pm_panel_media::Effect::NewComposition => {
+                                    self.composition_sheet(false, None, cx)
+                                }
+                                pm_panel_media::Effect::Reveal { path, .. } => {
+                                    let path = std::path::Path::new(&path);
+                                    if path.exists() {
+                                        crate::platform::reveal(path);
+                                    }
+                                }
+                                pm_panel_media::Effect::PickFiles { replace } => {
+                                    let place = replace.is_none();
+                                    self.pick_media(replace, place, cx)
+                                }
+                                pm_panel_media::Effect::PickFolder { folder } => {
+                                    self.pick_media_folder(folder, cx)
+                                }
+                                // A drop on the panel: assets only, no layers. Option
+                                // keeps a dropped folder's files apart instead of
+                                // offering them as a sequence.
+                                pm_panel_media::Effect::Import {
+                                    files,
+                                    folder,
+                                    as_folder,
+                                } => self.import_to_panel(
+                                    files.into_iter().map(Into::into).collect(),
+                                    folder,
+                                    as_folder,
+                                    cx,
+                                ),
+                                pm_panel_media::Effect::Renditions { action, assets } => {
+                                    self.renditions(action, assets, cx)
+                                }
+                                // Space on the selection: Quick Look, as in Finder.
+                                pm_panel_media::Effect::TogglePreview(id)
+                                | pm_panel_media::Effect::ShowPreview(id) => {
+                                    let selection = self
+                                        .builtins
+                                        .runtime
+                                        .as_ref()
+                                        .map(|r| r.project_selection())
+                                        .unwrap_or_default();
+                                    let names = self.asset_names();
+                                    let files = quick_look_files(
+                                        &selection,
+                                        &id,
+                                        &self.media_base.originals,
+                                    )
+                                    .into_iter()
+                                    .map(|(id, path)| {
+                                        let name = names.get(&id).cloned().unwrap_or_else(|| {
+                                            path.file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default()
+                                        });
+                                        (path, name)
+                                    })
+                                    .collect();
+                                    crate::quick_look::toggle(files);
+                                }
+                                // Double-click or Return on a ready item, and the
+                                // item menus (v1 `addFromAsset`, `Comps.fromAsset`,
+                                // `Comps.addToTimeline`).
+                                pm_panel_media::Effect::AddAsset(id) => {
+                                    self.add_to_timeline(&[id], &[], cx)
+                                }
+                                pm_panel_media::Effect::NestComposition(id) => {
+                                    self.add_to_timeline(&[], &[id], cx)
+                                }
+                                pm_panel_media::Effect::NewCompFromAsset(id) => {
+                                    self.new_comp_from_asset(&id, cx)
+                                }
+                                pm_panel_media::Effect::InterpretFootage(id) => {
+                                    self.interpret_asset_sheet(id, cx)
+                                }
+                                pm_panel_media::Effect::ConfirmDelete {
+                                    token,
+                                    assets,
+                                    references,
+                                } => self.confirm_delete_media(
+                                    effect.owner.clone(),
+                                    token,
+                                    &assets,
+                                    references,
+                                    cx,
+                                ),
+                                pm_panel_media::Effect::Focus(_)
+                                | pm_panel_media::Effect::ClearPreview => {}
+                                other => {
+                                    self.message =
+                                        format!("Native media action unavailable: {other:?}")
+                                }
+                            }
+                            Ok(Value::Null)
+                        }
+                        _ => Err("Media action belongs to a retired publication".into()),
+                    }
+                }
+                "media.settings" => {
+                    self.media_settings(&request.input, cx);
+                    Ok(Value::Null)
+                }
+                "storage.settings" => {
+                    self.storage_settings(&request.input, cx);
+                    Ok(Value::Null)
+                }
+                // The Export sheet's 3D estimate: the viewer measures the
+                // shot on its idle worker; the state comes back in the facts.
+                "export.estimate" => {
+                    let n = |k: &str| request.input[k].as_u64().unwrap_or(0);
+                    // Measure the viewer's current scene (its stamp, not the
+                    // last drawn frame's, which may already be superseded).
+                    if let Some(viewer) = &self.viewer
+                        && let Some(stamp) = viewer.stamp()
+                        && n("width") > 0
+                        && n("height") > 0
+                    {
+                        let time = viewer
+                            .status()
+                            .frame
+                            .map_or(pm_protocol::common::Ticks::ZERO, |f| f.time);
+                        if let Err(error) = viewer.estimate_studio_export_scaled(
+                            stamp,
+                            time,
+                            pm_protocol::common::Size::new(n("width") as u32, n("height") as u32),
+                            n("frames").max(1),
+                            request.input["renderScale"].as_f64().unwrap_or(1.) as f32,
+                        ) {
+                            eprintln!("Studio export estimate not started: {error}");
+                        }
+                    }
+                    Ok(Value::Null)
+                }
+                "export.begin" | "export.retry" | "export.without" => {
+                    // The 3D estimate measures the GPU the export now uses.
+                    if let Some(viewer) = &self.viewer {
+                        viewer.cancel_export_estimate("an export started");
+                    }
+                    self.begin_builtin_export(
+                        request.input.clone(),
+                        request.operation != "export.begin",
+                        request.operation == "export.without",
+                        cx,
+                    );
+                    Ok(Value::Null)
+                }
+                "export.destination.choose" => {
+                    self.choose_builtin_export_destination(request.input.clone(), cx);
+                    Ok(Value::Null)
+                }
+                "export.queue.add" => {
+                    self.begin_export_mode(request.input["options"].clone(), false, false, true, cx);
+                    Ok(Value::Null)
+                }
+                "export.queue.list" => { self.publish_render_queue(); Ok(Value::Null) }
+                "export.queue.render" => { self.render_pending(cx); Ok(Value::Null) }
+                "export.queue.action" => {
+                    let id = request.input["id"].as_u64().unwrap_or(0);
+                    let action = request.input["action"].as_str().unwrap_or("").to_owned();
+                    let retry = action == "retry";
+                    let store = crate::render_queue::store(&self.profile);
+                    let runtime = runtime.clone();
+                    let queue_runtime = runtime.clone();
+                    let reply = store.submit(move |queue| {
+                        let result = queue.action(id, &action);
+                        let _ = queue_runtime.observe_render_queue(queue.projection());
+                        result
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let result = reply.recv().await
+                            .unwrap_or_else(|_| Err("Render queue worker stopped".into()));
+                        if retry && result.is_ok() {
+                            let _ = this.update(cx, |v, cx| v.render_pending(cx));
+                        }
+                        runtime.platform_reply(request.id, result.map(|_| Value::Null));
+                    }).detach();
+                    continue;
+                }
+                "export.queue.finder" => {
+                    let id = request.input["id"].as_u64().unwrap_or(0);
+                    let store = crate::render_queue::store(&self.profile);
+                    cx.spawn(async move |_, _| {
+                        if let Ok(Some(path)) = store.run(move |queue| Ok(queue.completed_path(id))).await {
+                            crate::platform::reveal(&path);
+                        }
+                    }).detach();
+                    Ok(Value::Null)
+                }
+                "export.cancel" => {
+                    if let Some(job) = &self.builtins.export_job {
+                        // Worker observes the flag and publishes terminal state
+                        // only after the child is reaped and cleanup completes.
+                        job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                    } else {
+                        let _ = runtime.observe_export(json!({"phase":"cancelled"}));
+                        self.close_export_sheet(cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "export.showInFinder" => {
+                    if let Some(path) = request.input["path"].as_str() {
+                        crate::platform::reveal(std::path::Path::new(path));
+                    }
+                    Ok(Value::Null)
+                }
+                "export.reveal" => {
+                    self.show_builtin("export", window, cx);
+                    Ok(Value::Null)
+                }
+                "export.dismiss" => {
+                    self.close_export_sheet(cx);
+                    Ok(Value::Null)
+                }
+                "activatePanel" => {
+                    if let Some(id) = request.input.as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:show:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "command" => {
+                    let name = request.input["name"].as_str().unwrap_or("");
+                    let args = request.input["args"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    self.host.borrow().send_command(name, args);
+                    Ok(Value::Null)
+                }
+                "focus"
+                    if request.input.as_str() == Some("settings.search")
+                        && self.builtins.settings_chrome.is_some() =>
+                {
+                    if let Some(chrome) = &self.builtins.settings_chrome {
+                        chrome.focus_search();
+                    }
+                    Ok(Value::Null)
+                }
+                "focus" => {
+                    if let Some(id) = request.input.as_str()
+                        && let Some(view) = self.builtins.views.get(&request.panel)
+                    {
+                        view.update(cx, |v, cx| v.focus_semantic(id, window, cx));
+                    }
+                    Ok(Value::Null)
+                }
+                "announce" => {
+                    if let Some(message) = request.input.as_str() {
+                        crate::v4_native::announce(&self.host.borrow().window, message);
+                    }
+                    Ok(Value::Null)
+                }
+                // Aero on Free: Checkout for the plan the backend offers.
+                "agent.subscribe" => {
+                    crate::cloud::subscribe_offered(cx);
+                    Ok(Value::Null)
+                }
+                "agent.settings" => {
+                    // Aero on Free or out of credits: its plans are on
+                    // Settings › Account (Subscribe…, Upgrade…).
+                    let plans = self
+                        .builtins
+                        .runtime
+                        .as_ref()
+                        .and_then(|r| r.agent_accounts())
+                        .is_some_and(|a| match a.aero() {
+                            pm_agents::inference::Standing::Free(_) => true,
+                            pm_agents::inference::Standing::Ready { billing, .. } => {
+                                billing.remaining == 0
+                            }
+                            _ => false,
+                        });
+                    if plans {
+                        self.builtins.settings_page = Some("account".into());
+                    } else if self.builtins.providers {
+                        self.builtins.settings_page = Some("providers".into());
+                    }
+                    self.show_builtin("settings", window, cx);
+                    Ok(Value::Null)
+                }
+                // Select part of the screen (v1's): the popover gives way to a
+                // crosshair over the editor; what is selected is attached, and
+                // the popover comes back either way.
+                "agent.pickRegion" => 'pick: {
+                    let (Some(project), Some(thread)) = (
+                        request.input["project"].as_str(),
+                        request.input["thread"].as_str(),
+                    ) else {
+                        break 'pick Err("The attachment's thread is unavailable.".into());
+                    };
+                    let (project, thread) = (project.to_owned(), thread.to_owned());
+                    if self.builtins.agent_picking {
+                        break 'pick Ok(Value::Null);
+                    }
+                    let editor = self.host.borrow().window.clone();
+                    let current = window.window_handle();
+                    let native = crate::platform::ns_window(window);
+                    let editor_handle = native.as_ref()
+                        .filter(|native| {
+                            objc2::rc::Retained::as_ptr(native) == objc2::rc::Retained::as_ptr(&editor)
+                        })
+                        .map(|_| current)
+                        .or(self.close_window);
+                    let Some(editor_handle) = editor_handle else {
+                        break 'pick Err("The editor window is unavailable.".into());
+                    };
+                    let popover_handle = self.builtins.windows.get("agent").copied();
+                    self.builtins.agent_picking = true;
+                    let gizmos = self.builtins.gizmos.clone();
+                    // The box is attached only to the document it was drawn
+                    // over: closing or replacing the project cancels the
+                    // pick, and a late answer is checked again here.
+                    let document = self.session.as_ref().map(|s| s.project.clone())
+                        .zip(self.published.as_ref().map(|p| p.snapshot.doc_id));
+                    cx.spawn(async move |this, cx| {
+                        let popover = popover_handle.and_then(|handle| {
+                            if handle == current {
+                                native
+                            } else {
+                                handle.update(cx, |_, w, _| crate::platform::ns_window(w))
+                                    .ok().flatten()
+                            }
+                        });
+                        if let Some(gizmos) = gizmos {
+                            gizmos.update(cx, |g, cx| g.clear_hover(cx));
+                        }
+                        // AppKit sends delegate callbacks synchronously. Leave
+                        // both GPUI's app and entity updates before ordering windows.
+                        if let Some(popover) = &popover {
+                            if let Some(parent) = popover.parentWindow() {
+                                parent.removeChildWindow(popover);
+                            }
+                            popover.orderOut(None);
+                            if editor.isVisible() && !editor.isKeyWindow() {
+                                editor.makeKeyWindow();
+                            }
+                        }
+                        let picked = pm_shell::region_pick::pick(&editor).recv().await.ok().flatten();
+                        if let Some(rect) = picked {
+                            let _ = editor_handle.update(cx, |_, window, cx| {
+                                let _ = this.update(cx, |v, cx| {
+                                    let now = v.session.as_ref().map(|s| s.project.clone())
+                                        .zip(v.published.as_ref().map(|p| p.snapshot.doc_id));
+                                    if document.is_some() && now == document {
+                                        v.attach_region(rect, project, thread, window, cx)
+                                    }
+                                });
+                            });
+                        }
+                        // The editor update flushes its deferred capture before
+                        // the popover is ordered back in.
+                        let restore = this.update(cx, |v, _| {
+                            v.builtins.agent_picking = false;
+                            popover_handle.is_some()
+                                && v.builtins.windows.get("agent").copied() == popover_handle
+                        }).unwrap_or(false);
+                        if restore && editor.isVisible() && let Some(popover) = popover {
+                            let key = editor.isKeyWindow();
+                            gpui_macos::child_window::attach(&popover, &editor);
+                            gpui_macos::child_window::show(&popover, key);
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                "agent.previewAttachment" => {
+                    let record = request.input.clone();
+                    let name = record["name"].as_str().unwrap_or("Attachment").to_owned();
+                    cx.spawn(async move |this, cx| {
+                        let file = cx
+                            .background_executor()
+                            .spawn(async move { crate::media::attachment_preview_path(&record) })
+                            .await;
+                        let _ = this.update(cx, |v, cx| match file {
+                            Ok(path) => crate::quick_look::show(vec![(path, name)]),
+                            Err(message) => {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                "agent.attachInput" => {
+                    let paths: Vec<std::path::PathBuf> = request.input["paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(Into::into)
+                        .collect();
+                    let project = request.input["project"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let thread = request.input["thread"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let runtime = self.builtins.runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let records = crate::media::attachment_records(&paths)?;
+                                runtime
+                                    .ok_or("The Agent panel closed.")?
+                                    .agent_attach_for(&project, &thread, records)
+                            })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                "agent.attach" => {
+                    let target = crate::platform::ns_window(window)
+                        .unwrap_or_else(|| self.host.borrow().window.clone());
+                    let chosen = crate::platform::attach_paths(&target);
+                    let runtime = self.builtins.runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        let Ok(paths) = chosen.recv().await else {
+                            return;
+                        };
+                        if paths.is_empty() {
+                            return;
+                        }
+                        // Reading and encoding the files stays off the main thread.
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let records = crate::media::attachment_records(&paths)?;
+                                match runtime {
+                                    Some(runtime) => runtime.agent_attach(records),
+                                    None => Err("The Agent panel closed.".into()),
+                                }
+                            })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                "agent.open" => {
+                    self.show_builtin("agent", window, cx);
+                    Ok(Value::Null)
+                }
+                "agent.visual" => {
+                    let input = &request.input;
+                    let dark = self.host.borrow().tokens.scheme == pm_design::Scheme::Dark;
+                    let document = pm_agents::visual::document(
+                        input["html"].as_str().unwrap_or_default(),
+                        dark,
+                    );
+                    let parent = crate::platform::ns_window(window)
+                        .unwrap_or_else(|| self.host.borrow().window.clone());
+                    let viewer = pm_compat_host::visual::show(
+                        Some(&parent),
+                        input["id"].as_str().unwrap_or_default(),
+                        input["title"].as_str().unwrap_or("Visualization"),
+                        &document,
+                        input["height"].as_f64().unwrap_or(360.),
+                    );
+                    // An ordinary window: forward only while Powermove is
+                    // active, otherwise behind the other apps (P-CHILD).
+                    gpui_macos::child_window::present(&viewer, true);
+                    Ok(Value::Null)
+                }
+                "agent.media" => {
+                    // A file or address a reply names. The reply chose the path,
+                    // so the file is resolved and checked off the main thread
+                    // (a real image, video or sound, never an app or a link to
+                    // one) and opened as a document; a web address goes to the
+                    // browser only when it is http(s).
+                    let input = request.input.clone();
+                    let path = input["path"].as_str().unwrap_or_default().to_owned();
+                    let reveal = input["reveal"] == true;
+                    if input["remote"] == true {
+                        if !(pm_services::surfaces::agent_reply::safe_link(&path)
+                            && crate::platform::open_url(&path))
+                        {
+                            self.errors
+                                .borrow_mut()
+                                .tell("Agent", "That address couldn’t be opened.");
+                        }
+                    } else {
+                        cx.spawn(async move |this, cx| {
+                            let resolved = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    crate::platform::media_document(std::path::Path::new(&path))
+                                })
+                                .await;
+                            let outcome = match resolved {
+                                Ok(file) => {
+                                    if reveal {
+                                        crate::platform::reveal(&file);
+                                        Ok(())
+                                    } else if !crate::platform::open_document(&file) {
+                                        Err("No app on this Mac opens that file.")
+                                    } else {
+                                        Ok(())
+                                    }
+                                }
+                                Err(message) => Err(message),
+                            };
+                            if let Err(message) = outcome {
+                                let _ = this.update(cx, |v, cx| {
+                                    v.errors.borrow_mut().tell("Agent", message);
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
+                    }
+                    Ok(Value::Null)
+                }
+                // Escape in the docked composer: it lets go of the keyboard
+                // and the editor has it again (Space plays).
+                "agent.blur" => {
+                    if let Some(view) = self.builtins.views.get("agent").cloned() {
+                        view.update(cx, |v, cx| v.blur_semantic("agent-composer-text", cx));
+                    }
+                    Ok(Value::Null)
+                }
+                "agent.close" => {
+                    // Docked, Close takes it out of the workspace and the
+                    // popover opens again (`returns_to_popover`, agent-panel.md §1).
+                    if self.builtins.agent_docked {
+                        self.host.borrow().send_command("panel:close:agent", vec![]);
+                    }
+                    self.close_agent(cx);
+                    Ok(Value::Null)
+                }
+                // Pin to Workspace: the popover closes and the panel docks
+                // beside Properties, saved with the workspace's layout.
+                "agent.pin" => {
+                    if let Some(handle) = self.builtins.windows.remove("agent") {
+                        let _ = handle.update(cx, |_, w, _| w.remove_window());
+                    }
+                    self.builtins.agent_parked = false;
+                    self.host.borrow().send_command("panel:show:agent", vec![]);
+                    self.update_builtins(cx);
+                    Ok(Value::Null)
+                }
+                // Delete Thread asks first, as v1's PM.confirm.
+                "agent.delete" => {
+                    let thread = request.input["thread"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let title = request.input["title"].as_str().unwrap_or("this thread");
+                    let detail = if request.input["busy"] == true {
+                        "This stops its run and removes the thread’s history. This cannot be undone."
+                    } else {
+                        "This removes the thread’s history. This cannot be undone."
+                    };
+                    let detail = if request.input["subthreads"].as_u64().unwrap_or(0) > 0 {
+                        format!("{detail} This includes its subthreads.")
+                    } else {
+                        detail.to_owned()
+                    };
+                    use crate::alert::{Alert, Button};
+                    let rx = Alert::new(
+                        format!("Delete “{title}”?"),
+                        detail,
+                        vec![
+                            Button::new("Delete Thread", true).default().destructive(),
+                            Button::new("Cancel", false).cancel(),
+                        ],
+                    )
+                    .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        if rx.recv().await != Ok(Some(true)) {
+                            return;
+                        }
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move { runtime.agent_delete_thread(&thread) })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                // Full access asks first (language §9), as v1's consent.
+                "agent.consent" => {
+                    let effect = request.input["effect"].as_u64().unwrap_or_default();
+                    use crate::alert::{Alert, Button};
+                    // The request comes through the editor's window, never
+                    // the popover's: the sheet's window is looked up.
+                    let on: objc2::rc::Retained<objc2_app_kit::NSWindow> = consent_window(
+                        self.agent_popover_window(cx),
+                        crate::platform::ns_window(window),
+                        self.host.borrow().window.clone(),
+                    );
+                    let rx = Alert::new(
+                        "Give the agent full access?",
+                        "It can run commands and edit files anywhere on this Mac without asking. Choose this only for work you trust.",
+                        vec![
+                            Button::new("Allow Full Access", true).default(),
+                            Button::new("Cancel", false).cancel(),
+                        ],
+                    )
+                    .critical()
+                    // On the popover itself, as its file picker is: on the
+                    // editor it took key from the popover, which closed, and
+                    // the person had to open it again to send (PM-507).
+                    .sheet(&on);
+                    self.builtins.agent_picking = true;
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = this.update(cx, |v, _| v.builtins.agent_picking = false);
+                        let _ = cx
+                            .background_executor()
+                            .spawn(async move { runtime.agent_consent(effect, accepted) })
+                            .await;
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                "settings.present" => {
+                    self.show_builtin("settings", window, cx);
+                    Ok(Value::Null)
+                }
+                "settings.close" => {
+                    self.close_settings(cx);
+                    Ok(Value::Null)
+                }
+                // The window's title and sidebar follow `settings.sidebar`.
+                "settings.title" => Ok(Value::Null),
+                "settings.sidebar" => {
+                    self.settings_sidebar(&request.input, cx);
+                    Ok(Value::Null)
+                }
+                // The header's project picker and Show in Finder.
+                "settings.project" => {
+                    if let Some(id) = request.input.as_str() {
+                        self.settings_for_project(id, cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "settings.reveal" => {
+                    if let Some(path) = self.path.clone() {
+                        crate::platform::reveal(&path);
+                    }
+                    Ok(Value::Null)
+                }
+                "settings.scroll" => {
+                    if let Some(section) = request.input["section"].as_str()
+                        && let Some(form) = &mut self.builtins.settings_form
+                    {
+                        form.reveal(section);
+                    }
+                    Ok(Value::Null)
+                }
+                "contextMenu" => {
+                    let options = request.input.as_array().cloned().unwrap_or_default();
+                    let selected = options.clone();
+                    let runtime = runtime.clone();
+                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                        let value = index
+                            .and_then(|index| crate::v4_native::menu_item(&selected, index))
+                            .and_then(|item| item.get("id"))
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        runtime.platform_reply(request.id, Ok(value));
+                    });
+                    continue;
+                }
+                "effectMenu" => {
+                    let options = crate::v4_native::effect_options(&self.kernel.state());
+                    let selected = options.clone();
+                    let runtime = runtime.clone();
+                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                        runtime.platform_reply(
+                            request.id,
+                            Ok(index
+                                .and_then(|index| crate::v4_native::menu_item(&selected, index))
+                                .and_then(|item| item.get("id"))
+                                .cloned()
+                                .unwrap_or(Value::Null)),
+                        );
+                    });
+                    continue;
+                }
+                "fontMenu" => {
+                    self.font_menu(&runtime, &request, window, cx);
+                    continue;
+                }
+                "partMenu" => {
+                    self.part_menu(&runtime, &request, cx);
+                    continue;
+                }
+                "partPick" => {
+                    if let Some(layer) = request.input["layer"].as_str() {
+                        self.part_pick_mode(layer.to_owned(), cx);
+                    }
+                    runtime.platform_reply(request.id, Ok(Value::Null));
+                    continue;
+                }
+                "agentMenu" => {
+                    self.agent_menu(&runtime, &request, cx);
+                    continue;
+                }
+                // The Project panel's list/grid choice, kept in the
+                // profile: `{view}` saves it; without one, the saved one
+                // (list until the person chooses).
+                // The Project panel's list/grid choice, kept per project in
+                // the profile (`Project/view.json`: project id to view):
+                // `{view}` saves the open project's; without one, its saved
+                // choice, a grid until the person chooses (v1.2.0's panel was
+                // a grid).
+                "project.view" => {
+                    let path = self.profile.join("Project").join("view.json");
+                    let project = self.session.as_ref().map(|s| s.project.clone());
+                    let view = request.input["view"].as_str().map(str::to_owned);
+                    let runtime = runtime.clone();
+                    let io = cx
+                        .background_executor()
+                        .spawn(async move { project_view(&path, project.as_deref(), view) });
+                    cx.spawn(async move |this, cx| {
+                        let reply = io.await;
+                        if reply.as_deref() == Ok("grid") {
+                            let _ = this.update(cx, |c, cx| c.show_thumbnails(cx));
+                        }
+                        runtime.platform_reply(request.id, reply.map(Value::from));
+                    })
+                    .detach();
+                    continue;
+                }
+                "project.menu" => {
+                    let options = request.input["entries"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    let runtime = runtime.clone();
+                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                        runtime.platform_reply(request.id, Ok(json!(index)));
+                    });
+                    continue;
+                }
+                // ---- Layer 5: Workspace Control & Native Dialogs ----------------
+                "ext.workspace.openPanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:show:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.closePanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:close:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.focusPanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        self.host
+                            .borrow()
+                            .send_command(&format!("panel:activate:{id}"), vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.togglePanel" => {
+                    if let Some(id) = request.input["id"].as_str() {
+                        let cmd = if self.builtins.open.contains(id) {
+                            format!("panel:close:{id}")
+                        } else {
+                            format!("panel:show:{id}")
+                        };
+                        self.host.borrow().send_command(&cmd, vec![]);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.getLayout" => Ok(json!({
+                    "openPanels": self.builtins.open.iter().cloned().collect::<Vec<_>>(),
+                    "shownPanels": self.builtins.shown.iter().cloned().collect::<Vec<_>>(),
+                    "contributedPanels": self.extensions.contributed.iter().map(|(id, title)| json!({"id": id, "title": title})).collect::<Vec<_>>(),
+                    "tool": self.tool,
+                })),
+                "ext.workspace.runCommand" => {
+                    if let Some(name) = request.input["name"].as_str() {
+                        let args = request.input["args"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        self.host.borrow().send_command(name, args);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.notify" => {
+                    if let Some(msg) = request.input["message"].as_str() {
+                        self.note(msg.to_owned(), cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.workspace.setTool" => {
+                    let target = request.input["tool"].as_str();
+                    let next = match target {
+                        None | Some("") => "toolSelect".to_owned(),
+                        Some(id) if id.starts_with("tool") || id.starts_with(crate::extensions::V4_TOOL) => {
+                            id.to_owned()
+                        }
+                        Some(id) => format!("{}{}:{id}", crate::extensions::V4_TOOL, request.panel),
+                    };
+                    self.host.borrow().send_command(&next, vec![]);
+                    Ok(Value::Null)
+                }
+                "ext.dialogs.openFolder" | "ext.dialogs.openFiles" => {
+                    let folders_only = request.operation == "ext.dialogs.openFolder";
+                    let files = !folders_only;
+                    let folders = folders_only
+                        || request.input["canChooseDirectories"].as_bool().unwrap_or(false);
+                    let multiple = request.input["multiple"].as_bool().unwrap_or(!folders_only);
+                    let show_hidden = request.input["showHidden"].as_bool().unwrap_or(true);
+                    let extensions: Vec<String> = request.input["extensions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    let title = request.input["title"].as_str();
+                    let message = request.input["message"].as_str();
+                    let default_path = request.input["defaultPath"]
+                        .as_str()
+                        .and_then(|p| crate::ext_capabilities::expand_path(p).ok());
+                    let rx = crate::platform::ext_open_dialog(
+                        &self.host.borrow().window,
+                        files,
+                        folders,
+                        multiple,
+                        show_hidden,
+                        &extensions,
+                        title,
+                        message,
+                        default_path.as_deref(),
+                    );
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let chosen = rx.recv().await.ok().flatten();
+                        let reply = match chosen {
+                            Some(paths) => Value::Array(
+                                paths
+                                    .into_iter()
+                                    .map(|p| json!(p.to_string_lossy()))
+                                    .collect(),
+                            ),
+                            None => Value::Null,
+                        };
+                        runtime.platform_reply(request.id, Ok(reply));
+                    })
+                    .detach();
+                    continue;
+                }
+                "ext.dialogs.saveFile" => {
+                    let extensions: Vec<String> = request.input["extensions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    let title = request.input["title"].as_str();
+                    let message = request.input["message"].as_str();
+                    let default_name = request.input["defaultName"].as_str();
+                    let default_path = request.input["defaultPath"]
+                        .as_str()
+                        .and_then(|p| crate::ext_capabilities::expand_path(p).ok());
+                    let rx = crate::platform::ext_save_dialog(
+                        &self.host.borrow().window,
+                        title,
+                        message,
+                        default_path.as_deref(),
+                        default_name,
+                        &extensions,
+                    );
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let chosen = rx.recv().await.ok().flatten();
+                        let reply = chosen
+                            .map(|p| json!(p.to_string_lossy()))
+                            .unwrap_or(Value::Null);
+                        runtime.platform_reply(request.id, Ok(reply));
+                    })
+                    .detach();
+                    continue;
+                }
+                "ext.dialogs.confirm" => {
+                    use crate::alert::{Alert, Button};
+                    let title = request.input["title"]
+                        .as_str()
+                        .unwrap_or("Confirm")
+                        .to_owned();
+                    let message = request.input["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let confirm_label = request.input["confirmLabel"]
+                        .as_str()
+                        .unwrap_or("OK")
+                        .to_owned();
+                    let cancel_label = request.input["cancelLabel"]
+                        .as_str()
+                        .unwrap_or("Cancel")
+                        .to_owned();
+                    let mut confirm_btn = Button::new(confirm_label, true).default();
+                    if request.input["destructive"] == true {
+                        confirm_btn = confirm_btn.destructive();
+                    }
+                    let rx = Alert::new(
+                        title,
+                        message,
+                        vec![confirm_btn, Button::new(cancel_label, false).cancel()],
+                    )
+                    .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let accepted = rx.recv().await == Ok(Some(true));
+                        runtime.platform_reply(request.id, Ok(json!(accepted)));
+                    })
+                    .detach();
+                    continue;
+                }
+                "ext.dialogs.alert" => {
+                    use crate::alert::{Alert, Button};
+                    let title = request.input["title"]
+                        .as_str()
+                        .unwrap_or("Powermove")
+                        .to_owned();
+                    let message = request.input["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let ok_label = request.input["okLabel"].as_str().unwrap_or("OK").to_owned();
+                    let rx = Alert::new(title, message, vec![Button::new(ok_label, true).default()])
+                        .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, _| {
+                        let _ = rx.recv().await;
+                        runtime.platform_reply(request.id, Ok(Value::Null));
+                    })
+                    .detach();
+                    continue;
+                }
+                // ---- Layer 6: Clipboard, Media, Shell, FS, Storage, Net ---------
+                "ext.clipboard.readText" => {
+                    let clip = crate::platform::text_clipboard();
+                    clip(None).map(Value::String)
+                }
+                "ext.clipboard.writeText" => {
+                    let clip = crate::platform::text_clipboard();
+                    let text = request.input["text"].as_str().unwrap_or_default();
+                    clip(Some(text)).map(|_| Value::Null)
+                }
+                "ext.media.importFiles" => {
+                    let paths: Vec<std::path::PathBuf> = request.input["paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                        .filter_map(|p| crate::ext_capabilities::expand_path(p).ok())
+                        .collect();
+                    let folder = request.input["folder"].as_str().map(str::to_owned);
+                    let add_to_timeline = request.input["addToTimeline"] == true;
+                    if !paths.is_empty() {
+                        if add_to_timeline {
+                            self.drop_on_viewer(paths, false, cx);
+                        } else {
+                            self.import_to_panel(paths, folder, false, cx);
+                        }
+                    }
+                    Ok(Value::Null)
+                }
+                "ext.shell.revealInFinder" => {
+                    crate::ext_capabilities::expand_path(
+                        request.input["path"].as_str().unwrap_or_default(),
+                    )
+                    .map(|path| {
+                        crate::platform::reveal(&path);
+                        Value::Null
+                    })
+                }
+                "ext.shell.openPath" => {
+                    crate::ext_capabilities::expand_path(
+                        request.input["path"].as_str().unwrap_or_default(),
+                    )
+                    .map(|path| json!(crate::platform::open_document(&path)))
+                }
+                "ext.shell.openUrl" => {
+                    let url = request.input["url"].as_str().unwrap_or_default();
+                    match url::Url::parse(url) {
+                        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                            Ok(json!(crate::platform::open_url(url)))
+                        }
+                        Ok(_) => Err("shell.openUrl only supports http:// and https:// URLs".into()),
+                        Err(e) => Err(format!("Invalid URL: {e}")),
+                    }
+                }
+                op if op.starts_with("ext.fs.")
+                    || op.starts_with("ext.storage.")
+                    || op == "ext.net.fetch"
+                    || op == "ext.shell.exec" =>
+                {
+                    let profile = self.profile.clone();
+                    let panel = request.panel.clone();
+                    let operation = request.operation.clone();
+                    let input = request.input.clone();
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, cx| {
+                        let reply = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::ext_capabilities::run_worker_op(
+                                    &profile, &panel, &operation, &input,
+                                )
+                            })
+                            .await;
+                        runtime.platform_reply(request.id, reply);
+                    })
+                    .detach();
+                    continue;
+                }
+                _ => Err(format!("Native service unavailable: {}", request.operation)),
+            };
+            runtime.platform_reply(request.id, result);
+        }
+    }
+}
+impl Controller {
+    /// The highest zoom the display can show this composition at.
+    pub(crate) fn zoom_limit(&self) -> f64 {
+        self.host.borrow().viewer_zoom_limit(self.dimensions)
+    }
+    /// One Zoom In or Zoom Out step from what is on screen.
+    /// Zooms from the keyboard or a menu: about the point under the pointer
+    /// when it is over the viewer, else about the viewer's middle. With
+    /// `to`, to that zoom (100 %, 200 %); else by `factor`.
+    pub(crate) fn step_zoom(
+        &mut self,
+        factor: f64,
+        to: Option<f64>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let center = self.viewer_center();
+        let over = self
+            .builtins
+            .gizmos
+            .as_ref()
+            .is_some_and(|g| g.read(cx).pointer_over(window));
+        let at = if over {
+            window.mouse_position()
+        } else {
+            center
+        };
+        let current = self.view.scale.get();
+        let factor = to.map_or(factor, |to| to / current.max(f64::MIN_POSITIVE));
+        let limit = self.zoom_limit();
+        self.view
+            .navigate(crate::gizmo::Navigate::Zoom { factor, at }, center, limit);
+        self.write_view(None, cx);
+    }
+    /// Writes the placement now or after `after`, replacing any write not yet
+    /// made. It stays local until the kernel has taken it.
+    pub(crate) fn write_view(
+        &mut self,
+        after: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) {
+        self.host.borrow_mut().defer_viewer_raster(after.is_some());
+        if let Some(host) = &self.extensions.host {
+            host.shell_state(serde_json::json!({
+                "zoom": self.view.zoom.unwrap_or(1.),
+                "fit": self.view.zoom.is_none(),
+                "pan": self.view.pan,
+            }));
+        }
+        self.sync_viewer_stage();
+        self.view_write = Some(cx.spawn(async move |this, cx| {
+            if let Some(after) = after {
+                cx.background_executor().timer(after).await;
+            }
+            let Ok(pending) = this.update(cx, |v, cx| {
+                if after.is_some() {
+                    let layer = metal::MetalLayer::new();
+                    let old = v.host.borrow().viewer_layer();
+                    if pm_engine_service::layers::configure_layer(
+                        objc2::MainThreadMarker::new().unwrap(),
+                        &layer,
+                        &old.device(),
+                    )
+                    .is_ok()
+                        && v.host.borrow_mut().stage_viewer_raster(layer.clone())
+                        && let Some(viewer) = &v.viewer
+                    {
+                        let crop = v.host.borrow().viewer_crop.get().map(|[x, y, canvas_width, canvas_height]| pm_engine_service::Crop { x, y, canvas_width, canvas_height });
+                        let _ = viewer.retarget(layer, crop);
+                        v.builtins.frame_outline = Default::default();
+                    }
+                }
+                v.host.borrow_mut().defer_viewer_raster(false);
+                cx.notify();
+                v.write_ui()
+            }) else {
+                return;
+            };
+            if let Some(pending) = pending {
+                let _ = pending.await;
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.view.written();
+                v.refresh(cx);
+            });
+        }));
+    }
+    /// The viewer slot's centre, window points.
+    fn viewer_center(&self) -> Point<Pixels> {
+        self.host
+            .borrow()
+            .viewer_rect
+            .get()
+            .map_or(Point::default(), |r| {
+                point(px(r.x + r.w / 2.), px(r.y + r.h / 2.))
+            })
+    }
+}
+impl Controller {
+    pub(crate) fn audio_gain_preview(&self, message: pm_engine_service::audio::GainPreview) {
+        if let Some(viewer) = &self.viewer {
+            viewer.audio_gain_preview(message.clone());
+        }
+        if let Some(popout) = &self.popout
+            && let Some(viewer) = &*popout.viewer.borrow()
+        {
+            viewer.audio_gain_preview(message);
+        }
+    }
+}
+
+struct ControllerDelegate(WeakEntity<Controller>);
+/// Recognizes timeline status/error lines that describe an interaction blocked
+/// or partially skipped by a locked layer so we can also raise the floating popup.
+fn is_locked_status(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("locked layer")
+        || lower.contains("locked group")
+        || lower.contains("layer is locked")
+        || lower.contains("locked.")
+}
+
+impl crate::timeline_surface::Delegate for ControllerDelegate {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| {
+            if let Some(viewer) = &v.viewer {
+                let _ = viewer.transient_snapshot(snapshot.clone());
+            }
+            if let Some(popout) = &v.popout {
+                if let Some(viewer) = &*popout.viewer.borrow() {
+                    let _ = viewer.transient_snapshot(snapshot);
+                }
+            }
+        });
+    }
+
+    fn audio_gain_preview(&self, message: pm_engine_service::audio::GainPreview, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade() {
+            controller.read(cx).audio_gain_preview(message);
+        }
+    }
+
+    fn audio_peaks(&self, cx: &App) -> Option<([f64; 2], i64, bool)> {
+        let controller = self.0.upgrade()?;
+        let v = controller.read(cx);
+        let status = v.viewer.as_ref()?.status();
+        let levels = status.levels.as_ref()?;
+        let playing = status.clock.is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing);
+        Some((std::array::from_fn(|i| levels.master.peak.get(i).or(levels.master.peak.first()).copied().unwrap_or(0.) as f64), levels.media_time.get(), playing))
+    }
+    fn time(&self, cx: &App) -> f64 {
+        self.0.upgrade().map_or(0., |c| c.read(cx).time())
+    }
+    fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_media(drop, cx));
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_effect(drop, cx));
+    }
+    fn skim(&self, seconds: Option<f64>, cx: &mut App) {
+        let input = crate::skimming::input();
+        let _ = self.0.update(cx, |v, _| {
+            v.skim(seconds, input);
+            // The skimmer is drawn with the playhead: place it again.
+            if let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
+    }
+    fn skimming(&self, cx: &App) -> bool {
+        crate::skimming::on(&self.0, cx)
+    }
+    fn scrubbing(&self, on: bool, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            v.builtins.scrubbing = on;
+            if !on {
+                // The panels hear where the scrub left the time.
+                v.finish_scrub();
+                v.tick_builtins(cx);
+            }
+        });
+    }
+    fn skimmer_shown(&self, cx: &App) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|c| c.read(cx).skimming.at.is_some())
+    }
+    fn seek(&self, seconds: f64, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            v.seek(seconds);
+            v.tick_builtins(cx);
+        });
+    }
+    fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
+        use pm_panel_timeline::HostEffect as E;
+        let _ = self.0.update(cx, |v, cx| match effect {
+            E::Status(message) => {
+                if is_locked_status(&message) {
+                    v.show_locked_status_toast(message, cx);
+                } else {
+                    v.note(message, cx);
+                }
+            }
+            E::LockedStrip {
+                layer,
+                document,
+                composition,
+                trim,
+                message,
+            } => {
+                let message = message.unwrap_or_else(|| {
+                    if trim {
+                        "1 locked layer didn't trim".into()
+                    } else {
+                        "1 locked layer didn't move".into()
+                    }
+                });
+                v.show_locked_toast(vec![layer], document, composition, message, cx);
+            }
+            E::Seek(time) => v.seek(time),
+            // The empty composition's buttons: the app's own commands.
+            E::Run(name) => v.host.borrow().send_command(&name, vec![]),
+            // Import… from the timeline: File › Import…, at the playhead.
+            E::Import { .. } => v.host.borrow().send_command("import", vec![]),
+            E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
+            E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
+            E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
+            E::FocusGroup(group) => v.focus_builtin_group(group, true, cx),
+            E::CopyKeys(tracks) => {
+                crate::layer_commands::set_clipboard(crate::layer_commands::Clipboard::Keys(tracks));
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("Powermove keyframes".into()));
+            }
+            // The keyframe sheets on the keys the right-click was on.
+            E::EditKeyValues(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Value, keys, cx)
+            }
+            E::EditVelocity(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Velocity, keys, cx)
+            }
+            E::ScaleKeys(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Scale, keys, cx)
+            }
+            other => v.message = format!("Not available yet: {other:?}"),
+        });
+    }
+    fn view_moved(&self, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(wake) = &controller.read(cx).playback_wake
+        {
+            let _ = wake.try_send(());
+        }
+    }
+    fn tracks_view(&self, view: Arc<pm_panel_timeline::TimelineModel>, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(runtime) = &controller.read(cx).builtins.runtime
+        {
+            runtime.update_timeline_view(view);
+        }
+    }
+    fn timeline_outline(
+        &self,
+        view: Arc<pm_panel_timeline::TimelineModel>,
+        refresh: bool,
+        cx: &mut App,
+    ) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(runtime) = &controller.read(cx).builtins.runtime
+        {
+            runtime.update_timeline_outline(view, refresh);
+        }
+    }
+    fn view_facts(&self, facts: serde_json::Value, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(host) = &controller.read(cx).extensions.host
+        {
+            host.shell_state(serde_json::json!({ "timeline": facts }));
+        }
+    }
+    fn report(&self, message: String, cx: &mut App) {
+        // A passing note: it clears once its moment is over (PM-476 kept a
+        // timeline view write's failure in the status line for good).
+        let _ = self.0.update(cx, |v, cx| {
+            if is_locked_status(&message) {
+                v.show_locked_status_toast(message, cx);
+            } else {
+                v.note(message, cx);
+            }
+        });
+    }
+    fn command(&self, name: &str, cx: &mut App) {
+        crate::timeline_surface::Delegate::run(self, name, vec![], cx);
+    }
+    fn run(&self, name: &str, args: Vec<Value>, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade() {
+            controller.read(cx).host.borrow().send_command(name, args);
+        }
+    }
+    fn layer_menu_rows(&self, layer: &str, cx: &App) -> Vec<Value> {
+        let Some(controller) = self.0.upgrade() else {
+            return vec![];
+        };
+        let controller = controller.read(cx);
+        controller
+            .published
+            .as_ref()
+            .map(|p| crate::layer_commands::layer_menu(p, layer, controller.time(), crate::layer_commands::can_paste()))
+            .unwrap_or_default()
+    }
+    fn menu(
+        &self,
+        items: Vec<Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    ) {
+        crate::v4_native::menu(window, &items, cx, choose);
+    }
+    fn painters_revision(&self, cx: &App) -> u64 {
+        self.0
+            .upgrade()
+            .and_then(|c| c.read(cx).builtins.runtime.clone())
+            .map_or(0, |runtime| runtime.painters_revision())
+    }
+    fn paint_clips(&self, clips: Value, done: crate::timeline_surface::PaintDone, cx: &mut App) {
+        let Some(runtime) = self
+            .0
+            .upgrade()
+            .and_then(|c| c.read(cx).builtins.runtime.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |cx| {
+            // One 100 ms deadline for the whole request: a realm that hasn't
+            // answered by then is left out of this paint. Answers are bounded
+            // here, on the worker, before they reach the main thread.
+            let shapes = cx
+                .background_executor()
+                .spawn(async move {
+                    let visible: std::collections::HashSet<String> = clips
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                        .collect();
+                    let tickets = runtime.paint_clips(&clips);
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(100);
+                    let mut shapes = pm_panel_timeline::render::Decorations::new();
+                    let mut complete = true;
+                    for (_, ticket) in tickets {
+                        let Ok(ticket) = ticket else { continue };
+                        // A painter that threw has answered; one still running
+                        // past the deadline makes this paint incomplete.
+                        let answer = crate::ticket::answer(ticket, deadline);
+                        let Some(Ok(evaluation)) = answer else {
+                            complete &= answer.is_some();
+                            continue;
+                        };
+                        if let Some(answer) = painter_answer(&evaluation.value) {
+                            pm_panel_timeline::render::add_decorations(
+                                &mut shapes,
+                                &answer,
+                                &visible,
+                            );
+                        }
+                    }
+                    (shapes, complete)
+                })
+                .await;
+            cx.update(|cx| done(shapes.0, shapes.1, cx));
+        })
+        .detach();
+    }
+    fn extension_menu(
+        &self,
+        locations: Vec<(&'static str, Value)>,
+        items: Vec<Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    ) {
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        if !controller.read(cx).extensions_listen() {
+            crate::v4_native::menu(window, &items, cx, choose);
+            return;
+        }
+        let at = window.mouse_position();
+        controller.update(cx, |v, cx| {
+            v.extension_rows_menu(
+                locations,
+                &items,
+                (f32::from(at.x), f32::from(at.y)),
+                choose,
+                cx,
+            )
+        });
+    }
+}
+impl crate::gizmo::Host for ControllerDelegate {
+    fn sample_color(&self, cx: &App) -> Option<crate::colour_picker::SampleSource> {
+        self.0.upgrade()?.read(cx).builtins.natives.sample_color.borrow().clone()
+    }
+    fn focus_canvas(&self, window: &mut Window, cx: &mut App) {
+        let shell = self.0.upgrade().and_then(|c| c.read(cx).shell.clone());
+        if let Some(shell) = shell {
+            let _ = shell.update(cx, |shell, cx| shell.focus_canvas(window, cx));
+        }
+    }
+    fn effect_visible(&self, layer: &str, effect: &str, cx: &App) -> Option<bool> {
+        self.0.upgrade().and_then(|c| c.read(cx).builtins.runtime.as_ref()?.viewer_effect_visible(layer, effect))
+    }
+
+    fn drop_project_items(&self, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            let at = v.time();
+            v.place_project_items(at, Some(0), cx);
+        });
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_effect(drop, cx));
+    }
+    fn drop_files(&self, paths: Vec<std::path::PathBuf>, alt: bool, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_on_viewer(paths, alt, cx));
+    }
+    fn time(&self, cx: &App) -> f64 {
+        self.0.upgrade().map_or(0., |c| c.read(cx).time())
+    }
+    fn playing(&self, cx: &App) -> bool {
+        self.0.upgrade().is_some_and(|c| c.read(cx).playing())
+    }
+    fn frame(&self, _: Bounds<Pixels>, cx: &App) -> Option<crate::gizmo::ViewFrame> {
+        self.0.upgrade()?.read(cx).composition_frame()
+    }
+    fn tool(&self, cx: &App) -> crate::gizmo::Tool {
+        use crate::gizmo::Tool;
+        let Some(controller) = self.0.upgrade() else {
+            return Tool::Other;
+        };
+        match controller.read(cx).tool.as_str() {
+            "toolSelect" => Tool::Select,
+            "toolHand" => Tool::Hand,
+            "toolZoom" => Tool::Zoom,
+            "toolRotate" => Tool::Rotate,
+            "toolAnchor" => Tool::Anchor,
+            "toolShape" => Tool::Shape,
+            "toolText" => Tool::Text,
+            "toolPen" => Tool::Pen,
+            _ => Tool::Other,
+        }
+    }
+    fn custom_tool_event(&self, event: serde_json::Value, cx: &mut App) -> bool {
+        let Some(controller) = self.0.upgrade() else {
+            return false;
+        };
+        let c = controller.read(cx);
+        let Some(target) = c.tool.strip_prefix(crate::extensions::V4_TOOL) else {
+            return false;
+        };
+        let Some((panel, tool_id)) = target.split_once(':') else {
+            return false;
+        };
+        let Some(runtime) = c.builtins.runtime.clone() else {
+            return false;
+        };
+        let _ = runtime.tool_event(panel, tool_id, &event);
+        true
+    }
+    fn overlay(
+        &self,
+        lines: Vec<pm_engine_service::OverlayLine>,
+        at: Option<crate::gizmo_layer::Placement>,
+        cx: &mut App,
+    ) {
+        let _ = self.0.update(cx, |v, _| v.set_gizmos(lines, at));
+    }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| v.gizmo_marks = marks);
+    }
+    fn pick_surface(
+        &self,
+        at: [f32; 2],
+        cx: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        let c = self.0.upgrade()?;
+        let viewer = c.read(cx).viewer.as_ref()?;
+        let frame = viewer.status().frame?;
+        viewer
+            .pick_surface(
+                frame.stamp,
+                frame.time,
+                at,
+                pm_engine_service::SurfaceQueryKind::Click,
+            )
+            .ok()
+    }
+    fn open_composition(&self, comp: String, cx: &mut App) {
+        let _ = self
+            .0
+            .update(cx, |v, cx| v.open_builtin_composition(&comp, cx));
+    }
+    fn focus_group(&self, group: Option<String>, cx: &mut App) {
+        let _ = self
+            .0
+            .update(cx, |v, cx| v.focus_builtin_group(group, false, cx));
+    }
+    fn scene3d_assets(&self, cx: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        let c = self.0.upgrade()?;
+        let originals = c.read(cx).media.originals.clone();
+        Some(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            originals.into_iter().collect(),
+        )))
+    }
+    fn focus_part(&self, layer: &str, slot: Option<u64>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.focus_part(layer, slot, cx));
+    }
+    fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        if let Some(c) = self.0.upgrade()
+            && let Some(viewer) = &c.read(cx).viewer
+        {
+            let _ = viewer.studio_view_at(view, Controller::event_time());
+        }
+    }
+    fn input(&self, at: f64, cx: &mut App) {
+        if let Some(c) = self.0.upgrade()
+            && let Some(viewer) = &c.read(cx).viewer
+        {
+            viewer.input_event(at);
+        }
+    }
+    fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App) {
+        let host = self.0.clone();
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        let time = controller.read(cx).time();
+        let at = window.mouse_position();
+        let at = (f32::from(at.x), f32::from(at.y));
+        // Over nothing: the canvas's own menu (New, as the shipped app; Text
+        // is a tool here, not a command) and what extensions add to it.
+        let Some(id) = layer else {
+            controller.update(cx, |v, cx| {
+                let entries = vec![
+                    viewer_new_menu(),
+                    // `new3d:<kind>` runs Layer ▸ Add 3D Layer with that kind.
+                    pm_shell::MenuEntry::submenu(
+                        "Add 3D Layer",
+                        pm_shell::menu::new3d()
+                            .into_iter()
+                            .map(|i| match i.args.first().and_then(|a| a.as_str()) {
+                                Some(kind) => {
+                                    pm_shell::MenuEntry::item(i.label, format!("new3d:{kind}"))
+                                }
+                                None => pm_shell::MenuEntry::separator(),
+                            })
+                            .collect(),
+                    ),
+                ];
+                // Then the whole composition, then the view (viewer.ts).
+                let tail = canvas_menu_tail(!v.layers().is_empty(), crate::layer_commands::can_paste());
+                let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
+                if let Some(entries) = v.extension_menu_with_tail(locations, entries, tail, at, cx)
+                {
+                    v.host.borrow().context_menu(&entries, at.0, at.1);
+                }
+            });
+            return;
+        };
+        // The press selects the layer before the menu opens, but that
+        // write may not have published yet: the rows are for this layer.
+        let rows = controller
+            .read(cx)
+            .published
+            .as_ref()
+            .map(|p| crate::layer_commands::layer_menu(p, &id, time, crate::layer_commands::can_paste()))
+            .unwrap_or_default();
+        let chosen = rows.clone();
+        let choose: crate::timeline_surface::Choose = Box::new(move |index, cx| {
+            if let (Some((command, args)), Some(controller)) = (
+                index.and_then(|i| crate::layer_commands::layer_menu_choice(&chosen, i)),
+                host.upgrade(),
+            ) {
+                controller
+                    .read(cx)
+                    .host
+                    .borrow()
+                    .send_command(&command, args);
+            }
+        });
+        if !controller.read(cx).extensions_listen() {
+            crate::v4_native::menu(window, &rows, cx, choose);
+            return;
+        }
+        // The layer's menu with what extensions add for it, as the shipped
+        // viewer's layer menu (`layer:context`, then `viewer:context`).
+        let layers: Vec<String> = controller
+            .read(cx)
+            .published
+            .as_ref()
+            .map(|p| p.selection.layers().to_vec())
+            .filter(|layers| layers.contains(&id))
+            .unwrap_or_else(|| vec![id.clone()]);
+        let locations = vec![
+            ("layer:context", json!({"layerId": id, "layerIds": layers})),
+            (
+                "viewer:context",
+                json!({"kind":"layer","layerId":id,"time":time}),
+            ),
+        ];
+        controller.update(cx, |v, cx| {
+            v.extension_rows_menu(locations, &rows, at, choose, cx)
+        });
+    }
+    fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            let limit = v.zoom_limit();
+            let center = v.viewer_center();
+            v.view.navigate(change, center, limit);
+            v.write_view(Some(crate::gizmo::NAVIGATION_IDLE), cx);
+            let mut host = v.host.borrow_mut();
+            host.viewer_transform(v.dimensions, Some(v.view.scale.get()), v.view.shown_pan());
+            host.place_cached_viewer();
+            cx.notify();
+        });
+    }
+    fn report(&self, message: String, cx: &mut App) {
+        crate::timeline_surface::Delegate::report(self, message, cx);
+    }
+    fn shape_variant(&self, cx: &App) -> String {
+        self.0
+            .upgrade()
+            .map_or_else(|| "rect".into(), |c| c.read(cx).shape_variant.clone())
+    }
+    fn pause(&self, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(viewer) = &controller.read(cx).viewer
+        {
+            let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
+        }
+    }
+    fn command(&self, name: &str, cx: &mut App) {
+        crate::timeline_surface::Delegate::command(self, name, cx);
+    }
+    fn text_input(
+        &self,
+        initial: &str,
+        window: &mut Window,
+        _: &mut App,
+    ) -> Option<Rc<dyn crate::gizmo::text::TextInput>> {
+        crate::gizmo::text::native_input(initial, window)
+    }
+}
+struct SurfaceWindow {
+    owner: Entity<Controller>,
+    panel: String,
+    keys: PopoverKeys,
+    /// The Agent popover's header drag in progress.
+    drag: Option<crate::popover_drag::HeaderDrag>,
+    cancelled_press: bool,
+    /// The editor window it belongs to (its drop targets, its bounds).
+    editor: Option<AnyWindowHandle>,
+    /// Settings' AppKit chrome (the owner holds it too, to update it).
+    chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
+}
+impl SurfaceWindow {
+    /// A press on the popover's header: a drag begins once the pointer
+    /// leaves the threshold (before that it is the header's own press).
+    fn begin_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::popover_drag::{Area, HeaderDrag, native};
+        let (Some(me), Some(editor)) = (crate::platform::ns_window(window), self.editor) else {
+            return;
+        };
+        let toolbar = f64::from(self.owner.read(cx).host.borrow().tokens.metrics.toolbar);
+        let Ok(Some(content)) =
+            cx.update_window(editor, |_, w, _| -> Option<crate::popover_drag::Area> {
+                crate::platform::ns_window(w).map(|n| native::content(&n))
+            })
+        else {
+            return;
+        };
+        let area = Area {
+            h: content.h - toolbar,
+            ..content
+        };
+        self.drag = Some(HeaderDrag::new(native::pointer(), native::frame(&me), area));
+        cx.notify();
+    }
+    /// The pointer moved with the button down: the popover follows it one
+    /// to one, and the editor shows where a release would dock it.
+    fn drag_to(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use crate::popover_drag::native;
+        if self.drag.is_none() {
+            return false;
+        }
+        // A release AppKit delivered elsewhere still ends the drag here.
+        if !pm_shell::left_button_held() {
+            self.end_drag(window, cx);
+            return true;
+        }
+        let Some(origin) = self
+            .drag
+            .as_mut()
+            .and_then(|drag| drag.follow(native::pointer()))
+        else {
+            return false;
+        };
+        let Some(me) = crate::platform::ns_window(window) else {
+            return true;
+        };
+        native::move_to(&me, origin);
+        let docking = self.preview_dock(cx);
+        if let Some(drag) = self.drag.as_mut()
+            && drag.docking != docking
+        {
+            drag.docking = docking;
+            native::see_through(&me, docking);
+        }
+        true
+    }
+    /// The editor's drop preview for the pointer; true over a dock target.
+    fn preview_dock(&self, cx: &mut Context<Self>) -> bool {
+        use crate::popover_drag::{in_editor, native};
+        let Some(editor) = self.editor else {
+            return false;
+        };
+        let panel = self.panel.clone();
+        cx.update_window(editor, |root, w, cx| -> Option<bool> {
+            let native_window = crate::platform::ns_window(w)?;
+            let content = native::content(&native_window);
+            let at = in_editor(native::pointer(), content);
+            let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
+            Some(shell.update(cx, |e, cx| e.drag_from_outside(&panel, at, cx)))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    }
+    /// The release: over a dock target the panel docks there (as Pin
+    /// does, at that place); elsewhere the popover stays where it was put
+    /// and reopens there. A press that never moved is the header's own.
+    fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::popover_drag::{native, remembered};
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if !drag.moved {
+            return;
+        }
+        let Some(editor) = self.editor else {
+            return;
+        };
+        let panel = self.panel.clone();
+        let docked = drag.docking
+            && cx
+                .update_window(editor, |root, _, cx| -> Option<bool> {
+                    let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
+                    Some(shell.update(cx, |e, cx| e.drop_from_outside(&panel, cx)))
+                })
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+        if docked {
+            // This window goes; not from inside its own event.
+            let owner = self.owner.clone();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |v, cx| v.agent_dropped_in(cx));
+            });
+            return;
+        }
+        let _ = cx.update_window(editor, |root, _, cx| {
+            if let Ok(shell) = root.downcast::<pm_shell::view::Editor>() {
+                shell.update(cx, |e, cx| e.cancel_from_outside(cx));
+            }
+        });
+        if let Some(me) = crate::platform::ns_window(window) {
+            native::see_through(&me, false);
+        }
+        let popover = window.bounds().origin;
+        if let Ok(corner) = cx.update_window(editor, |_, w, _| w.bounds().origin) {
+            let place = remembered(
+                (f32::from(popover.x), f32::from(popover.y)),
+                (f32::from(corner.x), f32::from(corner.y)),
+            );
+            self.owner
+                .update(cx, |v, _| v.builtins.agent_place = Some(place));
+        }
+    }
+    /// Escape mid-drag: back where it started, nothing docked.
+    fn cancel_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::popover_drag::native;
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if let Some(me) = crate::platform::ns_window(window) {
+            native::move_to(&me, drag.start());
+            native::see_through(&me, false);
+        }
+        if let Some(editor) = self.editor {
+            let _ = cx.update_window(editor, |root, _, cx| {
+                if let Ok(shell) = root.downcast::<pm_shell::view::Editor>() {
+                    shell.update(cx, |e, cx| e.cancel_from_outside(cx));
+                }
+            });
+        }
+    }
+}
+/// A popover's own keys. With nothing focused GPUI delivers a key to the
+/// window's root only, so the popover's root holds focus whenever nothing
+/// inside does; a focused control inside still sees keys first, and what it
+/// leaves bubbles to the root (Escape closes the popover).
+pub(crate) struct PopoverKeys {
+    pub(crate) focus: FocusHandle,
+}
+impl PopoverKeys {
+    pub(crate) fn new(cx: &mut App) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+        }
+    }
+    /// Nothing in the window is focused: the popover's root takes focus.
+    pub(crate) fn claim(&self, window: &mut Window, cx: &mut App) {
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
+    }
+    /// Plain Escape, the popover's dismissal key.
+    pub(crate) fn dismisses(e: &KeyDownEvent) -> bool {
+        let m = e.keystroke.modifiers;
+        e.keystroke.key == "escape" && !(m.platform || m.control || m.alt || m.shift)
+    }
+}
+impl Render for SurfaceWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let size = window.viewport_size();
+        let panel = self.panel.clone();
+        let popover = self.panel == "agent";
+        // Export is a sheet: no title bar band (its window fits its content).
+        let sheet = self.panel == "export";
+        if panel == "settings" {
+            return div().into_any_element();
+        }
+        if popover || sheet {
+            // A focused control that went away leaves nothing focused.
+            self.keys.claim(window, cx);
+        }
+        let (mut fill, mut band, mut head_h) = (0, 0., 0.);
+        let (head, body) = self.owner.update(cx, |v, cx| {
+            let (header, colour, titlebar) = {
+                let t = &v.host.borrow().tokens;
+                // The popover's content, its header too, is on solid
+                // `floating` inside the glass frame (agent-panel.md §8).
+                let colour = if popover {
+                    t.colors.floating
+                } else {
+                    t.colors.panel
+                };
+                (t.metrics.header, colour, t.metrics.titlebar)
+            };
+            fill = colour;
+            head_h = header;
+            // Windows with a transparent title bar keep their content below it.
+            band = if popover || sheet { 0. } else { titlebar };
+            // A panel's header row is the dock's; the popover has no dock, so
+            // it shows the panel's header (Thread, New Thread, Pin) itself.
+            let rect = pm_shell::layout::Rect {
+                x: 0.,
+                y: 0.,
+                w: f32::from(size.width),
+                h: f32::from(size.height) + if popover { 0. } else { header } - band,
+            };
+            let head = popover
+                .then(|| v.builtin_header(&panel, rect, false, window, cx))
+                .flatten();
+            (head, v.builtin_panel(&panel, rect, window, cx))
+        });
+        // The agent popover's frame is native glass with its content on
+        // solid `floating`; other panel windows paint the panel colour.
+        div()
+            .when(popover, |d| {
+                // Escape closes the popover from anywhere in it; a control
+                // that uses Escape itself (a menu, the composer's shortcuts)
+                // handles it first. Deferred: this window is the one going.
+                d.track_focus(&self.keys.focus).on_key_down(cx.listener(
+                    |this, e: &KeyDownEvent, window, cx| {
+                        // Escape mid-drag puts the popover back; the next closes it.
+                        if PopoverKeys::dismisses(e) && this.drag.is_some_and(|d| d.moved) {
+                            cx.stop_propagation();
+                            this.cancel_drag(window, cx);
+                            return;
+                        }
+                        // Typed before the composer was there to take it:
+                        // kept for it (nothing inside has focus yet).
+                        let m = e.keystroke.modifiers;
+                        if !(m.platform || m.control || m.function)
+                            && let Some(text) = e.keystroke.key_char.clone()
+                            && !text.chars().any(char::is_control)
+                            && let Some(view) =
+                                this.owner.read(cx).builtins.views.get("agent").cloned()
+                            && view.update(cx, |v, _| v.type_early(&text))
+                        {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if PopoverKeys::dismisses(e) {
+                            cx.stop_propagation();
+                            let owner = this.owner.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |v, cx| v.close_agent(cx));
+                            });
+                        }
+                    },
+                ))
+            })
+            .when(sheet, |d| {
+                // Nothing inside focused: the sheet's keys go to its panel
+                // (Return presses Export, Escape cancels), as on any sheet.
+                d.track_focus(&self.keys.focus).on_key_down(cx.listener(
+                    |this, e: &KeyDownEvent, window, cx| {
+                        if !this.keys.focus.is_focused(window) {
+                            return;
+                        }
+                        let panel = this.panel.clone();
+                        let view = this.owner.read(cx).builtins.views.get(&panel).cloned();
+                        let heard = view
+                            .is_some_and(|view| view.update(cx, |v, cx| v.root_key_down(e, window, cx)));
+                        // Escape closes every sheet: one whose panel has no
+                        // keys of its own (nothing in it yet) is closed here
+                        // (PM-472).
+                        if !heard && PopoverKeys::dismisses(e) {
+                            cx.stop_propagation();
+                            let owner = this.owner.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |v, cx| v.close_export_sheet(cx));
+                            });
+                        }
+                    },
+                ))
+            })
+            .size_full()
+            .overflow_hidden()
+            .pt(px(band))
+            .bg(rgb(fill))
+            // The popover's header is its handle (popover_drag).
+            .children(head.map(|head| {
+                // Its own row, as tall as a header: the cached header has no
+                // height of its own, so the conversation started under it
+                // and covered Thread, New Thread and Pin (PM-507).
+                div()
+                    .id("agent-popover-handle")
+                    .w_full()
+                    .h(px(head_h))
+                    .flex_shrink_0()
+                    .bg(rgb(fill))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.begin_drag(window, cx)
+                        }),
+                    )
+                    .child(head)
+            }))
+            .children(body)
+            // While a drag is held: every move and the release are the
+            // popover's, never the header's controls' or anything else's.
+            .when(self.drag.is_some() || self.cancelled_press, |d| {
+                let this = cx.entity().downgrade();
+                d.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            let pressed = this.clone();
+                            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let _ = pressed.update(cx, |v, cx| {
+                                    if e.button == MouseButton::Left {
+                                        v.cancelled_press = false;
+                                    } else if e.button == MouseButton::Right
+                                        && (v.cancelled_press || v.drag.is_some_and(|drag| drag.moved))
+                                    {
+                                        v.cancel_drag(window, cx);
+                                        v.cancelled_press = true;
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                            let moved = this.clone();
+                            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                if moved
+                                    .update(cx, |v, cx| {
+                                        (v.cancelled_press && e.pressed_button.is_some())
+                                            || v.drag_to(window, cx)
+                                    })
+                                    .unwrap_or(false)
+                                {
+                                    cx.stop_propagation();
+                                }
+                            });
+                            let released = this.clone();
+                            window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let _ = released.update(cx, |v, cx| {
+                                    if e.button == MouseButton::Right && v.cancelled_press {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    if e.button != MouseButton::Left {
+                                        return;
+                                    }
+                                    if std::mem::take(&mut v.cancelled_press) {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    if v.drag.is_some_and(|d| d.moved) {
+                                        cx.stop_propagation();
+                                    }
+                                    v.end_drag(window, cx);
+                                });
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AgentToggle {
+    Open,
+    Close,
+    /// The press that toggles already closed it from outside.
+    Keep,
+}
+/// The toolbar's Agent item: an open popover closes; a closed one opens,
+/// unless the same press just closed it (the item lies outside the popover).
+fn agent_toggle(open: bool, since_dismissed: Option<std::time::Duration>) -> AgentToggle {
+    if open {
+        AgentToggle::Close
+    } else if since_dismissed.is_some_and(|d| d < AGENT_PRESS) {
+        AgentToggle::Keep
+    } else {
+        AgentToggle::Open
+    }
+}
+/// The docked Agent left the workspace without being parked (closed, not
+/// hidden by its toolbar item): it comes back as the popover.
+pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -> bool {
+    was_docked && !docked && !parked
+}
+/// The popover gave up key: it closes when its own editor took it (a press
+/// outside the popover), never for another window or app.
+/// Where the full-access question stands: the Agent popover when the panel is
+/// shown there, else the window that asked, else the editor.
+fn consent_window<W>(popover: Option<W>, asking: Option<W>, editor: W) -> W {
+    popover.or(asking).unwrap_or(editor)
+}
+fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
+    open && editor_took_key
+}
+#[cfg(test)]
+mod consent_window_tests {
+    /// PM-507 / run 29: the full-access question stood on the editor (the
+    /// request comes through its window) and answering it closed the
+    /// popover. With the popover open it stands on the popover.
+    #[test]
+    fn the_full_access_question_stands_on_the_popover_when_it_is_open() {
+        assert_eq!(super::consent_window(Some("popover"), Some("editor"), "host"), "popover");
+        assert_eq!(super::consent_window(None, Some("editor"), "host"), "editor", "docked");
+        assert_eq!(super::consent_window::<&str>(None, None, "host"), "host");
+    }
+}
+#[cfg(test)]
+mod popover_keys_tests {
+    use super::PopoverKeys;
+    use gpui::{
+        Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+        Styled, TestAppContext, Window, div,
+    };
+    /// A popover's root as SurfaceWindow draws it: its keys, a control inside.
+    struct Popover {
+        keys: PopoverKeys,
+        inner: FocusHandle,
+        dismissed: usize,
+    }
+    impl Render for Popover {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.keys.claim(window, cx);
+            div()
+                .track_focus(&self.keys.focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if PopoverKeys::dismisses(e) {
+                        this.dismissed += 1;
+                        cx.stop_propagation();
+                    }
+                }))
+                .size_full()
+                .child(div().track_focus(&self.inner).size_full())
+        }
+    }
+    #[gpui::test]
+    fn escape_dismisses_a_reopened_popover_with_nothing_inside_focused(cx: &mut TestAppContext) {
+        // The reported path: reopened, nothing clicked, Escape.
+        let (view, vcx) = cx.add_window_view(|_, cx| Popover {
+            keys: PopoverKeys::new(cx),
+            inner: cx.focus_handle(),
+            dismissed: 0,
+        });
+        let mut vcx = vcx.clone();
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 1);
+        // A focused control inside: Escape it leaves still bubbles up.
+        view.update_in(&mut vcx, |p, window, cx| window.focus(&p.inner, cx));
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
+        // Modified Escape is not the dismissal key.
+        vcx.simulate_keystrokes("shift-escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
+    }
+}
+#[cfg(test)]
+mod agent_close_tests {
+    use super::*;
+    use std::time::Duration;
+    #[::core::prelude::v1::test]
+    fn closing_the_docked_agent_returns_it_to_its_popover_and_parking_does_not() {
+        assert!(
+            returns_to_popover(true, false, false),
+            "closed: the popover"
+        );
+        assert!(
+            !returns_to_popover(true, false, true),
+            "parked: hidden in place"
+        );
+        assert!(
+            !returns_to_popover(false, true, false),
+            "docking is no return"
+        );
+        assert!(!returns_to_popover(false, false, false));
+    }
+    #[::core::prelude::v1::test]
+    fn the_toolbar_item_toggles_the_agent_popover_closed_and_open() {
+        // The reported bug: the item only ever opened (activated) it.
+        assert_eq!(agent_toggle(true, None), AgentToggle::Close);
+        assert_eq!(agent_toggle(false, None), AgentToggle::Open);
+        // The press on the item closed it from outside first: stay closed.
+        assert_eq!(
+            agent_toggle(false, Some(Duration::from_millis(80))),
+            AgentToggle::Keep
+        );
+        // Long after an outside press, the item opens it again.
+        assert_eq!(
+            agent_toggle(false, Some(Duration::from_secs(5))),
+            AgentToggle::Open
+        );
+    }
+    #[::core::prelude::v1::test]
+    fn a_press_in_the_editor_closes_the_popover_but_another_window_does_not() {
+        assert!(agent_dismisses(true, true));
+        assert!(!agent_dismisses(true, false));
+        assert!(!agent_dismisses(false, true));
+    }
+}
+/// How long after a press outside the Agent popover closed it a toolbar
+/// toggle from that same press is still the press (mouse down to mouse up).
+const AGENT_PRESS: std::time::Duration = std::time::Duration::from_millis(600);
+/// v1's timeline `gutterWidth` default (`api-helpers.ts`).
+const V1_DEFAULT_GUTTER: f64 = 224.;
+/// A painter's answer: JSON text (the realm returns `JSON.stringify(…)`),
+/// refused past 4 MiB before parsing.
+fn painter_answer(text: &str) -> Option<Value> {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    if text.len() > LIMIT {
+        return None;
+    }
+    match serde_json::from_str::<Value>(text).ok()? {
+        Value::String(inner) => serde_json::from_str(&inner).ok(),
+        other => Some(other),
+    }
+}
+
+/// v1–3's timeline chrome (`workspace.chrome.timeline`, which extensions set
+/// through `workspace.mutate`) as the timeline's metrics, within v1's ranges:
+/// row height, layer column (gutter) width, ruler height and keyframe size.
+pub fn timeline_chrome(
+    mut t: pm_design::Tokens,
+    workspace: &pm_model::Value,
+    surface: &Value,
+) -> pm_design::Tokens {
+    // The theme's timeline surface (track, gutter, accent, text, line).
+    let colour = |key: &str| {
+        surface[key]
+            .as_u64()
+            .filter(|c| *c <= 0xFF_FFFF)
+            .map(|c| c as u32)
+    };
+    for (target, key) in [
+        (&mut t.colors.panel, "track"),
+        (&mut t.colors.panel_secondary, "gutter"),
+        (&mut t.colors.accent, "accent"),
+        (&mut t.colors.text, "text"),
+        (&mut t.colors.separator, "line"),
+    ] {
+        if let Some(c) = colour(key) {
+            *target = c;
+        }
+    }
+    let chrome = workspace
+        .get("chrome")
+        .and_then(|c| c.get("timeline"))
+        .map(|c| {
+            serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(c))
+                .unwrap_or(Value::Null)
+        })
+        .unwrap_or(Value::Null);
+    // Main rounds the three lengths and keeps fractional key and corner sizes.
+    let field = |key: &str, low: f64, high: f64, round: bool| {
+        chrome[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(|v| if round { v.round() } else { v }.clamp(low, high))
+    };
+    let m = &mut t.metrics;
+    for (target, value) in [
+        (&mut m.track_row, field("rowHeight", 22., 48., true)),
+        // v1 wrote its default (224) into every workspace; only another value
+        // is a person's choice. The default takes the native, wider column.
+        (
+            &mut m.layer_column,
+            field("gutterWidth", 160., 640., true).filter(|w| *w != V1_DEFAULT_GUTTER),
+        ),
+        (&mut m.ruler, field("rulerHeight", 20., 42., true)),
+        (&mut m.keyframe, field("keyframeSize", 4., 12., false)),
+        // Main draws clip bars with at most a 5-point corner.
+        (
+            &mut m.clip_radius,
+            field("clipRadius", 0., 12., false).map(|r| r.min(5.)),
+        ),
+    ] {
+        if let Some(value) = value {
+            *target = value as f32;
+        }
+    }
+    // A reversed surface order swaps the track and gutter fills (T1).
+    let reversed = workspace
+        .get("chrome")
+        .and_then(|c| c.get("timelineSurfaceOrder"))
+        .and_then(|o| {
+            pm_model::json::to_canonical_string(o)
+                .parse::<String>()
+                .ok()
+        })
+        .is_some_and(|o| o == "\"reversed\"");
+    if reversed {
+        std::mem::swap(&mut t.colors.panel, &mut t.colors.panel_secondary);
+    }
+    t
+}
+
+/// Panels with transport, evaluated values, viewer chrome or live runs.
+fn follows_view(panel: &str, selected: bool) -> bool {
+    match panel {
+        "viewer" | "timeline" | "agent" | "export" => true,
+        "inspector" | "layer-effects" | "color" => selected,
+        _ => false,
+    }
+}
+
+/// Whether Properties has anything to follow while playing: a selected layer's
+/// values move with time. With nothing selected it shows the composition's
+/// fields, which don't, and republishing them every frame repainted the window
+/// for nothing; with native controls hosted that held each present behind a
+/// control transaction (Fable 5.5 at 36 s: 24 fps with Properties open, 29.5
+/// closed).
+pub(crate) fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
+    published.is_some_and(|p| !p.selection.layers().is_empty())
+}
+
+/// How often a playing Properties follows a selected layer: about ten times
+/// a second, as v1's inspector did (15 Hz). Each publication repaints the
+/// window, and with native controls hosted that present waits behind a
+/// control transaction: following every frame held Fable 5.5 at 36 s to
+/// 24 fps (drawable p95 52 ms) with an animated layer selected.
+const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether a playing Properties takes `frame` now: at most every
+/// `FOLLOW_EVERY`, except a jump (a seek or a loop wrap) of more than half a
+/// second, which shows at once. Pause, stop and selection changes publish
+/// through `update_builtins`, not here, so they are never held back.
+pub(crate) fn follow_due(
+    last_frame: Option<i64>,
+    last_at: Option<std::time::Instant>,
+    frame: i64,
+    now: std::time::Instant,
+) -> bool {
+    let jumped = last_frame
+        .is_none_or(|last| (frame - last).abs() > pm_protocol::common::TICKS_PER_SECOND / 2);
+    jumped || last_at.is_none_or(|at| now.duration_since(at) >= FOLLOW_EVERY)
+}
+
+#[cfg(test)]
+mod follow_selection_tests {
+    use super::{FOLLOW_EVERY, follow_due, follows_selection};
+    use crate::v4_view_tests::{PROJECT, rig_project};
+    use pm_kernel::{Caller, Request, SelectionCall};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn view_updates_wake_only_panels_with_live_inputs() {
+        for panel in ["easing", "assets", "fxbrowser", "settings"] {
+            assert!(!super::follows_view(panel, true), "{panel}");
+        }
+        for panel in ["inspector", "layer-effects", "color"] {
+            assert!(super::follows_view(panel, true), "{panel}");
+            assert!(!super::follows_view(panel, false), "{panel}");
+        }
+        for panel in ["viewer", "timeline", "agent", "export"] {
+            assert!(super::follows_view(panel, false), "{panel}");
+        }
+    }
+
+    /// Plays 60 content frames through the gate `follow_playback` uses and the
+    /// production Properties realm, and counts the publications that reach the
+    /// app. Each one repaints the window.
+    fn publications_while_playing(rig: &crate::v4_view_tests::Rig) -> usize {
+        let _ = rig.runtime.take_publications();
+        let mut published = 0;
+        let tick = pm_protocol::common::TICKS_PER_SECOND / 30;
+        let start = Instant::now();
+        let (mut last_frame, mut last_at) = (None, None);
+        for frame in 0..60i64 {
+            let p = rig.kernel.published(PROJECT);
+            let now = start + Duration::from_micros(33_333 * frame as u64);
+            if !follows_selection(p.as_deref())
+                || !follow_due(last_frame, last_at, frame * tick, now)
+            {
+                continue;
+            }
+            (last_frame, last_at) = (Some(frame * tick), Some(now));
+            let ticket = rig
+                .runtime
+                .follow_time("inspector", frame as f64 / 30., true)
+                .expect("Properties is mounted")
+                .expect("follow_time");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(result) = ticket.try_take() {
+                    result.expect("Properties publish");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "Properties did not settle");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            published += rig
+                .runtime
+                .take_publications()
+                .iter()
+                .filter(|p| p.panel == "inspector")
+                .count();
+        }
+        published
+    }
+
+    /// 98eb42792 republished Properties on every content frame while playing,
+    /// even with nothing selected (composition fields, which don't change with
+    /// time). That repaint held Fable 5.5 to 24 fps with Properties open.
+    #[::core::prelude::v1::test]
+    fn properties_follows_playback_only_with_a_selected_layer() {
+        // One shape whose opacity animates 0 → 100 over its 10 s.
+        let rig = rig_project(
+            "inspector",
+            r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[{"t":0,"v":0},{"t":10,"v":100}]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##,
+        );
+        assert!(!follows_selection(None));
+        assert_eq!(
+            publications_while_playing(&rig),
+            0,
+            "nothing selected: no publication per frame"
+        );
+        let select = SelectionCall::Layers {
+            ids: vec!["a".into()],
+            add: false,
+        };
+        rig.kernel
+            .call(PROJECT, Request::new(Caller::native(), select))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let followed = publications_while_playing(&rig);
+        assert!(
+            (12..=20).contains(&followed),
+            "a selected animated layer follows ~10 times a second, not every frame: {followed}"
+        );
+    }
+
+    /// Playing at 30 fps with a layer selected, Properties follows at most
+    /// every 100 ms (every fourth frame at 30 fps: 15 updates in 2 s), not every
+    /// frame; a seek shows at once.
+    #[::core::prelude::v1::test]
+    fn a_playing_selected_layer_follows_about_ten_times_a_second() {
+        let tick = pm_protocol::common::TICKS_PER_SECOND / 30;
+        let start = std::time::Instant::now();
+        let (mut last_frame, mut last_at, mut taken) = (None, None, 0);
+        for i in 0..60i64 {
+            let now = start + std::time::Duration::from_micros(33_333 * i as u64);
+            let frame = i * tick;
+            if follow_due(last_frame, last_at, frame, now) {
+                taken += 1;
+                (last_frame, last_at) = (Some(frame), Some(now));
+            }
+        }
+        assert!(
+            (12..=20).contains(&taken),
+            "2 s of playback took {taken} updates"
+        );
+        // A seek of more than half a second shows on the next frame.
+        let now = last_at.unwrap() + FOLLOW_EVERY / 4;
+        let seek = last_frame.unwrap() + 20 * tick;
+        let next = last_frame.unwrap() + tick;
+        assert!(follow_due(last_frame, last_at, seek, now));
+        assert!(!follow_due(last_frame, last_at, next, now));
+    }
+}
+
+/// The viewer canvas menu's closing rows (viewer.ts): the composition's
+/// Paste and Select All Layers, then its view and settings.
+pub(crate) fn canvas_menu_tail(has_layers: bool, can_paste: bool) -> Vec<pm_shell::MenuEntry> {
+    let mut select = pm_shell::MenuEntry::item("Select All Layers", "selectAll");
+    select.enabled = has_layers;
+    let mut paste = pm_shell::MenuEntry::item("Paste", "pasteLayers");
+    paste.enabled = can_paste;
+    vec![
+        paste,
+        select,
+        pm_shell::MenuEntry::separator(),
+        pm_shell::MenuEntry::item("Fit Composition in View", "fitComposition"),
+        pm_shell::MenuEntry::item("Composition Settings…", "compositionSettings"),
+    ]
+}
+
+#[cfg(test)]
+mod canvas_menu_tests {
+    /// Right-clicking empty canvas ends as viewer.ts does: Paste, Select All
+    /// Layers (off in an empty composition), then Fit Composition in View
+    /// and Composition Settings…, each a command the app routes.
+    #[test]
+    fn the_canvas_menu_closes_with_the_composition_rows_in_electrons_order() {
+        let rows = super::canvas_menu_tail(true, true);
+        let labels: Vec<_> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Paste",
+                "Select All Layers",
+                "",
+                "Fit Composition in View",
+                "Composition Settings…"
+            ]
+        );
+        let commands: Vec<_> = rows.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(
+            commands,
+            [
+                "pasteLayers",
+                "selectAll",
+                "",
+                "fitComposition",
+                "compositionSettings"
+            ]
+        );
+        assert!(rows.iter().all(|r| r.enabled || r.label.is_empty()));
+        let empty = super::canvas_menu_tail(false, false);
+        assert!(!empty[1].enabled, "nothing to select");
+        assert!(!empty[0].enabled, "clipboard is empty");
+        assert!(empty[3].enabled && empty[4].enabled);
+    }
+}
+
+/// Requests answered while their panel is still mounting: they only read
+/// or measure, never edit. The Export sheet asks for its 3D estimate from its
+/// first snapshot; the Project panel asks for its list/grid choice before
+/// its first render (refused, its grid drew no thumbnails).
+fn answers_before_ready(operation: &str) -> bool {
+    // Settings telling its window's sidebar what it lists edits nothing.
+    // Layer 5/6 extension capabilities (`ext.*`) must work immediately during
+    // `activate()` and initial render (e.g. listing home folder or reading
+    // persistent storage before first surface commit).
+    operation.starts_with("ext.")
+        || matches!(
+            operation,
+            "export.estimate" | "project.view" | "settings.sidebar"
+        )
+}
+
+/// The Project panel's view for `project` in the per-project choices at
+/// `path`: `set` saves one, else the saved one (a grid until chosen).
+fn project_view(
+    path: &std::path::Path,
+    project: Option<&str>,
+    set: Option<String>,
+) -> Result<String, String> {
+    let mut choices: serde_json::Map<String, Value> = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let key = project.unwrap_or("");
+    match set {
+        Some(view) if view == "list" || view == "grid" => {
+            choices.insert(key.to_owned(), Value::from(view.clone()));
+            let _ = std::fs::create_dir_all(path.parent().expect("a folder"));
+            std::fs::write(path, Value::Object(choices).to_string())
+                .map(|()| view)
+                .map_err(|e| format!("The view choice wasn't saved: {e}"))
+        }
+        Some(other) => Err(format!("Unknown Project view {other}")),
+        None => Ok(choices
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| *v == "list")
+            .unwrap_or("grid")
+            .to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod project_view_tests {
+    /// The Project panel's first question (its list/grid choice) is answered
+    /// while it mounts; edits still wait for the panel.
+    #[test]
+    fn the_view_choice_is_answered_while_the_panel_mounts() {
+        assert!(super::answers_before_ready("project.view"));
+        assert!(super::answers_before_ready("export.estimate"));
+        assert!(!super::answers_before_ready("project.effect"));
+    }
+    /// Each project keeps its own list/grid choice; one never chosen opens
+    /// as a grid, as v1.2.0's Project panel was.
+    #[test]
+    fn each_project_keeps_its_own_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Project/view.json");
+        let view = |project, set: Option<&str>| {
+            super::project_view(&path, Some(project), set.map(str::to_owned)).unwrap()
+        };
+        assert_eq!(view("a", None), "grid");
+        assert_eq!(view("a", Some("list")), "list");
+        assert_eq!(view("b", None), "grid");
+        assert_eq!(view("a", None), "list");
+        assert_eq!(view("b", Some("grid")), "grid");
+        assert_eq!(view("a", None), "list");
+        assert!(super::project_view(&path, Some("a"), Some("tiles".into())).is_err());
+    }
+}
+
+impl Controller {
+    /// The open project's asset names, by id (what the Project shows).
+    pub(crate) fn asset_names(&self) -> std::collections::HashMap<String, String> {
+        let Some(published) = &self.published else {
+            return Default::default();
+        };
+        let Some(pm_model::doc::NodeKind::Object(assets)) = published
+            .snapshot
+            .root()
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.kind())
+        else {
+            return Default::default();
+        };
+        assets
+            .iter()
+            .filter_map(|(id, record)| {
+                let name = record.get("name")?.to_value().as_str()?.to_owned();
+                Some((id.as_str()?.to_owned(), name))
+            })
+            .collect()
+    }
+}
+
+/// The files Quick Look shows for Space on `pressed`: the whole selection
+/// when it holds that item (the arrow keys then move through it), else that
+/// item; each asset's original, an image sequence as its first frame.
+fn quick_look_files(
+    selection: &[String],
+    pressed: &str,
+    originals: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Vec<(String, std::path::PathBuf)> {
+    let ids: Vec<&str> = if selection.iter().any(|s| s == pressed) {
+        selection.iter().map(String::as_str).collect()
+    } else {
+        vec![pressed]
+    };
+    ids.into_iter()
+        .filter_map(|id| Some((id, originals.get(id)?)))
+        .map(|(id, path)| {
+            let file = match pm_media::image::sequence::Manifest::read(path) {
+                Ok(Some(sequence)) => (sequence.first..=sequence.last)
+                    .map(|n| sequence.file(n))
+                    .find(|f| f.is_file())
+                    .unwrap_or_else(|| path.clone()),
+                _ => path.clone(),
+            };
+            (id.to_owned(), file)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod quick_look_tests {
+    /// Space on a selected item shows the selection's originals in order;
+    /// on an item outside the selection, that item alone; items without an
+    /// original (compositions) are left out.
+    #[test]
+    fn quick_look_shows_the_selections_originals() {
+        let originals: std::collections::BTreeMap<String, std::path::PathBuf> = [
+            ("a".to_owned(), "/m/a.mov".into()),
+            ("b".to_owned(), "/m/b.png".into()),
+        ]
+        .into();
+        let selection = ["b".to_owned(), "c".to_owned(), "a".to_owned()];
+        assert_eq!(
+            super::quick_look_files(&selection, "a", &originals),
+            [
+                ("b".to_owned(), std::path::PathBuf::from("/m/b.png")),
+                ("a".to_owned(), "/m/a.mov".into())
+            ]
+        );
+        assert_eq!(
+            super::quick_look_files(&["b".to_owned()], "a", &originals),
+            [("a".to_owned(), std::path::PathBuf::from("/m/a.mov"))]
+        );
+    }
+
+    #[test]
+    fn studio_add_choices_includes_blender_lights_null_meshes_and_camera() {
+        let choices = super::studio_add_choices();
+        let has = |cmd: &str| choices.iter().any(|c| c.command == cmd);
+        for cmd in [
+            "new3d:point",
+            "new3d:sun",
+            "new3d:spot",
+            "new3d:area",
+            "new3d:null",
+            "new3d:box",
+            "new3d:sphere",
+            "new3d:camera",
+        ] {
+            assert!(has(cmd), "missing Shift+A choice {cmd}");
+        }
+    }
+
+    #[test]
+    fn studio_add_choices_group_every_command_and_support_flat_search() {
+        use pm_shell::transient::{Picker, PickerRow};
+        let mut menu = Picker {
+            choices: super::studio_add_choices(),
+            grouped: true,
+            open: true,
+            ..Default::default()
+        };
+        let expected = [
+            ("Mesh", 9),
+            ("Light", 4),
+            ("3D Null", 1),
+            ("Camera", 1),
+            ("Light Presets", 5),
+            ("Environment", 3),
+            ("Nature", 6),
+        ];
+        let rows = menu.rows();
+        assert_eq!(rows.len(), expected.len());
+        let mut reachable = Vec::new();
+        for (place, (row, (label, count))) in rows.into_iter().zip(expected).enumerate() {
+            let index = match row {
+                PickerRow::Category(index) => {
+                    assert_eq!(menu.choices[index].category, label);
+                    menu.point(Some(place));
+                    let items = menu.submenu_choices();
+                    assert_eq!(items.len(), count);
+                    reachable.extend(items);
+                    index
+                }
+                PickerRow::Choice(index) => {
+                    assert_eq!(menu.choices[index].label, label);
+                    assert_eq!(count, 1);
+                    reachable.push(index);
+                    index
+                }
+                PickerRow::Provider(_) => panic!("unexpected provider row"),
+            };
+            assert!(menu.choices[index].menu_icon.is_some());
+        }
+        reachable.sort_unstable();
+        assert_eq!(reachable, (0..menu.choices.len()).collect::<Vec<_>>());
+        menu.search("spot".into());
+        assert!(menu.submenu.is_none());
+        assert_eq!(menu.navigate("enter").as_deref(), Some("new3d:spot"));
+    }
+}
+
+pub(crate) fn studio_add_choices() -> Vec<pm_shell::transient::Choice> {
+    use pm_shell::transient::Choice;
+    let item = |label: &str, cmd: &str, cat: &str, detail: &str, aliases: &[&str]| {
+        let mut c = Choice::new(label, cmd).within(cat);
+        c.menu_icon = match cat {
+            "Mesh" => Some("cube"),
+            "Light" => Some("lightbulb"),
+            "Empty" => Some("plus.viewfinder"),
+            "Camera" => Some("video"),
+            "Light Presets" => Some("slider.horizontal.3"),
+            "Environment" => Some("globe"),
+            "Nature" => Some("leaf"),
+            _ => None,
+        };
+        if !detail.is_empty() {
+            c = c.detail(detail);
+        }
+        if !aliases.is_empty() {
+            c = c.with_aliases(aliases.iter().map(|s| (*s).to_owned()).collect());
+        }
+        c
+    };
+    vec![
+        // Mesh
+        item("Cube", "new3d:box", "Mesh", "", &["Box", "Mesh"]),
+        item("Sphere", "new3d:sphere", "Mesh", "", &["UV Sphere", "Ball", "Mesh"]),
+        item("Plane", "new3d:plane", "Mesh", "", &["Floor", "Quad", "Mesh"]),
+        item("Cylinder", "new3d:cylinder", "Mesh", "", &["Tube", "Mesh"]),
+        item("Cone", "new3d:cone", "Mesh", "", &["Pyramid", "Mesh"]),
+        item("Torus", "new3d:torus", "Mesh", "", &["Donut", "Ring", "Mesh"]),
+        item("Capsule", "new3d:capsule", "Mesh", "", &["Pill", "Mesh"]),
+        item("Icosphere", "new3d:icosahedron", "Mesh", "", &["Ico Sphere", "Mesh"]),
+        item(
+            "Import 3D Model…",
+            "new3d:import",
+            "Mesh",
+            "Import GLB, GLTF, USDZ, OBJ, or FBX",
+            &["GLB", "GLTF", "USDZ", "OBJ", "FBX", "Model"],
+        ),
+        // Light (Blender's 4 core light types)
+        item(
+            "Point Light",
+            "new3d:point",
+            "Light",
+            "Omnidirectional light radiating in all directions",
+            &["Point", "Bulb", "Omni", "Light"],
+        ),
+        item(
+            "Sun Light",
+            "new3d:sun",
+            "Light",
+            "Directional parallel sunlight across the whole scene",
+            &["Sun", "Directional", "Light"],
+        ),
+        item(
+            "Spot Light",
+            "new3d:spot",
+            "Light",
+            "Focused cone with adjustable spread & softness",
+            &["Spot", "Spotlight", "Cone", "Light"],
+        ),
+        item(
+            "Area Light",
+            "new3d:area",
+            "Light",
+            "Softbox emitter with adjustable width & height",
+            &["Area", "Softbox", "Rect", "Light"],
+        ),
+        // Empty / Rig
+        item(
+            "3D Null",
+            "new3d:null",
+            "Empty",
+            "Empty 3D transform locator for rigging & parenting",
+            &["Empty", "Null", "Null Object", "Plain Axes", "Rig"],
+        ),
+        // Camera
+        item(
+            "Camera",
+            "new3d:camera",
+            "Camera",
+            "Perspective or orthographic 3D camera",
+            &["Shot", "Lens"],
+        ),
+        // Light Presets
+        item("Rim Strip Left", "new3d:preset:rim_left", "Light Presets", "", &["Light", "Preset"]),
+        item("Rim Strip Right", "new3d:preset:rim_right", "Light Presets", "", &["Light", "Preset"]),
+        item("Top Softbox", "new3d:preset:top", "Light Presets", "", &["Light", "Preset"]),
+        item(
+            "Edge Highlight Card",
+            "new3d:preset:edge_card",
+            "Light Presets",
+            "",
+            &["Light", "Preset"],
+        ),
+        item("Strip Light", "new3d:preset:strip", "Light Presets", "", &["Light", "Preset"]),
+        // Environment
+        item("Sky", "new3d:sky", "Environment", "Physical atmosphere & world sky", &["World", "HDRI"]),
+        item("Fog Volume", "new3d:fog", "Environment", "Volumetric fog box or sphere", &["Volume"]),
+        item("Terrain", "new3d:terrain", "Environment", "Procedural landscape heightfield", &["Landscape"]),
+        // Nature
+        item("Pine Trees", "new3d:scatter:conifer", "Nature", "", &["Scatter", "Trees"]),
+        item("Oak Trees", "new3d:scatter:broadleaf", "Nature", "", &["Scatter", "Trees"]),
+        item("Birch Trees", "new3d:scatter:birch", "Nature", "", &["Scatter", "Trees"]),
+        item("Bushes", "new3d:scatter:bush", "Nature", "", &["Scatter"]),
+        item("Grass", "new3d:scatter:grass", "Nature", "", &["Scatter"]),
+        item("Rocks", "new3d:scatter:rock", "Nature", "", &["Scatter"]),
+    ]
+}
+
+pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
+    pm_shell::MenuEntry::submenu(
+        "New",
+        vec![
+            pm_shell::MenuEntry::item("Solid", "newSolid"),
+            pm_shell::MenuEntry::item("Camera", "newCamera"),
+            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+            pm_shell::MenuEntry::item("Null Object", "newNull"),
+            pm_shell::MenuEntry::separator(),
+            pm_shell::MenuEntry::item("Composition…", "newComposition"),
+        ],
+    )
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryRecovery {
+    Restarting,
+    Restarted,
+    Failed,
+}
+impl MemoryRecovery {
+    fn after_failure(previous: Option<Self>) -> Self {
+        if previous.is_none() {
+            Self::Restarting
+        } else {
+            Self::Failed
+        }
+    }
+}
+fn builtin_title(id: &str) -> &str {
+    pm_builtins::builtin_panel(id).map_or(id, |panel| panel.title.as_str())
+}
+fn panel_recovery_message(id: &str, retry: bool) -> String {
+    let title = builtin_title(id);
+    if retry {
+        format!("{title} ran out of memory")
+    } else {
+        format!("Reloading {title}…")
+    }
+}
+
+#[cfg(test)]
+mod memory_recovery_tests {
+    use super::{MemoryRecovery, panel_recovery_message};
+
+    #[test]
+    fn restarts_once_then_shows_the_reload_error() {
+        let first = MemoryRecovery::after_failure(None);
+        assert_eq!(first, MemoryRecovery::Restarting);
+        assert_eq!(
+            MemoryRecovery::after_failure(Some(first)),
+            MemoryRecovery::Failed
+        );
+        assert_eq!(
+            MemoryRecovery::after_failure(Some(MemoryRecovery::Restarted)),
+            MemoryRecovery::Failed
+        );
+        assert_eq!(
+            panel_recovery_message("timeline", true),
+            "Timeline ran out of memory"
+        );
+        assert_eq!(
+            panel_recovery_message("inspector", true),
+            "Properties ran out of memory"
+        );
+    }
+
+    #[test]
+    fn only_memory_errors_recover() {
+        use pm_runtime_v8::{Error, HEAP_FULL};
+        assert!(Error::Quota("heap").is_memory());
+        assert!(Error::Quota(HEAP_FULL).is_memory());
+        assert!(Error::Quota("external memory").is_memory());
+        assert!(!Error::Quota("source bytes").is_memory());
+        assert!(!Error::Closed.is_memory());
+    }
+}
+/// A side panel's body: the scroller, a scroll layer, around the panel. A
+/// view of its own, cached, so a wheel step that only moves the offset
+/// replays its drawing instead of the window laying the panel out again.
+pub(crate) struct PanelBody {
+    id: SharedString,
+    view: Entity<crate::v4_view::SurfaceView>,
+    handle: ScrollHandle,
+    /// The panel's height: its content, at least the slot.
+    height: f32,
+}
+impl Render for PanelBody {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The Project body replays its drawing between edge-mask changes.
+        // Native surfaces retain their own frame callbacks.
+        let native = self.view.read(cx).has_native();
+        div()
+            .id(self.id.clone())
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
+            .when(!native, |d| d.scroll_layer())
+            .child(
+                self.view
+                    .clone()
+                    .cached(StyleRefinement::default().w_full().h(px(self.height))),
+            )
+    }
+}

@@ -1,0 +1,4910 @@
+//! Viewer transform gizmos. The engine draws them in the frame's own pass, so
+//! they register with the picture at any zoom; this element owns hit testing and
+//! runs each drag as one kernel gesture on a worker, never through V8.
+use crate::gizmo_layer::{Mark, Shape};
+use gpui::{prelude::*, *};
+use pm_engine_service::OverlayLine;
+use pm_kernel::{
+    Ack, Call, Caller, Command, GestureCall, KernelHandle, PropertyCommand, QueryMirror, Reply,
+    Request, SelectionCall, WriteBody, commands::properties::SetProperty,
+};
+use pm_model::Value;
+use pm_panel_studio3d::viewport::Scene;
+use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    rc::Rc,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+#[path = "marquee.rs"]
+mod marquee;
+#[path = "effect_handles.rs"]
+mod effect_handles;
+#[path = "pen_tool.rs"]
+pub mod pen;
+#[path = "snap.rs"]
+mod snap;
+#[path = "fly.rs"]
+pub mod fly;
+#[path = "gizmo3d.rs"]
+pub mod studio3d;
+#[path = "viewer_rulers.rs"]
+pub mod viewer_rulers;
+#[path = "text_edit.rs"]
+pub mod text;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    Select,
+    Hand,
+    Zoom,
+    Rotate,
+    Anchor,
+    Shape,
+    Pen,
+    Text,
+    Other,
+}
+/// Viewer navigation the pointer asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Navigate {
+    Pan(Point<Pixels>),
+    Zoom { factor: f64, at: Point<Pixels> },
+}
+/// How long pointer navigation rests before it is written. Every write publishes
+/// to all panels, so a hot gesture only moves local state.
+pub const NAVIGATION_IDLE: Duration = Duration::from_millis(150);
+/// One input owner per gesture; AppKit can interleave scroll and magnify.
+#[derive(Default)]
+pub(crate) struct ZoomInput {
+    pinching: bool,
+    pinch_until: Option<std::time::Instant>,
+}
+impl ZoomInput {
+    fn owns_pinch(&self) -> bool {
+        self.pinching || self.pinch_until.is_some_and(|until| std::time::Instant::now() < until)
+    }
+    pub(crate) fn pinch(&mut self, event: &PinchEvent) -> Option<Navigate> {
+        self.pinching = !matches!(event.phase, TouchPhase::Ended | TouchPhase::Cancelled);
+        self.pinch_until = Some(std::time::Instant::now() + NAVIGATION_IDLE);
+        if event.phase == TouchPhase::Cancelled || !event.delta.is_finite() || event.delta == 0. {
+            return None;
+        }
+        Some(Navigate::Zoom {
+            factor: (event.delta as f64).exp(),
+            at: event.position,
+        })
+    }
+    pub(crate) fn wheel(&self, event: &ScrollWheelEvent) -> Option<Navigate> {
+        if event.is_momentum || self.owns_pinch() {
+            return None;
+        }
+        let m = event.modifiers;
+        if !(m.control || m.platform || m.alt || matches!(event.delta, ScrollDelta::Lines(_))) {
+            return None;
+        }
+        // Electron normalises a wheel line to 40 px; trackpads already report points.
+        let dy = match event.delta {
+            ScrollDelta::Lines(d) => d.y as f64 * 40.,
+            ScrollDelta::Pixels(d) => f32::from(d.y) as f64,
+        };
+        if !dy.is_finite() || dy == 0. || event.touch_phase == TouchPhase::Cancelled {
+            return None;
+        }
+        Some(Navigate::Zoom {
+            factor: (dy * 0.006).exp().clamp(0.5, 2.),
+            at: event.position,
+        })
+    }
+}
+/// The viewer's zoom and pan. The pointer owns them from its first event until
+/// their write lands: publications in between carry older values.
+#[derive(Debug)]
+pub struct ViewPlacement {
+    /// `None` fits the slot.
+    pub zoom: Option<f64>,
+    /// Offset from centred, points.
+    pub pan: [f64; 2],
+    /// The composition's scale as shown, which is what pointers map through.
+    pub scale: Cell<f64>,
+    /// The viewer body the composition fits in, points.
+    pub stage: [f64; 2],
+    /// Looking through a 3D composition's Free View: the image covers the
+    /// whole viewer body, centred, whatever the zoom and pan (3d-studio.md §4).
+    pub fill: Cell<bool>,
+    local: bool,
+}
+impl Default for ViewPlacement {
+    fn default() -> Self {
+        Self {
+            zoom: None,
+            pan: [0., 0.],
+            scale: Cell::new(1.),
+            stage: [640., 360.],
+            fill: Cell::new(false),
+            local: false,
+        }
+    }
+}
+impl ViewPlacement {
+    pub fn navigate(&mut self, change: Navigate, center: Point<Pixels>, limit: f64) {
+        let (zoom, pan) = navigated(change, self.scale.get(), self.pan, center, limit);
+        self.zoom = Some(zoom);
+        self.pan = pan;
+        self.scale.set(zoom);
+        self.local = true;
+    }
+    /// An absolute placement from a command.
+    pub fn place(&mut self, zoom: Option<f64>, pan: [f64; 2]) {
+        self.zoom = zoom;
+        self.pan = pan;
+        if let Some(zoom) = zoom {
+            self.scale.set(zoom);
+        }
+        self.local = true;
+    }
+    /// A publication's values, ignored while local ones are unwritten.
+    pub fn adopt(&mut self, navigation: &pm_panel_viewerchrome::Navigation) {
+        if !self.local {
+            self.zoom = (!navigation.fit).then_some(navigation.zoom);
+            self.pan = [navigation.pan.x, navigation.pan.y];
+        }
+    }
+    pub fn written(&mut self) {
+        self.local = false;
+    }
+    /// The pan as shown: none while the editor view fills the body.
+    pub fn shown_pan(&self) -> [f64; 2] {
+        if self.fill.get() { [0., 0.] } else { self.pan }
+    }
+}
+/// The zoom and pan after a change: zooming keeps the point under the pointer.
+/// `limit` is the highest zoom the display can show.
+pub fn navigated(
+    change: Navigate,
+    zoom: f64,
+    pan: [f64; 2],
+    center: Point<Pixels>,
+    limit: f64,
+) -> (f64, [f64; 2]) {
+    match change {
+        Navigate::Pan(by) => (
+            zoom,
+            [
+                pan[0] + f32::from(by.x) as f64,
+                pan[1] + f32::from(by.y) as f64,
+            ],
+        ),
+        Navigate::Zoom { factor, at } => {
+            let next = (zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX.min(limit).max(ZOOM_MIN));
+            let kept = 1. - next / zoom;
+            let offset = |at: Pixels, center: Pixels, pan: f64| {
+                pan + (f32::from(at) as f64 - f32::from(center) as f64 - pan) * kept
+            };
+            (
+                next,
+                [
+                    offset(at.x, center.x, pan[0]),
+                    offset(at.y, center.y, pan[1]),
+                ],
+            )
+        }
+    }
+}
+/// The composition's placement inside the viewer, in window points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewFrame {
+    pub origin: Point<Pixels>,
+    pub scale: f64,
+    pub size: [f64; 2],
+}
+pub trait Host: 'static {
+    fn sample_color(&self, _: &App) -> Option<crate::colour_picker::SampleSource> {
+        None
+    }
+    fn effect_visible(&self, _: &str, _: &str, _: &App) -> Option<bool> {
+        None
+    }
+
+    fn time(&self, cx: &App) -> f64;
+    /// The Project panel's dragged items dropped on the viewer: placed at
+    /// the playhead, on top of the stack.
+    fn drop_project_items(&self, _cx: &mut App) {}
+    /// Files from Finder dropped on the viewer: imported, and placed at the
+    /// playhead on top of the stack (`alt`: a folder keeps its files apart).
+    fn drop_files(&self, _paths: Vec<std::path::PathBuf>, _alt: bool, _cx: &mut App) {}
+    /// An effect from the Effects panel dropped on the viewer: the selected
+    /// layer takes it.
+    fn drop_effect(&self, _drop: crate::timeline_surface::EffectDrop, _cx: &mut App) {}
+    fn playing(&self, cx: &App) -> bool;
+    fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
+    fn tool(&self, cx: &App) -> Tool;
+    /// Layer 2: forward pointer/wheel/key events to an active v4 extension tool.
+    fn custom_tool_event(&self, _event: serde_json::Value, _cx: &mut App) -> bool {
+        false
+    }
+    /// A canvas press leaves field/control keyboard focus behind.
+    fn focus_canvas(&self, _: &mut Window, _: &mut App) {}
+    /// Publish engine-drawn lines, normalized to the composition frame.
+    /// The outline and handles, normalized to the composition, and where the
+    /// composition sits in the viewer view (`None`: nothing to place them by).
+    fn overlay(
+        &self,
+        lines: Vec<OverlayLine>,
+        at: Option<crate::gizmo_layer::Placement>,
+        cx: &mut App,
+    );
+    /// The marks that keep their size on screen (handles, the rotation
+    /// knob, the anchor's rings, the box's keyline), sent just before the
+    /// lines they go with.
+    fn marks(&self, _marks: Vec<Mark>, _cx: &mut App) {}
+    fn navigate(&self, change: Navigate, cx: &mut App);
+    /// The shared layer menu, on the selection the press made.
+    /// The right-click menu over `layer`, or over empty canvas.
+    fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App);
+    fn report(&self, message: String, cx: &mut App);
+    /// A drag step is on its way to the kernel; `at` is the oldest pointer
+    /// event it carries (host seconds), for the viewer's input-to-photon trace.
+    fn input(&self, _at: f64, _: &mut App) {}
+    /// The Shape tool's variant.
+    fn shape_variant(&self, _: &App) -> String {
+        "rect".into()
+    }
+    /// Editing tools stop playback first.
+    fn pause(&self, _: &mut App) {}
+    /// A shell command (the tool returning to Select).
+    fn command(&self, _: &str, _: &mut App) {}
+    /// The native editor an on-canvas text session types into.
+    fn text_input(&self, _: &str, _: &mut Window, _: &mut App) -> Option<Rc<dyn text::TextInput>> {
+        None
+    }
+    /// Open a composition (a double-clicked precomp).
+    fn open_composition(&self, _: String, _: &mut App) {}
+    /// Focus a group layer like a composition (`None` returns to the composition).
+    fn focus_group(&self, _: Option<String>, _: &mut App) {}
+    /// Imported-model geometry for picking a part (snapshot-approved
+    /// originals); `None` when no media host can load it.
+    fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        None
+    }
+    /// Reveal an imported model's material slot in Properties (a
+    /// double-clicked model part); `None` leaves part focus.
+    fn focus_part(&self, _: &str, _: Option<u64>, _: &mut App) {}
+    /// The viewer's Free View for Studio 3D layers; `None` is the shot.
+    fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, _: &mut App) {}
+    /// The engine's surface pick at normalized composition coordinates, on
+    /// the frame on screen. `None` when there's no viewer frame to ask.
+    fn pick_surface(
+        &self,
+        _: [f32; 2],
+        _: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        None
+    }
+}
+/// 3D drag frame for moving a 3D child cleanly inside a 3D-rotated parent/group.
+#[derive(Clone, Copy, Debug)]
+struct Drag3d {
+    /// Inverse of the layer's `parent3d` matrix (maps world XYZ deltas into parent-local XYZ).
+    parent_inv: [f64; 16],
+    /// Perspective scale `(1.0 + world_z / focal)` at the layer's anchor.
+    depth_scale: f64,
+    /// True when the parent space has non-zero 3D tilt (X/Y rotation or Z coupling).
+    parent_tilted: bool,
+}
+
+/// One selected layer's pose at the current time, in composition pixels.
+#[derive(Clone, Debug)]
+pub struct Pose {
+    pub id: String,
+    pub locked: bool,
+    /// A selected parent or group carries this layer; moving both would double it.
+    root: bool,
+    /// Images and video keep their picture's aspect, as in the shipped viewer.
+    keeps_aspect: bool,
+    world: [f64; 6],
+    /// Column-major 3×3 perspective homography for 2.5D 3D layers (`planeMatrix`).
+    plane: Option<[f64; 9]>,
+    /// Positioning homography (`planeMatrix(..., true)`) mapping parent-plane XY
+    /// at the layer's Z depth to composition pixels for 1:1 3D drag moves.
+    plane_pos: Option<[f64; 9]>,
+    /// True when `corners` is a screen-space enclosing box for a 3D group with
+    /// non-coplanar 3D children (handles interpolate `corners` directly so the
+    /// box never detaches or disappears when rotated edge-on).
+    screen_box: bool,
+    /// Whether this layer itself has `threeD: true`.
+    own_3d: bool,
+    /// Evaluated `position.z` (0 for 2D layers).
+    position_z: f64,
+    /// Evaluated `scale.z` for 3D layers (keeps uniform 3D group scale shear-free).
+    scale_z: Option<f64>,
+    /// 3D parent-space drag transform when dragging inside a 3D hierarchy.
+    drag_3d: Option<Drag3d>,
+    /// Rotation, skew and scale of the layer alone.
+    linear: [f64; 4],
+    /// Maps composition deltas into the layer's parent space.
+    to_parent: [f64; 4],
+    /// Layer-space box: x0, y0, x1, y1.
+    bounds: [f64; 4],
+    /// A parametric shape resizes its content, not its scale.
+    shape: Option<ShapeSize>,
+    /// A text layer's font size: the common box resizes type by it.
+    text_size: Option<f64>,
+    has_skew: bool,
+    pub corners: [[f64; 2]; 4],
+    /// Where the anchor lands in the composition.
+    pub anchor: [f64; 2],
+    pub local_anchor: [f64; 2],
+    pub position: [f64; 2],
+    pub scale: [f64; 2],
+    pub rotation: f64,
+}
+impl Pose {
+    /// This layer moved by `delta` in the composition (a locked one stays).
+    fn moved(&self, delta: [f64; 2]) -> Pose {
+        let mut pose = self.clone();
+        if !pose.locked {
+            for corner in &mut pose.corners {
+                corner[0] += delta[0];
+                corner[1] += delta[1];
+            }
+            pose.anchor[0] += delta[0];
+            pose.anchor[1] += delta[1];
+            pose.world[4] += delta[0];
+            pose.world[5] += delta[1];
+        }
+        pose
+    }
+    /// This layer turned to `degrees` about its anchor (a locked one stays).
+    /// The turn happens in the parent's space, so a scaled parent skews it
+    /// in the composition exactly as the engine will draw it.
+    fn turned(&self, degrees: f64) -> Pose {
+        let mut pose = self.clone();
+        let Some(parent) = inverse_linear(pose.to_parent) else {
+            return pose;
+        };
+        if pose.locked {
+            return pose;
+        }
+        let (sin, cos) = (degrees - pose.rotation).to_radians().sin_cos();
+        let m = multiply(multiply(parent, [cos, sin, -sin, cos]), pose.to_parent);
+        let about = pose.anchor;
+        let turn = |p: [f64; 2]| {
+            let v = apply(m, [p[0] - about[0], p[1] - about[1]]);
+            [about[0] + v[0], about[1] + v[1]]
+        };
+        for corner in &mut pose.corners {
+            *corner = turn(*corner);
+        }
+        let w = pose.world;
+        let [a, b, c, d] = multiply(m, [w[0], w[1], w[2], w[3]]);
+        let [e, f] = turn([w[4], w[5]]);
+        pose.world = [a, b, c, d, e, f];
+        pose.rotation = degrees;
+        pose
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShapeSize {
+    width: f64,
+    height: f64,
+    stroke: f64,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Hit {
+    Body,
+    Handle(usize),
+    Rotate,
+    Anchor,
+}
+struct Drag {
+    hit: Hit,
+    origin: Point<Pixels>,
+    active: bool,
+    poses: Arc<Vec<Pose>>,
+    time: f64,
+    /// A press on the selection that never moves is a click: it picks.
+    click: Option<Press>,
+    /// What a move snaps to, once read off the main thread.
+    snaps: Option<Arc<Vec<[f64; 2]>>>,
+    /// An Option-drag of the body: each moved layer and the copy that takes
+    /// the move in its place.
+    copies: Option<Vec<(String, String)>>,
+}
+impl Drag {
+    /// A move, or one layer's turn, predicts its outline as the pointer
+    /// goes; the rest (and 2.5D 3D layers whose perspective shape changes
+    /// with position/rotation) wait for the kernel's read-back.
+    fn draws_own_outline(&self) -> bool {
+        !self.poses.iter().any(|p| p.plane.is_some())
+            && (self.hit == Hit::Body || (self.hit == Hit::Rotate && self.poses.len() == 1))
+    }
+}
+#[derive(Clone, Copy)]
+struct Press {
+    at: [f64; 2],
+    shift: bool,
+    deep: bool,
+    time: f64,
+    /// Released inside the selection's box without moving: the selection
+    /// keeps itself unless the click asks otherwise (viewer.ts onDown
+    /// `startMove(... click)`).
+    inside: bool,
+}
+enum Job {
+    Begin(&'static str),
+    /// `true`: supersedes the previous step (absolute, from-start values).
+    Step(Vec<Command>, bool),
+    Finish(bool),
+    /// A one-step edit outside any gesture, then the layer to select.
+    Transact(&'static str, Vec<Command>, Option<String>),
+    /// Select one layer, or nothing (not an edit).
+    Select(Option<String>),
+    /// Select these layers (the copies an Option-drag made).
+    SelectLayers(Vec<String>),
+}
+impl Job {
+    /// For the main-thread trace.
+    fn kind(&self) -> &'static str {
+        match self {
+            Job::Begin(_) => "begin",
+            Job::Step(..) => "step",
+            Job::Finish(_) => "finish",
+            Job::Transact(..) => "transact",
+            Job::Select(_) | Job::SelectLayers(_) => "select",
+        }
+    }
+}
+#[derive(PartialEq, Eq)]
+struct StudioSceneKey {
+    document: u64,
+    revision: u64,
+    time: u64,
+    fonts: Option<u64>,
+}
+struct StudioSceneCache {
+    key: StudioSceneKey,
+    // Share an in-flight build between reads of the same frame, too.
+    frame: Arc<OnceLock<StudioFrame>>,
+}
+struct StudioFrame {
+    scene: Option<Arc<Scene>>,
+    layers: Vec<pm_kernel::LayerInfo>,
+    geometry: std::sync::Mutex<FrameGeometry>,
+}
+
+/// Selection can return to the same group while the document and time are
+/// unchanged. Reuse its projected bounds along with the scene and layer index.
+struct FrameGeometry {
+    query: QueryMirror,
+    groups: std::collections::HashMap<String, Option<Pose>>,
+}
+
+impl FrameGeometry {
+    fn new(query: QueryMirror) -> Self {
+        Self {
+            query,
+            groups: Default::default(),
+        }
+    }
+}
+
+pub struct GizmoSurface {
+    zoom_input: ZoomInput,
+    effect_controls: Vec<effect_handles::Control>,
+    effect_index: Option<Arc<effect_handles::EffectIndex>>,
+    effect_read: u64,
+    effect_out: bool,
+    effect_again: bool,
+    effect_drag: Option<effect_handles::Drag>,
+    effect_stop: Option<(usize, usize)>,
+    effect_picker: Option<(usize, usize)>,
+    effect_colour: Option<(Entity<crate::colour_picker::Picker>, Subscription, AnyWindowHandle)>,
+    /// The layer a click would select under the pointer, outlined
+    /// (viewer.ts hoverTargetId): its id and composition corners.
+    hover_box: Option<(String, [[f64; 2]; 4])>,
+    /// A hover pick is out; the latest pointer waits here meanwhile.
+    hover_out: bool,
+    hover_next: Option<Press>,
+    /// ⌘/Ctrl held at the last pointer move: the hover reaches the leaf.
+    hover_deep: bool,
+    /// ⌥ held: the Zoom tool zooms out (its cursor says so).
+    hover_alt: bool,
+    /// Where the pointer last hovered, to re-read the cursor when ⌥ changes.
+    hover_at: Option<Point<Pixels>>,
+    modifier_subscription: Option<Subscription>,
+    studio: studio3d::State,
+    studio_scene_cache: Option<StudioSceneCache>,
+    kernel: KernelHandle,
+    project: String,
+    tokens: pm_design::Tokens,
+    host: Rc<dyn Host>,
+    poses: Arc<Vec<Pose>>,
+    bounds: Bounds<Pixels>,
+    drag: Option<Drag>,
+    queue: VecDeque<Job>,
+    gesture: Option<u64>,
+    busy: bool,
+    /// The oldest pointer event behind the queued drag steps (`Host::input`).
+    step_input: Option<f64>,
+    latest: u64,
+    /// Single-flight guard for background `reread` tasks so rapid ticks/clicks
+    /// never pile up concurrent reads on the GCD thread pool.
+    reread_out: bool,
+    reread_again: bool,
+    #[cfg(test)]
+    completed_read: u64,
+    /// Press waiting on a pick; the drag starts on its answer if still held.
+    picking: Option<Point<Pixels>>,
+    picks: usize,
+    controls: bool,
+    panning: Option<(Point<Pixels>, Point<Pixels>)>,
+    pointer_button: MouseButton,
+    cancelled_press: Option<MouseButton>,
+    /// Space is held over the viewer: a press pans whatever the tool, and
+    /// whether it did decides if the key's release plays.
+    space_hand: bool,
+    space_panned: bool,
+    /// View ▸ Show Rulers and Show Grid, and the guides pulled from a ruler.
+    rulers: viewer_rulers::Rulers,
+    snapping_enabled: bool,
+    cursor: CursorStyle,
+    fly_capture: Option<Rc<std::cell::Cell<bool>>>,
+    part_assets_revision: Option<(u64, u64)>,
+    part_assets: Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>,
+    /// Holds the keyboard while flying, so held keys report their release.
+    focus: Option<FocusHandle>,
+    refreshing: bool,
+    /// A Shape tool drag: where it started and the box drawn so far.
+    sketch: Option<Sketch>,
+    /// A Text tool press, until its release decides what it makes.
+    text_sketch: Option<text::TextSketch>,
+    /// The on-canvas text edit.
+    text: Option<text::TextSession>,
+    /// The Pen tool's view of the selected layer's paths.
+    pen: Option<pen::PenPose>,
+    pen_reading: u64,
+    pen_read_out: bool,
+    pen_read_again: bool,
+    text_reading: u64,
+    text_read_out: bool,
+    text_read_again: bool,
+    /// The layer and open path new clicks extend.
+    pen_active: Option<(String, String)>,
+    /// A pen read that includes the Pen's own last press has landed.
+    pen_ready: bool,
+    /// Presses, moves and releases that came before that read, replayed in
+    /// order when it lands.
+    pen_waiting: VecDeque<pen::PenInput>,
+    /// Path and vertex whose tangents show.
+    pen_selected: Option<(String, String)>,
+    pen_drag: Option<pen::PenDrag>,
+    pen_pointer: Option<[f64; 2]>,
+    /// A Select-tool drag from empty canvas.
+    marquee: Option<marquee::Marquee>,
+    /// Snapping guides of the move in progress, composition points.
+    guides: Vec<snap::Guide>,
+}
+struct Sketch {
+    origin: Point<Pixels>,
+    start: [f64; 2],
+    shape: Option<crate::shape_tool::ShapeBox>,
+}
+const HANDLES: [(f64, f64); 8] = [
+    (0., 0.),
+    (0.5, 0.),
+    (1., 0.),
+    (1., 0.5),
+    (1., 1.),
+    (0.5, 1.),
+    (0., 1.),
+    (0., 0.5),
+];
+/// The Anchor tool grabs only near the anchor (viewer.ts startAnchorTool).
+const ANCHOR_REACH: f64 = 12.;
+/// Smallest scale a handle drag reaches, percent (viewer.ts calculateResize).
+const MIN_SCALE: f64 = 0.1;
+fn transform(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
+    [
+        m[0] * p[0] + m[2] * p[1] + m[4],
+        m[1] * p[0] + m[3] * p[1] + m[5],
+    ]
+}
+pub(crate) fn project_plane(m: &[f64; 9], p: [f64; 2]) -> Option<[f64; 2]> {
+    let w = m[2] * p[0] + m[5] * p[1] + m[8];
+    if !w.is_finite() || w <= 1e-4 {
+        return None;
+    }
+    let x = (m[0] * p[0] + m[3] * p[1] + m[6]) / w;
+    let y = (m[1] * p[0] + m[4] * p[1] + m[7]) / w;
+    (x.is_finite() && y.is_finite()).then_some([x, y])
+}
+/// Legacy focal length in pixels (the outermost 3D group owns perspective).
+fn comp_focal_length(
+    root: &pm_model::Node,
+    list: &[pm_kernel::model::LayerInfo],
+    id: &str,
+    mirror: &mut QueryMirror,
+    time: f64,
+) -> f64 {
+    let comp = pm_kernel::model::comp_node(root, None).unwrap_or(root);
+    let w = comp
+        .get("w")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1920.0);
+    let mut owner = id.to_owned();
+    let mut cur = list
+        .iter()
+        .find(|l| l.id == id)
+        .and_then(|l| l.group.as_deref());
+    let mut guard = 0usize;
+    while let Some(g) = cur {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let is_g3d = pm_kernel::model::find_layer(root, g)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .and_then(|n| n.get("threeD"))
+            .and_then(|v| v.to_value().as_bool())
+            == Some(true);
+        if is_g3d {
+            owner = g.to_owned();
+        }
+        cur = list
+            .iter()
+            .find(|l| l.id == g)
+            .and_then(|l| l.group.as_deref());
+    }
+    let perspective = mirror
+        .queries()
+        .evaluate(None, &owner, "perspective", time)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(50.0)
+        .max(0.001);
+    w.max(1.0) * perspective / 36.0
+}
+
+/// Active non-group descendants of `group_id` in `list`.
+fn group_descendants(list: &[pm_kernel::model::LayerInfo], group_id: &str) -> Vec<String> {
+    let parent_group: std::collections::HashMap<&str, Option<&str>> = list
+        .iter()
+        .filter(|l| l.kind == "group")
+        .map(|l| (l.id.as_str(), l.group.as_deref()))
+        .collect();
+    let mut out = Vec::new();
+    for info in list {
+        if info.kind == "group" {
+            continue;
+        }
+        let mut cur = info.group.as_deref();
+        let mut guard = 0usize;
+        while let Some(g) = cur {
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+            if g == group_id {
+                out.push(info.id.clone());
+                break;
+            }
+            cur = parent_group.get(g).copied().flatten();
+        }
+    }
+    out
+}
+
+/// Project a 2D box `[x0, y0, x1, y1]` through `plane_matrix` for 2.5D 3D
+/// layers or 2D `world_matrix` for flat layers.
+pub(crate) fn project_box(
+    q: &mut pm_kernel::QueryContext,
+    id: &str,
+    time: f64,
+    bounds: pm_kernel::Bounds,
+) -> Option<([[f64; 2]; 4], Option<[f64; 9]>)> {
+    let local = [
+        [bounds.x0, bounds.y0],
+        [bounds.x1, bounds.y0],
+        [bounds.x1, bounds.y1],
+        [bounds.x0, bounds.y1],
+    ];
+    if q.is_3d_layer(None, id, time).unwrap_or(false) {
+        let plane = q.plane_matrix(None, id, time, false).ok()?;
+        let corners = [
+            project_plane(&plane, local[0])?,
+            project_plane(&plane, local[1])?,
+            project_plane(&plane, local[2])?,
+            project_plane(&plane, local[3])?,
+        ];
+        Some((corners, Some(plane)))
+    } else {
+        let world = q.world_matrix(None, id, time).ok()?;
+        Some((
+            [
+                transform(&world, local[0]),
+                transform(&world, local[1]),
+                transform(&world, local[2]),
+                transform(&world, local[3]),
+            ],
+            None,
+        ))
+    }
+}
+fn inverse_linear(m: [f64; 4]) -> Option<[f64; 4]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    (det.abs() > 1e-12).then(|| [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det])
+}
+pub(crate) fn inverse_point(m: &[f64; 6], p: [f64; 2]) -> Option<[f64; 2]> {
+    let inverse = inverse_linear([m[0], m[1], m[2], m[3]])?;
+    Some(apply(inverse, [p[0] - m[4], p[1] - m[5]]))
+}
+/// A composition-space step as the layer's parent sees it.
+pub fn parent_delta(world: &[f64; 6], local: &[f64; 6], delta: [f64; 2]) -> Option<[f64; 2]> {
+    Some(apply(parent_inverse(world, local)?, delta))
+}
+/// parent = world · local⁻¹; deltas go through its inverse.
+fn parent_inverse(world: &[f64; 6], local: &[f64; 6]) -> Option<[f64; 4]> {
+    let inverse_local = inverse_linear([local[0], local[1], local[2], local[3]])?;
+    let w = [world[0], world[1], world[2], world[3]];
+    inverse_linear([
+        w[0] * inverse_local[0] + w[2] * inverse_local[1],
+        w[1] * inverse_local[0] + w[3] * inverse_local[1],
+        w[0] * inverse_local[2] + w[2] * inverse_local[3],
+        w[1] * inverse_local[2] + w[3] * inverse_local[3],
+    ])
+}
+/// Whether a View ▸ 3D key acts. The number row and the numpad are the 3D
+/// view's only while it has the keyboard: the canvas focused on a scene in
+/// Free View. Anywhere else digits do what v1's did (nothing, or the field
+/// they are typed into), so a digit typed for a number field that did not
+/// take the click never turns the view into 3D and orbits it (PM-480). The
+/// menu items (no key) and Fly Navigation's key always act.
+pub(crate) fn studio_key(group: &str, focused: bool, active: bool, free_look: bool) -> bool {
+    active && (group == "fly" || focused && free_look)
+}
+fn round(value: f64, digits: i32) -> f64 {
+    let unit = 10f64.powi(digits);
+    (value * unit).round() / unit
+}
+fn apply(m: [f64; 4], v: [f64; 2]) -> [f64; 2] {
+    [m[0] * v[0] + m[2] * v[1], m[1] * v[0] + m[3] * v[1]]
+}
+/// `a · b` for column-major 2×2 matrices `[a, b, c, d]`.
+fn multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+    ]
+}
+fn lerp(a: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+impl Pose {
+    fn local(&self, u: f64, v: f64) -> [f64; 2] {
+        let b = self.bounds;
+        [b[0] + (b[2] - b[0]) * u, b[1] + (b[3] - b[1]) * v]
+    }
+    fn to_local(&self, p: [f64; 2]) -> Option<[f64; 2]> {
+        if let Some(plane) = &self.plane {
+            let inv = pm_eval::space3d::inverse_plane(plane)?;
+            project_plane(&inv, p)
+        } else {
+            inverse_point(&self.world, p)
+        }
+    }
+    fn handle(&self, index: usize) -> [f64; 2] {
+        let (u, v) = HANDLES[index];
+        if !self.screen_box
+            && let Some(plane) = &self.plane
+            && let Some(projected) = project_plane(plane, self.local(u, v))
+        {
+            return projected;
+        }
+        let top = lerp(self.corners[0], self.corners[1], u);
+        let bottom = lerp(self.corners[3], self.corners[2], u);
+        lerp(top, bottom, v)
+    }
+    /// Above the top-centre handle, along the layer's own up axis.
+    fn rotate_handle(&self, stem: f64) -> [f64; 2] {
+        let top = self.handle(1);
+        let centre = lerp(self.handle(1), self.handle(5), 0.5);
+        let (dx, dy) = (top[0] - centre[0], top[1] - centre[1]);
+        let length = dx.hypot(dy).max(1e-6);
+        [top[0] + dx / length * stem, top[1] + dy / length * stem]
+    }
+    /// The resize cursor along a handle's direction from the box centre.
+    fn cursor(&self, index: usize) -> CursorStyle {
+        let centre = lerp(self.handle(0), self.handle(4), 0.5);
+        let at = self.handle(index);
+        let angle = (at[1] - centre[1]).atan2(at[0] - centre[0]).to_degrees();
+        match ((angle + 22.5).rem_euclid(180.) / 45.) as usize {
+            0 => CursorStyle::ResizeLeftRight,
+            1 => CursorStyle::ResizeUpLeftDownRight,
+            2 => CursorStyle::ResizeUpDown,
+            _ => CursorStyle::ResizeUpRightDownLeft,
+        }
+    }
+}
+fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
+    let root = p.snapshot.root()?;
+    let list = pm_kernel::model::list_layers(root, None);
+    let mut geometry = FrameGeometry::new(QueryMirror::new(p));
+    Some(read_poses(p, time, root, &list, &mut geometry))
+}
+fn read_poses(
+    p: &pm_kernel::Published,
+    time: f64,
+    root: &pm_model::Node,
+    list: &[pm_kernel::LayerInfo],
+    geometry: &mut FrameGeometry,
+) -> Vec<Pose> {
+    let FrameGeometry { query: mirror, groups } = geometry;
+    let selected = p.selection.layers();
+    if selected.is_empty() {
+        return vec![];
+    }
+    let roots = (selected.len() > 1).then(|| crate::layer_commands::transform_roots(list, selected));
+    let layers: std::collections::HashMap<_, _> =
+        list.iter().map(|layer| (layer.id.as_str(), layer)).collect();
+    let comp = p.snapshot.open_comp();
+    let nodes = pm_kernel::model::comp_node(root, comp.as_deref()).and_then(|comp| comp.get("layers"));
+    let layer_node = |id: &str| nodes?.at(layers.get(id)?.index);
+    let mut poses = vec![];
+    for id in selected {
+        let Some(row) = layers.get(id.as_str()) else { continue };
+        let (locked, kind) = (row.effectively_locked, row.kind.as_str());
+        let transform_root = roots.as_ref().is_none_or(|roots| roots.contains(id.as_str()));
+        if let Some(cached) = groups.get(id) {
+            if let Some(mut pose) = cached.clone() {
+                pose.root = transform_root;
+                poses.push(pose);
+            }
+            continue;
+        }
+        let q = mirror.queries();
+        // A selected layer the playhead is outside of has nothing on screen to
+        // box (viewer.ts visibleSelectionLayers).
+        if !q.active(None, id, time).unwrap_or(false) {
+            continue;
+        }
+        let bounds = if matches!(kind, "text" | "captions" | "group") {
+            crate::text_host::query(p, |q| q.bounds(None, id, time))
+        } else {
+            q.bounds(None, id, time)
+        };
+        if kind == "group"
+            && (matches!(bounds, Ok(None))
+                || (matches!(bounds, Err(pm_kernel::QueryError::NeedsFonts | pm_kernel::QueryError::NeedsInk))
+                    && crate::text_host::render_fonts().is_none()))
+        {
+            // The frame key includes font availability. Do not cache a
+            // measurement failure that could recover while a registry is live.
+            groups.insert(id.clone(), None);
+        }
+        let Ok(Some(bounds)) = bounds else {
+            continue;
+        };
+        let q = mirror.queries();
+        let (Ok(world), Ok(local)) = (
+            q.world_matrix(None, id, time),
+            q.local_matrix(None, id, time),
+        ) else {
+            continue;
+        };
+        // A layer collapsed to nothing has no box to grab; the others keep theirs.
+        let Some(to_parent) = parent_inverse(&world, &local) else {
+            continue;
+        };
+        let mut number = |channel: &str| {
+            mirror
+                .queries()
+                .evaluate(None, id, channel, time)
+                .ok()
+                .and_then(|v| v.as_f64())
+        };
+        let (Some(px), Some(py), Some(sx), Some(sy)) = (
+            number("position.x"),
+            number("position.y"),
+            number("scale.x"),
+            number("scale.y"),
+        ) else {
+            continue;
+        };
+        let local_anchor = [
+            number("anchor.x").unwrap_or(0.),
+            number("anchor.y").unwrap_or(0.),
+        ];
+        let layer = layer_node(id);
+        let data = layer.and_then(|layer| layer.get("d"));
+        let parametric = kind == "shape"
+            && data
+                .and_then(|d| d.get("paths"))
+                .is_none_or(|paths| paths.to_value().as_array().is_none_or(|p| p.is_empty()));
+        // Static content reads as stored; animated content is evaluated.
+        let stored = |key: &str| {
+            let v = data?.get(key)?.to_value();
+            let animated = v
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty());
+            if animated {
+                return None;
+            }
+            v.as_f64().or_else(|| v.get("v").and_then(Value::as_f64))
+        };
+        let mut content = |key: &str| stored(key).or_else(|| number(&format!("c.{key}")));
+        let shape = if parametric {
+            content("w")
+                .zip(content("h"))
+                .map(|(width, height)| ShapeSize {
+                    width,
+                    height,
+                    stroke: content("stroke").unwrap_or(0.).max(0.),
+                })
+        } else {
+            None
+        };
+        let text_size = if kind == "text" {
+            content("size")
+        } else {
+            None
+        };
+        let has_skew = number("skew").is_some();
+        let rotation = number("rotation").unwrap_or(0.);
+        let own_3d = layer
+            .and_then(|l| l.get("threeD"))
+            .and_then(|v| v.to_value().as_bool())
+            == Some(true);
+        let position_z = if own_3d {
+            number("position.z").unwrap_or(0.)
+        } else {
+            0.
+        };
+        let local_anchor_z = if own_3d {
+            number("anchor.z").unwrap_or(0.)
+        } else {
+            0.
+        };
+        let scale_z = if own_3d {
+            Some(number("scale.z").unwrap_or(100.))
+        } else {
+            None
+        };
+        let is_3d = mirror.queries().is_3d_layer(None, id, time).unwrap_or(false);
+        let effective_bounds = bounds;
+        let mut screen_box = false;
+        let mut drag_3d = None;
+        let (plane, plane_pos, corners, anchor) = if is_3d {
+            let Ok(plane) = mirror.queries().plane_matrix(None, id, time, false) else {
+                continue;
+            };
+            let plane_pos = mirror.queries().plane_matrix(None, id, time, true).ok();
+            if own_3d
+                && let Ok(world_pos) = mirror.queries().world_3d(None, id, time, true)
+            {
+                let parent3d = pm_eval::space3d::multiply(
+                    &world_pos,
+                    &pm_eval::space3d::translation(0.0, 0.0, -position_z),
+                );
+                if let Some(parent_inv) = pm_eval::space3d::inverse3d(&parent3d) {
+                    let parent_tilted = parent3d[2].abs() > 1e-4
+                        || parent3d[6].abs() > 1e-4
+                        || parent3d[8].abs() > 1e-4
+                        || parent3d[9].abs() > 1e-4;
+                    let focal = comp_focal_length(root, list, id, mirror, time);
+                    let world3d = mirror.queries().world_3d(None, id, time, false).ok();
+                    let wz = if let Some(w3) = &world3d {
+                        w3[2] * local_anchor[0]
+                            + w3[6] * local_anchor[1]
+                            + w3[10] * local_anchor_z
+                            + w3[14]
+                    } else {
+                        world_pos[14]
+                    };
+                    let depth_scale = (1.0 + wz / focal).max(0.05);
+                    drag_3d = Some(Drag3d {
+                        parent_inv,
+                        depth_scale,
+                        parent_tilted,
+                    });
+                }
+            }
+            let anchor_3d = plane_pos
+                .filter(|_| own_3d)
+                .and_then(|positioning| project_plane(&positioning, [px, py]))
+                .or_else(|| project_plane(&plane, local_anchor));
+            // For a 3D group: if any active descendant has independent 3D depth/tilt
+            // (or the group plane itself is edge-on so corners can't project on Z=0),
+            // enclose the descendants' projected 3D corners directly in screen space
+            // so the box and handles never distort, detach, or disappear.
+            if kind == "group" {
+                let planar_corners = (
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
+                );
+                let descendants = group_descendants(list, id);
+                let child_has_depth = descendants.iter().any(|child| {
+                    layer_node(child)
+                        .and_then(|layer| layer.get("threeD"))
+                        .and_then(|value| value.to_value().as_bool())
+                        == Some(true)
+                        && mirror.queries().active(None, child, time).unwrap_or(false)
+                        && [
+                            "position.z",
+                            "rotation.x",
+                            "rotation.y",
+                            "orientation.x",
+                            "orientation.y",
+                        ]
+                        .iter()
+                        .any(|key| {
+                            mirror
+                                .queries()
+                                .evaluate(None, child, key, time)
+                                .ok()
+                                .and_then(|v| v.as_f64())
+                                .is_some_and(|v| v.abs() > 1e-4)
+                        })
+                });
+                let mut lo = [f64::INFINITY; 2];
+                let mut hi = [f64::NEG_INFINITY; 2];
+                if child_has_depth
+                    || planar_corners.0.is_none()
+                    || planar_corners.1.is_none()
+                    || planar_corners.2.is_none()
+                    || planar_corners.3.is_none()
+                {
+                    for child in descendants {
+                        if !mirror.queries().active(None, &child, time).unwrap_or(false) {
+                            continue;
+                        }
+                        let Ok(Some(bounds)) =
+                            geometry_query(p, mirror, |q| q.bounds(None, &child, time))
+                        else {
+                            continue;
+                        };
+                        if let Ok(matrix) = mirror.queries().plane_matrix(None, &child, time, false) {
+                            for point in [
+                                [bounds.x0, bounds.y0],
+                                [bounds.x1, bounds.y0],
+                                [bounds.x1, bounds.y1],
+                                [bounds.x0, bounds.y1],
+                            ] {
+                                if let Some([x, y]) = project_plane(&matrix, point) {
+                                    lo = [lo[0].min(x), lo[1].min(y)];
+                                    hi = [hi[0].max(x), hi[1].max(y)];
+                                }
+                            }
+                        }
+                    }
+                }
+                if lo[0].is_finite() && hi[0].is_finite() {
+                    screen_box = true;
+                    let corners = [
+                        [lo[0], lo[1]],
+                        [hi[0], lo[1]],
+                        [hi[0], hi[1]],
+                        [lo[0], hi[1]],
+                    ];
+                    let anchor = anchor_3d
+                        .unwrap_or_else(|| [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5]);
+                    (Some(plane), plane_pos, corners, anchor)
+                } else {
+                    let (Some(c0), Some(c1), Some(c2), Some(c3)) = planar_corners else {
+                        continue;
+                    };
+                    let anchor = anchor_3d
+                        .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+                    (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
+                }
+            } else {
+                let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
+                ) else {
+                    continue;
+                };
+                let anchor = anchor_3d
+                    .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+                (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
+            }
+        } else {
+            let mut corners = [
+                transform(&world, [bounds.x0, bounds.y0]),
+                transform(&world, [bounds.x1, bounds.y0]),
+                transform(&world, [bounds.x1, bounds.y1]),
+                transform(&world, [bounds.x0, bounds.y1]),
+            ];
+            // A 2D group containing 3D children: project its active descendants
+            // through their own 3D plane matrices so the group box matches them.
+            if kind == "group" {
+                let mut any_3d_child = false;
+                let mut lo = [f64::INFINITY; 2];
+                let mut hi = [f64::NEG_INFINITY; 2];
+                for child_id in group_descendants(list, id) {
+                    if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
+                        continue;
+                    }
+                    let cb_res = geometry_query(p, mirror, |q| q.bounds(None, &child_id, time));
+                    let Ok(Some(cb)) = cb_res else {
+                        continue;
+                    };
+                    if let Some((cc, child_plane)) =
+                        project_box(mirror.queries(), &child_id, time, cb)
+                    {
+                        any_3d_child |= child_plane.is_some();
+                        for pt in cc {
+                            lo[0] = lo[0].min(pt[0]);
+                            lo[1] = lo[1].min(pt[1]);
+                            hi[0] = hi[0].max(pt[0]);
+                            hi[1] = hi[1].max(pt[1]);
+                        }
+                    }
+                }
+                if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+                    screen_box = true;
+                    corners = [
+                        [lo[0], lo[1]],
+                        [hi[0], lo[1]],
+                        [hi[0], hi[1]],
+                        [lo[0], hi[1]],
+                    ];
+                }
+            }
+            (None, None, corners, transform(&world, local_anchor))
+        };
+        let pose = Pose {
+            id: id.clone(),
+            locked,
+            root: transform_root,
+            keeps_aspect: matches!(kind, "image" | "video"),
+            world,
+            plane,
+            plane_pos,
+            screen_box,
+            own_3d,
+            position_z,
+            scale_z,
+            drag_3d,
+            linear: [local[0], local[1], local[2], local[3]],
+            to_parent,
+            bounds: [
+                effective_bounds.x0,
+                effective_bounds.y0,
+                effective_bounds.x1,
+                effective_bounds.y1,
+            ],
+            shape,
+            text_size,
+            has_skew,
+            corners,
+            anchor,
+            local_anchor,
+            position: [px, py],
+            scale: [sx, sy],
+            rotation,
+        };
+        if kind == "group" {
+            groups.insert(id.clone(), Some(pose.clone()));
+        }
+        poses.push(pose);
+    }
+    poses
+}
+impl GizmoSurface {
+    pub fn new(
+        kernel: KernelHandle,
+        project: String,
+        tokens: pm_design::Tokens,
+        host: Rc<dyn Host>,
+    ) -> Self {
+        Self {
+            zoom_input: ZoomInput::default(),
+            effect_controls: vec![],
+            effect_index: None,
+            effect_read: 0,
+            effect_out: false,
+            effect_again: false,
+            effect_drag: None,
+            effect_stop: None,
+            effect_picker: None,
+            effect_colour: None,
+            hover_box: None,
+            hover_out: false,
+            hover_next: None,
+            hover_deep: false,
+            hover_alt: false,
+            hover_at: None,
+            modifier_subscription: None,
+            studio: Default::default(),
+            studio_scene_cache: None,
+            kernel,
+            project,
+            tokens,
+            host,
+            poses: Default::default(),
+            bounds: Bounds::default(),
+            drag: None,
+            queue: VecDeque::new(),
+            gesture: None,
+            busy: false,
+            step_input: None,
+            latest: 0,
+            reread_out: false,
+            reread_again: false,
+            #[cfg(test)]
+            completed_read: 0,
+            picking: None,
+            picks: 0,
+            fly_capture: None,
+            part_assets_revision: None,
+            part_assets: None,
+            controls: true,
+            panning: None,
+            pointer_button: MouseButton::Left,
+            cancelled_press: None,
+            space_hand: false,
+            space_panned: false,
+            rulers: viewer_rulers::Rulers { guides_locked: pm_shell::viewer_preference("PowermoveGuidesLocked", false), ..Default::default() },
+            snapping_enabled: pm_shell::viewer_preference("PowermoveViewerSnapping", true),
+            cursor: CursorStyle::Arrow,
+            focus: None,
+            refreshing: false,
+            sketch: None,
+            text_sketch: None,
+            text: None,
+            pen: None,
+            pen_reading: 0,
+            pen_read_out: false,
+            pen_read_again: false,
+            text_reading: 0,
+            text_read_out: false,
+            text_read_again: false,
+            pen_active: None,
+            pen_ready: false,
+            pen_waiting: VecDeque::new(),
+            pen_selected: None,
+            pen_drag: None,
+            pen_pointer: None,
+            marquee: None,
+            guides: vec![],
+        }
+    }
+    /// Selection, document or playhead moved. The Controller calls in during its
+    /// own update and the host reads the Controller, which GPUI refuses while it
+    /// is leased, so the work runs once that update ends.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.refreshing, true) {
+            return;
+        }
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            this.update(cx, |s, cx| {
+                s.refreshing = false;
+                let live_outline = s.draws_live_outline();
+                if s.prune_selection_overlays() {
+                    s.draw(cx);
+                    cx.notify();
+                }
+                if !live_outline {
+                    s.reread(cx);
+                }
+                s.text_reread(cx);
+                s.pen_reread(cx);
+                // Keep visible effect handles attached during a transform.
+                // With none shown, there is nothing to recompute here.
+                if !live_outline || !s.effect_controls.is_empty() {
+                    s.effects_reread(cx);
+                }
+            });
+        });
+    }
+    /// The kernel prunes deleted IDs before publishing. Clear the old
+    /// overlays before the worker has a chance to return a replacement.
+    fn prune_selection_overlays(&mut self) -> bool {
+        if self.poses.is_empty() && self.studio.selected.is_empty() && self.studio.part.is_none() {
+            return false;
+        }
+        let published = self.kernel.published(&self.project);
+        let selected = published.as_ref().map_or(&[][..], |p| p.selection.layers());
+        let ids = (selected.len() > 1)
+            .then(|| selected.iter().map(String::as_str).collect::<std::collections::HashSet<_>>());
+        let keeps = |layer: &str| match &ids {
+            Some(ids) => ids.contains(layer),
+            None => selected.first().is_some_and(|id| layer == id),
+        };
+        let mut changed = false;
+        if !self.poses.iter().all(|pose| keeps(&pose.id)) {
+            if selected.is_empty() {
+                self.poses = Arc::default();
+            } else {
+                Arc::make_mut(&mut self.poses).retain(|pose| keeps(&pose.id));
+            }
+            changed = true;
+        }
+        let n = self.studio.selected.len();
+        self.studio.selected.retain(|id| keeps(id));
+        changed |= self.studio.selected.len() != n;
+        let part_layer = published
+            .as_ref()
+            .and_then(|p| pm_panel_studio3d::properties::active_part(&p.selection))
+            .map(|(layer, _)| layer);
+        if self.studio.part.is_some() && part_layer.is_none() {
+            self.studio.part = None;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Lines depend on the shown scale; repaint them from the current poses.
+    pub fn redraw(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        cx.defer(move |cx| this.update(cx, |s, cx| {
+            s.draw(cx);
+            cx.notify();
+        }));
+    }
+    fn draws_live_outline(&self) -> bool {
+        !self.studio.free_look
+            && self
+                .drag
+                .as_ref()
+                .is_some_and(|drag| drag.active && drag.draws_own_outline())
+    }
+
+    /// Reread the pose off the main thread. While playing the engine owns the
+    /// frame and gizmos stay down. Single-flight: at most one read runs on the
+    /// background pool at a time; newer triggers coalesce into one follow-up.
+    fn reread(&mut self, cx: &mut Context<Self>) {
+        if self.host.playing(cx) {
+            self.latest += 1;
+            self.reread_again = false;
+            self.poses = Default::default();
+            self.host.overlay(vec![], None, cx);
+            return;
+        }
+        self.latest += 1;
+        if self.reread_out {
+            self.reread_again = true;
+            return;
+        }
+        self.reread_out = true;
+        self.reread_again = false;
+        let ticket = self.latest;
+        // Use the same publication for the scene, poses, and part selection.
+        let published = self.kernel.published(&self.project);
+        let assets = published
+            .as_ref()
+            .filter(|p| pm_panel_studio3d::properties::active_part(&p.selection).is_some())
+            .and_then(|p| {
+                let revision = p.snapshot.root()?.get("assets")?.rev();
+                let source = (p.snapshot.doc_id, revision);
+                if self.part_assets_revision != Some(source) {
+                    self.part_assets = self.host.scene3d_assets(cx);
+                    self.part_assets_revision = Some(source);
+                }
+                self.part_assets.clone()
+            });
+        let time = self.host.time(cx);
+        let scene_read = published.as_ref().map(|p| {
+            // A document revision includes the active composition, layer
+            // content and retained asset records. Selection and viewer UI
+            // have their own publication state.
+            let key = StudioSceneKey {
+                document: p.snapshot.doc_id,
+                revision: p.snapshot.revision,
+                time: time.to_bits(),
+                fonts: crate::text_host::render_fonts().map(|fonts| fonts.generation()),
+            };
+            let cache = match self.studio_scene_cache.as_ref() {
+                Some(cache) if cache.key == key => cache,
+                _ => self.studio_scene_cache.insert(StudioSceneCache {
+                    key,
+                    frame: Arc::new(OnceLock::new()),
+                }),
+            };
+            cache.frame.clone()
+        });
+        let read = cx.background_spawn(async move {
+            let (p, frame_read) = published.zip(scene_read)?;
+            let root = p.snapshot.root()?;
+            let frame = frame_read.get_or_init(|| {
+                let layers = pm_kernel::model::list_layers(root, None);
+                let text_ids: std::collections::HashSet<&str> = layers
+                    .iter()
+                    .filter(|l| matches!(l.kind.as_str(), "text" | "captions"))
+                    .map(|l| l.id.as_str())
+                    .collect();
+                let mut local_mirror = QueryMirror::new(&p);
+                // The viewport probe returns immediately for a flat
+                // comp, before resolving or converting its layers.
+                let scene = pm_panel_studio3d::viewport::scene_with_bounds(&p, time, |id| {
+                    if text_ids.contains(id) {
+                        crate::text_host::query(&p, |q| q.bounds(None, id, time))
+                            .ok()
+                            .flatten()
+                    } else {
+                        local_mirror.queries().bounds(None, id, time).ok().flatten()
+                    }
+                })
+                .ok()
+                .map(Arc::new);
+                StudioFrame {
+                    scene,
+                    layers,
+                    geometry: std::sync::Mutex::new(FrameGeometry::new(local_mirror)),
+                }
+            });
+            let mut scene = frame.scene.clone();
+            let mut poses = {
+                let mut geometry = frame.geometry.lock().unwrap_or_else(|error| error.into_inner());
+                read_poses(&p, time, root, &frame.layers, &mut geometry)
+            };
+            poses.retain(|pose| {
+                // Depth boxes are selection-specific. Only copy the
+                // base scene when a selected layer adds one.
+                let extruded = is_extruded(&p, &pose.id);
+                if extruded
+                    && let Some(sc) = scene.as_mut()
+                    && let Some(item) = extruded_item(&p, pose, time, sc.width, sc.height)
+                {
+                    Arc::make_mut(sc).items.push(item);
+                }
+                // Studio objects and extrusions have 3D handles.
+                !extruded
+                    && !is_studio(&p, &pose.id)
+                    && !scene
+                        .as_ref()
+                        .is_some_and(|s| s.items.iter().any(|i| i.id == pose.id && !i.is_plane))
+            });
+            let selected = p
+                .selection
+                .layers()
+                .iter()
+                .filter(|id| {
+                    scene
+                        .as_ref()
+                        .is_some_and(|s| s.items.iter().any(|i| &i.id == *id))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let part = pm_panel_studio3d::properties::active_part(&p.selection).and_then(
+                |(layer, key)| {
+                    pm_panel_studio3d::viewport::model_part(
+                        &p.snapshot,
+                        time,
+                        layer,
+                        Some(key),
+                        None,
+                        assets.as_deref()?,
+                    )
+                    .ok()
+                    .flatten()
+                },
+            );
+            let ui = |k: &str| {
+                p.ui_state
+                    .viewer
+                    .get(k)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            Some((
+                poses,
+                scene,
+                selected,
+                part,
+                ui("studioTool"),
+                ui("studioLook"),
+                ui("studioAxes"),
+                (
+                    ui("studioLightKind"),
+                    ui("studioLightAdd"),
+                    ui("studioLightAim"),
+                ),
+                // The viewer's 2D/3D choice is remembered per composition.
+                {
+                    let comp = p.snapshot.render_comp();
+                    let kept = p
+                        .ui_state
+                        .viewer
+                        .get("studioLookByComp")
+                        .and_then(|m| m.get(&comp))
+                        .and_then(pm_model::Value::as_str)
+                        .map(str::to_owned);
+                    (comp, kept)
+                },
+            ))
+        });
+        cx.spawn(async move |this, cx| {
+            let read = read.await;
+            let _ = this.update(cx, |s, cx| {
+                s.reread_out = false;
+                if s.latest == ticket && !s.draws_live_outline() {
+                    let (
+                        poses,
+                        scene,
+                        selected,
+                        part,
+                        tool,
+                        look,
+                        axes,
+                        (kind, add, aim),
+                        (comp, kept),
+                    ) = read.unwrap_or((
+                        vec![],
+                        None,
+                        vec![],
+                        None,
+                        None,
+                        None,
+                        None,
+                        (None, None, None),
+                        (String::new(), None),
+                    ));
+                    s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
+                    s.studio.object_axes = axes.as_deref() == Some("object");
+                    s.studio.light_kind = kind.unwrap_or_default();
+                    s.studio.light_add = add.as_deref() == Some("on");
+                    // A move or turn under way draws its own outline: a
+                    // read of an earlier step would pull it back.
+                    if !s
+                        .drag
+                        .as_ref()
+                        .is_some_and(|d| d.active && d.draws_own_outline())
+                    {
+                        s.poses = Arc::new(poses);
+                    }
+                    let had = s.studio.scene.is_some();
+                    // Flight belongs to the composition it began in. Stop its
+                    // timer and shortcut capture before adopting another scene.
+                    if s.studio.comp.as_deref() != Some(comp.as_str()) || scene.is_none() {
+                        s.studio_fly_end(false, cx);
+                    }
+                    let published = look.as_deref() == Some("free");
+                    // A look this viewer wrote holds until it is published.
+                    let mut free_look = match s.studio.look_pending {
+                        Some(mine) if mine != published => mine,
+                        _ => {
+                            s.studio.look_pending = None;
+                            published
+                        }
+                    };
+                    // Another composition: its own 2D/3D choice (2D unless it
+                    // was left in 3D), from its own shot.
+                    let mut adopt = None;
+                    if s.studio.comp.as_deref() != Some(comp.as_str()) {
+                        if s.studio.comp.is_some() && !s.studio.busy() {
+                            let want = kept.as_deref() == Some("free");
+                            s.studio.free = None;
+                            if want != free_look {
+                                free_look = want;
+                                s.studio.look_pending = Some(want);
+                                adopt = Some(want);
+                            }
+                        }
+                        s.studio.comp = Some(comp);
+                    }
+                    if scene.is_none() {
+                        free_look = false;
+                        s.studio.look_pending = None;
+                        if published || kept.as_deref() == Some("free") {
+                            adopt = Some(false);
+                        }
+                    }
+                    let changed_look = free_look != s.studio.free_look;
+                    let mut scene = scene;
+                    if s.studio.camera_commit_return.is_some()
+                        && let (Some(sc), Some(end)) = (scene.as_mut(), s.studio.free)
+                    {
+                        Arc::make_mut(sc).shot = end;
+                    }
+                    s.studio.scene = scene;
+                    if let Some(want) = adopt {
+                        if want && s.studio.free.is_none() {
+                            s.studio.free = s.studio.scene.as_ref().map(|sc| sc.shot);
+                        }
+                        s.studio_ui("studioLook", if want { "free" } else { "camera" }, cx);
+                    }
+                    s.studio.selected = selected;
+                    s.studio.part = part;
+                    s.studio.tool = studio3d::Tool::parse(tool.as_deref());
+                    if !s.studio.busy() && s.studio.camera_commit_return.is_none() {
+                        s.studio.free_look = free_look;
+                    }
+                    if (changed_look && s.studio.camera_commit_return.is_none())
+                        || had != s.studio.scene.is_some()
+                    {
+                        s.studio_push_view(cx);
+                    }
+                    s.draw(cx);
+                    #[cfg(test)]
+                    {
+                        s.completed_read = ticket;
+                    }
+                }
+                if s.reread_again {
+                    s.reread_again = false;
+                    s.reread(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    fn draw(&mut self, cx: &mut Context<Self>) {
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let editing = self.text_session().is_some();
+        let poses = self.view_poses();
+        let (mut lines, mut marks) = overlay(
+            if self.controls && !editing && !self.studio_flying() {
+                &poses
+            } else {
+                &[]
+            },
+            frame,
+            &self.tokens,
+        );
+        // The hover outline: the accent at 60% (viewer-chrome.md), never
+        // over a gesture or on a layer the selection already outlines.
+        if let Some((id, c)) = &self.hover_box
+            && self.controls
+            && !editing
+            && !self.studio.free_look
+            && self.drag.is_none()
+            && !self.poses.iter().any(|p| &p.id == id)
+        {
+            let accent = self.tokens.colors.accent;
+            let channel = |shift: u32| ((accent >> shift) & 255) as f32 / 255.;
+            let color = [channel(16), channel(8), channel(0), 0.6];
+            let [w, h] = frame.size;
+            for i in 0..4 {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                lines.push(OverlayLine {
+                    ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+                    color,
+                });
+            }
+        }
+        let drawn = self.sketch.as_ref().and_then(|s| s.shape);
+        if let Some(shape) = drawn.or(self.text_sketch.as_ref().and_then(|s| s.shape)) {
+            let [w, h] = frame.size;
+            // The Ellipse variant previews its outline; the others their box.
+            let c = if drawn.is_some() && self.host.shape_variant(cx) == "ellipse" {
+                crate::shape_tool::ellipse_outline(shape, 32)
+            } else {
+                shape.corners().to_vec()
+            };
+            for i in 0..c.len() {
+                let (a, b) = (c[i], c[(i + 1) % c.len()]);
+                lines.push(OverlayLine {
+                    ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+                    color: [1., 1., 1., 1.],
+                });
+            }
+        }
+        if self.controls && !editing {
+            let (studio, studio_marks) = self.studio_lines(frame);
+            lines.extend(studio);
+            marks.extend(studio_marks);
+        }
+        lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
+        // The composition's rectangle in the viewer view (the gizmo covers it).
+        let at = crate::gizmo_layer::Placement {
+            origin: [
+                f64::from(f32::from(frame.origin.x - self.bounds.origin.x)),
+                f64::from(f32::from(frame.origin.y - self.bounds.origin.y)),
+            ],
+            size: [frame.size[0] * frame.scale, frame.size[1] * frame.scale],
+            view: [
+                f64::from(f32::from(self.bounds.size.width)),
+                f64::from(f32::from(self.bounds.size.height)),
+            ],
+        };
+        self.host.marks(marks, cx);
+        self.host.overlay(lines, Some(at), cx);
+    }
+    fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
+        let at = position - frame.origin;
+        [
+            f32::from(at.x) as f64 / frame.scale,
+            f32::from(at.y) as f64 / frame.scale,
+        ]
+    }
+    fn stem(&self, scale: f64) -> f64 {
+        self.tokens.metrics.rotation_stem as f64 / scale
+    }
+    /// Whether the pointer is over the viewer now (Space held there pans).
+    pub fn pointer_over(&self, window: &Window) -> bool {
+        window.is_window_active()
+            && window.is_window_hovered()
+            && self.bounds.contains(&window.mouse_position())
+    }
+    /// Whether a Blender key of View ▸ 3D in `group` belongs to the viewer
+    /// (PM-367): the composition shows Studio 3D layers, the viewer has the
+    /// keyboard (`canvas`, or the gizmos' own focus), and for the view keys
+    /// the 3D side of 2D | 3D is showing. Otherwise the key goes on to its
+    /// next meaning; the menus and the bar still run the command.
+    pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
+        let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
+        studio_key(group, focused, self.studio.active(), self.studio.free_look)
+    }
+    /// View ▸ Show Rulers / Show Grid.
+    pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
+        self.rulers.shown = shown;
+        self.rulers.grid = grid;
+        cx.notify();
+    }
+    pub fn toggle_snapping(&mut self, cx: &mut Context<Self>) {
+        self.snapping_enabled = !self.snapping_enabled;
+        pm_shell::set_viewer_preference("PowermoveViewerSnapping", self.snapping_enabled);
+        cx.notify();
+    }
+    pub fn toggle_guides_locked(&mut self, cx: &mut Context<Self>) {
+        self.rulers.toggle_locked();
+        pm_shell::set_viewer_preference("PowermoveGuidesLocked", self.rulers.guides_locked);
+        cx.notify();
+    }
+    /// View ▸ Clear Guides.
+    pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
+        self.rulers.guides.clear();
+        self.rulers.dragging = None;
+        cx.notify();
+    }
+    /// The ruler guides, in composition pixels.
+    #[cfg(test)]
+    pub fn ruler_guides(&self) -> &[viewer_rulers::RulerGuide] {
+        &self.rulers.guides
+    }
+    /// Space went down over the viewer: the hand, until it comes up.
+    pub fn arm_space(&mut self, cx: &mut Context<Self>) {
+        self.space_hand = true;
+        self.space_panned = false;
+        self.set_cursor(CursorStyle::OpenHand, cx);
+    }
+    /// Space came up: the tool returns; true when the hand panned (then the
+    /// key does not play).
+    pub fn release_space(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let panned = std::mem::take(&mut self.space_panned);
+        self.space_hand = false;
+        self.panning = None;
+        // Deferred like `refresh`: this runs from the controller's own
+        // `viewer.spaceUp` command, and `hover` reads the controller through
+        // `Host::frame`, a double lease (abort) while that update is open.
+        cx.defer_in(window, |s, window, cx| s.hover(window.mouse_position(), cx));
+        panned
+    }
+    fn set_cursor(&mut self, cursor: CursorStyle, cx: &mut Context<Self>) {
+        if cursor != self.cursor {
+            self.cursor = cursor;
+            cx.notify();
+        }
+    }
+    /// Panning with the middle button, whatever the tool.
+    fn on_middle(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // A 3D composition's middle button navigates the scene (Blender).
+        if self.studio.active() {
+            return;
+        }
+        self.panning = Some((event.position, event.position));
+        self.set_cursor(CursorStyle::ClosedHand, cx);
+    }
+    /// The cursor promises what a press here does.
+    fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.hover_at = Some(position);
+        if self.rulers.shown && self.rulers.pointer != Some(position) {
+            self.rulers.pointer = Some(position);
+            cx.notify();
+        }
+        if self.space_hand {
+            let hand = if self.panning.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            };
+            self.set_cursor(hand, cx);
+            return;
+        }
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(position, frame);
+        if self.effects_hover(at, frame) && self.controls && self.text_session().is_none() && self.host.tool(cx) == Tool::Select && !self.host.playing(cx) {
+            self.set_cursor(CursorStyle::Crosshair, cx);
+            return;
+        }
+        let tool = self.host.tool(cx);
+        let in_text = !matches!(tool, Tool::Hand | Tool::Zoom)
+            && self
+                .text_session()
+                .is_some_and(|s| s.contains(at, frame.scale));
+        let ruler = self.rulers_cursor(position, frame);
+        // A 3D handle under the pointer lights up (3d-studio.md §5).
+        if matches!(tool, Tool::Select) && self.studio_hover(at, frame) {
+            self.draw(cx);
+        }
+        // The layer a click would select is outlined; not over a handle,
+        // text being edited, 3D layers (their own picking) or other tools.
+        let handle = self.handle_at(at, frame.scale).is_some();
+        if matches!(tool, Tool::Select)
+            && !in_text
+            && !handle
+            && ruler.is_none()
+            && self.text_session().is_none()
+            && !self.studio.free_look
+            && self
+                .studio
+                .scene
+                .as_ref()
+                .is_none_or(|scene| scene.items.iter().all(|item| item.is_plane))
+            && self.marquee.is_none()
+        {
+            let press = Press {
+                at,
+                shift: false,
+                deep: self.hover_deep,
+                time: self.host.time(cx),
+                inside: false,
+            };
+            self.hover_pick(press, cx);
+        } else {
+            self.unhover(cx);
+        }
+        // viewer.ts updateStageCursor: each tool's own cursor; with Select,
+        // a handle's resize or rotate cursor, and move inside the selection.
+        let cursor = match tool {
+            _ if ruler.is_some() => ruler.unwrap_or(CursorStyle::Arrow),
+            _ if in_text => CursorStyle::IBeam,
+            Tool::Hand => CursorStyle::OpenHand,
+            Tool::Text => CursorStyle::IBeam,
+            Tool::Zoom if self.hover_alt => CursorStyle::ZoomOut,
+            Tool::Zoom => CursorStyle::ZoomIn,
+            Tool::Rotate => CursorStyle::Rotate,
+            Tool::Anchor | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
+            Tool::Select if self.studio_cursor(at, frame).is_some() => {
+                self.studio_cursor(at, frame).unwrap()
+            }
+            _ => self.select_cursor(at, frame.scale),
+        };
+        if cursor != self.cursor {
+            self.cursor = cursor;
+            cx.notify();
+        }
+    }
+    /// The Select tool's cursor at `at` (composition pixels).
+    fn select_cursor(&self, at: [f64; 2], scale: f64) -> CursorStyle {
+        match self.handle_at(at, scale) {
+            Some(Hit::Handle(index)) => self
+                .handle_pose()
+                .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
+            Some(Hit::Rotate) => CursorStyle::Rotate,
+            Some(_) => CursorStyle::Arrow,
+            // Inside a layer's box or the selection's common box, a drag moves.
+            None if self.transformable()
+                && (self.view_poses().iter().any(|p| inside(&p.corners, at))
+                    || self.handle_pose().is_some_and(|p| inside(&p.corners, at))) =>
+            {
+                CursorStyle::Move
+            }
+            None => CursorStyle::Arrow,
+        }
+    }
+    /// ⌥ pressed or released over the viewer: the Zoom tool's cursor flips.
+    fn on_modifiers(&mut self, alt: bool, cx: &mut Context<Self>) {
+        if alt == self.hover_alt {
+            return;
+        }
+        self.hover_alt = alt;
+        if self.drag.is_none()
+            && self.host.tool(cx) == Tool::Zoom
+            && let Some(at) = self.hover_at
+        {
+            self.hover(at, cx);
+        }
+    }
+    /// Drops the hover outline: the pointer went where the viewer cannot
+    /// follow it (a pick overlay over the editor takes every move).
+    pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_at = None;
+        self.unhover(cx);
+    }
+    fn unhover(&mut self, cx: &mut Context<Self>) {
+        self.hover_next = None;
+        if self.hover_box.take().is_some() {
+            self.draw(cx);
+        }
+    }
+    /// What a click at `press` would select, outlined unless it is already
+    /// selected. One query at a time; the latest pointer goes next.
+    fn hover_pick(&mut self, press: Press, cx: &mut Context<Self>) {
+        if self.hover_out {
+            self.hover_next = Some(press);
+            return;
+        }
+        self.hover_out = true;
+        self.picks += 1;
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let id = pick_target(&p, press)??;
+                    if p.selection.layers().contains(&id) {
+                        return None;
+                    }
+                    Some((id.clone(), outline(&p, &id, press.time)?))
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.picks -= 1;
+                s.hover_out = false;
+                if s.hover_box != found {
+                    s.hover_box = found;
+                    s.draw(cx);
+                }
+                if let Some(next) = s.hover_next.take() {
+                    s.hover_pick(next, cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Free View draws and edits the projected planes with the scene handles.
+    fn view_poses(&self) -> std::borrow::Cow<'_, [Pose]> {
+        if self.studio.free_look && self.poses.iter().any(|pose| pose.plane.is_some()) {
+            std::borrow::Cow::Owned(
+                self.poses
+                    .iter()
+                    .filter(|p| p.plane.is_none())
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(self.poses.as_slice())
+        }
+    }
+
+    /// A selection holding a locked layer owns its geometry but does not move.
+    fn transformable(&self) -> bool {
+        let poses = self.view_poses();
+        !poses.is_empty() && poses.iter().all(|p| !p.locked)
+    }
+    /// The box whose handles a press can take: the one layer's, or the
+    /// common box of an unlocked multiple selection.
+    fn handle_pose(&self) -> Option<Pose> {
+        match self.view_poses().as_ref() {
+            [pose] => Some(pose.clone()),
+            poses => group_pose(poses),
+        }
+    }
+    fn handle_at(&self, at: [f64; 2], scale: f64) -> Option<Hit> {
+        let pose = self.handle_pose()?;
+        if pose.locked || !self.controls {
+            return None;
+        }
+        let distance = |p: [f64; 2]| (p[0] - at[0]).hypot(p[1] - at[1]);
+        let reach = self.tokens.metrics.hit as f64 / 2. / scale;
+        if distance(pose.rotate_handle(self.stem(scale))) <= reach {
+            return Some(Hit::Rotate);
+        }
+        // Small boxes overlap: the handle really under the pointer wins.
+        (0..8)
+            .map(|i| (i, distance(pose.handle(i))))
+            .filter(|(_, d)| *d <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| Hit::Handle(i))
+    }
+    fn on_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flying: a click keeps the flight (Blender's Fly).
+        if self.studio_flying() {
+            self.studio_fly_end(true, cx);
+            return;
+        }
+        // Along the viewer's edges the dividers' grab reaches over it: a
+        // press there resizes, it never takes a handle (PM-289).
+        if on_divider_reach(self.bounds, event.position, &self.tokens) {
+            return;
+        }
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        self.unhover(cx);
+        // Space held over the viewer: the hand, whatever the tool.
+        if self.space_hand {
+            self.panning = Some((event.position, event.position));
+            self.set_cursor(CursorStyle::ClosedHand, cx);
+            return;
+        }
+        // A ruler makes a guide; a guide is carried.
+        if self.rulers_down(event.position, frame) {
+            cx.notify();
+            return;
+        }
+        let at = self.to_comp(event.position, frame);
+        let time = self.host.time(cx);
+        let mut tool = self.host.tool(cx);
+        // An open text edit owns presses on its text; any other press commits
+        // it and then acts as a Select-tool click.
+        if self.text_session().is_some() && !matches!(tool, Tool::Hand | Tool::Zoom) {
+            if self.text_press(event, at, frame.scale) {
+                cx.notify();
+                return;
+            }
+            self.finish_text(false, cx);
+            tool = Tool::Select;
+        }
+        self.host.focus_canvas(window, cx);
+        // In a 3D composition the window's Hand and Zoom tools move the
+        // editor view (orbit, ⇧ pan; dolly), as they navigate a 2D one.
+        let view_tool = (self.studio.active() && matches!(tool, Tool::Hand | Tool::Zoom))
+            .then_some(tool == Tool::Zoom);
+        if (tool == Tool::Select
+            || view_tool.is_some()
+            || event.modifiers.alt && self.studio.active())
+            && self.studio_down(event, at, frame, view_tool, cx)
+        {
+            return;
+        }
+        if tool == Tool::Select && self.effects_down(event, frame, window, cx) { return; }
+        let start = |hit, click| Drag {
+            hit,
+            origin: event.position,
+            active: false,
+            poses: if self.studio.free_look {
+                Arc::new(self.view_poses().into_owned())
+            } else {
+                self.poses.clone()
+            },
+            time,
+            click,
+            snaps: None,
+            copies: None,
+        };
+        let deep = event.modifiers.platform || event.modifiers.control;
+        let press = Press {
+            at,
+            shift: event.modifiers.shift,
+            deep,
+            time,
+            inside: false,
+        };
+        let drag = match tool {
+            Tool::Other => {
+                let button = match event.button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => 0,
+                };
+                let _ = self.host.custom_tool_event(
+                    serde_json::json!({
+                        "type": "down",
+                        "x": f32::from(event.position.x - self.bounds.origin.x),
+                        "y": f32::from(event.position.y - self.bounds.origin.y),
+                        "compX": at[0],
+                        "compY": at[1],
+                        "scale": frame.scale,
+                        "width": frame.size[0],
+                        "height": frame.size[1],
+                        "button": button,
+                        "clickCount": event.click_count,
+                        "modifiers": {
+                            "shift": event.modifiers.shift,
+                            "alt": event.modifiers.alt,
+                            "ctrl": event.modifiers.control,
+                            "meta": event.modifiers.platform,
+                        }
+                    }),
+                    cx,
+                );
+                return;
+            }
+            Tool::Pen => {
+                self.pen_down(event, at, frame.scale, cx);
+                return;
+            }
+            Tool::Text => {
+                self.text_sketch = Some(text::TextSketch {
+                    origin: event.position,
+                    start: at,
+                    shift: event.modifiers.shift,
+                    shape: None,
+                });
+                return;
+            }
+            Tool::Hand => {
+                self.panning = Some((event.position, event.position));
+                return;
+            }
+            Tool::Shape => {
+                self.sketch = Some(Sketch {
+                    origin: event.position,
+                    start: at,
+                    shape: None,
+                });
+                return;
+            }
+            Tool::Zoom => {
+                let factor = if event.modifiers.alt { 0.8 } else { 1.25 };
+                let at = event.position;
+                self.zoom_view(Navigate::Zoom { factor, at }, cx);
+                return;
+            }
+            Tool::Rotate => (self.view_poses().len() == 1 && self.transformable())
+                .then(|| start(Hit::Rotate, None)),
+            Tool::Anchor => match self.view_poses().as_ref() {
+                [pose]
+                    if !pose.locked
+                        && (pose.anchor[0] - at[0]).hypot(pose.anchor[1] - at[1])
+                            <= ANCHOR_REACH / frame.scale.max(0.02) =>
+                {
+                    Some(start(Hit::Anchor, None))
+                }
+                _ => None,
+            },
+            Tool::Select if event.click_count == 2 => {
+                self.double_click(press, window, cx);
+                None
+            }
+            Tool::Select => {
+                // A layer's own box, or the common box of a multiple
+                // selection (its gaps included), owns the press
+                // (viewer.ts pointInSelection).
+                let inside_selection = self.view_poses().iter().any(|p| inside(&p.corners, at))
+                    || self.handle_pose().is_some_and(|p| inside(&p.corners, at));
+                if let Some(hit) = self.handle_at(at, frame.scale) {
+                    Some(start(hit, None))
+                } else if inside_selection && self.transformable() {
+                    Some(start(
+                        Hit::Body,
+                        Some(Press {
+                            inside: true,
+                            ..press
+                        }),
+                    ))
+                } else if inside_selection {
+                    None
+                } else {
+                    self.picking = Some(event.position);
+                    self.pick(press, cx);
+                    None
+                }
+            }
+        };
+        self.drag = drag;
+    }
+    /// Select-tool double-click: edit text, descend into a group, or open a
+    /// precomp (viewer.ts). Studio 3D layers took theirs in `studio_down`.
+    fn double_click(&mut self, press: Press, window: &mut Window, cx: &mut Context<Self>) {
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let action = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    double_click_action(&p, press)
+                })
+                .await;
+            match action {
+                Some(DoubleClick::Select(id)) => {
+                    let _ = this.update(cx, |s, cx| {
+                        s.queue.push_back(Job::SelectLayers(vec![id]));
+                        s.pump(cx);
+                    });
+                }
+                Some(DoubleClick::FocusGroup { group, select }) => {
+                    let _ = this.update(cx, |s, cx| {
+                        s.host.focus_group(group, cx);
+                        s.queue.push_back(Job::SelectLayers(
+                            select.into_iter().collect(),
+                        ));
+                        s.pump(cx);
+                    });
+                }
+                Some(DoubleClick::Text(id)) => {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |s, cx| s.edit_text_all(id, window, cx));
+                    });
+                }
+                Some(DoubleClick::Open(comp)) => {
+                    let _ = this.update(cx, |s, cx| s.host.open_composition(comp, cx));
+                }
+                None => {}
+            }
+        })
+        .detach();
+    }
+    /// Secondary press: selects what is under the pointer, locked layers
+    /// included, then opens the shared layer menu on it.
+    fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flying: a right-click cancels and returns to where it began.
+        if self.studio_flying() {
+            self.studio_fly_end(false, cx);
+            return;
+        }
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(event.position, frame);
+        cx.stop_propagation();
+        if self.text_context(at, frame.scale) {
+            return;
+        }
+        self.finish_text(false, cx);
+        let press = Press {
+            at,
+            shift: false,
+            deep: false,
+            time: self.host.time(cx),
+            inside: false,
+        };
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let handle = window.window_handle();
+        self.picks += 1;
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let options = pm_kernel::PickOptions {
+                        include_locked: true,
+                        focus_group: focused_group(&p),
+                    };
+                    let hit = crate::text_host::query(&p, |q| {
+                        q.pick(None, press.at[0], press.at[1], press.time, &options)
+                    })
+                    .ok()
+                    .and_then(|hit| hit.layer_id);
+                    // Empty canvas: the viewer's own menu, which only extensions fill.
+                    let Some(hit) = hit else {
+                        return Some((None, None));
+                    };
+                    if !p.selection.layers().contains(&hit) {
+                        let ids = vec![hit.clone()];
+                        let selection = SelectionCall::Layers { ids, add: false };
+                        let request = Request::new(Caller::native(), selection.user());
+                        kernel.call(&project, request).await?.ok()?;
+                    }
+                    let p = kernel.published(&project)?;
+                    Some((Some(hit), read_at(&p, press.time)))
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.picks -= 1;
+                let Some((hit, poses)) = picked else {
+                    return;
+                };
+                if let Some(poses) = poses {
+                    s.poses = Arc::new(poses);
+                    s.draw(cx);
+                }
+                let host = s.host.clone();
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| host.layer_menu(hit, window, cx));
+                });
+            });
+        })
+        .detach();
+    }
+    /// Asks the kernel what is under the pointer and applies the shipped click
+    /// rules, off the main thread. The answer arrives while the press may be held.
+    fn pick(&mut self, press: Press, cx: &mut Context<Self>) {
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        // The 2D picker can't measure Studio 3D layers; their own picking ran
+        // first, so a 2D failure over a 3D scene is empty canvas.
+        let studio = self.studio.active();
+        let free = self.studio.free_look;
+        self.picks += 1;
+        cx.spawn(async move |this, cx| {
+            let poses = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let target = match pick_target(&p, press) {
+                        Some(Some(id))
+                            if free
+                                && QueryMirror::new(&p)
+                                    .queries()
+                                    .is_3d_layer(None, &id, press.time)
+                                    .unwrap_or(false) =>
+                        {
+                            None
+                        }
+                        Some(target) => target,
+                        None if studio => None,
+                        None => return None,
+                    };
+                    let selected = p.selection.layers();
+                    // A click released inside the selection on one of its own
+                    // layers keeps the whole selection (it was a move that
+                    // never moved).
+                    if press.inside
+                        && !press.shift
+                        && target.as_ref().is_some_and(|id| selected.contains(id))
+                    {
+                        return Some((read_at(&p, press.time)?, None, false));
+                    }
+                    let ids = match &target {
+                        Some(id) if press.shift && selected.contains(id) => {
+                            selected.iter().filter(|s| *s != id).cloned().collect()
+                        }
+                        Some(id) => vec![id.clone()],
+                        // Empty canvas keeps the selection until the release
+                        // decides (a click clears it, a marquee replaces it,
+                        // Escape leaves it).
+                        None => return Some((read_at(&p, press.time)?, None, true)),
+                    };
+                    let add =
+                        press.shift && target.is_some() && !selected.contains(target.as_ref()?);
+                    let selection = SelectionCall::Layers { ids, add };
+                    let request = Request::new(Caller::native(), selection.user());
+                    kernel.call(&project, request).await?.ok()?;
+                    let p = kernel.published(&project)?;
+                    let empty = target.is_none();
+                    Some((
+                        read_at(&p, press.time)?,
+                        target.filter(|_| !press.shift),
+                        empty,
+                    ))
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.picks -= 1;
+                let held = s.picking.take();
+                let Some((poses, target, empty)) = poses else {
+                    return;
+                };
+                s.poses = Arc::new(poses);
+                s.draw(cx);
+                // A press on empty canvas that is still held draws a marquee;
+                // one already released was a click that clears.
+                if empty && held.is_none() && !press.shift {
+                    s.queue.push_back(Job::Select(None));
+                    s.pump(cx);
+                }
+                if let Some(origin) = held.filter(|_| empty) {
+                    s.marquee = Some(marquee::Marquee {
+                        origin,
+                        start: press.at,
+                        shift: press.shift,
+                        shape: None,
+                    });
+                }
+                if let Some(origin) = held.filter(|_| target.is_some() && s.transformable()) {
+                    s.drag = Some(Drag {
+                        hit: Hit::Body,
+                        origin,
+                        active: false,
+                        poses: s.poses.clone(),
+                        time: press.time,
+                        click: None,
+                        snaps: None,
+                        copies: None,
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+    /// Content and handles reach the compositor as one navigation frame.
+    fn zoom_view(&mut self, change: Navigate, cx: &mut Context<Self>) {
+        unsafe {
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), begin];
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), setDisableActions:true];
+        }
+        self.host.navigate(change, cx);
+        self.draw(cx);
+        unsafe { let _: () = objc2::msg_send![objc2::class!(CATransaction), commit]; }
+    }
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        if event.is_momentum || self.zoom_input.owns_pinch() {
+            return;
+        }
+        // Flying: the wheel changes speed, a notch (or ~20 pt) a step.
+        if self.studio_flying() {
+            let dy = f32::from(event.delta.pixel_delta(line).y) as f64;
+            let notches = match event.delta {
+                ScrollDelta::Lines(l) => l.y as f64,
+                ScrollDelta::Pixels(_) => dy / 20.,
+            };
+            self.studio_fly_scroll(notches);
+            return;
+        }
+        if self.studio_wheel(event, line, cx) {
+            return;
+        }
+        if self.host.tool(cx) == Tool::Other
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let at = self.to_comp(event.position, frame);
+            let delta = event.delta.pixel_delta(line);
+            if self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "wheel",
+                    "x": f32::from(event.position.x - self.bounds.origin.x),
+                    "y": f32::from(event.position.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": 0,
+                    "clickCount": 0,
+                    "deltaX": f32::from(delta.x),
+                    "deltaY": f32::from(delta.y),
+                    "modifiers": {
+                        "shift": event.modifiers.shift,
+                        "alt": event.modifiers.alt,
+                        "ctrl": event.modifiers.control,
+                        "meta": event.modifiers.platform,
+                    }
+                }),
+                cx,
+            ) {
+                return;
+            }
+        }
+        let delta = event.delta.pixel_delta(line);
+        let m = event.modifiers;
+        let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
+        if let Some(change) = self.zoom_input.wheel(event) {
+            self.zoom_view(change, cx);
+        } else if m.shift {
+            // A plain two-finger scroll leaves the view where it is.
+            let by = if dx == 0. {
+                point(dy, 0.)
+            } else {
+                point(dx, dy)
+            };
+            let by = point(px(by.x as f32), px(by.y as f32));
+            self.host.navigate(Navigate::Pan(by), cx);
+            // The outline is drawn over the picture: it moves with the view.
+            self.draw(cx);
+        }
+    }
+    fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.studio_flying() {
+            self.studio_fly_pointer(event.position, cx);
+            return;
+        }
+        if self.effects_move(event, cx) { return; }
+        if self.rulers.dragging.is_some()
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+            && self.rulers_move(event.position, frame)
+        {
+            cx.notify();
+            return;
+        }
+        if self.studio_move(event, cx) {
+            return;
+        }
+        if self.host.tool(cx) == Tool::Other
+            && self.bounds.contains(&event.position)
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let at = self.to_comp(event.position, frame);
+            let button = match event.pressed_button {
+                Some(MouseButton::Left) => 0,
+                Some(MouseButton::Middle) => 1,
+                Some(MouseButton::Right) => 2,
+                _ => -1,
+            };
+            if self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "move",
+                    "x": f32::from(event.position.x - self.bounds.origin.x),
+                    "y": f32::from(event.position.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": button,
+                    "clickCount": 0,
+                    "modifiers": {
+                        "shift": event.modifiers.shift,
+                        "alt": event.modifiers.alt,
+                        "ctrl": event.modifiers.control,
+                        "meta": event.modifiers.platform,
+                    }
+                }),
+                cx,
+            ) {
+                return;
+            }
+        }
+        if let Some((start, last)) = self.panning {
+            self.panning = Some((start, event.position));
+            if event.position != last {
+                self.space_panned |= self.space_hand;
+            }
+            self.host.navigate(Navigate::Pan(event.position - last), cx);
+            // The outline is drawn over the picture: it moves with the view
+            // while held, not on release.
+            self.draw(cx);
+            return;
+        }
+        if self.sketch.is_some() || self.text_sketch.is_some() {
+            self.sketch_move(event, cx);
+            return;
+        }
+        if self.marquee_move(event, cx) {
+            return;
+        }
+        if let Some(frame) = self.host.frame(self.bounds, cx) {
+            let at = self.to_comp(event.position, frame);
+            if self.text_drag(at) {
+                cx.notify();
+                return;
+            }
+            if self.pen_move(event, at, cx) {
+                return;
+            }
+        }
+        if self.drag.is_none() {
+            self.hover_deep = event.modifiers.platform || event.modifiers.control;
+            self.hover_alt = event.modifiers.alt;
+            if self.bounds.contains(&event.position) {
+                self.hover(event.position, cx);
+            } else {
+                self.unhover(cx);
+            }
+            return;
+        }
+        let threshold = self.tokens.metrics.drag_threshold;
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(event.position, frame);
+        let origin = self.drag.as_ref().map(|d| self.to_comp(d.origin, frame));
+        let Some((drag, origin)) = self.drag.as_mut().zip(origin) else {
+            return;
+        };
+        let moved = event.position - drag.origin;
+        if !drag.active {
+            if f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
+                return;
+            }
+            drag.active = true;
+            if drag.hit == Hit::Body {
+                let ids: Vec<String> = drag.poses.iter().map(|p| p.id.clone()).collect();
+                let (kernel, project, time) =
+                    (self.kernel.clone(), self.project.clone(), drag.time);
+                let started = drag.origin;
+                self.picks += 1;
+                cx.spawn(async move |this, cx| {
+                    let points = cx
+                        .background_executor()
+                        .spawn(
+                            async move { snap::points(&*kernel.published(&project)?, &ids, time) },
+                        )
+                        .await;
+                    let _ = this.update(cx, |s, _| {
+                        s.picks -= 1;
+                        if let (Some(drag), Some(points)) = (s.drag.as_mut(), points)
+                            && drag.origin == started
+                        {
+                            drag.snaps = Some(Arc::new(points));
+                        }
+                    });
+                })
+                .detach();
+            }
+            // Option on a body drag: copies take the move (decided as the
+            // drag starts), and the layers themselves stay.
+            if drag.hit == Hit::Body && event.modifiers.alt {
+                drag.copies = Some(
+                    drag.poses
+                        .iter()
+                        .filter(|p| p.root && !p.locked)
+                        .map(|p| (p.id.clone(), pm_kernel::new_id("L")))
+                        .collect(),
+                );
+            }
+            self.queue.push_back(Job::Begin(match drag.hit {
+                Hit::Body if drag.copies.is_some() => "Duplicate",
+                Hit::Body => "Move",
+                Hit::Handle(_) if drag.poses.iter().any(|p| p.shape.is_some()) => "Resize Shape",
+                Hit::Handle(_) => "Scale",
+                Hit::Rotate => "Rotate",
+                Hit::Anchor => "Move Anchor Point",
+            }));
+        }
+        let mods = Mods {
+            shift: event.modifiers.shift,
+            alt: event.modifiers.alt,
+            snap: snapping_suspended(self.snapping_enabled, event.modifiers.platform || event.modifiers.control),
+        };
+        // Moves align with the composition and other layers; Command
+        // bypasses, and a Shift-locked axis stays put.
+        let mut offset = [0., 0.];
+        let mut guides = vec![];
+        if drag.hit == Hit::Body
+            && !mods.snap
+            && let Some(points) = drag.snaps.clone()
+        {
+            let delta = locked_delta(origin, at, mods.shift);
+            let axes = [!mods.shift || delta[0] != 0., !mods.shift || delta[1] != 0.];
+            let moving = snap::box_points(&drag.poses, delta);
+            let result = snap::snap_with_rulers(
+                &moving,
+                &points,
+                &self.rulers.guides,
+                snap::DISTANCE / frame.scale.max(0.02),
+                axes,
+            );
+            offset = result.0;
+            guides = result.1;
+        }
+        let mut commands = commands(drag, origin, at, mods, offset);
+        if let Some(copies) = &drag.copies {
+            commands = on_copies(commands, copies);
+        }
+        // A move's or a turn's outline follows the pointer now, not when the
+        // kernel's next publication has been read back (slow on a large
+        // project): each unlocked layer moves by exactly the composition
+        // offset, or turns to exactly the rotation the step writes.
+        let moved = match drag.hit {
+            Hit::Body => {
+                let d = locked_delta(origin, at, mods.shift);
+                let delta = [d[0] + offset[0], d[1] + offset[1]];
+                Some(drag.poses.iter().map(|pose| pose.moved(delta)).collect())
+            }
+            _ if drag.draws_own_outline() => Some(
+                drag.poses
+                    .iter()
+                    .map(|pose| pose.turned(turned_to(pose, origin, at, mods)))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        // The alignment feedback marks catching something new, not each
+        // step that stays caught.
+        let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
+        if caught(&guides) != caught(&self.guides) && !guides.is_empty() {
+            snap::haptic();
+        }
+        if guides != self.guides {
+            self.guides = guides;
+            cx.notify();
+        }
+        if let Some(moved) = moved {
+            self.poses = Arc::new(moved);
+            self.draw(cx);
+        }
+        self.queue.push_back(Job::Step(commands, true));
+        // The viewer trace's input time; untraced, no timestamp is read.
+        if pm_engine_service::trace::enabled() {
+            self.step_input
+                .get_or_insert_with(crate::session::Controller::event_time);
+        }
+        self.pump(cx);
+    }
+    fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.picking = None;
+        if self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_some()) { return; }
+        if self.effect_drag.is_some() {
+            self.effects_release_drag(commit, cx);
+            return;
+        }
+        if self.rulers.dragging.is_some() {
+            let at = window
+                .as_ref()
+                .map_or(Point::default(), |w| w.mouse_position());
+            if commit {
+                self.rulers_up(at);
+            } else {
+                self.rulers_cancel();
+            }
+            cx.notify();
+            return;
+        }
+        if let Some((start, last)) = self.panning.take() {
+            if !commit {
+                self.host.navigate(Navigate::Pan(start - last), cx);
+                self.draw(cx);
+            }
+            let open = if self.space_hand || self.host.tool(cx) == Tool::Hand {
+                CursorStyle::OpenHand
+            } else {
+                CursorStyle::Arrow
+            };
+            self.set_cursor(open, cx);
+        }
+        if self.studio_up(commit, cx) {
+            return;
+        }
+        if self.host.tool(cx) == Tool::Other
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let pos = window
+                .as_ref()
+                .map_or(self.bounds.origin, |w| w.mouse_position());
+            let at = self.to_comp(pos, frame);
+            let _ = self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "up",
+                    "x": f32::from(pos.x - self.bounds.origin.x),
+                    "y": f32::from(pos.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": 0,
+                    "clickCount": 0,
+                    "modifiers": {
+                        "shift": false,
+                        "alt": false,
+                        "ctrl": false,
+                        "meta": false,
+                    }
+                }),
+                cx,
+            );
+        }
+        if !self.guides.is_empty() {
+            self.guides.clear();
+            cx.notify();
+        }
+        if self.text_release() || self.pen_up(commit, cx) || self.marquee_up(commit, cx) {
+            return;
+        }
+        if let Some(sketch) = self.text_sketch.take() {
+            self.draw(cx);
+            if let (true, Some(window)) = (commit, window) {
+                self.text_tool_release(sketch, window, cx);
+            }
+            return;
+        }
+        if let Some(sketch) = self.sketch.take() {
+            if let Some(shape) = sketch.shape.filter(|_| commit) {
+                self.create_shape(shape, cx);
+            }
+            self.draw(cx);
+            return;
+        }
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if drag.active {
+            if let (true, Some(copies)) = (commit, drag.copies) {
+                let ids = copies.into_iter().map(|(_, copy)| copy).collect();
+                self.queue.push_back(Job::SelectLayers(ids));
+            }
+            if !commit {
+                self.poses = drag.poses;
+                self.draw(cx);
+            }
+            self.queue.push_back(Job::Finish(commit));
+            self.pump(cx);
+        } else if let Some(press) = drag.click.filter(|_| commit) {
+            self.pick(press, cx);
+        }
+    }
+    /// The button came up in the window while a pointer gesture of this
+    /// surface still waits for it: its own listener never heard the release
+    /// (the viewer was drawn again or covered while held). It ends now, as a
+    /// release does, so no edit stays open.
+    pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A marquee or a shape or text box being drawn, or a press whose
+        // pick has not answered yet, waits for the release as a drag does.
+        let held = self.pointer_button == MouseButton::Left && self.pointer_drag_held();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
+    }
+
+    fn pointer_drag_held(&self) -> bool {
+        self.drag.is_some()
+            || self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_none())
+            || self.pen_drag.is_some()
+            || matches!(
+                self.pen_waiting.back(),
+                Some(pen::PenInput::Down(..) | pen::PenInput::Move(..))
+            )
+            || self.panning.is_some()
+            || self.rulers.dragging.is_some()
+            || self.marquee.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
+            || self.picking.is_some()
+            || self.studio.pointer_drag_held()
+    }
+    /// A pointer gesture Escape would cancel (not a text session): ending
+    /// one reads the controller (its tool, its frame), so the controller
+    /// asks first and has it ended after its own update (PM-480).
+    pub fn gesture_to_cancel(&self) -> bool {
+        self.pen_drag.is_some()
+            || self.marquee.is_some()
+            || self.studio.busy()
+            || self.studio.part_pick.is_some()
+            || self.drag.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
+    }
+    pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.studio.part_pick.take().is_some() {
+            self.studio.hovered_part = None;
+            self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+            self.cursor = CursorStyle::Arrow;
+            self.draw(cx);
+            cx.notify();
+            return true;
+        }
+        if self.effect_colour.is_some() {
+            self.effects_finish_colour(false, cx); return true;
+        }
+        if self.effect_picker.take().is_some() {
+            if self.effect_drag.is_some() { self.on_up(false, None, cx); }
+            cx.notify(); return true;
+        }
+        if self.finish_text(false, cx) {
+            return true;
+        }
+        if self.pen_up(false, cx) || self.marquee_up(false, cx) {
+            return true;
+        }
+        if self.studio.busy() {
+            return self.studio_up(false, cx);
+        }
+        if self.drag.is_none() && self.effect_drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
+            return false;
+        }
+        self.on_up(false, None, cx);
+        true
+    }
+    /// The box follows the pointer once it passes the drag threshold;
+    /// Shift draws a square, Option from the centre.
+    fn sketch_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(event.position, frame);
+        let threshold = self.tokens.metrics.drag_threshold;
+        let m = event.modifiers;
+        let (origin, start, shape, square) = if let Some(s) = self.sketch.as_mut() {
+            (s.origin, s.start, &mut s.shape, m.shift)
+        } else if let Some(s) = self.text_sketch.as_mut() {
+            // A text box keeps its proportions free.
+            (s.origin, s.start, &mut s.shape, false)
+        } else {
+            return;
+        };
+        let moved = event.position - origin;
+        if shape.is_none() && f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
+            return;
+        }
+        *shape = Some(crate::shape_tool::ShapeBox::from_drag(
+            start, at, m.alt, square,
+        ));
+        self.draw(cx);
+    }
+    /// One undo step, planned and written off the main thread; a new shape
+    /// layer is selected, as in the shipped viewer.
+    fn create_shape(&mut self, shape: crate::shape_tool::ShapeBox, cx: &mut Context<Self>) {
+        let (kernel, project, time) = (
+            self.kernel.clone(),
+            self.project.clone(),
+            self.host.time(cx),
+        );
+        let variant = self.host.shape_variant(cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let published = kernel.published(&project).ok_or("No open project")?;
+                    let Some(plan) = crate::shape_tool::plan(&published, shape, time, &variant)
+                    else {
+                        return Ok(());
+                    };
+                    let call = Call::TransactWithSelection {
+                        selection: plan.select.map_or_else(
+                            || SelectionCall::Batch(vec![]),
+                            |id| SelectionCall::Layers { ids: vec![id], add: false },
+                        ),
+                        label: Some(plan.label.into()),
+                        body: WriteBody::Commands(plan.commands),
+                        expected_revision: Some(published.revision()),
+                    };
+                    let ack = kernel
+                        .call(&project, Request::new(Caller::native(), call))
+                        .await
+                        .ok_or("Kernel closed")?
+                        .map_err(|e| e.to_string())?;
+                    if let Reply::Throw(error) = ack.reply {
+                        return Err(error.to_string());
+                    }
+                    Ok::<(), String>(())
+                })
+                .await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |s, cx| s.host.report(error, cx));
+            }
+        })
+        .detach();
+    }
+    /// View ▸ Show/Hide Layer Controls: boxes off, handles disarmed.
+    pub fn toggle_controls(&mut self, cx: &mut Context<Self>) {
+        self.controls = !self.controls;
+        self.redraw(cx);
+    }
+    pub fn controls(&self) -> bool {
+        self.controls
+    }
+    #[cfg(test)]
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor
+    }
+    #[cfg(test)]
+    pub fn gesture_active(&self) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.active)
+    }
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(mut job) = self.queue.pop_front() else {
+            return;
+        };
+        // Superseding steps coalesce; a step that accumulates never drops.
+        while matches!(job, Job::Step(_, true))
+            && matches!(self.queue.front(), Some(Job::Step(_, true)))
+        {
+            job = self.queue.pop_front().unwrap();
+        }
+        self.busy = true;
+        if matches!(job, Job::Step(..))
+            && let Some(at) = self.step_input.take()
+        {
+            self.host.input(at, cx);
+        }
+        let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
+        let (started, kind) = (std::time::Instant::now(), job.kind());
+        let camera_transact = matches!(&job, Job::Transact("Fly Camera" | "Move Camera", ..));
+        crate::interaction_work::submit!(cx, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let call: Call = match (job, gesture) {
+                        (job @ (Job::Select(_) | Job::SelectLayers(_)), _) => {
+                            let ids = match job {
+                                Job::Select(id) => id.into_iter().collect(),
+                                Job::SelectLayers(ids) => ids,
+                                _ => vec![],
+                            };
+                            let select = SelectionCall::Layers { ids, add: false };
+                            return kernel
+                                .call(&project, Request::new(Caller::native(), select.user()))
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string());
+                        }
+                        (Job::Transact(label, commands, select), _) => {
+                            let selection = select.map_or_else(
+                                || SelectionCall::Batch(vec![]),
+                                |id| SelectionCall::Layers {
+                                    ids: vec![id],
+                                    add: false,
+                                },
+                            );
+                            let call = Call::TransactWithSelection {
+                                label: Some(label.into()),
+                                body: WriteBody::Commands(commands),
+                                expected_revision: None,
+                                selection,
+                            };
+                            return kernel
+                                .call(&project, Request::new(Caller::native(), call))
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string());
+                        }
+                        (Job::Begin(label), _) => GestureCall::Begin {
+                            label: label.into(),
+                        }
+                        .into(),
+                        (Job::Step(commands, replace), Some(gesture)) => GestureCall::Step {
+                            gesture,
+                            body: WriteBody::Commands(commands),
+                            replace,
+                        }
+                        .into(),
+                        (Job::Finish(true), Some(gesture)) => {
+                            GestureCall::Commit { gesture }.into()
+                        }
+                        (Job::Finish(false), Some(gesture)) => {
+                            GestureCall::Cancel { gesture }.into()
+                        }
+                        _ => return Err::<Ack, String>("Gesture was refused".into()),
+                    };
+                    kernel
+                        .call(&project, Request::new(Caller::native(), call))
+                        .await
+                        .ok_or("Kernel closed")?
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+            crate::diag::line(
+                serde_json::json!({"gizmo": kind, "ms": started.elapsed().as_secs_f64() * 1000.}),
+            );
+            let _ = this.update(cx, |s, cx| {
+                s.busy = false;
+                // A gesture that has finished (or never began) has no id to
+                // step: a later gesture's steps must never reach a committed
+                // one, which would leave the later one empty in the history
+                // (PM-433: two Cmd-Z presses undid one step).
+                let begun = match result {
+                    Ok(ack) => match ack.reply {
+                        Reply::Gesture(id) => {
+                            s.gesture = Some(id);
+                            true
+                        }
+                        Reply::Throw(error) => {
+                            s.host.report(error.to_string(), cx);
+                            false
+                        }
+                        _ => true,
+                    },
+                    Err(error) => {
+                        s.host.report(error, cx);
+                        false
+                    }
+                };
+                if kind == "finish" || (kind == "begin" && !begun) {
+                    s.gesture = None;
+                }
+                if s.queue.is_empty()
+                    && s.drag.is_none()
+                    && s.effect_drag.is_none()
+                    && s.pen_drag.is_none()
+                    && !s.studio.busy()
+                    && s.gesture.is_some()
+                {
+                    s.queue.push_back(Job::Finish(true));
+                }
+                let mut released_camera_commit = false;
+                if camera_transact
+                    && !s
+                        .queue
+                        .iter()
+                        .any(|j| matches!(j, Job::Transact("Fly Camera" | "Move Camera", ..)))
+                    && let Some((was_free, prev_free)) = s.studio.camera_commit_return.take()
+                {
+                    s.studio.free_look = was_free;
+                    s.studio.look_pending = Some(was_free);
+                    s.studio.free = prev_free;
+                    s.studio_push_view(cx);
+                    s.draw(cx);
+                    released_camera_commit = true;
+                }
+                s.pump(cx);
+                // Reconcile any reads deferred during the drag, even when
+                // release did not change the document or the kernel refused it.
+                // The Pen also needs a read when its own work has landed.
+                if kind == "finish"
+                    || released_camera_commit
+                    || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty())
+                {
+                    s.refresh(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// The common box's rotate handle and centre.
+    #[cfg(test)]
+    pub fn group_points(&self) -> Option<([f64; 2], [f64; 2], [f64; 2])> {
+        let g = group_pose(&self.poses)?;
+        Some((g.rotate_handle(self.stem(1.)), g.anchor, g.handle(4)))
+    }
+    #[cfg(test)]
+    pub fn pen_paths(&self) -> Vec<usize> {
+        self.pen.as_ref().map_or(vec![], |p| {
+            p.targets.iter().map(|t| t.vertices.len()).collect()
+        })
+    }
+    #[cfg(test)]
+    pub fn pen_vertices(&self) -> usize {
+        self.pen
+            .as_ref()
+            .map_or(0, |p| p.targets.iter().map(|t| t.vertices.len()).sum())
+    }
+    /// The text session, including one still finishing.
+    pub fn text_open(&self) -> Option<&text::TextSession> {
+        self.text.as_ref()
+    }
+    /// The latest pose read finished; an empty selection is a completed read too.
+    #[cfg(test)]
+    pub fn refresh_complete(&self) -> bool {
+        !self.refreshing && !self.effect_out && self.completed_read == self.latest
+    }
+    #[cfg(test)]
+    pub fn idle(&self) -> bool {
+        !self.busy && self.queue.is_empty() && self.picks == 0
+    }
+    #[cfg(test)]
+    pub fn marquee_drawn(&self) -> bool {
+        self.marquee.is_some()
+    }
+    #[cfg(test)]
+    pub fn hovered(&self) -> Option<String> {
+        self.hover_box.as_ref().map(|(id, _)| id.clone())
+    }
+    #[cfg(test)]
+    pub fn poses(&self) -> Arc<Vec<Pose>> {
+        self.poses.clone()
+    }
+    #[cfg(test)]
+    pub fn points(&self) -> Option<([f64; 2], [f64; 2], [f64; 2])> {
+        let pose = self.poses.first()?;
+        Some((
+            lerp(pose.corners[0], pose.corners[2], 0.5),
+            pose.handle(4),
+            pose.rotate_handle(self.stem(1.)),
+        ))
+    }
+}
+/// The common box of an unlocked multiple selection, as a pose whose
+/// handles the shared scale and rotate drags use.
+fn group_pose(poses: &[Pose]) -> Option<Pose> {
+    if poses.len() < 2 || poses.iter().any(|p| p.locked) {
+        return None;
+    }
+    let points = poses.iter().flat_map(|p| p.corners);
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for [x, y] in points {
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+    }
+    let centre = [(x0 + x1) / 2., (y0 + y1) / 2.];
+    Some(Pose {
+        id: String::new(),
+        locked: false,
+        root: false,
+        keeps_aspect: false,
+        world: [1., 0., 0., 1., 0., 0.],
+        plane: None,
+        plane_pos: None,
+        screen_box: false,
+        own_3d: false,
+        position_z: 0.,
+        scale_z: None,
+        drag_3d: None,
+        linear: [1., 0., 0., 1.],
+        to_parent: [1., 0., 0., 1.],
+        bounds: [x0, y0, x1, y1],
+        shape: None,
+        text_size: None,
+        has_skew: false,
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        anchor: centre,
+        local_anchor: centre,
+        position: centre,
+        scale: [100., 100.],
+        rotation: 0.,
+    })
+}
+/// A layer's local rotation, scale (as factors) and skew (degrees).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Decomposed {
+    pub rotation: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub skew: f64,
+}
+fn compose_linear(t: Decomposed) -> [f64; 4] {
+    let (sin, cos) = t.rotation.to_radians().sin_cos();
+    let skew = t.skew.to_radians().tan();
+    [
+        cos * t.scale_x,
+        sin * t.scale_x,
+        t.scale_y * (cos * skew - sin),
+        t.scale_y * (sin * skew + cos),
+    ]
+}
+/// The local rotation, scale and skew giving `desired` under `parent`
+/// (viewer.ts `solveLocalTransformForWorldLinear`); a mirrored layer keeps
+/// its mirror and the rotation stays near the one it had.
+pub(crate) fn solve_local(
+    parent: Option<[f64; 4]>,
+    desired: [f64; 4],
+    preferred_scale_x: f64,
+    preferred_rotation: f64,
+) -> Option<Decomposed> {
+    let local = match parent {
+        Some(p) => {
+            let inverse = inverse_linear(p)?;
+            let column = |x: f64, y: f64| apply(inverse, [x, y]);
+            let (a, b) = (
+                column(desired[0], desired[1]),
+                column(desired[2], desired[3]),
+            );
+            [a[0], a[1], b[0], b[1]]
+        }
+        None => desired,
+    };
+    let scale_x = local[0].hypot(local[1]);
+    if !scale_x.is_finite() || scale_x < 1e-8 {
+        return None;
+    }
+    let (cos, sin) = (local[0] / scale_x, local[1] / scale_x);
+    let skew_scale_y = cos * local[2] + sin * local[3];
+    let scale_y = -sin * local[2] + cos * local[3];
+    if !scale_y.is_finite() || scale_y.abs() < 1e-8 {
+        return None;
+    }
+    let mut skew = skew_scale_y.atan2(scale_y);
+    if skew > std::f64::consts::FRAC_PI_2 {
+        skew -= std::f64::consts::PI;
+    } else if skew < -std::f64::consts::FRAC_PI_2 {
+        skew += std::f64::consts::PI;
+    }
+    let mut rotation = local[1].atan2(local[0]).to_degrees();
+    let (mut sx, mut sy) = (scale_x, scale_y);
+    if preferred_scale_x < 0. {
+        rotation += 180.;
+        sx = -sx;
+        sy = -sy;
+    }
+    rotation += ((preferred_rotation - rotation) / 360.).round() * 360.;
+    let out = Decomposed {
+        rotation,
+        scale_x: sx,
+        scale_y: sy,
+        skew: skew.to_degrees(),
+    };
+    let check = compose_linear(out);
+    let magnitude = local.iter().fold(1f64, |m, v| m.max(v.abs()));
+    check
+        .iter()
+        .zip(local)
+        .all(|(c, l)| (c - l).abs() <= magnitude * 1e-7)
+        .then_some(out)
+}
+/// Resize or rotate the selected root layers about the common box
+/// (viewer.ts common transform). Resizing is proportional: type by its size,
+/// parametric shapes by their size, others by a signed scale (a mirrored
+/// layer stays mirrored), and each anchor follows the pivot (the opposite
+/// handle, the centre with Option). Rotating carries each anchor about the
+/// box centre and solves the layer's own rotation, scale and skew for the
+/// turned world matrix under its parent (Shift: 15° steps, Command: 45°).
+fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Command> {
+    let Some(group) = group_pose(&drag.poses) else {
+        return vec![];
+    };
+    let t = drag.time;
+    let centre = group.anchor;
+    let mut out = vec![];
+    let carry = |pose: &Pose, moved: [f64; 2], out: &mut Vec<Command>| {
+        let d = apply(
+            pose.to_parent,
+            [moved[0] - pose.anchor[0], moved[1] - pose.anchor[1]],
+        );
+        out.push(set(
+            &pose.id,
+            "position.x",
+            round(pose.position[0] + d[0], 3),
+            t,
+        ));
+        out.push(set(
+            &pose.id,
+            "position.y",
+            round(pose.position[1] + d[1], 3),
+            t,
+        ));
+    };
+    let roots = drag.poses.iter().filter(|p| p.root && !p.locked);
+    match drag.hit {
+        Hit::Handle(index) => {
+            let (u, v) = HANDLES[index];
+            let (active_x, active_y) = (u != 0.5, v != 0.5);
+            let handle = group.handle(index);
+            let pivot = if mods.alt {
+                centre
+            } else {
+                group.local(
+                    if active_x { 1. - u } else { 0.5 },
+                    if active_y { 1. - v } else { 0.5 },
+                )
+            };
+            let grabbed = [
+                at[0] - (origin[0] - handle[0]),
+                at[1] - (origin[1] - handle[1]),
+            ];
+            let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+            let f = if active_x && active_y {
+                ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                    / (dx * dx + dy * dy).max(1e-9)
+            } else if active_x {
+                (grabbed[0] - pivot[0]) / dx.abs().max(1e-9).copysign(dx)
+            } else {
+                (grabbed[1] - pivot[1]) / dy.abs().max(1e-9).copysign(dy)
+            };
+            // calculateResize's floor: the box never turns inside out.
+            let f = f.max(0.01);
+            for pose in roots {
+                if let Some(size) = pose.text_size {
+                    out.push(set(&pose.id, "c.size", round((size * f).max(4.), 2), t));
+                } else if let Some(shape) = pose.shape {
+                    let side = |v: f64| round(((v + shape.stroke) * f - shape.stroke).max(1.), 3);
+                    out.push(set(&pose.id, "c.w", side(shape.width), t));
+                    out.push(set(&pose.id, "c.h", side(shape.height), t));
+                } else {
+                    out.push(set(&pose.id, "scale.x", round(pose.scale[0] * f, 3), t));
+                    out.push(set(&pose.id, "scale.y", round(pose.scale[1] * f, 3), t));
+                }
+                let moved = [
+                    pivot[0] + (pose.anchor[0] - pivot[0]) * f,
+                    pivot[1] + (pose.anchor[1] - pivot[1]) * f,
+                ];
+                carry(pose, moved, &mut out);
+            }
+        }
+        Hit::Rotate => {
+            let angle = |p: [f64; 2]| (p[1] - centre[1]).atan2(p[0] - centre[0]);
+            let mut turn =
+                ((angle(at) - angle(origin)).to_degrees() + 180.).rem_euclid(360.) - 180.;
+            if mods.snap {
+                turn = (turn / 45.).round() * 45.;
+            } else if mods.shift {
+                turn = (turn / 15.).round() * 15.;
+            }
+            let (s, c) = turn.to_radians().sin_cos();
+            for pose in roots {
+                let r = [pose.anchor[0] - centre[0], pose.anchor[1] - centre[1]];
+                let moved = [
+                    centre[0] + c * r[0] - s * r[1],
+                    centre[1] + s * r[0] + c * r[1],
+                ];
+                carry(pose, moved, &mut out);
+                let parent = inverse_linear(pose.to_parent).filter(|p| {
+                    p.iter()
+                        .zip([1., 0., 0., 1.])
+                        .any(|(a, b)| (a - b).abs() > 1e-9)
+                });
+                let Some(parent) = parent else {
+                    // No parent: turning the world turns only the rotation.
+                    out.push(set(&pose.id, "rotation", round(pose.rotation + turn, 3), t));
+                    continue;
+                };
+                let w = [pose.world[0], pose.world[1], pose.world[2], pose.world[3]];
+                let desired = [
+                    c * w[0] - s * w[1],
+                    s * w[0] + c * w[1],
+                    c * w[2] - s * w[3],
+                    s * w[2] + c * w[3],
+                ];
+                let Some(local) =
+                    solve_local(Some(parent), desired, pose.scale[0] / 100., pose.rotation)
+                else {
+                    continue;
+                };
+                out.push(set(&pose.id, "rotation", round(local.rotation, 4), t));
+                out.push(set(&pose.id, "scale.x", round(local.scale_x * 100., 4), t));
+                out.push(set(&pose.id, "scale.y", round(local.scale_y * 100., 4), t));
+                // A layer saved without a skew channel takes none it doesn't need.
+                if pose.has_skew || local.skew.abs() > 1e-6 {
+                    out.push(set(&pose.id, "skew", round(local.skew, 4), t));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+fn inside(corners: &[[f64; 2]; 4], p: [f64; 2]) -> bool {
+    let mut sign = 0.;
+    for i in 0..4 {
+        let (a, b) = (corners[i], corners[(i + 1) % 4]);
+        let cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        if cross != 0. {
+            if sign != 0. && cross * sign < 0. {
+                return false;
+            }
+            sign = cross;
+        }
+    }
+    true
+}
+/// A body move's writes, made on copies of the moved layers: the layers are
+/// duplicated first (each step starts again from the gesture's beginning),
+/// then each write goes to its layer's copy.
+fn on_copies(moves: Vec<Command>, copies: &[(String, String)]) -> Vec<Command> {
+    let (layer_ids, new_ids): (Vec<String>, Vec<String>) = copies.iter().cloned().unzip();
+    let mut out: Vec<Command> =
+        vec![pm_kernel::LayerCommand::Duplicate { layer_ids, new_ids }.into()];
+    out.extend(moves.into_iter().map(|command| match command {
+        Command::Property(PropertyCommand::Set(mut set)) => {
+            if let Some((_, copy)) = copies.iter().find(|(source, _)| *source == set.layer_id) {
+                set.layer_id = copy.clone();
+            }
+            PropertyCommand::Set(set).into()
+        }
+        other => other,
+    }));
+    out
+}
+fn set(id: &str, channel: &str, value: f64, time: f64) -> Command {
+    // A viewer edit is the artist's hand: it overrides earlier hand edits and
+    // protects its value from agents, as in the shipped viewer.
+    let mut set = SetProperty::new(id, channel, Value::Number(value), time);
+    set.preserve_hand_edits = false;
+    set.mark_intent = true;
+    PropertyCommand::Set(set).into()
+}
+#[derive(Clone, Copy)]
+struct Mods {
+    shift: bool,
+    alt: bool,
+    /// Command or Control.
+    snap: bool,
+}
+/// Shift locks a move's dominant axis.
+fn locked_delta(origin: [f64; 2], at: [f64; 2], shift: bool) -> [f64; 2] {
+    let mut delta = [at[0] - origin[0], at[1] - origin[1]];
+    if shift {
+        let axis = usize::from(delta[0].abs() > delta[1].abs());
+        delta[axis] = 0.;
+    }
+    delta
+}
+/// The rotation a one-layer turn from `origin` to `at` writes: the pointer's
+/// angle about the anchor in the parent's space, Shift in 15° steps and
+/// Command in 45° steps.
+fn turned_to(pose: &Pose, origin: [f64; 2], at: [f64; 2], mods: Mods) -> f64 {
+    let angle = |p: [f64; 2]| {
+        let v = apply(
+            pose.to_parent,
+            [p[0] - pose.anchor[0], p[1] - pose.anchor[1]],
+        );
+        v[1].atan2(v[0])
+    };
+    let turn = (angle(at) - angle(origin)).to_degrees();
+    let mut degrees = pose.rotation + (turn + 180.).rem_euclid(360.) - 180.;
+    if mods.snap {
+        degrees = (degrees / 45.).round() * 45.;
+    } else if mods.shift {
+        degrees = (degrees / 15.).round() * 15.;
+    }
+    round(degrees, 2)
+}
+fn commands(
+    drag: &Drag,
+    origin: [f64; 2],
+    at: [f64; 2],
+    mods: Mods,
+    snap: [f64; 2],
+) -> Vec<Command> {
+    let delta = if matches!(drag.hit, Hit::Body) {
+        let d = locked_delta(origin, at, mods.shift);
+        [d[0] + snap[0], d[1] + snap[1]]
+    } else {
+        [at[0] - origin[0], at[1] - origin[1]]
+    };
+    if drag.poses.len() > 1 && matches!(drag.hit, Hit::Handle(_) | Hit::Rotate) {
+        return group_commands(drag, origin, at, mods);
+    }
+    let t = drag.time;
+    let mut out = vec![];
+    let moves_roots = matches!(drag.hit, Hit::Body);
+    for pose in drag
+        .poses
+        .iter()
+        .filter(|p| !p.locked && (p.root || !moves_roots))
+    {
+        let id = &pose.id;
+        match drag.hit {
+            Hit::Body => {
+                if pose.own_3d
+                    && let Some(d3) = pose.drag_3d
+                    && d3.parent_tilted
+                {
+                    let wx = delta[0] * d3.depth_scale;
+                    let wy = delta[1] * d3.depth_scale;
+                    let inv = &d3.parent_inv;
+                    let dx = inv[0] * wx + inv[4] * wy;
+                    let dy = inv[1] * wx + inv[5] * wy;
+                    let dz = inv[2] * wx + inv[6] * wy;
+                    out.push(set(id, "position.x", pose.position[0] + dx, t));
+                    out.push(set(id, "position.y", pose.position[1] + dy, t));
+                    out.push(set(id, "position.z", pose.position_z + dz, t));
+                } else {
+                    let d = pose
+                        .plane_pos
+                        .as_ref()
+                        .and_then(pm_eval::space3d::inverse_plane)
+                        .and_then(|inv| {
+                            let a = project_plane(&inv, origin)?;
+                            let b =
+                                project_plane(&inv, [origin[0] + delta[0], origin[1] + delta[1]])?;
+                            Some([b[0] - a[0], b[1] - a[1]])
+                        })
+                        .unwrap_or_else(|| apply(pose.to_parent, delta));
+                    out.push(set(id, "position.x", pose.position[0] + d[0], t));
+                    out.push(set(id, "position.y", pose.position[1] + d[1], t));
+                }
+            }
+            Hit::Rotate => {
+                out.push(set(id, "rotation", turned_to(pose, origin, at, mods), t));
+            }
+            Hit::Anchor => {
+                let Some(to_local) = inverse_linear(pose.linear) else {
+                    continue;
+                };
+                let moved = apply(pose.to_parent, delta);
+                let mut anchor = apply(to_local, moved);
+                anchor = [
+                    pose.local_anchor[0] + anchor[0],
+                    pose.local_anchor[1] + anchor[1],
+                ];
+                if mods.snap {
+                    // Command lands on the box's corners, edges and centre.
+                    let nearest = |value: f64, low: f64, high: f64| {
+                        [low, (low + high) / 2., high]
+                            .into_iter()
+                            .min_by(|a, b| (a - value).abs().total_cmp(&(b - value).abs()))
+                            .unwrap_or(value)
+                    };
+                    let b = pose.bounds;
+                    anchor = [
+                        nearest(anchor[0], b[0], b[2]),
+                        nearest(anchor[1], b[1], b[3]),
+                    ];
+                }
+                out.push(set(id, "anchor.x", round(anchor[0], 3), t));
+                out.push(set(id, "anchor.y", round(anchor[1], 3), t));
+                if !mods.alt {
+                    // Position compensates so the picture stays put; Option lets it go.
+                    let shift = apply(
+                        pose.linear,
+                        [
+                            anchor[0] - pose.local_anchor[0],
+                            anchor[1] - pose.local_anchor[1],
+                        ],
+                    );
+                    out.push(set(
+                        id,
+                        "position.x",
+                        round(pose.position[0] + shift[0], 3),
+                        t,
+                    ));
+                    out.push(set(
+                        id,
+                        "position.y",
+                        round(pose.position[1] + shift[1], 3),
+                        t,
+                    ));
+                }
+            }
+            Hit::Handle(index) => {
+                out.extend(resize(pose, index, origin, at, mods, t));
+            }
+        }
+    }
+    out
+}
+/// Port of `calculateResize`: the opposite handle stays fixed, Option scales
+/// from the centre and Shift keeps the aspect. Scale is the rightmost term of
+/// the layer's matrix, so the position correction has a closed form.
+fn resize(
+    pose: &Pose,
+    index: usize,
+    origin: [f64; 2],
+    at: [f64; 2],
+    mods: Mods,
+    t: f64,
+) -> Vec<Command> {
+    let (u, v) = HANDLES[index];
+    let (active_x, active_y) = (u != 0.5, v != 0.5);
+    // A 3D group whose children have independent 3D depth/tilt scales uniformly
+    // in screen space across X, Y, and Z so rotating or scaling never causes
+    // edge-on singularities or depth shear.
+    if pose.screen_box {
+        let handle = pose.handle(index);
+        let pivot = if mods.alt {
+            pose.anchor
+        } else {
+            let opp_u = if active_x { 1. - u } else { 0.5 };
+            let opp_v = if active_y { 1. - v } else { 0.5 };
+            let top = lerp(pose.corners[0], pose.corners[1], opp_u);
+            let bottom = lerp(pose.corners[3], pose.corners[2], opp_u);
+            lerp(top, bottom, opp_v)
+        };
+        let grabbed = [
+            at[0] - (origin[0] - handle[0]),
+            at[1] - (origin[1] - handle[1]),
+        ];
+        let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+        let factor = if active_x && active_y {
+            ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                / (dx * dx + dy * dy).max(1e-9)
+        } else if active_x && dx.abs() > 1e-9 {
+            (grabbed[0] - pivot[0]) / dx
+        } else if active_y && dy.abs() > 1e-9 {
+            (grabbed[1] - pivot[1]) / dy
+        } else {
+            1.
+        };
+        let scale_x = (pose.scale[0] * factor).max(MIN_SCALE);
+        let kept = scale_x / pose.scale[0].max(1e-9);
+        let scale_y = (pose.scale[1] * kept).max(MIN_SCALE);
+        let mut cmds = vec![
+            set(&pose.id, "scale.x", round(scale_x, 3), t),
+            set(&pose.id, "scale.y", round(scale_y, 3), t),
+        ];
+        if let Some(sz) = pose.scale_z {
+            cmds.push(set(&pose.id, "scale.z", round((sz * kept).max(MIN_SCALE), 3), t));
+        }
+        return cmds;
+    }
+    let (Some(start), Some(now)) = (pose.to_local(origin), pose.to_local(at)) else {
+        return vec![];
+    };
+    let handle = pose.local(u, v);
+    let pivot = if mods.alt {
+        pose.local(0.5, 0.5)
+    } else {
+        pose.local(
+            if active_x { 1. - u } else { 0.5 },
+            if active_y { 1. - v } else { 0.5 },
+        )
+    };
+    let grabbed = [
+        now[0] - (start[0] - handle[0]),
+        now[1] - (start[1] - handle[1]),
+    ];
+    let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+    let factor = |active: bool, span: f64, grabbed: f64, pivot: f64| {
+        if active && span.abs() > 1e-9 {
+            (grabbed - pivot) / span
+        } else {
+            1.
+        }
+    };
+    let mut fx = factor(active_x, dx, grabbed[0], pivot[0]);
+    let mut fy = factor(active_y, dy, grabbed[1], pivot[1]);
+    let uniform_scale = mods.shift || pose.keeps_aspect;
+    if uniform_scale {
+        let uniform = if active_x && active_y {
+            // Project onto the corner's diagonal: continuous through shrink and growth.
+            ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                / (dx * dx + dy * dy).max(1e-9)
+        } else if active_x {
+            fx
+        } else {
+            fy
+        };
+        fx = uniform;
+        fy = uniform;
+    }
+    if let Some(shape) = pose.shape {
+        return resize_shape(pose, shape, pivot, [fx, fy], t);
+    }
+    let scale_x = (pose.scale[0] * fx).max(MIN_SCALE);
+    let scale_y = (pose.scale[1] * fy).max(MIN_SCALE);
+    let (kept_x, kept_y) = (scale_x / pose.scale[0], scale_y / pose.scale[1]);
+    let fixed = [
+        pivot[0] - pose.local_anchor[0],
+        pivot[1] - pose.local_anchor[1],
+    ];
+    let correction = apply(
+        pose.linear,
+        [fixed[0] * (1. - kept_x), fixed[1] * (1. - kept_y)],
+    );
+    let mut cmds = vec![
+        set(&pose.id, "scale.x", round(scale_x, 3), t),
+        set(&pose.id, "scale.y", round(scale_y, 3), t),
+        set(
+            &pose.id,
+            "position.x",
+            round(pose.position[0] + correction[0], 3),
+            t,
+        ),
+        set(
+            &pose.id,
+            "position.y",
+            round(pose.position[1] + correction[1], 3),
+            t,
+        ),
+    ];
+    if uniform_scale
+        && let Some(sz) = pose.scale_z
+    {
+        cmds.push(set(&pose.id, "scale.z", round((sz * kept_x).max(MIN_SCALE), 3), t));
+    }
+    cmds
+}
+/// Selection bounds carry half the stroke on each side, and a shape's box grows
+/// about its own centre, so the fixed point follows its place inside that box.
+fn resize_shape(
+    pose: &Pose,
+    shape: ShapeSize,
+    pivot: [f64; 2],
+    f: [f64; 2],
+    t: f64,
+) -> Vec<Command> {
+    let [x0, y0, x1, y1] = pose.bounds;
+    let (span_x, span_y) = (x1 - x0, y1 - y0);
+    let width = (span_x * f[0] - shape.stroke).max(1.);
+    let height = (span_y * f[1] - shape.stroke).max(1.);
+    let centre = pose.local(0.5, 0.5);
+    let moved = [
+        (pivot[0] - centre[0]) * (1. - (width + shape.stroke) / span_x.max(1e-9)),
+        (pivot[1] - centre[1]) * (1. - (height + shape.stroke) / span_y.max(1e-9)),
+    ];
+    let correction = apply(pose.linear, moved);
+    vec![
+        set(&pose.id, "c.w", round(width, 3), t),
+        set(&pose.id, "c.h", round(height, 3), t),
+        set(
+            &pose.id,
+            "position.x",
+            round(pose.position[0] + correction[0], 3),
+            t,
+        ),
+        set(
+            &pose.id,
+            "position.y",
+            round(pose.position[1] + correction[1], 3),
+            t,
+        ),
+    ]
+}
+fn geometry_query<T>(
+    p: &pm_kernel::Published,
+    mirror: &mut QueryMirror,
+    mut read: impl FnMut(&mut pm_kernel::QueryContext) -> Result<T, pm_kernel::QueryError>,
+) -> Result<T, pm_kernel::QueryError> {
+    match read(mirror.queries()) {
+        Err(pm_kernel::QueryError::NeedsFonts | pm_kernel::QueryError::NeedsInk) => {
+            crate::text_host::query(p, read)
+        }
+        result => result,
+    }
+}
+
+fn viewer_pick(
+    p: &pm_kernel::Published,
+    press: Press,
+    options: &pm_kernel::PickOptions,
+) -> Option<pm_kernel::PickHit> {
+    geometry_query(p, &mut QueryMirror::new(p), |q| {
+        q.pick(None, press.at[0], press.at[1], press.time, options)
+    })
+    .ok()
+}
+
+/// A layer's box in the composition at `time`: its transformed bounds
+/// (perspective-projected through `planeMatrix` for 2.5D 3D layers, or
+/// screen-space union of projected descendants for 3D groups with 3D depth).
+fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
+    let root = p.snapshot.root()?;
+    let loc = pm_kernel::model::find_layer(root, id)?;
+    let layer = pm_kernel::model::layer_at(root, &loc)?;
+    let mut mirror = QueryMirror::new(p);
+    if !mirror.queries().active(None, id, time).unwrap_or(false) {
+        return None;
+    }
+    if layer.get("type").and_then(crate::node_string) == Some("group") {
+        let list = pm_kernel::model::list_layers(root, None);
+        let descendants = group_descendants(&list, id);
+        let mut any_3d_child = false;
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for child_id in &descendants {
+            if !mirror.queries().active(None, child_id, time).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(true) = mirror.queries().is_3d_layer(None, child_id, time)
+                && let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false)
+                && let Ok(Some(cb)) =
+                    geometry_query(p, &mut mirror, |q| q.bounds(None, child_id, time))
+            {
+                any_3d_child = true;
+                for local_pt in [
+                    [cb.x0, cb.y0],
+                    [cb.x1, cb.y0],
+                    [cb.x1, cb.y1],
+                    [cb.x0, cb.y1],
+                ] {
+                    if let Some(pt) = project_plane(&cp, local_pt) {
+                        lo[0] = lo[0].min(pt[0]);
+                        lo[1] = lo[1].min(pt[1]);
+                        hi[0] = hi[0].max(pt[0]);
+                        hi[1] = hi[1].max(pt[1]);
+                    }
+                }
+            }
+        }
+        if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+            return Some([
+                [lo[0], lo[1]],
+                [hi[0], lo[1]],
+                [hi[0], hi[1]],
+                [lo[0], hi[1]],
+            ]);
+        }
+    }
+    let b = geometry_query(p, &mut mirror, |q| q.bounds(None, id, time)).ok()??;
+    project_box(mirror.queries(), id, time, b).map(|(corners, _)| corners)
+}
+/// What a Select-tool double-click does, in viewer.ts order (onDown's
+/// remembered text, `drillTarget`, then the `dblclick` handler).
+#[derive(Debug, PartialEq)]
+enum DoubleClick {
+    /// Descend one group level: the child of the deepest selected group
+    /// holding the hit.
+    Select(String),
+    /// Focus a group layer like a composition (or exit when `group` is `None`),
+    /// optionally selecting the clicked member inside it.
+    FocusGroup {
+        group: Option<String>,
+        select: Option<String>,
+    },
+    /// Edit the text layer's text, all of it selected.
+    Text(String),
+    /// Open the precomp's composition.
+    Open(String),
+}
+pub(crate) fn focused_group(p: &pm_kernel::Published) -> Option<String> {
+    let id = pm_panel_timeline::focused_group_from_ui(&p.ui_state)?;
+    let root = p.snapshot.root()?;
+    let comp = p.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, comp.as_deref())?;
+    pm_kernel::model::layers_of(comp)
+        .any(|layer| {
+            layer.get("id").and_then(crate::node_string) == Some(id)
+                && layer.get("type").and_then(crate::node_string) == Some("group")
+        })
+        .then(|| id.to_owned())
+}
+fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleClick> {
+    let root = p.snapshot.root()?;
+    let focus = focused_group(p);
+    let pick_opts = pm_kernel::PickOptions {
+        include_locked: false,
+        focus_group: focus.clone(),
+    };
+    let hit = viewer_pick(p, press, &pick_opts)?
+    .layer_id;
+    let layers = pm_kernel::model::list_layers(root, None);
+    let group_of = |id: &str| {
+        layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.group.clone())
+    };
+    let Some(hit) = hit else {
+        // Double-clicking empty canvas while focused on a group steps up one level.
+        let gid = focus?;
+        return Some(DoubleClick::FocusGroup {
+            group: group_of(&gid),
+            select: None,
+        });
+    };
+    // Studio 3D layers answer their own double-click.
+    if is_studio(p, &hit) {
+        return None;
+    }
+    let info = layers.iter().find(|l| l.id == hit)?;
+    let selected = p.selection.layers();
+    let text = info.kind == "text" && !info.effectively_locked;
+    // The first click may have selected the text itself: edit it.
+    if text && selected.contains(&hit) {
+        return Some(DoubleClick::Text(hit));
+    }
+    let mut chain = vec![hit.clone()];
+    while let Some(group) = group_of(chain.last().unwrap()) {
+        chain.push(group);
+    }
+    chain.reverse();
+    let scope_start = focus
+        .as_ref()
+        .and_then(|gid| chain.iter().position(|id| id == gid).map(|i| i + 1))
+        .unwrap_or(0);
+    if scope_start + 1 < chain.len() {
+        let group = chain[scope_start].clone();
+        if layers.iter().any(|l| l.id == group && l.kind == "group") {
+            return Some(DoubleClick::FocusGroup {
+                group: Some(group),
+                select: Some(chain[scope_start + 1].clone()),
+            });
+        }
+    }
+    if let Some(index) = chain.iter().rposition(|id| selected.contains(id))
+        && index + 1 < chain.len()
+    {
+        return Some(DoubleClick::Select(chain[index + 1].clone()));
+    }
+    if text {
+        return Some(DoubleClick::Text(hit));
+    }
+    if info.kind == "precomp" {
+        let loc = pm_kernel::model::find_layer(root, &hit)?;
+        let layer = pm_kernel::model::layer_at(root, &loc)?;
+        let comp = layer.get("d")?.get("comp")?.to_value().as_str()?.to_owned();
+        return Some(DoubleClick::Open(comp));
+    }
+    None
+}
+/// The top layer under a press. Groups the selection has not entered answer
+/// for their members; Command reaches the leaf (viewer.ts resolvePickTarget).
+fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>> {
+    let root = p.snapshot.root()?;
+    let focus = focused_group(p);
+    let pick_opts = pm_kernel::PickOptions {
+        include_locked: false,
+        focus_group: focus.clone(),
+    };
+    let hit = viewer_pick(p, press, &pick_opts)?;
+    let Some(id) = hit.layer_id else {
+        return Some(None);
+    };
+    // A 3D layer draws over the whole frame; its own picking ran first, so
+    // a 2D hit on one is empty canvas.
+    if is_studio(p, &id) {
+        return Some(None);
+    }
+    if press.deep {
+        return Some(Some(id));
+    }
+    let comp = p.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, comp.as_deref())?;
+    let parents: std::collections::HashMap<_, _> = pm_kernel::model::layers_of(comp)
+        .filter_map(|layer| {
+            Some((
+                layer.get("id").and_then(crate::node_string)?,
+                layer.get("group").and_then(crate::node_string)?,
+            ))
+        })
+        .collect();
+    if parents.is_empty() {
+        return Some(Some(id));
+    }
+    let chain = |from: &str| {
+        let mut out = vec![];
+        let mut at = from;
+        while let Some(&group) = parents.get(at) {
+            if out.contains(&group) {
+                break;
+            }
+            out.push(group);
+            at = group;
+        }
+        out
+    };
+    let hit_chain = chain(&id);
+    if let Some(gid) = &focus
+        && !hit_chain.contains(&gid.as_str())
+    {
+        return Some(None);
+    }
+    let mut entered: Vec<&str> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
+    if let Some(gid) = &focus {
+        entered.push(gid.as_str());
+        entered.extend(chain(gid));
+    }
+    let outermost = hit_chain.into_iter().rev().find(|g| !entered.contains(g));
+    Some(Some(outermost.map(str::to_owned).unwrap_or(id)))
+}
+/// Accent box, handles and anchor as engine lines. Sizes follow the display,
+/// never the composition zoom.
+/// The handles' keyline and the knob's ground: the viewer's dark in both
+/// schemes (viewer-chrome.md), so an accent mark reads on orange or white
+/// footage.
+const MARK_DARK: [f32; 4] = [14. / 255., 14. / 255., 14. / 255., 1.];
+/// The box's outer keyline: `c.media_badge` (black) at 40 % (viewer-chrome.md).
+const BOX_KEYLINE_ALPHA: f32 = 0.4;
+/// The gizmo as the viewer draws it: the box, stem and anchor cross as 1 pt
+/// accent lines, and the marks that keep their size on screen (filled
+/// handles, the rotation knob, the anchor's rings, the box's keyline) as
+/// viewer-chrome.md specifies them.
+fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> (Vec<OverlayLine>, Vec<Mark>) {
+    let channels = |c: u32, alpha: f32| {
+        let channel = |shift: u32| ((c >> shift) & 255) as f32 / 255.;
+        [channel(16), channel(8), channel(0), alpha]
+    };
+    let color = channels(t.colors.accent, 1.);
+    let keyline = channels(t.colors.media_badge, BOX_KEYLINE_ALPHA);
+    let [w, h] = frame.size;
+    let n = |p: [f64; 2]| [(p[0] / w) as f32, (p[1] / h) as f32];
+    let mut lines = vec![];
+    let mut marks = vec![];
+    let mut line = |a: [f64; 2], b: [f64; 2]| {
+        let (a, b) = (n(a), n(b));
+        lines.push(OverlayLine {
+            ends: [a[0], a[1], b[0], b[1]],
+            color,
+        });
+    };
+    let m = &t.metrics;
+    let stem = m.rotation_stem as f64 / frame.scale;
+    let handle = |p: [f64; 2]| Mark {
+        shape: Shape::Square,
+        at: n(p),
+        size: m.gizmo_handle,
+        fill: Some(color),
+        stroke: Some(MARK_DARK),
+        width: m.gizmo_keyline,
+        under: false,
+    };
+    // Rotation is a round knob, so it never reads as a scale handle.
+    let knob = |p: [f64; 2]| Mark {
+        shape: Shape::Circle,
+        at: n(p),
+        size: m.gizmo_handle + 2. * m.gizmo_keyline,
+        fill: Some(MARK_DARK),
+        stroke: Some(color),
+        width: 1.5,
+        under: false,
+    };
+    let box_keyline = |corners: &[[f64; 2]; 4], marks: &mut Vec<Mark>| {
+        for i in 0..4 {
+            marks.push(Mark {
+                shape: Shape::To(n(corners[(i + 1) % 4])),
+                at: n(corners[i]),
+                size: 0.,
+                fill: None,
+                stroke: Some(keyline),
+                width: 1. + 2. * m.gizmo_keyline,
+                under: true,
+            });
+        }
+    };
+    // The box a press can take comes first: a huge selection over the
+    // engine's line budget loses its last per-layer outlines, never its box.
+    let common = (poses.len() > 1).then(|| group_pose(poses)).flatten();
+    if let Some(group) = &common {
+        for i in 0..4 {
+            line(group.corners[i], group.corners[(i + 1) % 4]);
+        }
+        box_keyline(&group.corners, &mut marks);
+        marks.extend((0..8).map(|i| handle(group.handle(i))));
+        line(group.handle(1), group.rotate_handle(stem));
+        marks.push(knob(group.rotate_handle(stem)));
+    }
+    if let [pose] = poses
+        && !pose.locked
+    {
+        box_keyline(&pose.corners, &mut marks);
+        marks.extend((0..8).map(|i| handle(pose.handle(i))));
+        line(pose.handle(1), pose.rotate_handle(stem));
+        marks.push(knob(pose.rotate_handle(stem)));
+        // The anchor point: a ring with a cross through it (After Effects,
+        // v1), a white inner ring so it reads on any picture.
+        let a = pose.anchor;
+        let reach = m.anchor_mark as f64 / 2. / frame.scale;
+        line([a[0] - reach, a[1]], [a[0] + reach, a[1]]);
+        line([a[0], a[1] - reach], [a[0], a[1] + reach]);
+        marks.push(Mark {
+            shape: Shape::Circle,
+            at: n(a),
+            size: m.anchor_mark,
+            fill: None,
+            stroke: Some(color),
+            width: 1.5,
+            under: false,
+        });
+        marks.push(Mark {
+            shape: Shape::Circle,
+            at: n(a),
+            size: m.anchor_mark - 3.,
+            fill: None,
+            stroke: Some([1., 1., 1., 1.]),
+            width: 1.,
+            under: false,
+        });
+    }
+    for pose in poses {
+        for i in 0..4 {
+            line(pose.corners[i], pose.corners[(i + 1) % 4]);
+        }
+    }
+    (lines, marks)
+}
+impl Render for GizmoSurface {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.modifier_subscription.is_none() {
+            // A hovered viewer need not own keyboard focus. A window observer
+            // keeps Alt-release cursor updates independent of the focus path.
+            self.modifier_subscription = Some(cx.observe_window_modifiers(window, |s, window, cx| {
+                if s.bounds.contains(&window.mouse_position()) {
+                    s.on_modifiers(window.modifiers().alt, cx);
+                }
+            }));
+        }
+        let this = cx.entity().downgrade();
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        // Flying holds the keyboard so a released key stops its move.
+        self.studio_focus_fly(window, cx);
+        // Media held over the viewer: an accent ring where it will land.
+        let accent = rgb(self.tokens.colors.accent);
+        let ring = px(self.tokens.metrics.border * 2.);
+        div()
+            .id("viewer-gizmos")
+            .size_full()
+            .track_focus(&focus)
+            .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
+                if matches!(e.keystroke.key.as_str(), "backspace" | "delete") && s.effects_delete(cx) { cx.stop_propagation(); }
+                if e.keystroke.key=="escape" && s.effect_picker.is_some() {s.cancel(cx);cx.stop_propagation();}
+            }))
+            .on_key_up(cx.listener(|s, event: &KeyUpEvent, _, cx| {
+                s.studio_fly_key(&event.keystroke, false, cx);
+            }))
+            .on_modifiers_changed(cx.listener(|s, event: &ModifiersChangedEvent, _, _| {
+                s.studio_fly_modifiers(event.modifiers);
+            }))
+            .cursor(self.cursor)
+            .on_drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border(ring).border_color(accent)
+            })
+            .on_drop(cx.listener(|s, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                s.host
+                    .drop_files(paths.paths().to_vec(), window.modifiers().alt, cx);
+            }))
+            .on_drag_over::<crate::v4_view::PanelDrag>(move |style, drag, _, _| {
+                if drag.panel == pm_builtins::PROJECT_PANEL
+                    || drag.panel == crate::timeline_surface::EFFECTS_PANEL
+                {
+                    style.border(ring).border_color(accent)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, _, cx| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    cx.stop_propagation();
+                    s.host.drop_project_items(cx);
+                } else if drag.panel == crate::timeline_surface::EFFECTS_PANEL
+                    && let Some(definition) = &drag.item
+                {
+                    cx.stop_propagation();
+                    s.host.drop_effect(
+                        crate::timeline_surface::EffectDrop {
+                            panel: drag.panel.clone(),
+                            definition: definition.to_string(),
+                            label: drag.label.to_string(),
+                            layer: None,
+                            edge: None,
+                            across: None,
+                            at: None,
+                        },
+                        cx,
+                    );
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                    s.pointer_button = event.button;
+                    s.on_down(event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    s.pointer_button = event.button;
+                    if let Some(frame) = s.host.frame(s.bounds, cx) {
+                        let at = s.to_comp(event.position, frame);
+                        s.studio_down(event, at, frame, None, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                    s.on_context(event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_middle(event, cx)),
+            )
+            .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
+                s.on_wheel(event, window.line_height(), cx);
+            }))
+            .on_modifiers_changed(
+                cx.listener(|s, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    s.on_modifiers(event.modifiers.alt, cx);
+                }),
+            )
+            .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
+                let change = s.zoom_input.pinch(event);
+                if s.studio_pinch(event.delta as f64, cx) {
+                    return;
+                }
+                let Some(change) = change else {
+                    return;
+                };
+                s.zoom_view(change, cx);
+            }))
+            .child(
+                canvas(
+                    {
+                        let this = this.clone();
+                        move |bounds, _, cx| {
+                            let _ = this.update(cx, |s, _| s.bounds = bounds);
+                        }
+                    },
+                    move |_, _, window, cx| {
+                        let _ = this.update(cx, |s, cx| {
+                            if let Some(frame) = s.host.frame(s.bounds, cx) {
+                                s.effects_paint(frame, window, cx);
+                                s.pen_paint(frame, window);
+                                s.marquee_paint(frame, window);
+                                s.guides_paint(frame, window);
+                                s.text_paint(frame, window);
+                                s.rulers_paint(frame, window, cx);
+                            }
+                        });
+                        let pressed = this.clone();
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = pressed.update(cx, |s, cx| {
+                                if s.studio_flying() {
+                                    match e.button {
+                                        MouseButton::Left => {
+                                            s.studio_fly_end(true, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        MouseButton::Right => {
+                                            s.studio_fly_end(false, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
+                                    }
+                                    return;
+                                }
+                                if matches!(e.button, MouseButton::Left | MouseButton::Middle) {
+                                    s.cancelled_press = None;
+                                } else if e.button == MouseButton::Right && !s.studio_flying()
+                                    && (s.cancelled_press.is_some() || s.pointer_drag_held())
+                                {
+                                    s.cancelled_press = Some(s.pointer_button);
+                                    s.on_up(false, None, cx);
+                                    cx.stop_propagation();
+                                }
+                            });
+                        });
+                        let moved = this.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = moved.update(cx, |s, cx| {
+                                    if s.studio_flying() {
+                                        s.studio_fly_pointer(e.position, cx);
+                                        cx.stop_propagation();
+                                    } else if s.cancelled_press.is_some() && e.pressed_button.is_some() {
+                                        cx.stop_propagation();
+                                    } else {
+                                        s.on_move(e, cx);
+                                    }
+                                });
+                            }
+                        });
+                        let released = this.clone();
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = released.update(cx, |s, cx| {
+                                if e.button == MouseButton::Right && s.cancelled_press.is_some() {
+                                    cx.stop_propagation();
+                                } else if s.cancelled_press == Some(e.button) {
+                                    s.cancelled_press = None;
+                                    cx.stop_propagation();
+                                } else if s.cancelled_press.is_none() && s.pointer_button == e.button {
+                                    s.on_up(true, Some(window), cx);
+                                }
+                            });
+                        });
+                    },
+                )
+                .size_full(),
+            )
+            .children(self.effects_picker_element(cx))
+    }
+}
+
+/// A Studio 3D layer (model, light, camera) by its definition.
+/// An extruded layer as a 3D item: the engine maps composition pixels into
+/// the scene with `u = 6 / height` units per pixel, x centred, y up, z out
+/// of the screen (`studio/extrusion.rs`); its depth runs back from its z.
+fn extruded_item(
+    p: &pm_kernel::Published,
+    pose: &Pose,
+    time: f64,
+    width: f64,
+    height: f64,
+) -> Option<pm_panel_studio3d::viewport::Item> {
+    let mut mirror = QueryMirror::new(p);
+    let mut q = |k: &str, d: f64| {
+        mirror
+            .queries()
+            .evaluate(None, &pose.id, k, time)
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(d)
+    };
+    let position = [q("position.x", 0.), q("position.y", 0.), q("position.z", 0.)];
+    let rotation = [q("rotation.x", 0.), q("rotation.y", 0.), q("rotation", 0.)];
+    let scale = [q("scale.x", 100.), q("scale.y", 100.), q("scale.z", 100.)];
+    let depth = q("geo.depth", 0.).max(0.);
+    let u = 6. / height.max(1.);
+    let to_scene = |x: f64, y: f64, z: f64| [x * u - width * u / 2., 3. - y * u, -z * u];
+    let world3d = mirror.queries().world_3d(None, &pose.id, time, false).ok();
+    let [x0, y0, x1, y1] = pose.bounds;
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    let box_corners = world3d.map(|m| {
+        let mut corners = [[0.; 3]; 8];
+        for (n, slot) in corners.iter_mut().enumerate() {
+            let lx = if n & 1 == 0 { x0 } else { x1 };
+            let ly = if n & 2 == 0 { y0 } else { y1 };
+            let lz = if n & 4 == 0 { 0. } else { depth };
+            let wx = m[0] * lx + m[4] * ly + m[8] * lz + m[12];
+            let wy = m[1] * lx + m[5] * ly + m[9] * lz + m[13];
+            let wz = m[2] * lx + m[6] * ly + m[10] * lz + m[14];
+            let s = to_scene(wx, wy, wz);
+            *slot = s;
+            for a in 0..3 {
+                lo[a] = lo[a].min(s[a]);
+                hi[a] = hi[a].max(s[a]);
+            }
+        }
+        corners
+    });
+    if box_corners.is_none() {
+        for c in pose.corners {
+            for z in [position[2], position[2] + depth] {
+                let s = to_scene(c[0], c[1], z);
+                for a in 0..3 {
+                    lo[a] = lo[a].min(s[a]);
+                    hi[a] = hi[a].max(s[a]);
+                }
+            }
+        }
+    }
+    let name = p
+        .snapshot
+        .root()
+        .and_then(|root| {
+            let at = pm_kernel::model::find_layer(root, &pose.id)?;
+            let l = pm_kernel::model::layer_at(root, &at)?.to_value();
+            l.get("name").and_then(pm_model::Value::as_str).map(str::to_owned)
+        })
+        .unwrap_or_default();
+    const IDENTITY: [f64; 16] = [
+        1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
+    Some(pm_panel_studio3d::viewport::Item {
+        id: pose.id.clone(),
+        role: pm_scene3d::schema::Role::Object,
+        is_null: false,
+        is_plane: false,
+        name,
+        locked: pose.locked,
+        world: IDENTITY,
+        parent_world: IDENTITY,
+        bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
+        box_corners,
+        pivot: to_scene(position[0], position[1], position[2]),
+        target: None,
+        aim: None,
+        light: None,
+        shape: [0.; 3],
+        position,
+        rotation,
+        scale,
+        pixels: Some(u),
+    })
+}
+/// A text or shape layer the 3D renderer draws with depth.
+pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .map(|l| pm_scene3d::from_model(&l.to_value()).unwrap_or_default())
+            .is_some_and(|l| pm_scene3d::extrusion::enabled(&l))
+    })
+}
+pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        let Some(at) = pm_kernel::model::find_layer(root, id) else {
+            return false;
+        };
+        let Some(l) = pm_kernel::model::layer_at(root, &at) else {
+            return false;
+        };
+        if l.get("d")
+            .and_then(|d| d.get("definition"))
+            .and_then(|d| d.to_value().as_str().map(str::to_owned))
+            .is_some_and(|d| d.starts_with("powermove.3d."))
+        {
+            return true;
+        }
+        if l.get("type")
+            .and_then(|v| v.to_value().as_str().map(str::to_owned))
+            .as_deref()
+            == Some("null")
+            && l.get("threeD").and_then(|v| v.to_value().as_bool()) == Some(true)
+        {
+            return l
+                .get("d")
+                .and_then(|d| d.get("studio3d"))
+                .and_then(|v| v.to_value().as_bool())
+                == Some(true);
+        }
+        false
+    })
+}
+
+fn snapping_suspended(enabled: bool, command_held: bool) -> bool { !enabled || command_held }
+#[cfg(test)]
+mod snapping_toggle_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn toggle_and_temporary_suspend_compose() {
+        assert!(!snapping_suspended(true, false));
+        assert!(snapping_suspended(true, true));
+        assert!(snapping_suspended(false, false));
+        assert!(snapping_suspended(false, true));
+    }
+}
+/// Whether `at` lies in the band along the viewer's edges that the dividers
+/// beside it take (their grab reaches `splitter_reach` into each side).
+fn on_divider_reach(bounds: Bounds<Pixels>, at: Point<Pixels>, t: &pm_design::Tokens) -> bool {
+    let reach = px(t.metrics.splitter_reach + t.metrics.border);
+    let (left, top) = (bounds.origin.x, bounds.origin.y);
+    let (right, bottom) = (left + bounds.size.width, top + bounds.size.height);
+    bounds.contains(&at)
+        && (at.x < left + reach || at.x > right - reach || at.y < top + reach || at.y > bottom - reach)
+}
+#[cfg(test)]
+mod divider_reach_tests {
+    use gpui::{Bounds, point, px, size};
+    #[test]
+    fn a_press_along_the_viewers_edge_is_the_dividers() {
+        let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let b = Bounds::new(point(px(100.), px(50.)), size(px(600.), px(400.)));
+        let reach = t.metrics.splitter_reach + t.metrics.border;
+        assert!(super::on_divider_reach(b, point(px(100. + reach - 1.), px(200.)), &t));
+        assert!(super::on_divider_reach(b, point(px(400.), px(450. - reach + 1.)), &t));
+        assert!(!super::on_divider_reach(b, point(px(400.), px(250.)), &t));
+        assert!(!super::on_divider_reach(b, point(px(90.), px(250.)), &t));
+    }
+}
+
+#[cfg(test)]
+mod layer_drag_profile {
+    use super::{Drag, GizmoSurface, Hit, Host, Navigate, Tool, ViewFrame, read_at, snap};
+    use gpui::{App, AppContext, Bounds, Pixels, TestAppContext, Window};
+    use pm_engine_service::OverlayLine;
+    use pm_kernel::{
+        Call, Caller, Command, LayerCommand, PropertyCommand, Reply, Request, SelectionCall,
+        WriteBody,
+        commands::{layers::LayerPatch, properties::SetProperty},
+    };
+    use std::{cell::Cell, rc::Rc, sync::Arc, time::Instant};
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    struct Viewer {
+        time: Cell<f64>,
+        drawn: Cell<Option<Instant>>,
+        lines: Cell<usize>,
+    }
+    impl Viewer {
+        fn new(time: f64) -> Self {
+            Self {
+                time: Cell::new(time),
+                drawn: Cell::new(None),
+                lines: Cell::new(0),
+            }
+        }
+    }
+    impl Host for Viewer {
+        fn time(&self, _: &App) -> f64 {
+            self.time.get()
+        }
+        fn playing(&self, _: &App) -> bool {
+            false
+        }
+        fn frame(&self, bounds: Bounds<Pixels>, _: &App) -> Option<ViewFrame> {
+            Some(ViewFrame {
+                origin: bounds.origin,
+                size: [1920., 1080.],
+                scale: 1.,
+            })
+        }
+        fn tool(&self, _: &App) -> Tool {
+            Tool::Select
+        }
+        fn overlay(
+            &self,
+            lines: Vec<OverlayLine>,
+            _: Option<crate::gizmo_layer::Placement>,
+            _: &mut App,
+        ) {
+            self.lines.set(lines.len());
+            self.drawn.set(Some(Instant::now()));
+        }
+        fn navigate(&self, _: Navigate, _: &mut App) {}
+        fn layer_menu(&self, _: Option<String>, _: &mut Window, _: &mut App) {}
+        fn report(&self, message: String, _: &mut App) {
+            panic!("{message}")
+        }
+    }
+
+    #[gpui::test]
+    fn selection_overlays_clear_before_a_pose_read_can_finish(cx: &mut TestAppContext) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let select = |id: &str| SelectionCall::Layers { ids: vec![id.into()], add: false };
+        let call = |call: Call| {
+            let ack = kernel
+                .call(fixture::PROJECT, Request::new(Caller::native(), call))
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let time = 11.9;
+        let viewer = Rc::new(Viewer::new(time));
+        let surface = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                viewer.clone(),
+            )
+        });
+        for delete in [false, true] {
+            call(select("solid").into());
+            let p = kernel.published(fixture::PROJECT).unwrap();
+            let poses = read_at(&p, time).unwrap();
+            assert!(poses.iter().any(|pose| pose.id == "solid"));
+            if delete {
+                call(Call::Transact {
+                    label: Some("Delete selected layer".into()),
+                    body: WriteBody::Commands(vec![LayerCommand::Delete {
+                        layer_ids: vec!["solid".into()],
+                    }.into()]),
+                    expected_revision: None,
+                });
+                assert!(kernel.published(fixture::PROJECT).unwrap().selection.layers().is_empty());
+            } else {
+                call(select(fixture::TEXT).into());
+            }
+            surface.update(cx, |g, cx| {
+                g.poses = Arc::new(poses);
+                g.reread_out = true;
+                g.refresh(cx);
+            });
+            cx.run_until_parked();
+            surface.read_with(cx, |g, _| {
+                assert!(g.reread_out);
+                assert!(g.poses.is_empty());
+                assert_eq!(viewer.lines.get(), 0);
+            });
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn non_text_pick_and_outline_skip_the_font_mirror() {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let p = kernel.published(fixture::PROJECT).unwrap();
+        let time = 0.5;
+        let corners = super::outline(&p, "solid", time).unwrap();
+        let at = [
+            (corners[0][0] + corners[2][0]) / 2.,
+            (corners[0][1] + corners[2][1]) / 2.,
+        ];
+        let press = super::Press { at, time, shift: false, deep: true, inside: false };
+        let before = crate::text_host::query_count();
+        assert_eq!(super::pick_target(&p, press), Some(Some("solid".into())));
+        assert_eq!(super::outline(&p, "solid", time), Some(corners));
+        assert_eq!(super::outline(&p, "solid", 102.), None);
+        assert_eq!(crate::text_host::query_count(), before);
+    }
+
+    #[gpui::test]
+    fn profile_639_layer_gizmo_snap_and_rows(cx: &mut TestAppContext) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let gizmos = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                Rc::new(Viewer::new(fixture::TIME)),
+            )
+        });
+        let initial = kernel.published(fixture::PROJECT).unwrap();
+        // Start with the live outline already owned by the pointer, as it
+        // is after on_move crosses the drag threshold.
+        gizmos.update(cx, |gizmos, _| {
+            gizmos.drag = Some(Drag {
+                hit: Hit::Body,
+                origin: Default::default(),
+                active: true,
+                poses: Arc::new(Vec::new()),
+                time: fixture::TIME,
+                click: None,
+                snaps: None,
+                copies: None,
+            });
+        });
+        let mut pane_cache = crate::studio_panes::PaneScenes::default();
+        let mut rows = crate::rows::LayerRows::default();
+        let key = crate::rows::key(&initial.snapshot);
+        assert!(rows.accept(key, crate::rows::list(&initial.snapshot), Some(key)));
+        let kept = rows.rows.clone();
+        let baseline = std::env::var_os("PM_PROFILE_DRAG_BASELINE").is_some();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            assert!(!pane_cache.wants_scene(1));
+            let panes = start.elapsed();
+
+            let start = Instant::now();
+            gizmos.update(cx, |gizmos, cx| gizmos.refresh(cx));
+            cx.run_until_parked();
+            gizmos.read_with(cx, |gizmos, _| {
+                assert!(gizmos.draws_live_outline());
+                assert_eq!(gizmos.latest, 0, "a live outline needs no pose job");
+            });
+            let gizmo = start.elapsed();
+
+            let start = Instant::now();
+            rows.follow_transform_values(&p);
+            let key = crate::rows::key(&p.snapshot);
+            assert!(matches!(
+                rows.plan(key, || crate::rows::layer_count(&p.snapshot)),
+                crate::rows::Plan::Current
+            ));
+            assert!(Arc::ptr_eq(&kept, &rows.rows));
+            let rows_elapsed = start.elapsed();
+            let start = Instant::now();
+            std::hint::black_box(snap::points(&p, &[fixture::TEXT.into()], fixture::TIME));
+            let snapping = start.elapsed();
+            after.push([panes, gizmo, rows_elapsed, snapping].map(|d| d.as_secs_f64() * 1000.));
+
+            if baseline {
+                let start = Instant::now();
+                let _ = pm_panel_studio3d::viewport::scene(&p, 0.);
+                let panes = start.elapsed();
+                let start = Instant::now();
+                let _ = pm_panel_studio3d::viewport::scene_with_bounds(&p, fixture::TIME, |id| {
+                    crate::text_host::query(&p, |q| q.bounds(None, id, fixture::TIME))
+                        .ok()
+                        .flatten()
+                });
+                let scene = start.elapsed();
+                let start = Instant::now();
+                std::hint::black_box(read_at(&p, fixture::TIME));
+                let poses = start.elapsed();
+                let start = Instant::now();
+                std::hint::black_box(crate::rows::list(&p.snapshot));
+                std::hint::black_box(crate::rows::keyframe_count(&p.snapshot));
+                let rows = start.elapsed();
+                before.push([panes, scene, poses, rows].map(|d| d.as_secs_f64() * 1000.));
+            }
+        });
+        if baseline {
+            fixture::report(
+                [
+                    "old Studio panes",
+                    "old gizmo scene",
+                    "old gizmo poses",
+                    "old rows",
+                ],
+                &before,
+            );
+        }
+        fixture::report(
+            [
+                "single Studio pane",
+                "gizmo refresh",
+                "rows reuse",
+                "snap (once per drag)",
+            ],
+            &after,
+        );
+        fixture::assert_budget(&after, 0..4);
+    }
+    #[gpui::test]
+    fn profile_639_layer_selection_refresh(cx: &mut TestAppContext) {
+        const SHAPE: &str = "group1-5";
+        const GROUP: &str = "group1";
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let time = 11.9; // The fixture's second group and its shapes are still active.
+        let viewer = Rc::new(Viewer::new(time));
+        let gizmos = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                viewer.clone(),
+            )
+        });
+        let call = |call: Call| {
+            let ack = kernel
+                .call(fixture::PROJECT, Request::new(Caller::native(), call))
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let edit = |command: Command| {
+            call(Call::TransactWithSelection {
+                selection: SelectionCall::Batch(vec![]),
+                label: Some("Selection fixture".into()),
+                body: WriteBody::Commands(vec![command]),
+                expected_revision: None,
+            });
+        };
+        let select = |id: &str| {
+            let start = Instant::now();
+            call(
+                SelectionCall::Layers {
+                    ids: vec![id.into()],
+                    add: false,
+                }
+                .into(),
+            );
+            start.elapsed().as_secs_f64() * 1000.
+        };
+        // Make the headline active at the same frame as the second group.
+        edit(
+            LayerCommand::Set {
+                layer_id: fixture::TEXT.into(),
+                patch: LayerPatch {
+                    from: Some(11.),
+                    ..Default::default()
+                },
+            }
+            .into(),
+        );
+        let refresh = |cx: &mut TestAppContext, clear_cache: bool| {
+            viewer.drawn.set(None);
+            let start = Instant::now();
+            gizmos.update(cx, |g, cx| {
+                if clear_cache {
+                    g.studio_scene_cache = None;
+                }
+                g.refresh(cx);
+            });
+            cx.run_until_parked();
+            let finished = viewer.drawn.get().expect("selection overlay was submitted");
+            let scene = gizmos.read_with(cx, |g, _| {
+                assert!(g.refresh_complete());
+                g.studio
+                    .scene
+                    .clone()
+                    .expect("3D navigation remains available")
+            });
+            ((finished - start).as_secs_f64() * 1000., scene)
+        };
+
+        let (_, base) = refresh(cx, false);
+        assert!(
+            base.items
+                .iter()
+                .any(|item| item.id == SHAPE && item.is_plane)
+        );
+        let ids = ["solid", fixture::TEXT, SHAPE, GROUP];
+        let before = std::env::var_os("PM_PROFILE_SELECTION_BASELINE").is_some();
+        let mut uncached = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut cached = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut phases = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for _ in 0..(fixture::STEPS / ids.len()) {
+            for (i, id) in ids.into_iter().enumerate() {
+                let publication = select(id);
+                let (elapsed, scene) = refresh(cx, false);
+                assert!(Arc::ptr_eq(&base, &scene), "selection rebuilt the scene");
+                if matches!(id, "solid" | SHAPE) {
+                    assert!(viewer.lines.get() > 0, "{id} did not get an outline");
+                    gizmos.read_with(cx, |g, _| assert_eq!(g.poses[0].id, id));
+                }
+                cached[i].push([elapsed]);
+                if before {
+                    let p = kernel.published(fixture::PROJECT).unwrap();
+                    let start = Instant::now();
+                    std::hint::black_box(pm_kernel::model::list_layers(
+                        p.snapshot.root().unwrap(),
+                        None,
+                    ));
+                    let listing = start.elapsed();
+                    let start = Instant::now();
+                    std::hint::black_box(read_at(&p, time));
+                    let poses = start.elapsed();
+                    let controls = gizmos.update(cx, |g, cx| {
+                        let start = Instant::now();
+                        g.text_reread(cx);
+                        let text = start.elapsed();
+                        let start = Instant::now();
+                        g.pen_reread(cx);
+                        let pen = start.elapsed();
+                        let start = Instant::now();
+                        g.effects_reread(cx);
+                        [text, pen, start.elapsed()]
+                    });
+                    let [listing, poses, text, pen, effects] =
+                        [listing, poses, controls[0], controls[1], controls[2]]
+                            .map(|elapsed| elapsed.as_secs_f64() * 1000.);
+                    phases[i].push([publication, listing, poses, text, pen, effects]);
+                }
+            }
+        }
+        if before {
+            for _ in 0..(fixture::STEPS / ids.len()) {
+                for (i, id) in ids.into_iter().enumerate() {
+                    select(id);
+                    let (elapsed, _) = refresh(cx, true);
+                    uncached[i].push([elapsed]);
+                }
+            }
+        }
+        for (i, id) in ids.into_iter().enumerate() {
+            if before {
+                fixture::report([&format!("{id} uncached refresh to outline")], &uncached[i]);
+                eprintln!("{id} selection stages:");
+                fixture::report(
+                    [
+                        "kernel selection call",
+                        "list_layers",
+                        "read_at",
+                        "text",
+                        "pen",
+                        "effects",
+                    ],
+                    &phases[i],
+                );
+            }
+            fixture::report([&format!("{id} cached refresh to outline")], &cached[i]);
+            let mean = cached[i].iter().map(|[ms]| ms).sum::<f64>() / cached[i].len() as f64;
+            assert!(mean < 5., "selecting {id} averaged {mean:.3} ms");
+        }
+
+        let original = base
+            .items
+            .iter()
+            .find(|item| item.id == SHAPE)
+            .unwrap()
+            .pivot;
+        edit(PropertyCommand::Set(SetProperty::new(SHAPE, "position.x", 1030., time)).into());
+        let (_, moved) = refresh(cx, false);
+        assert!(moved.revision > base.revision);
+        let moved_item = moved.items.iter().find(|item| item.id == SHAPE).unwrap();
+        assert_eq!(moved_item.position[0], 1030.);
+        assert!(moved_item.pivot[0] > original[0]);
+
+        viewer.time.set(fixture::TIME);
+        let (_, later) = refresh(cx, false);
+        assert_eq!(moved.revision, later.revision);
+        assert_eq!(later.time, fixture::TIME);
+        assert!(!later.items.iter().any(|item| item.id == SHAPE));
+    }
+}

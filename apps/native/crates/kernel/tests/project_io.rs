@@ -1,0 +1,1008 @@
+//! Open/save round trips over real fixtures, and what a failed save leaves.
+
+mod common;
+
+use common::*;
+use pm_kernel::project_io::save::{SaveLayout, VerifyLevel, WriteFault};
+use pm_kernel::project_io::{
+    BackupPolicy, MediaEntry, MediaSource, OpenOptions, SaveOptions, SaveTarget, list_backups,
+    open_project,
+};
+use pm_kernel::{Command, DocumentStore, Origin, ProjectIoError};
+use pm_model::canonical::{canonical_project, project_of};
+use pm_model::container::{ContainerFormat, ReadOptions, read_container};
+use pm_model::json::{Value, parse, to_canonical_string};
+
+fn canonical_of_file(path: &std::path::Path) -> Value {
+    let file = std::fs::File::open(path).unwrap();
+    let c = read_container(&file, ReadOptions { verify_media: true }).unwrap();
+    canonical_project(project_of(&c.document).clone())
+}
+
+/// `project` as V2 opens a file written by the old app: a v1 video asset
+/// keeps the video reading v1 showed with `videoColor: "electron"`. Every
+/// video asset of a PMV3 or JSON file is a v1 one; in a PMV4 file, one with
+/// no `timing` and no Interpret Footage choice.
+fn as_opened(project: &Value, legacy_container: bool) -> Value {
+    let mut project = project.clone();
+    let assets = project
+        .as_object_mut()
+        .and_then(|p| p.get_mut("assets"))
+        .and_then(Value::as_object_mut);
+    for (_, asset) in assets.into_iter().flat_map(|a| a.iter_mut()) {
+        let Some(asset) = asset.as_object_mut() else {
+            continue;
+        };
+        let chosen = asset
+            .get("interpret")
+            .and_then(Value::as_object)
+            .is_some_and(|i| !i.is_empty());
+        if asset.get("kind").and_then(Value::as_str) == Some("video")
+            && asset.get("videoColor").is_none()
+            && (legacy_container || asset.get("timing").is_none() && !chosen)
+        {
+            asset.insert("videoColor", Value::from("electron"));
+        }
+    }
+    project
+}
+
+fn media_bytes(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let bytes = read(path);
+    let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true })
+        .unwrap();
+    c.media
+        .iter()
+        .map(|r| {
+            (
+                r.id.to_string_lossy(),
+                c.media_bytes(&bytes, r).unwrap().to_vec(),
+            )
+        })
+        .collect()
+}
+
+fn sorted(mut v: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    v.sort();
+    v
+}
+
+/// JSON, PMV3 and PMV4 files written by the old app's encoders: saving them
+/// keeps the project (unknown fields and lone surrogates included), every
+/// embedded media byte, and the envelope members we do not own.
+#[test]
+fn container_fixtures_round_trip_through_pmv4() {
+    for name in [
+        "pmv4.pmv",
+        "pmv4-no-media.pmv",
+        "pmv4-bare-project.pmv",
+        "pmv4-id-at-limit.pmv",
+        "pmv4-zero-length-overlap-ok.pmv",
+        "pmv3.pmv",
+        "pmv3-no-media.pmv",
+        "json-plain.pmv",
+    ] {
+        let dir = TempDir::new("roundtrip");
+        let source = engine_fixture(&format!("containers/{name}"));
+        let opened =
+            open_project(&source, OpenOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let format = opened.file.format;
+        let mut store = DocumentStore::open(opened);
+        let out = dir.path("out.pmv");
+        save_as(&mut store, &out).unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        // The production reader accepts the output with every checksum.
+        let file = std::fs::File::open(&out).unwrap();
+        let saved = read_container(&file, ReadOptions { verify_media: true }).unwrap();
+        assert_eq!(saved.format, ContainerFormat::Pmv4, "{name}");
+        // The project is the same, member for member, but for the v1 video
+        // reading kept on its v1 video assets.
+        assert_eq!(
+            to_canonical_string(&canonical_of_file(&out)),
+            to_canonical_string(&as_opened(
+                &canonical_of_file(&source),
+                format != ContainerFormat::Pmv4
+            )),
+            "{name}: project"
+        );
+        // Media bytes survive. Only media of assets the project (or its
+        // undo history) reaches is written, as in the old app.
+        let assets = canonical_of_file(&source);
+        let reachable = |id: &str| assets.get("assets").and_then(|a| a.get(id)).is_some();
+        let source_media: Vec<_> = media_bytes(&source)
+            .into_iter()
+            .filter(|(id, _)| reachable(id))
+            .collect();
+        if format != ContainerFormat::Json {
+            assert!(
+                !source_media.is_empty() || name.contains("no-media"),
+                "{name}"
+            );
+            assert_eq!(
+                sorted(media_bytes(&out)),
+                sorted(source_media.clone()),
+                "{name}: media"
+            );
+        }
+        // Envelope: the old app's members first, unknown ones kept.
+        let doc = &saved.document;
+        assert_eq!(
+            doc.get("v").and_then(Value::as_str),
+            Some("1.0.0"),
+            "{name}"
+        );
+        let source_doc = {
+            let f = std::fs::File::open(&source).unwrap();
+            read_container(
+                &f,
+                ReadOptions {
+                    verify_media: false,
+                },
+            )
+            .unwrap()
+            .document
+        };
+        if source_doc.get("proj").is_some() {
+            // `history: { entries: [], index: 0 }` is not replayable (no
+            // version), so it is written back exactly as read.
+            assert_eq!(
+                doc.get("history"),
+                source_doc.get("history"),
+                "{name}: history"
+            );
+        }
+        // A second open of our own file works, and saving it again in place
+        // appends nothing but a document.
+        let mut again = open_store(&out);
+        assert_eq!(again.layers(), store.layers(), "{name}");
+        again
+            .execute(
+                Command::SetLayerName {
+                    layer_id: "a".into(),
+                    name: "Renamed".into(),
+                },
+                Origin::Interface,
+            )
+            .unwrap();
+        save(&mut again, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+        let reread = open_store(&out);
+        assert_eq!(reread.layers()[0].name, "Renamed", "{name}");
+        if format != ContainerFormat::Json {
+            assert_eq!(
+                sorted(media_bytes(&out)),
+                sorted(source_media),
+                "{name}: media after append"
+            );
+        }
+        assert_eq!(dir.entries(), ["out.pmv"], "{name}: no temp files");
+    }
+}
+
+/// Legacy JSON with base64 media in the document: the media becomes a PMV4
+/// record (only for assets the project reaches) and the member is dropped.
+#[test]
+fn legacy_base64_media_becomes_a_record() {
+    let dir = TempDir::new("legacy");
+    let src = dir.path("old.pmv");
+    std::fs::write(
+        &src,
+        r#"{"v":1,"proj":{"id":"P","w":8,"h":8,"layers":[],"assets":{"img":{"id":"img"}}},"media":{"img":{"type":"image/png","data":"AQID"},"gone":{"type":"x","data":"AA=="}},"futureEnvelope":{"x":[1,2]}}"#,
+    )
+    .unwrap();
+    let mut store = open_store(&src);
+    assert_eq!(store.media().len(), 1);
+    let out = dir.path("new.pmv");
+    save_as(&mut store, &out).unwrap();
+    assert_eq!(media_bytes(&out), [("img".to_owned(), vec![1, 2, 3])]);
+    let file = std::fs::File::open(&out).unwrap();
+    let doc = read_container(&file, ReadOptions::default())
+        .unwrap()
+        .document;
+    assert!(doc.get("media").is_none());
+    assert_eq!(
+        to_canonical_string(doc.get("futureEnvelope").unwrap()),
+        r#"{"x":[1,2]}"#
+    );
+}
+
+/// Every corpus project preserves its authored source across automatic upgrade
+/// and saves/reopens the exact published native document.
+#[test]
+fn corpus_projects_round_trip() {
+    let dir = TempDir::new("corpus");
+    let mut count = 0;
+    for entry in std::fs::read_dir(engine_fixture("corpus")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let stored = parse(&text).unwrap();
+        let original = canonical_project(project_of(&stored).clone());
+        let mut store = DocumentStore::new_untitled(project_of(&stored).clone());
+        let upgraded = store.snapshot().root().unwrap().to_value();
+        fn source_projection(value: Value) -> Value {
+            match value {
+                Value::Object(mut m) => {
+                    if let Some(source) = m.get("native3dArchive").and_then(|a| a.get("source")) {
+                        return source.clone();
+                    }
+                    m.remove("native3dUpgrade");
+                    let mut out = pm_model::Map::new();
+                    for (k, v) in m.iter() {
+                        out.insert(k.clone(), source_projection(v.clone()));
+                    }
+                    Value::Object(out)
+                }
+                Value::Array(a) => Value::Array(
+                    a.into_iter()
+                        .filter(|v| v.get("native3dSourceLayer").is_none())
+                        .map(source_projection)
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
+        assert_eq!(
+            source_projection(upgraded.clone()),
+            original,
+            "original source must remain intact: {}",
+            path.display()
+        );
+        assert_upgrade_archive(&original, &upgraded);
+        let expected = to_canonical_string(&upgraded);
+        let out = dir.path(&format!("{count}.pmv"));
+        save_as(&mut store, &out).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(
+            to_canonical_string(&canonical_of_file(&out)),
+            expected,
+            "{}",
+            path.display()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        count += 1;
+    }
+    assert!(count >= 30, "{count}");
+}
+
+// Independent losslessness checks: all outer fields and original layer order
+// stay exact. Replaced data must remain verbatim in its same-ID source archive.
+fn assert_upgrade_archive(before: &Value, after: &Value) {
+    let old = before.as_object().unwrap();
+    let new = after.as_object().unwrap();
+    for (key, value) in old.iter() {
+        if key == "comps" {
+            let old_comps = value.as_object().unwrap();
+            let new_comps = new.get_key(key).unwrap().as_object().unwrap();
+            assert_eq!(old_comps.len(), new_comps.len());
+            for (id, comp) in old_comps.iter() {
+                assert_upgrade_archive(comp, new_comps.get_key(id).unwrap());
+            }
+        } else if key == "layers" {
+            let old_layers = value.as_array().unwrap();
+            let new_layers = new.get_key(key).unwrap().as_array().unwrap();
+            let old_ids = old_layers
+                .iter()
+                .map(|l| l.get("id").unwrap())
+                .collect::<Vec<_>>();
+            let retained_order = new_layers
+                .iter()
+                .map(|l| l.get("id").unwrap())
+                .filter(|id| old_ids.contains(id))
+                .collect::<Vec<_>>();
+            assert_eq!(retained_order, old_ids);
+            for layer in old_layers {
+                let next = new_layers
+                    .iter()
+                    .find(|n| n.get("id") == layer.get("id"))
+                    .unwrap();
+                if next != layer {
+                    if let Some(archive) = next.get("native3dArchive") {
+                        assert_eq!(archive.get("source"), Some(layer));
+                        for (field, authored) in layer.as_object().unwrap().iter() {
+                            if !matches!(field.as_str(), Some("d" | "type" | "threeD")) {
+                                assert_eq!(
+                                    next.as_object().unwrap().get_key(field),
+                                    Some(authored)
+                                );
+                            }
+                        }
+                    } else {
+                        let mut unchanged = next.clone();
+                        let issue = unchanged
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("native3dUpgradeIssue")
+                            .unwrap();
+                        assert!(!issue.as_str().unwrap().is_empty());
+                        assert_eq!(&unchanged, layer);
+                    }
+                }
+            }
+        } else {
+            assert_eq!(new.get_key(key), Some(value));
+        }
+    }
+    for (key, _) in new.iter() {
+        assert!(old.get_key(key).is_some() || key == "native3dUpgrade");
+    }
+}
+
+fn edited_copy(dir: &TempDir) -> (std::path::PathBuf, DocumentStore) {
+    let path = dir.path("project.pmv");
+    std::fs::copy(ts_fixture("fresh.pmv"), &path).unwrap();
+    let mut store = open_store(&path);
+    store
+        .execute(
+            Command::SetStaticOpacity {
+                layer_id: "a".into(),
+                value: 25.0,
+            },
+            Origin::Interface,
+        )
+        .unwrap();
+    (path, store)
+}
+
+#[test]
+fn disk_full_leaves_the_previous_file_valid() {
+    for limit in [0, 3, 200, 1500] {
+        let dir = TempDir::new("diskfull");
+        let (path, mut store) = edited_copy(&dir);
+        let before = read(&path);
+        let options = SaveOptions {
+            fault: Some(WriteFault::DiskFullAfter(limit)),
+            ..SaveOptions::default()
+        };
+        let err = run_save(&mut store, SaveTarget::InPlace, options).unwrap_err();
+        assert!(err.to_string().contains("No space left"), "{err}");
+        assert_eq!(read(&path), before, "byte-identical after a failed save");
+        assert_eq!(dir.entries(), ["project.pmv"], "temp file removed");
+        assert!(store.is_dirty());
+        // And the next save works.
+        save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+        assert!(!store.is_dirty());
+        assert_eq!(opacity_of(&open_store(&path), "a"), Some(25.0));
+    }
+}
+
+#[test]
+fn a_failure_before_publishing_changes_nothing() {
+    let dir = TempDir::new("fail");
+    let (path, mut store) = edited_copy(&dir);
+    let before = read(&path);
+    let options = SaveOptions {
+        fault: Some(WriteFault::FailBeforePublish),
+        ..SaveOptions::default()
+    };
+    assert!(run_save(&mut store, SaveTarget::InPlace, options).is_err());
+    assert_eq!(read(&path), before);
+    assert_eq!(dir.entries(), ["project.pmv"]);
+    assert!(store.is_dirty());
+}
+
+#[test]
+fn a_file_changed_on_disk_is_never_overwritten() {
+    let dir = TempDir::new("conflict");
+    let (path, mut store) = edited_copy(&dir);
+    // Another app rewrites the file after we opened it.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut other = read(&path);
+    other[10] ^= 1;
+    std::fs::write(&path, &other).unwrap();
+    let err = run_save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap_err();
+    assert!(matches!(err, ProjectIoError::ChangedOnDisk), "{err}");
+    assert_eq!(read(&path), other);
+    assert_eq!(dir.entries(), ["project.pmv"]);
+    // Replaced by another file at the same path (new inode, same bytes).
+    let dir2 = TempDir::new("conflict2");
+    let (path2, mut store2) = edited_copy(&dir2);
+    let bytes = read(&path2);
+    std::fs::remove_file(&path2).unwrap();
+    std::fs::write(&path2, &bytes).unwrap();
+    assert!(matches!(
+        run_save(&mut store2, SaveTarget::InPlace, SaveOptions::default()),
+        Err(ProjectIoError::ChangedOnDisk)
+    ));
+}
+
+/// A v1 project whose export frame rate nobody chose (30, from when it was
+/// created; its composition is 24 fps): the Export sheet opens it on 24 by
+/// reading alone, so a project nobody exports from at another rate saves
+/// byte-identical, its stored defaults as they were.
+#[test]
+fn an_unchosen_export_rate_saves_byte_identical() {
+    let dir = TempDir::new("export-rate");
+    let project = parse(
+        r##"{"id":"P","name":"Old","compId":"C","w":640,"h":360,"fps":24,"dur":5,"bg":"#000000","assets":{},"comps":{},
+            "exportDefaults":{"format":"mp4","scale":1,"fps":30,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false},
+            "layers":[]}"##,
+    )
+    .unwrap();
+    let first = dir.path("first.pmv");
+    save_as(&mut DocumentStore::new_untitled(project), &first).unwrap();
+    let mut reopened = open_store(&first);
+    let second = dir.path("second.pmv");
+    save_as(&mut reopened, &second).unwrap();
+    assert_eq!(read(&first), read(&second));
+    let doc = read_container(
+        &std::fs::File::open(&second).unwrap(),
+        ReadOptions::default(),
+    )
+    .unwrap()
+    .document;
+    let defaults = to_canonical_string(project_of(&doc).get("exportDefaults").unwrap());
+    assert!(
+        defaults.contains("\"fps\":30") && !defaults.contains("fpsChosen"),
+        "{defaults}"
+    );
+}
+
+#[test]
+fn touched_but_identical_files_are_still_saved() {
+    let dir = TempDir::new("touch");
+    let (path, mut store) = edited_copy(&dir);
+    // Same inode, same bytes, new timestamps: proven identical by re-hash.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let bytes = read(&path);
+    std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+    assert_eq!(opacity_of(&open_store(&path), "a"), Some(25.0));
+}
+
+#[test]
+fn save_as_never_overwrites_without_consent() {
+    let dir = TempDir::new("exists");
+    let (_, mut store) = edited_copy(&dir);
+    let other = dir.path("other.pmv");
+    std::fs::write(&other, b"precious").unwrap();
+    let err = run_save(
+        &mut store,
+        SaveTarget::SaveAs {
+            path: other.clone(),
+            replace: false,
+        },
+        SaveOptions::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ProjectIoError::DestinationExists(_)), "{err}");
+    assert_eq!(read(&other), b"precious");
+    save(
+        &mut store,
+        SaveTarget::SaveAs {
+            path: other.clone(),
+            replace: true,
+        },
+        SaveOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(opacity_of(&open_store(&other), "a"), Some(25.0));
+}
+
+#[test]
+fn a_vanished_media_source_fails_the_save_cleanly() {
+    let dir = TempDir::new("vanished");
+    let media = dir.path("clip.bin");
+    std::fs::write(&media, [7u8; 100]).unwrap();
+    let mut store = DocumentStore::new_untitled(
+        parse(r#"{"id":"P","w":8,"h":8,"layers":[],"assets":{"m":{"id":"m"}}}"#).unwrap(),
+    );
+    store.media_mut().insert(MediaEntry {
+        id: "m".into(),
+        media_type: "application/octet-stream".into(),
+        revision: MediaEntry::fresh_revision(),
+        source: MediaSource::File {
+            path: media.clone(),
+            length: 100,
+            sha256: None,
+        },
+    });
+    std::fs::remove_file(&media).unwrap();
+    let out = dir.path("out.pmv");
+    assert!(save_as(&mut store, &out).is_err());
+    assert!(!out.exists());
+    assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+    // A source whose checksum no longer matches fails too.
+    std::fs::write(&media, [8u8; 100]).unwrap();
+    store.media_mut().insert(MediaEntry {
+        id: "m".into(),
+        media_type: "x".into(),
+        revision: "r".into(),
+        source: MediaSource::File {
+            path: media.clone(),
+            length: 100,
+            sha256: Some("0".repeat(64)),
+        },
+    });
+    assert!(save_as(&mut store, &out).is_err());
+    assert!(!out.exists());
+}
+
+#[test]
+fn undoing_track_lock_then_track_visibility_returns_to_saved_content() {
+    use pm_kernel::commands::layers::{LayerCommand, LayerPatch};
+
+    let dir = TempDir::new("track-switch-undo");
+    let path = dir.path("Track.pmv");
+    let root = parse(
+        r#"{
+        "id":"P", "compId":"C", "w":200, "h":100, "fps":30, "dur":4,
+        "layers":[{"id":"clip","type":"shape","from":0,"dur":4,"lock":false,"on":true,"p":{}}]
+    }"#,
+    )
+    .unwrap();
+    let mut store = DocumentStore::new_untitled(root);
+    save_as(&mut store, &path).unwrap();
+    let saved = store.root().unwrap().to_value();
+    assert!(!store.is_dirty());
+
+    for (label, patch) in [
+        (
+            "Lock Track",
+            LayerPatch {
+                locked: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "Hide Track",
+            LayerPatch {
+                visible: Some(false),
+                ..Default::default()
+            },
+        ),
+    ] {
+        store
+            .transact(
+                label,
+                Origin::Interface,
+                &[LayerCommand::Set {
+                    layer_id: "clip".into(),
+                    patch,
+                }
+                .into()],
+            )
+            .unwrap()
+            .unwrap();
+        assert!(store.is_dirty(), "{label} should be marked Edited");
+        store.undo().unwrap();
+        assert_eq!(store.root().unwrap().to_value(), saved);
+        assert!(!store.is_dirty(), "undoing {label} should be marked Saved");
+        assert_eq!(
+            store.history().labels(),
+            [label],
+            "only the latest redo remains"
+        );
+    }
+}
+
+#[test]
+fn edits_during_a_save_stay_dirty() {
+    let dir = TempDir::new("during");
+    let (path, mut store) = edited_copy(&dir);
+    let plan = store
+        .prepare_save(SaveTarget::InPlace, SaveOptions::default())
+        .unwrap();
+    assert!(store.is_saving());
+    assert!(matches!(
+        store.prepare_save(SaveTarget::InPlace, SaveOptions::default()),
+        Err(ProjectIoError::SaveInProgress)
+    ));
+    let worker = std::thread::spawn(move || plan.run());
+    // The user keeps editing while the worker writes revision R.
+    store
+        .execute(
+            Command::SetStaticOpacity {
+                layer_id: "a".into(),
+                value: 60.0,
+            },
+            Origin::Interface,
+        )
+        .unwrap();
+    let receipt = worker.join().unwrap().unwrap();
+    store.finish_save(receipt).unwrap();
+    assert!(!store.is_saving());
+    assert!(store.is_dirty(), "the later edit is not on disk");
+    assert_eq!(opacity_of(&open_store(&path), "a"), Some(25.0));
+    // Undoing the later edit returns to exactly the saved state.
+    store.undo().unwrap();
+    assert!(!store.is_dirty());
+    store.redo().unwrap();
+    assert!(store.is_dirty());
+    save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+    assert!(!store.is_dirty());
+    assert_eq!(opacity_of(&open_store(&path), "a"), Some(60.0));
+}
+
+#[test]
+fn compaction_keeps_reused_media_first_and_intact() {
+    let dir = TempDir::new("compact");
+    let path = dir.path("project.pmv");
+    std::fs::copy(ts_fixture("append.pmv"), &path).unwrap();
+    let mut store = open_store(&path);
+    store
+        .execute(
+            Command::SetLayerVisible {
+                layer_id: "b".into(),
+                visible: false,
+            },
+            Origin::Interface,
+        )
+        .unwrap();
+    let options = SaveOptions {
+        compact_min_dead_bytes: Some(0),
+        verify: VerifyLevel::Full,
+        ..SaveOptions::default()
+    };
+    let receipt = run_save(&mut store, SaveTarget::InPlace, options).unwrap();
+    assert_eq!(receipt.layout, SaveLayout::Compacted);
+    assert_eq!(receipt.reused_media_bytes, 3011);
+    store.finish_save(receipt).unwrap();
+    let bytes = read(&path);
+    let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true })
+        .unwrap();
+    // Reused records come straight after the magic, then the document.
+    assert_eq!(c.media[0].offset, 5);
+    assert_eq!(c.media[1].offset, 16);
+    assert!(bytes.len() < read(&ts_fixture("append.pmv")).len());
+    assert_eq!(
+        c.media_bytes(&bytes, &c.media[0]).unwrap(),
+        read(&ts_fixture("media-img.bin"))
+    );
+    assert_eq!(
+        c.media_bytes(&bytes, &c.media[1]).unwrap(),
+        read(&ts_fixture("media-clip.bin"))
+    );
+    assert!(!open_store(&path).layers()[1].visible);
+}
+
+#[test]
+fn backups_keep_the_replaced_version() {
+    let dir = TempDir::new("backup");
+    let (path, mut store) = edited_copy(&dir);
+    let original = read(&path);
+    let policy = BackupPolicy::new(dir.path("Backups"));
+    // A version a save moved into the backups is removed when pruned,
+    // unchanged; nothing reaches the Trash.
+    let hooks = pm_kernel::project_io::PublishHooks {
+        trash: Some(common::trash(&dir.path("Trash"))),
+        ..Default::default()
+    };
+    let options = SaveOptions {
+        backups: Some(policy.clone()),
+        hooks: hooks.clone(),
+        ..SaveOptions::default()
+    };
+    let receipt = run_save(&mut store, SaveTarget::InPlace, options.clone()).unwrap();
+    let backup = receipt.backup.clone().unwrap();
+    store.finish_save(receipt).unwrap();
+    assert_eq!(read(&backup), original);
+    for value in [1.0, 2.0, 3.0] {
+        store
+            .execute(
+                Command::SetStaticOpacity {
+                    layer_id: "a".into(),
+                    value,
+                },
+                Origin::Interface,
+            )
+            .unwrap();
+        save(&mut store, SaveTarget::InPlace, options.clone()).unwrap();
+    }
+    let small = BackupPolicy {
+        max_versions: 2,
+        ..policy.clone()
+    };
+    store
+        .execute(
+            Command::SetStaticOpacity {
+                layer_id: "a".into(),
+                value: 4.0,
+            },
+            Origin::Interface,
+        )
+        .unwrap();
+    save(
+        &mut store,
+        SaveTarget::InPlace,
+        SaveOptions {
+            backups: Some(small),
+            hooks,
+            ..SaveOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(list_backups(&policy).unwrap().len(), 2);
+    assert_eq!(common::trashed(&dir.path("Trash")), Vec::<Vec<u8>>::new());
+}
+
+/// A structural edit (layer order) is saved in the old leaf-patch history
+/// format and can be undone after reopening.
+#[test]
+fn structural_history_survives_save_and_reopen() {
+    let dir = TempDir::new("structural");
+    let path = dir.path("project.pmv");
+    std::fs::copy(ts_fixture("fresh.pmv"), &path).unwrap();
+    let mut store = open_store(&path);
+    let mut project = store.snapshot().document.to_value().unwrap();
+    let layers = project
+        .get_mut_path(&["comps", "C1", "layers"])
+        .and_then(Value::as_array_mut)
+        .unwrap();
+    layers.reverse();
+    store
+        .restore_project(project, "Reorder Layers", Origin::Interface)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .layers()
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+    let mut reopened = open_store(&path);
+    assert_eq!(
+        reopened.history().labels(),
+        ["Change Opacity", "Reorder Layers"]
+    );
+    reopened.undo().unwrap();
+    assert_eq!(
+        reopened
+            .layers()
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    reopened.redo().unwrap();
+    assert_eq!(
+        reopened
+            .layers()
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+}
+
+trait PathMut {
+    fn get_mut_path(&mut self, path: &[&str]) -> Option<&mut Value>;
+}
+
+impl PathMut for Value {
+    fn get_mut_path(&mut self, path: &[&str]) -> Option<&mut Value> {
+        let mut v = self;
+        for k in path {
+            v = v.as_object_mut()?.get_mut(k)?;
+        }
+        Some(v)
+    }
+}
+
+#[test]
+fn saving_app_effect_provenance_survives_edit_undo_and_native_save_reopen() {
+    for version in ["1.2.0", "1.3.0"] {
+        let dir = TempDir::new("effect-provenance");
+        let path = dir.path("input.pmv");
+        let mut envelope = read_container(
+            &std::fs::File::open(ts_fixture("fresh.pmv")).unwrap(),
+            ReadOptions::default(),
+        )
+        .unwrap()
+        .document;
+        envelope
+            .as_object_mut()
+            .unwrap()
+            .insert("v", Value::from(version));
+        std::fs::write(&path, to_canonical_string(&envelope)).unwrap();
+        let mut store = open_store(&path);
+        let before = store.snapshot().document.to_value();
+        assert_eq!(
+            store.snapshot().document.saving_app_version(),
+            Some(version)
+        );
+        store
+            .execute(
+                Command::SetStaticOpacity {
+                    layer_id: "a".into(),
+                    value: 25.,
+                },
+                Origin::Interface,
+            )
+            .unwrap();
+        assert_eq!(
+            store.snapshot().document.saving_app_version(),
+            Some(version)
+        );
+        store.undo().unwrap();
+        assert_eq!(store.snapshot().document.to_value(), before);
+        assert_eq!(
+            store.snapshot().document.saving_app_version(),
+            Some(version)
+        );
+        let output = dir.path("saved.pmv");
+        save_as(&mut store, &output).unwrap();
+        let reopened = open_store(&output);
+        assert_eq!(reopened.snapshot().document.to_value(), before);
+        assert_eq!(
+            pm_fx_defs::catalog::saving_generation(
+                reopened.snapshot().document.saving_app_version()
+            ),
+            pm_fx_defs::catalog::saving_generation(Some(version))
+        );
+    }
+}
+
+/// `Object.keys(document.proj.assets)` as the shipped reader sees the file.
+fn file_asset_keys(path: &std::path::Path) -> Vec<String> {
+    let file = std::fs::File::open(path).unwrap();
+    read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .asset_order
+    .unwrap()
+    .iter()
+    .map(|id| id.as_str().unwrap().to_owned())
+    .collect()
+}
+
+#[test]
+fn authored_media_order_survives_open_edit_undo_save_and_reopen() {
+    let dir = TempDir::new("asset-order");
+    let source = dir.path("authored.pmv");
+    let text = r##"{"v":"1.0.0","proj":{"id":"p","name":"Order","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","layers":[],"comps":{},"assets":{"zebra":{"name":"Zebra","kind":"image"},"apple":{"name":"Apple","kind":"image"},"mango":{"name":"Mango","kind":"image"}}},"history":null,"ws":null}"##;
+    std::fs::write(&source, text).unwrap();
+    let ids = |store: &DocumentStore| -> Vec<String> {
+        pm_kernel::asset_order::node_keys(store.root().unwrap())
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut store = open_store(&source);
+    assert_eq!(ids(&store), ["zebra", "apple", "mango"]);
+    assert!(!store.is_dirty(), "reading the order is not an edit");
+
+    let asset = parse(r#"{"name":"Banana","kind":"image"}"#).unwrap();
+    let add = |id: &str| -> Command {
+        pm_kernel::MediaCommand::AddAsset {
+            asset_id: id.into(),
+            asset: asset.clone(),
+        }
+        .into()
+    };
+    store.execute(add("banana"), Origin::Interface).unwrap();
+    assert_eq!(ids(&store), ["zebra", "apple", "mango", "banana"]);
+    store.undo().unwrap();
+    assert_eq!(ids(&store), ["zebra", "apple", "mango"]);
+    store.redo().unwrap();
+    store
+        .execute(
+            pm_kernel::MediaCommand::RemoveAsset {
+                asset_id: "apple".into(),
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+    assert_eq!(ids(&store), ["zebra", "mango", "banana"]);
+    store.undo().unwrap();
+    assert_eq!(
+        ids(&store),
+        ["zebra", "apple", "mango", "banana"],
+        "Undo keeps its place"
+    );
+
+    let saved = dir.path("saved.pmv");
+    save_as(&mut store, &saved).unwrap();
+    assert_eq!(
+        file_asset_keys(&saved),
+        ["zebra", "apple", "mango", "banana"]
+    );
+    let member = pm_kernel::asset_order::FIELD;
+    let file = std::fs::File::open(&saved).unwrap();
+    let container = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        project_of(&container.document).get(member).is_none(),
+        "files stay readable by the shipped app"
+    );
+
+    // A second generation keeps the order, and sorted projects gain no member.
+    let mut reopened = open_store(&saved);
+    assert_eq!(ids(&reopened), ["zebra", "apple", "mango", "banana"]);
+    let again = dir.path("again.pmv");
+    save_as(&mut reopened, &again).unwrap();
+    assert_eq!(
+        file_asset_keys(&again),
+        ["zebra", "apple", "mango", "banana"]
+    );
+    let sorted = dir.path("sorted.pmv");
+    std::fs::write(
+        &sorted,
+        text.replace("\"zebra\"", "\"a\"")
+            .replace("\"apple\"", "\"b\"")
+            .replace("\"mango\"", "\"c\""),
+    )
+    .unwrap();
+    assert!(open_store(&sorted).root().unwrap().get(member).is_none());
+}
+
+#[test]
+fn obsolete_3d_archive_is_not_materialized_and_save_keeps_scene() {
+    let dir = TempDir::new("retired-3d-history");
+    let input = dir.path("legacy.json");
+    let project = r#"{"id":"P","name":"Scene","w":640,"h":360,"fps":30,"dur":10,"layers":[],"assets":{},"custom":{"native3dHistoryArchive":"authored"}}"#;
+    // 128 MiB of obsolete recovery data. Deliberately opaque syntax inside
+    // the balanced archive proves ingress does not parse its entries.
+    let archive = "x".repeat(128 * 1024 * 1024);
+    std::fs::write(
+        &input,
+        format!("{{\"proj\":{project},\"native\":true,\"history\":null}}"),
+    )
+    .unwrap();
+    let ordinary = DocumentStore::open(open_project(&input, Default::default()).unwrap());
+    let expected = ordinary.snapshot().document.to_value();
+    std::fs::write(
+        &input,
+        format!(
+            "{{\"proj\":{{\"native3dHistoryArchive\":[{archive}],{} }}}}",
+            &project[1..project.len() - 1]
+        ),
+    )
+    .unwrap();
+    drop(archive);
+    let start = std::time::Instant::now();
+    let mut store = DocumentStore::open(open_project(&input, Default::default()).unwrap());
+    assert!(
+        start.elapsed().as_secs_f64() < 10.,
+        "large archive open exceeded 10 seconds"
+    );
+    assert_eq!(store.snapshot().document.to_value(), expected);
+    let output = dir.path("compact.pmv");
+    save_as(&mut store, &output).unwrap();
+    assert!(std::fs::metadata(&output).unwrap().len() < 64 * 1024);
+    let reopened = DocumentStore::open(open_project(&output, Default::default()).unwrap());
+    assert_eq!(reopened.snapshot().document.to_value(), expected);
+}
+
+#[test]
+fn project_workspace_round_trips_independently_without_document_edits() {
+    let dir = TempDir::new("workspace-roundtrip");
+    let source = engine_fixture("containers/pmv4-no-media.pmv");
+    let mut snapshots = Vec::new();
+    let workspace_for = |id: &str, width: i32| parse(&format!(r#"{{"id":"{id}","custom":[{{"id":"late.panel","title":"Marker note"}}],"layout":{{"docks":[{{"id":"right","size":{width},"panels":[{{"id":"inspector","flex":true}},{{"id":"late.panel","size":220}},{{"id":"notes","tabbed":true,"active":true}}]}}]}}}}"#)).unwrap();
+    for (id, width) in [("first", 280), ("second", 430)] {
+        let opened = open_project(&source, OpenOptions::default()).unwrap();
+        let mut store = DocumentStore::open(opened);
+        let workspace = workspace_for(id, width);
+        assert!(!store.is_dirty());
+        store.set_workspace(Some(workspace.clone()));
+        assert!(!store.is_dirty(), "workspace changes follow Electron's dirty rule");
+        let path = dir.path(&format!("{id}.pmv"));
+        save_as(&mut store, &path).unwrap();
+        let reopened = open_project(&path, OpenOptions::default()).unwrap();
+        assert_eq!(reopened.file.envelope.workspace, Some(workspace.clone()));
+        let changed = workspace_for(id, width + 17);
+        store.set_workspace(Some(changed.clone()));
+        assert!(!store.is_dirty(), "layout-only changes keep a saved document clean");
+        save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+        let reopened = open_project(&path, OpenOptions::default()).unwrap();
+        assert_eq!(reopened.file.envelope.workspace, Some(changed.clone()),
+            "ordinary Save must persist layout-only changes too");
+        snapshots.push(changed);
+    }
+    assert_ne!(snapshots[0], snapshots[1]);
+}

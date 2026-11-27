@@ -1,0 +1,10 @@
+{
+  "id": "toolbar",
+  "name": "Toolbar",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Provides the editor's tool and layer-creation toolbar.",
+  "entry": "index.ts",
+  "contributes": ["panels"],
+  "author": "powermove"
+}

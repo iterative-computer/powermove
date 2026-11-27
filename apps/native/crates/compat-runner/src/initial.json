@@ -1,0 +1,60 @@
+{
+  "revision": 0,
+  "document": {
+    "id": "synthetic",
+    "colorDepth": 16,
+    "name": "Synthetic extension check",
+    "w": 320,
+    "h": 180,
+    "fps": 30,
+    "dur": 2,
+    "bg": "#000000",
+    "backgroundFill": {
+      "type": "solid",
+      "angle": 0,
+      "stops": [
+        {
+          "id": "stop-1",
+          "color": "#000000",
+          "position": 0
+        }
+      ]
+    },
+    "compId": "synthetic-comp",
+    "compName": "Synthetic extension check",
+    "layers": [],
+    "comps": {},
+    "assets": {},
+    "markers": [],
+    "work": [
+      0,
+      2
+    ],
+    "exportDefaults": {
+      "format": "mp4",
+      "scale": 1,
+      "fps": 30,
+      "range": "work",
+      "quality": "high",
+      "mblur": true,
+      "audio": true,
+      "alpha": false
+    },
+    "params": {},
+    "revision": 0,
+    "edits": [],
+    "created": 0
+  },
+  "selection": {
+    "layers": [],
+    "keys": [],
+    "chan": null
+  },
+  "workspace": {},
+  "facts": {
+    "historyBusy": false,
+    "canUndo": false,
+    "canRedo": false,
+    "editLive": false
+  }
+}

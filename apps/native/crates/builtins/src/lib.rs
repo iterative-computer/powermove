@@ -1,0 +1,4127 @@
+//! Application v4 embedding. JavaScript owns presentation; the kernel remains
+//! the only document writer. GPUI consumes immutable accepted surfaces.
+#![cfg_attr(test, recursion_limit = "512")]
+mod agent_context;
+pub mod agent_completion;
+mod agent_host;
+mod presets;
+pub use agent_host::NoticeSink;
+mod agent_tasks;
+mod chrome;
+pub use agent_host::AgentCarry;
+pub use models::APPLICATION_AGENT_STORE;
+pub use pm_panel_inspector::EffectClipboard;
+pub use properties::STARTING_EXPRESSION;
+pub use settings::{RESOLUTIONS, set_notification_status};
+
+/// Panel state is locked both on the V8 owner thread (every panel and
+/// extension realm runs there) and on host threads. A panic on one thread
+/// while it held a lock must not cascade into every later locker and take the
+/// owner thread down: the poison is cleared and the value used. Held state is
+/// maps, queues and panel backends whose views are rebuilt from the kernel on
+/// their next tick; the panic itself was reported where it happened.
+pub(crate) trait LockShared<T: ?Sized> {
+    fn shared(&self) -> std::sync::MutexGuard<'_, T>;
+    /// [`Self::shared`] without waiting: None while another holder has it.
+    fn try_shared(&self) -> Option<std::sync::MutexGuard<'_, T>>;
+}
+impl<T: ?Sized> LockShared<T> for std::sync::Mutex<T> {
+    fn shared(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| {
+            self.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+    fn try_shared(&self) -> Option<std::sync::MutexGuard<'_, T>> {
+        match self.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                self.clear_poison();
+                Some(poisoned.into_inner())
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod agent_tests;
+mod data;
+pub mod delivery;
+pub mod figma;
+pub mod media_import;
+mod models;
+mod properties;
+mod publication;
+mod settings;
+pub mod speech;
+mod timeline_easing;
+pub mod virtualization;
+mod wakers;
+/// Opt-in panel timings (`PM_NATIVE_MAIN_TRACE=1`).
+pub(crate) fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PM_NATIVE_MAIN_TRACE").as_deref() == Ok("1"))
+}
+/// `PM_PANEL {json}` on stderr while tracing, with wall-clock `w` (ms) to
+/// line up with the app's lines.
+pub(crate) fn trace(mut value: Value) {
+    if tracing() {
+        value["w"] = json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64)
+        );
+        eprintln!("PM_PANEL {value}");
+    }
+}
+pub(crate) fn ms(d: std::time::Duration) -> f64 {
+    (d.as_secs_f64() * 10_000.).round() / 10.
+}
+
+use data::Backend;
+use pm_kernel::KernelHandle;
+use pm_runtime_v8::*;
+use pm_surface::{
+    Surface, events::EventDetail, host_api::*, host_data::HostDataService, interaction::Interaction,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+
+/// A built-in panel, from `js/v4/app/panels.json`: the one list the runtime
+/// mounts, forks copy and the build bundles.
+pub struct BuiltinPanel {
+    pub id: String,
+    pub title: String,
+    /// Parks while closed: its isolate goes until it opens again. The viewer
+    /// and timeline are always shown, the agent holds live runs, and window
+    /// panels close with their window.
+    pub parks: bool,
+    /// Mounts with no project open (the application window).
+    pub application: bool,
+    /// Shown in its own window rather than docked.
+    pub window: bool,
+}
+pub static BUILTIN_PANELS: std::sync::LazyLock<Vec<BuiltinPanel>> =
+    std::sync::LazyLock::new(|| {
+        let list: Vec<Value> = serde_json::from_str(include_str!("../../../js/v4/app/panels.json"))
+            .expect("panels.json is a list");
+        list.iter()
+            .map(|p| {
+                let flag = |name: &str| p[name].as_bool().unwrap_or(false);
+                BuiltinPanel {
+                    id: p["id"].as_str().expect("panel id").to_owned(),
+                    title: p["title"].as_str().expect("panel title").to_owned(),
+                    parks: flag("parks"),
+                    application: flag("application"),
+                    window: flag("window"),
+                }
+            })
+            .collect()
+    });
+pub fn builtin_panel(id: &str) -> Option<&'static BuiltinPanel> {
+    BUILTIN_PANELS.iter().find(|p| p.id == id)
+}
+const BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/builtins.js"));
+/// Each built-in panel's source as a v4 extension tree (`scripts/builtin-sources.ts`).
+const SOURCES: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin-sources.json"));
+
+/// The shipped built-in sources as folders under `root`, written once per build
+/// and never changed after, so forks always copy what this app runs.
+pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let stamp = {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        SOURCES.hash(&mut hash);
+        format!("{:016x}", hash.finish())
+    };
+    let dir = root.join(&stamp);
+    if dir.join(".complete").exists() {
+        return Ok(dir);
+    }
+    let trees: BTreeMap<String, BTreeMap<String, String>> =
+        serde_json::from_str(SOURCES).map_err(std::io::Error::other)?;
+    let scratch = root.join(format!(".{stamp}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    for (id, files) in trees {
+        for (path, text) in files {
+            let file = scratch.join(&id).join(path);
+            fs::create_dir_all(file.parent().unwrap())?;
+            fs::write(&file, text)?;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o444))?;
+        }
+    }
+    fs::write(scratch.join(".complete"), stamp.as_bytes())?;
+    match fs::rename(&scratch, &dir) {
+        Ok(()) => Ok(dir),
+        // Another window wrote the same build's copy first.
+        Err(_) if dir.join(".complete").exists() => {
+            let _ = fs::remove_dir_all(&scratch);
+            Ok(dir)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// A v4 extension's viewer overlay publishes as `<panel>@viewer`.
+pub const VIEWER_OVERLAY: &str = "@viewer";
+/// A v4 extension's built-in panel slot publishes as `<panel>@slot:<slotId>`.
+pub const SLOT_PREFIX: &str = "@slot:";
+/// Known built-in panel slot ids extensions may contribute live UI into.
+pub const BUILTIN_SLOTS: [&str; 7] = [
+    "inspector.top",
+    "inspector.bottom",
+    "timeline.toolbar",
+    "timeline.footer",
+    "viewer.hud",
+    "agent.toolbar",
+    "assets.toolbar",
+];
+/// A `themes.activate` request: its number, panel and theme id (`None`: the
+/// built-in look).
+pub type ThemeRequest = (u64, String, Option<String>);
+/// A deduplicated agent-tool thread request: fingerprint, thread, run.
+type ThreadRequest = (String, String, Option<String>);
+#[derive(Clone, Debug)]
+pub struct Publication {
+    pub panel: String,
+    pub generation: u64,
+    pub surface: Arc<Surface>,
+}
+#[derive(Clone, Debug)]
+pub struct PlatformRequest {
+    /// Holds files through the handoff from the panel realm to the app.
+    pub received: Option<Arc<dyn media_import::ReceivedMedia>>,
+    pub id: u64,
+    pub panel: String,
+    pub generation: u64,
+    pub operation: String,
+    pub input: Value,
+}
+mod surface_transfer;
+
+struct Entry {
+    generation: u64,
+    backend: Arc<Mutex<Backend>>,
+    router: HostRouter<HostDataService<data::Data>>,
+    surface: Surface,
+    transfer: surface_transfer::Transfer,
+    interaction: Interaction,
+    /// A v4 extension's viewer overlay (`overlays.viewer`).
+    overlay: Surface,
+    overlay_interaction: Interaction,
+    /// Composable built-in panel slots contributed by this extension (`slots.contribute`).
+    slots: BTreeMap<String, (Surface, Interaction)>,
+}
+/// Completed byte receipts stay native; the JSX panel receives metadata only.
+#[derive(Clone)]
+pub struct RetainedAsset {
+    pub id: String,
+    pub metadata: pm_model::Value,
+    pub original: pm_kernel::media_archive::Original,
+    pub previous: Option<pm_kernel::media_archive::Original>,
+}
+
+/// One host/pool per project window. A realm and native state exist separately
+/// for every extension; there is no editor-isolate shortcut for v4 built-ins.
+/// The Project panel's layout (media-browser §2): list rows, or a grid of
+/// `columns = max(1, ⌊(W − 2·inset + inset) ÷ (thumbnail_min + inset)⌋)`,
+/// each card a 16:9 thumbnail filling its column over a name and a meta
+/// line, rows `inset` apart. `width` is the grid's own width, inside the
+/// panel's `inset` margins (W − 2·inset); a grid without one yet is laid
+/// out at the narrowest column.
+fn project_layout(grid: bool, width: Option<f64>, m: &pm_design::Metrics) -> Value {
+    if !grid {
+        return json!({"columns": 1, "rowHeight": m.row});
+    }
+    let (inset, min) = (f64::from(m.inset), f64::from(m.thumbnail_min));
+    let width = width.filter(|w| w.is_finite() && *w > 0.).unwrap_or(min);
+    let columns = (((width + inset) / (min + inset)).floor() as usize).max(1);
+    let thumb_width = ((width - (columns - 1) as f64 * inset) / columns as f64).max(min / 2.);
+    let thumb_height = (thumb_width * 9. / 16.).round();
+    let row_height = thumb_height + f64::from(m.gap) + 2. * f64::from(m.field) + inset;
+    json!({
+        "columns": columns,
+        "rowHeight": row_height,
+        "thumbWidth": thumb_width.floor(),
+        "thumbHeight": thumb_height,
+    })
+}
+
+#[cfg(test)]
+mod project_layout_tests {
+    #[test]
+    fn project_card_curves_and_dot_derive_from_the_outer_shape() {
+        for scheme in [pm_design::Scheme::Dark, pm_design::Scheme::Light] {
+            let mut tokens = pm_design::Tokens::new(scheme, Default::default());
+            tokens.apply_patch([("metrics.control_radius", 16.)]).unwrap();
+            let m = tokens.metrics;
+            let frame = (m.control_radius - m.media_comp_inset).max(2.);
+            assert_eq!(m.control_radius, 16.);
+            assert_eq!(m.media_frame_radius, frame);
+            assert_eq!(m.media_small_radius, (m.control_radius - m.media_inset).max(2.));
+            assert_eq!(
+                m.media_open_dot_inset,
+                m.media_comp_inset + frame * (1. - 1. / 2_f32.sqrt()) + 3.
+            );
+        }
+    }
+    /// The list is one column of rows; the grid fills its width with
+    /// columns of at least the narrowest thumbnail (media-browser §2).
+    #[test]
+    fn the_project_grid_lays_out_columns_from_its_width() {
+        let m = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()).metrics;
+        let list = super::project_layout(false, Some(900.), &m);
+        assert_eq!(list["columns"], 1);
+        assert_eq!(list["rowHeight"].as_f64(), Some(f64::from(m.row)));
+        let (inset, min) = (f64::from(m.inset), f64::from(m.thumbnail_min));
+        // Widths inside the panel's margins.
+        for (width, columns) in [
+            (min, 1),
+            (2. * min + inset, 2),
+            (2. * min + inset - 1., 1),
+            (576., 4),
+            (66., 1),
+        ] {
+            let grid = super::project_layout(true, Some(width), &m);
+            assert_eq!(grid["columns"], columns, "width {width}");
+            let thumb = grid["thumbWidth"].as_f64().unwrap();
+            assert!(
+                columns == 1 && width < min || thumb >= min - 1.,
+                "width {width}: {thumb}"
+            );
+            let height = grid["thumbHeight"].as_f64().unwrap();
+            assert!(
+                (height - thumb * 9. / 16.).abs() <= 1.,
+                "width {width}: {height}"
+            );
+        }
+    }
+}
+
+/// The Project panel's id (its media, bins and compositions).
+pub const PROJECT_PANEL: &str = "assets";
+type LauncherFacts = (Vec<(String, String, String, u64, bool, bool)>, u64, String);
+type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, bool, bool);
+pub struct Builtins {
+    agent_status_cache: Mutex<AgentStatus>,
+    pool: RuntimePool,
+    broker: Arc<Broker>,
+    /// Built-in panels by id; a fork that replaces one runs in its place here.
+    realms: Mutex<BTreeMap<String, Realm>>,
+    panel_replacements: Mutex<()>,
+    extension_realms: Mutex<BTreeMap<String, Realm>>,
+    /// User forks running in place of a built-in (`replace`): the fork's id
+    /// and module graph by panel, so a parked fork starts again as itself.
+    forks: Mutex<BTreeMap<String, (String, Value)>>,
+}
+type DropLookup = fn(&[std::path::PathBuf]) -> Option<Arc<dyn media_import::ReceivedMedia>>;
+
+struct Broker {
+    /// Third-party v4 surface extensions mounted in this window.
+    extensions: Mutex<std::collections::BTreeSet<String>>,
+    project: String,
+    application: bool,
+    kernel: KernelHandle,
+    /// Each panel's entry has its own lock: one panel's slow poll never holds
+    /// another's calls (all nine built-ins share this broker).
+    entries: Mutex<BTreeMap<String, Arc<Mutex<Entry>>>>,
+    publications: Mutex<BTreeMap<String, Publication>>,
+    platform: Mutex<Vec<PlatformRequest>>,
+    drop_lookup: Mutex<Option<DropLookup>>,
+    errors: Mutex<Vec<String>>,
+    facts: Mutex<Value>,
+    timeline_view: Arc<Mutex<Option<Arc<pm_panel_timeline::TimelineModel>>>>,
+    timeline_outline: Arc<Mutex<Option<Arc<pm_panel_timeline::TimelineModel>>>>,
+    platform_replies: Mutex<BTreeMap<u64, Value>>,
+    timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
+    platform_ids: std::sync::atomic::AtomicU64,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    agent: Arc<agent_host::AgentLink>,
+    /// Runs carried in from the previous application window, for its Agent panel.
+    carried: Mutex<Option<agent_host::SharedAgent>>,
+    /// Set once `carry_agent` hands the runs on: closing no longer stops them.
+    agent_released: std::sync::atomic::AtomicBool,
+    /// Agent-tool thread requests by caller and clientRequestId: the request's
+    /// fingerprint, its thread and run (main dedupes retries the same way).
+    thread_requests: Mutex<BTreeMap<String, ThreadRequest>>,
+    /// Commands each extension realm registered (`commands.register`), by panel,
+    /// with a revision that moves on every change.
+    commands: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Themes each extension realm offers (`themes.register`), by panel.
+    themes: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// The latest `themes.activate` in this window: a counter, and the last
+    /// request (its number, panel and theme id, `None` for the built-in look).
+    theme_request: Mutex<(u64, Option<ThemeRequest>)>,
+    /// Realms with a clip painter (`timeline.paint`), and a revision that
+    /// moves whenever one arrives or leaves.
+    painters: Mutex<(u64, std::collections::BTreeSet<String>)>,
+    /// The `timeline.chrome` writer (`chrome.rs`), started on first use.
+    chrome: Mutex<Option<std::sync::mpsc::Sender<chrome::ChromeEdit>>>,
+    /// The app's effect clipboard, given to each panel's inspector model.
+    effect_clipboard: Mutex<EffectClipboard>,
+    presets: Mutex<presets::Library>,
+    preset_sheet: Mutex<Option<Value>>,
+    /// Set while the window closes: its realms' ends are not removals.
+    closing: std::sync::atomic::AtomicBool,
+    /// Built-in panels parked while closed (`Builtins::park`).
+    parked: Mutex<std::collections::BTreeSet<String>>,
+    /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
+    overlays_cleared: Mutex<Vec<String>>,
+    /// Whether each viewer overlay (`<panel>@viewer`) accepts pointer input.
+    overlay_interactive: Mutex<BTreeMap<String, bool>>,
+    /// Built-in panel slots an extension cleared (`<panel>@slot:<slotId>`).
+    slots_cleared: Mutex<Vec<String>>,
+    /// Layer 1: window toolbar items (`toolbar.contribute`), by panel.
+    toolbar_items: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Layer 1: panel header action pills (`panelHeader.contribute`), by owner panel.
+    panel_headers: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Layer 1: macOS menu bar items (`menuBar.contribute`), by panel.
+    menu_bar: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Layer 2: interactive viewer tools (`tools.register`), by panel.
+    tools: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Layer 5: lifecycle event subscriptions (`events.on`), by panel.
+    event_subs: Mutex<BTreeMap<String, std::collections::BTreeSet<String>>>,
+    /// The Export sheet's checks, drained by main on every wake without the
+    /// panel's entry or backend, which its V8 worker holds for whole host
+    /// calls (PM-699).
+    export_probe: Mutex<Option<Arc<Mutex<models::Probe>>>>,
+}
+/// v1's inspector-service effect clipboard for one window: `copy` takes the
+/// effects selected in its Effect Controls, `paste` adds the clipboard's
+/// effects to each selected layer (audio aside) as one undo step, `clear`.
+#[derive(Clone)]
+pub struct EffectDesk(Arc<Broker>);
+impl EffectDesk {
+    pub fn run(&self, op: &str) -> std::result::Result<Value, String> {
+        let clipboard = self.0.effect_clipboard.shared().clone();
+        match op {
+            "copy" => {
+                let entry = self.0.entries.shared().get("layer-effects").cloned();
+                let copied = entry.and_then(|entry| {
+                    let entry = entry.shared();
+                    let mut backend = entry.backend.shared();
+                    let model = backend.model.as_mut()?;
+                    let layer = model.effects.layer.clone()?;
+                    let first = model.effects.ids.first().cloned()?;
+                    // Selected effects the layer no longer has copy nothing.
+                    model.copy_effects(&layer, &first).ok()
+                });
+                Ok(json!({"copied": copied.unwrap_or(0)}))
+            }
+            "clear" => {
+                clipboard.clear();
+                Ok(json!({}))
+            }
+            "paste" => {
+                if clipboard.is_empty() {
+                    return Ok(json!({"empty": true}));
+                }
+                // Through the window's Effect Controls (or Properties) model:
+                // its effect definitions are the window's registries.
+                let entries = self.0.entries.shared().clone();
+                let entry = ["layer-effects", "inspector"]
+                    .iter()
+                    .find_map(|id| entries.get(*id).cloned())
+                    .ok_or("The window's panels are not running")?;
+                let entry = entry.shared();
+                let mut backend = entry.backend.shared();
+                backend.sync()?;
+                let caller = backend.caller;
+                let model = backend.model.as_ref().ok_or("No open project")?;
+                let targets = model
+                    .selected_layers()
+                    .iter()
+                    .filter(|id| {
+                        model.layer(id).is_ok_and(|l| {
+                            l.get("type").and_then(pm_model::Value::as_str) != Some("audio")
+                        })
+                    })
+                    .count();
+                if targets == 0 {
+                    return Ok(json!({"reason": "select"}));
+                }
+                let (mut request, per_layer) = match model.paste_selected_effects(caller) {
+                    Ok(pasted) => pasted,
+                    Err(pm_panel_inspector::InspectorError::EmptyEdit) => {
+                        return Ok(json!({"reason": "unavailable"}));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                let count = per_layer * targets;
+                if let pm_kernel::Call::Transact { label, .. } = &mut request.call {
+                    *label = Some(
+                        if count == 1 {
+                            "Paste Effect"
+                        } else {
+                            "Paste Effects"
+                        }
+                        .into(),
+                    );
+                }
+                let ack = self
+                    .0
+                    .kernel
+                    .call_blocking(&self.0.project, request)
+                    .map_err(|e| e.to_string())?;
+                if let pm_kernel::Reply::Throw(error) = ack.reply {
+                    return Err(error.to_string());
+                }
+                Ok(json!({"pasted": count}))
+            }
+            _ => Err(format!("unknown effect clipboard operation {op}")),
+        }
+    }
+}
+impl Builtins {
+    /// Invalidates disk covers whenever the built-in panel bundle changes.
+    pub fn cover_version() -> &'static str {
+        BUNDLE
+    }
+
+    pub fn new(
+        kernel: KernelHandle,
+        project: &str,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Self::create(kernel, project, false, wake, None)
+    }
+    /// Application-owned Agent/Settings without inventing an open document.
+    /// `carry` holds runs from an earlier application window; its panel shows them.
+    pub fn application(
+        kernel: KernelHandle,
+        wake: impl Fn() + Send + Sync + 'static,
+        carry: Option<AgentCarry>,
+    ) -> Result<Self> {
+        Self::create(kernel, "builtin-application", true, wake, carry)
+    }
+    /// Keep the application Agent panel's live runs going past this window, e.g.
+    /// when a run opens a project. `None` when nothing is running.
+    pub fn carry_agent(&self) -> Option<AgentCarry> {
+        if !self.broker.application {
+            return None;
+        }
+        let entry = self.broker.entry("agent")?;
+        let state = entry.shared().backend.shared().native.agent.clone()?;
+        let carry = AgentCarry::take(&self.broker.agent, &state)?;
+        self.broker
+            .agent_released
+            .store(true, std::sync::atomic::Ordering::Release);
+        Some(carry)
+    }
+    /// thread_launch, thread_send and thread_cancel from an agent tool, through
+    /// this window's Agent panel and its provider runs (main's controlThread):
+    /// the composer's own send, steer, answer and stop effects, without
+    /// switching the person's visible thread. New threads and new turns run at
+    /// the caller's access (`callerAccess`); a caller never steers a thread
+    /// with broader access. Call it off the main thread: saves and launches
+    /// reach the kernel and disk, and a reconfiguration waits for a stop.
+    pub fn agent_thread_control(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> std::result::Result<Value, String> {
+        use pm_agents::Access;
+        use pm_agents::Provider;
+        let closed = || {
+            "Open the Agent panel in this project's window before controlling its threads."
+                .to_owned()
+        };
+        let missing = || "This thread does not exist in the current project.".to_owned();
+        let failed = |e: pm_panel_agentpanel::Error| format!("{e:?}");
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| closed())?;
+            let backend = backend.shared();
+            let agent = backend.native.agent.clone().ok_or_else(closed)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        // An unknown caller gets the narrowest access: planning.
+        let caller = match args["callerAccess"].as_str() {
+            Some("project") => "project",
+            _ => "editor",
+        };
+        let caller_run = args["callerRunId"].as_str().unwrap_or_default();
+        let thread_arg = args["threadId"].as_str().unwrap_or_default().to_owned();
+        let describe = |thread: &str, extra: Value| -> std::result::Result<Value, String> {
+            let state = agent.shared();
+            let session = state.panel.session(thread).map_err(|_| missing())?;
+            let mut out = json!({"threadId":thread,"runId":session.run.as_ref().map(|r| r.id.clone()),
+                "busy":session.run.is_some(),"provider":session.settings.provider.name(),
+                "model":session.settings.model,"reasoningEffort":session.settings.effort,
+                "access":if session.settings.access == Access::Editor { "editor" } else { "project" },
+                "status":if session.run.is_some() { "running" } else if tool == "thread_cancel" { "cancelled" } else { "idle" }});
+            if let (Some(out), Some(extra)) = (out.as_object_mut(), extra.as_object()) {
+                out.extend(extra.clone());
+            }
+            Ok(out)
+        };
+        let run_effect = |effect: &pm_panel_agentpanel::model::Effect| {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                effect,
+            )
+        };
+        let save = |state: &mut agent_host::AgentState| {
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| format!("{e:?}"))
+        };
+        if tool == "thread_cancel" {
+            let effect = {
+                let mut state = agent.shared();
+                let running = state
+                    .panel
+                    .session(&thread_arg)
+                    .map_err(|_| missing())?
+                    .run
+                    .is_some();
+                running
+                    .then(|| state.panel.stop(&thread_arg))
+                    .transpose()
+                    .map_err(failed)?
+            };
+            if let Some(effect) = effect {
+                run_effect(&effect)?;
+            }
+            link.touch();
+            return describe(&thread_arg, json!({}));
+        }
+        if self.broker.application && caller == "editor" {
+            return Err(
+                "Start an app thread with Project access. Editor threads need an attached project."
+                    .into(),
+            );
+        }
+        // A retried request returns its first answer; a reused id refuses.
+        let target = &args["target"];
+        let fingerprint = json!({"title":args["title"],"message":args["message"],"target":target,"access":caller}).to_string();
+        let request_key = args["clientRequestId"].as_str().map(|id| {
+            format!(
+                "{tool}\u{0}{caller_run}\u{0}{}\u{0}{id}",
+                if tool == "thread_send" {
+                    thread_arg.as_str()
+                } else {
+                    ""
+                }
+            )
+        });
+        if let Some(key) = &request_key
+            && let Some((seen, thread, run)) =
+                self.broker.thread_requests.shared().get(key).cloned()
+        {
+            if seen != fingerprint {
+                return Err(if tool == "thread_launch" {
+                    "This clientRequestId belongs to another thread launch.".into()
+                } else {
+                    "This clientRequestId belongs to another message.".into()
+                });
+            }
+            return describe(
+                &thread,
+                if tool == "thread_launch" {
+                    json!({})
+                } else {
+                    json!({"runId":run,"delivery":"already_sent"})
+                },
+            );
+        }
+        if tool == "thread_send" && request_key.is_some() {
+            let prefix = format!("thread_send\u{0}{caller_run}\u{0}{thread_arg}\u{0}");
+            if self
+                .broker
+                .thread_requests
+                .shared()
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
+                >= 64
+            {
+                return Err("This thread has reached its saved update limit. Start a new thread for further orchestrated work.".into());
+            }
+        }
+        let provider_of = |name: &str| match name {
+            "chatgpt" => Provider::Chatgpt,
+            "claude" => Provider::Claude,
+            "aero" => Provider::Aero,
+            _ => Provider::Compatible,
+        };
+        let message = args["message"].as_str().unwrap_or_default();
+        let now = agent_host::now_ms();
+        // What the request asks for, against the thread's current settings.
+        let (thread, steer, reconfigure) = {
+            let mut state = agent.shared();
+            let base = if tool == "thread_send" {
+                thread_arg.clone()
+            } else {
+                state.panel.active_id().to_owned()
+            };
+            let session = state.panel.session(&base).map_err(|_| missing())?;
+            let provider = target["providerInstanceId"]
+                .as_str()
+                .map_or(session.settings.provider, provider_of);
+            if !link.available(provider) {
+                let name = match provider {
+                    Provider::Chatgpt => "ChatGPT",
+                    Provider::Claude => "Claude",
+                    Provider::Compatible => "your compatible provider",
+                    Provider::Aero => "Aero",
+                };
+                return Err(format!(
+                    "Sign in to {name} in Settings › Agents before starting a run."
+                ));
+            }
+            if tool == "thread_launch" {
+                let id = pm_kernel::new_id("agent-thread");
+                state.panel.launch_background(&id, now).map_err(failed)?;
+                (id, None, false)
+            } else {
+                let busy = session.run.as_ref().map(|r| r.id.clone());
+                if busy.is_some()
+                    && (session.settings.access == Access::Computer
+                        || caller == "editor" && session.settings.access != Access::Editor)
+                {
+                    return Err("This thread has broader permissions than the caller.".into());
+                }
+                if session.applying {
+                    return Err("This thread is applying its current change. Wait before sending new direction.".into());
+                }
+                let changes = target["providerInstanceId"]
+                    .as_str()
+                    .is_some_and(|p| provider_of(p) != session.settings.provider)
+                    || target["model"]
+                        .as_str()
+                        .is_some_and(|m| m != session.settings.model)
+                    || target["options"]["reasoningEffort"]
+                        .as_str()
+                        .is_some_and(|e| e != session.settings.effort);
+                (
+                    thread_arg.clone(),
+                    busy.clone().filter(|_| !changes),
+                    busy.is_some() && changes,
+                )
+            }
+        };
+        // A reconfigured run stops first; the new turn carries the request on.
+        if reconfigure {
+            let effect = agent.shared().panel.stop(&thread).map_err(failed)?;
+            run_effect(&effect)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while agent
+                .shared()
+                .panel
+                .session(&thread)
+                .is_ok_and(|s| s.run.is_some())
+            {
+                if std::time::Instant::now() > deadline {
+                    return Err("The running turn did not stop in time. Its work continues; try again shortly.".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        let effect = {
+            let mut state = agent.shared();
+            if steer.is_none() {
+                // A new turn runs at the caller's access and the target settings.
+                if let Some(effect) = state.panel.set_access(&thread, caller).map_err(failed)? {
+                    drop(state);
+                    run_effect(&effect)?;
+                    state = agent.shared();
+                }
+                if let Some(provider) = target["providerInstanceId"].as_str().map(provider_of) {
+                    let model = target["model"].as_str().unwrap_or_default().to_owned();
+                    state
+                        .panel
+                        .set_provider(&thread, provider, model, link.catalog(provider))
+                        .map_err(failed)?;
+                }
+                let current = state
+                    .panel
+                    .session(&thread)
+                    .map_err(|_| missing())?
+                    .settings
+                    .clone();
+                let model = target["model"]
+                    .as_str()
+                    .map_or(current.model.clone(), str::to_owned);
+                let effort = target["options"]["reasoningEffort"]
+                    .as_str()
+                    .map_or(current.effort.clone(), str::to_owned);
+                if model != current.model || effort != current.effort {
+                    state
+                        .panel
+                        .set_model(&thread, model, effort)
+                        .map_err(failed)?;
+                }
+                agent_host::admit_send(&state, &thread)?;
+            }
+            let run = steer.clone().unwrap_or_else(|| pm_kernel::new_id("run"));
+            let effect = state
+                .panel
+                .send_message(
+                    &thread,
+                    message,
+                    &[],
+                    &run,
+                    &pm_kernel::new_id("request"),
+                    now,
+                )
+                .map_err(failed)?;
+            if tool == "thread_launch"
+                && let Some(title) = args["title"].as_str()
+            {
+                let _ = state.panel.generated_title(&thread, message, title, now);
+            }
+            save(&mut state)?;
+            effect
+        };
+        let delivery = match (&effect.kind, steer.is_some()) {
+            (pm_panel_agentpanel::model::EffectKind::Answer { .. }, _) => "answered",
+            (_, true) => "live",
+            _ => "started",
+        };
+        run_effect(&effect)?;
+        link.touch();
+        let result = describe(
+            &thread,
+            if tool == "thread_send" {
+                json!({"delivery":delivery})
+            } else {
+                json!({})
+            },
+        )?;
+        if let Some(key) = request_key {
+            self.broker.thread_requests.shared().insert(
+                key,
+                (
+                    fingerprint,
+                    thread,
+                    result["runId"].as_str().map(str::to_owned),
+                ),
+            );
+        }
+        Ok(result)
+    }
+    /// Settings › General › Bring My Workspace… (`workspaceImportHandoff`):
+    /// a new thread in this window's Agent panel, with Project access, asking
+    /// for the After Effects workspace. It is sent at once when the thread's
+    /// provider is signed in; otherwise the request waits in the composer,
+    /// where the panel shows how to connect. Answers whether it was sent.
+    /// Call it off the main thread.
+    pub fn bring_workspace(&self) -> std::result::Result<bool, String> {
+        let closed = || "Open the Agent panel to bring your workspace.".to_owned();
+        let failed = |e: pm_panel_agentpanel::Error| format!("{e:?}");
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| closed())?;
+            let backend = backend.shared();
+            let agent = backend.native.agent.clone().ok_or_else(closed)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let run_effect = |effect: &pm_panel_agentpanel::model::Effect| {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                effect,
+            )
+        };
+        let now = agent_host::now_ms();
+        let label = agent_host::WORKSPACE_IMPORT_LABEL;
+        let thread = {
+            let mut state = agent.shared();
+            state
+                .panel
+                .new_thread(&pm_kernel::new_id("agent-thread"), now)
+                .map_err(failed)?
+        };
+        let access = agent
+            .shared()
+            .panel
+            .set_access(&thread, "project")
+            .map_err(failed)?;
+        if let Some(effect) = access {
+            run_effect(&effect)?;
+        }
+        let effect = {
+            let mut state = agent.shared();
+            let provider = state
+                .panel
+                .session(&thread)
+                .map_err(failed)?
+                .settings
+                .provider;
+            let effect = if link.available(provider) {
+                agent_host::admit_send(&state, &thread)?;
+                Some(
+                    state
+                        .panel
+                        .send_message(
+                            &thread,
+                            label,
+                            &[],
+                            &pm_kernel::new_id("run"),
+                            &pm_kernel::new_id("request"),
+                            now,
+                        )
+                        .map_err(failed)?,
+                )
+            } else {
+                state
+                    .panel
+                    .draft_mut(&thread)
+                    .map_err(failed)?
+                    .set_text(label, now)
+                    .map_err(failed)?;
+                None
+            };
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(failed)?;
+            effect
+        };
+        if let Some(effect) = &effect {
+            run_effect(effect)?;
+        }
+        link.touch();
+        Ok(effect.is_some())
+    }
+    /// Main's orchestrator tools for the run named by `agentRunId` (its MCP
+    /// session's `--agent-run`): subagent tasks and run watches, through this
+    /// window's Agent panel runs. Call it off the main thread.
+    pub fn agent_orchestrate(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> std::result::Result<Value, String> {
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| {
+                "Open the Agent panel in this project's window before delegating.".to_owned()
+            })?;
+            let backend = backend.shared();
+            let agent = backend
+                .native
+                .agent
+                .clone()
+                .ok_or("This agent run is no longer active.")?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let result = agent_tasks::call(&agent, &link, tool, args);
+        agent_host::ensure_worker(&agent, &link, &self.broker.kernel, self.broker.application);
+        link.touch();
+        link.publish_now();
+        result
+    }
+    /// publish_visual_reply for the run named by `agentRunId`: validated and
+    /// normalized as main does, saved on the run's thread before it answers.
+    pub fn agent_visual_reply(&self, args: &Value) -> std::result::Result<Value, String> {
+        const GONE: &str = "The visualization’s agent run is no longer active.";
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| GONE.to_owned())?;
+            let backend = backend.shared();
+            let agent = backend.native.agent.clone().ok_or(GONE)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let run = args["agentRunId"].as_str().ok_or(GONE)?;
+        let mut input = args.clone();
+        if let Some(object) = input.as_object_mut() {
+            for key in ["agentRunId", "callerAccess", "callerRunId"] {
+                object.remove(key);
+            }
+        }
+        let prepared = pm_agents::visual::prepare(&input)?;
+        let id = format!("visual-{}", pm_kernel::new_id("reply"));
+        let thread = {
+            let mut state = agent.shared();
+            let thread = state.runs.live(run).ok_or(GONE)?.thread.clone();
+            let artifact = json!({"version":1,"id":id,"runId":run,"title":prepared.title,
+                "html":prepared.html,"height":prepared.height});
+            state
+                .panel
+                .add_visual_reply(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    &thread,
+                    artifact,
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| match e {
+                    pm_panel_agentpanel::Error::Invalid("four visual replies") => {
+                        "This run already published four visual replies. Continue in a follow-up message.".to_owned()
+                    }
+                    pm_panel_agentpanel::Error::UnknownId(_) | pm_panel_agentpanel::Error::Stale => {
+                        "The visualization’s thread was removed.".to_owned()
+                    }
+                    _ => "The visual reply could not be saved. Free storage and try again.".to_owned(),
+                })?;
+            thread
+        };
+        link.touch();
+        link.publish_now();
+        Ok(json!({"id":id,"title":prepared.title,"saved":true,"threadId":thread}))
+    }
+    /// Files the person chose with Add Attachments, as attachment records
+    /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the
+    /// visible thread's message. At most six per message, as on main.
+    pub fn agent_attach(&self, records: Vec<Value>) -> std::result::Result<(), String> {
+        self.agent_attach_guarded(records, None)
+    }
+    /// Async clipboard/drop reads retain the project and thread that accepted them.
+    pub fn agent_attach_for(
+        &self,
+        project: &str,
+        thread: &str,
+        records: Vec<Value>,
+    ) -> std::result::Result<(), String> {
+        self.agent_attach_guarded(records, Some((project, thread)))
+    }
+    fn agent_attach_guarded(
+        &self,
+        records: Vec<Value>,
+        target: Option<(&str, &str)>,
+    ) -> std::result::Result<(), String> {
+        let (agent, link) = {
+            let backend = self
+                .backend("agent")
+                .map_err(|_| "The Agent panel closed.")?;
+            let backend = backend.shared();
+            (
+                backend
+                    .native
+                    .agent
+                    .clone()
+                    .ok_or("The Agent panel closed.")?,
+                backend.native.agent_link.clone(),
+            )
+        };
+        {
+            let mut state = agent.shared();
+            let thread = match target {
+                Some((project, thread)) if state.panel.project() == project => thread.to_owned(),
+                Some(_) => return Err("The attachment's project is no longer open.".into()),
+                None => state.panel.active_id().to_owned(),
+            };
+            let mut store =
+                models::KernelStore::new(self.broker.kernel.clone(), self.broker.application);
+            let now = agent_host::now_ms();
+            state
+                .panel
+                .attach_records(&thread, records, &mut store, now)
+                .map_err(|e| match e {
+                    pm_panel_agentpanel::Error::Invalid("six attachments per message") => {
+                        "A message can carry six attachments.".to_owned()
+                    }
+                    e => format!("{e:?}"),
+                })?;
+            // Called off the main thread: the archive write happens here.
+            state
+                .panel
+                .save(&mut store, now)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        link.touch();
+        link.publish_now();
+        Ok(())
+    }
+    /// The toolbar Agent item's facts: a run going (in view or behind),
+    /// a question or approval waiting, the run in view's time, and how many
+    /// threads run behind the one in view.
+    pub fn agent_status(&self) -> (bool, bool, Option<u64>, usize) {
+        let (working, attention, elapsed, background, _, _) = self.agent_status_with_notice(false);
+        (working, attention, elapsed, background)
+    }
+
+    pub fn agent_status_with_notice(&self, shown: bool) -> (bool, bool, Option<u64>, usize, bool, bool) {
+        // Called by the UI drain. Never wait for the JS backend, provider launch,
+        // prompt construction or durable storage. The next drain refreshes facts.
+        let mut cached = self
+            .agent_status_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let observed = (|| {
+            let entries = self.broker.entries.try_lock().ok()?;
+            let Some(entry) = entries.get("agent").cloned() else {
+                return Some((false, false, None, 0, (vec![], 0, String::new()), false, false));
+            };
+            drop(entries);
+            let backend = entry.try_lock().ok()?.backend.clone();
+            let backend = backend.try_lock().ok()?;
+            let Some(agent) = backend.native.agent.clone() else {
+                return Some((false, false, None, 0, (vec![], 0, String::new()), false, false));
+            };
+            drop(backend);
+            let mut state = agent.try_lock().ok()?;
+            let panel = &mut state.panel;
+            if shown {
+                panel.mark_toolbar_seen();
+            }
+            let (unread, failed) = panel.toolbar_notice();
+            let session = panel.session(panel.active_id()).ok()?;
+            let background = panel.background_runs();
+            let mut revision = 0;
+            let mut summaries = panel.summaries();
+            summaries.sort_by_key(|thread| thread.id != panel.active_id());
+            let tasks = summaries.into_iter().filter_map(|t| {
+                let s = panel.session(&t.id).ok()?;
+                revision += s.trace.rows.len() as u64 + s.conversation.len() as u64;
+                let attention = panel.launcher_attention(&t.id);
+                if s.run.is_none() && !attention { return None; }
+                let started = s.run.as_ref().map_or(t.updated_at, |r| r.started_at);
+                let step = if s.activity.is_empty() {
+                    s.progress.last().cloned().unwrap_or_default()
+                } else {
+                    s.activity.clone()
+                };
+                Some((t.id, t.title, step, started, attention, s.run.is_some()))
+            }).collect();
+            Some((
+                session.run.is_some() || background > 0,
+                session.needs_answer(),
+                session.elapsed_ms(agent_host::now_ms()),
+                background,
+                (tasks, revision, panel.active_id().into()),
+                unread,
+                failed,
+            ))
+        })();
+        if let Some(observed) = observed {
+            *cached = observed;
+        }
+        (cached.0, cached.1, cached.2, cached.3, cached.5, cached.6)
+    }
+
+    /// Live facts across every thread, independent of panel visibility.
+    pub fn agent_launcher_tasks(&self) -> LauncherFacts {
+        self.agent_status();
+        self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).4.clone()
+    }
+    /// The launcher's task switch, for the main thread: it never waits.
+    /// `Ok(false)` while the Agent panel's state is busy (a launch can hold
+    /// it while its completion waits on the shared tool host behind an
+    /// agent's project check); the caller tries again on a later frame.
+    pub fn agent_launcher_try_switch(&self, id: &str) -> std::result::Result<bool, String> {
+        let closed = || "The Agent panel closed.".to_owned();
+        let Some(entries) = self.broker.entries.try_shared() else {
+            return Ok(false);
+        };
+        let entry = entries.get("agent").cloned().ok_or_else(closed)?;
+        drop(entries);
+        let Some(backend) = entry.try_shared().map(|entry| entry.backend.clone()) else {
+            return Ok(false);
+        };
+        let Some(backend) = backend.try_shared() else {
+            return Ok(false);
+        };
+        let agent = backend.native.agent.clone().ok_or_else(closed)?;
+        let link = backend.native.agent_link.clone();
+        drop(backend);
+        {
+            let Some(mut state) = agent.try_shared() else {
+                return Ok(false);
+            };
+            if state.panel.active_id() == id {
+                return Ok(true);
+            }
+            state.panel.switch(id).map_err(|e| e.to_string())?;
+        }
+        link.publish_now();
+        Ok(true)
+    }
+    /// Adding the effect `definition` to `layer` at `time` as the Effects
+    /// panel `panel` adds one (its definitions, extensions' included): the
+    /// commands of one Undo step.
+    pub fn show_preset_sheet(&self, hint: Value) {
+        *self.broker.preset_sheet.shared() = Some(hint);
+    }
+    pub fn preset_sheet(&self, hint: Value) -> Result<Ticket<Evaluation>> {
+        self.show_preset_sheet(hint);
+        match self.realm_of("fxbrowser") {
+            Ok(realm) => realm.eval("__pmBuiltin.publish()"),
+            Err(Error::Closed) => self.mount_builtin("fxbrowser"),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn effect_commands(
+        &self,
+        panel: &str,
+        layer: &str,
+        definition: &str,
+        time: f64,
+    ) -> std::result::Result<Vec<pm_kernel::Command>, String> {
+        let backend = self
+            .backend(panel)
+            .map_err(|_| "The Effects panel closed.".to_owned())?;
+        let mut backend = backend.shared();
+        backend.sync()?;
+        if let Some(definition) = definition.strip_prefix("transition:") {
+            return backend.transition_commands(definition, layer, time, true);
+        }
+        let caller = backend.caller;
+        let request = if let Some(id) = definition.strip_prefix("preset:") {
+            let saved = self
+                .broker
+                .presets
+                .shared()
+                .list()
+                .into_iter()
+                .find(|p| p["id"] == id)
+                .ok_or("Preset not found")?;
+            backend
+                .model
+                .as_mut()
+                .ok_or("Open a project first.")?
+                .apply_preset(caller, &data::model(&saved)?, &[layer.into()], time)
+                .map_err(|e| e.to_string())?
+        } else {
+            backend
+                .model
+                .as_mut()
+                .ok_or("Open a project first.")?
+                .add_effect_at(caller, layer, definition, time)
+                .map_err(|e| e.to_string())?
+        };
+        match request.call {
+            pm_kernel::Call::Transact {
+                body: pm_kernel::WriteBody::Commands(commands),
+                ..
+            } => Ok(commands),
+            _ => Err("This effect can't be added here.".into()),
+        }
+    }
+    /// The answer to the Project panel's Delete Media question (its
+    /// `ConfirmDelete` effect): approved, the deletion it held, as the
+    /// kernel call to make; declined or stale, nothing.
+    pub fn project_confirm_delete(
+        &self,
+        owner: pm_panel_media::Stamp,
+        token: u64,
+        approved: bool,
+    ) -> Result<Option<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>>
+    {
+        let backend = self.backend(PROJECT_PANEL)?;
+        let command = {
+            let mut backend = backend.shared();
+            let request = pm_panel_media::v4::Request {
+                owner,
+                action: pm_panel_media::v4::Action::Input(pm_panel_media::Input::ConfirmDelete {
+                    token,
+                    approved,
+                }),
+            };
+            backend
+                .native_command("panel.project", &serde_json::to_value(request).map_err(|e| Error::Host(e.to_string()))?)
+                .map_err(Error::Host)?
+        };
+        Ok(match command {
+            models::NativeCommand::Kernel(request) => {
+                Some(self.broker.kernel.call(&self.broker.project, request))
+            }
+            _ => None,
+        })
+    }
+    /// The Project panel's selected assets, in its order.
+    pub fn project_selection(&self) -> Vec<String> {
+        self.backend(PROJECT_PANEL)
+            .ok()
+            .map(|b| b.shared().native.project.panel.selected_assets().to_vec())
+            .unwrap_or_default()
+    }
+    /// Selected Project items for the explicit timeline commands.
+    pub fn project_timeline_items(&self, compositions: bool) -> (Vec<String>, Vec<String>) {
+        let Ok(backend) = self.backend(PROJECT_PANEL) else {
+            return Default::default();
+        };
+        let backend = backend.shared();
+        let panel = &backend.native.project.panel;
+        if compositions {
+            match panel.selected_item() {
+                Some(pm_panel_media::ItemId::Composition(id)) => (vec![], vec![id.clone()]),
+                _ => Default::default(),
+            }
+        } else {
+            (panel.selected_assets().to_vec(), vec![])
+        }
+    }
+    /// What the Project panel is dragging (its `dragstart`): the items the
+    /// timeline or the viewer places when it is dropped there.
+    pub fn project_drag(&self) -> Option<pm_panel_media::Drag> {
+        let backend = self.backend(PROJECT_PANEL).ok()?;
+        let backend = backend.shared();
+        backend.native.project.panel.drag.clone()
+    }
+    pub fn project_id(&self) -> &str {
+        &self.broker.project
+    }
+    pub fn agent_current_thread(&self) -> Option<String> {
+        // Toolbar actions must not wait for a busy agent worker either.
+        self.agent_status();
+        let id = self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).4.2.clone();
+        (!id.is_empty()).then_some(id)
+    }
+    /// Admit one toolbar direction on the same worker as the composer.
+    /// Returns whether it was queued for the thread’s next turn.
+    pub fn agent_quick_prompt(
+        &self,
+        thread: &str,
+        text: &str,
+    ) -> std::result::Result<bool, String> {
+        let (agent, link) = self.agent_state()?;
+        let queued = {
+            let mut state = agent.shared();
+            let session = state.panel.session(thread).map_err(|e| e.to_string())?;
+            if session.composer_disabled() {
+                return Err("Wait for the agent to finish applying its change.".into());
+            }
+            let current_run = session
+                .run
+                .as_ref()
+                .ok_or("This turn has already finished.")?
+                .id
+                .clone();
+            let queued = agent_host::queue_composer_send(&state, thread)?;
+            let now = agent_host::now_ms();
+            let mut effect = if queued {
+                state.panel.queue_text(thread, text, now)
+            } else {
+                state.panel.send_message(
+                    thread,
+                    text,
+                    &[],
+                    &current_run,
+                    &pm_kernel::new_id("request"),
+                    now,
+                )
+            }
+            .map_err(|e| e.to_string())?;
+            state
+                .panel
+                .track_live_direction(&mut effect)
+                .map_err(|e| e.to_string())?;
+            state.panel.defer_save(now);
+            if !queued {
+                state.sends.push_back(effect);
+            }
+            queued
+        };
+        link.touch();
+        link.publish_now();
+        agent_host::ensure_worker(&agent, &link, &self.broker.kernel, self.broker.application);
+        Ok(queued)
+    }
+    /// The agent panel's state and link, for an answer the window gives.
+    fn agent_state(
+        &self,
+    ) -> std::result::Result<(agent_host::SharedAgent, Arc<agent_host::AgentLink>), String> {
+        let backend = self
+            .backend("agent")
+            .map_err(|_| "The Agent panel closed.")?;
+        let backend = backend.shared();
+        Ok((
+            backend
+                .native
+                .agent
+                .clone()
+                .ok_or("The Agent panel closed.")?,
+            backend.native.agent_link.clone(),
+        ))
+    }
+    /// The window confirmed deleting a thread (its alert): its history goes;
+    /// a running thread stops first and goes once its run has settled.
+    pub fn agent_delete_thread(&self, thread: &str) -> std::result::Result<(), String> {
+        let (agent, link) = self.agent_state()?;
+        let now = agent_host::now_ms();
+        let stops = {
+            let mut state = agent.shared();
+            let ids = state
+                .panel
+                .thread_subtree(thread)
+                .map_err(|e| format!("{e:?}"))?;
+            let mut candidate = state.panel.clone();
+            let mut stops = vec![];
+            // Children settle/archive first; final receipts retain their own owner.
+            for id in ids.iter().rev() {
+                if let Some(stop) = candidate
+                    .archive_thread(id, &pm_kernel::new_id("thread"), true, now)
+                    .map_err(|e| format!("{e:?}"))?
+                {
+                    stops.push(stop);
+                }
+            }
+            candidate
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+            state.panel = candidate;
+            stops
+        };
+        let mut failure = None;
+        for stop in stops {
+            if let Err(error) = agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                &stop,
+            ) {
+                failure.get_or_insert(error);
+            }
+        }
+        link.touch();
+        link.publish_now();
+        failure.map_or(Ok(()), Err)
+    }
+    /// The window's Full Access alert answered (`accepted`: Allow).
+    pub fn agent_consent(&self, effect: u64, accepted: bool) -> std::result::Result<(), String> {
+        let (agent, link) = self.agent_state()?;
+        let now = agent_host::now_ms();
+        {
+            let mut state = agent.shared();
+            state
+                .panel
+                .acknowledge(effect, accepted)
+                .map_err(|e| format!("{e:?}"))?;
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        link.touch();
+        link.publish_now();
+        Ok(())
+    }
+    /// What `thread_read` adds from this window's live Agent panel: the
+    /// running trace as text, open questions, and the run. `None` when the
+    /// panel holds no session for the thread.
+    pub fn agent_thread_live(&self, thread: &str) -> Option<Value> {
+        let shared = {
+            let backend = self.backend("agent").ok()?;
+            let state = backend.shared().native.agent.clone();
+            state.or_else(|| self.broker.carried.shared().clone())?
+        };
+        let state = shared.shared();
+        let session = state.panel.session(thread).ok()?;
+        let busy = session.run.is_some();
+        let steps: Vec<Value> = session.trace.rows.values().cloned().collect();
+        let mut activity = if busy {
+            pm_agents::conversation::message_text(&json!({"role":"trace","steps":steps}))
+        } else {
+            String::new()
+        };
+        // Main keeps the last 20,000 UTF-16 units.
+        let units: Vec<u16> = activity.encode_utf16().collect();
+        if units.len() > 20_000 {
+            activity = String::from_utf16_lossy(&units[units.len() - 20_000..]);
+        }
+        let questions: Vec<Value> = session
+            .trace
+            .rows
+            .page(0..session.trace.rows.len())
+            .iter()
+            .filter(|row| row.value["kind"] == "question" && row.value["status"] == "open")
+            .map(|row| {
+                json!({"itemId":row.id,"blocking":row.value["blocking"] != false,
+                    "questions":row.value["questions"].clone()})
+            })
+            .collect();
+        Some(
+            json!({"busy":busy,"runId":session.run.as_ref().map(|run| run.id.clone()),
+            "activity":activity,"questions":questions}),
+        )
+    }
+    fn create(
+        kernel: KernelHandle,
+        project: &str,
+        application: bool,
+        wake: impl Fn() + Send + Sync + 'static,
+        carry: Option<AgentCarry>,
+    ) -> Result<Self> {
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        // Speech model downloads publish Settings › Transcription again, and
+        // the Export sheet's encoder checks the sheet.
+        crate::wakers::watch(&wake);
+        let (agent, carried) = match carry.map(AgentCarry::adopt) {
+            Some((link, state)) => (link, Some(state)),
+            None => Default::default(),
+        };
+        let broker = Arc::new(Broker {
+            extensions: Default::default(),
+            project: project.into(),
+            application,
+            kernel,
+            entries: Default::default(),
+            publications: Default::default(),
+            platform: Default::default(),
+            drop_lookup: Default::default(),
+            errors: Default::default(),
+            facts: Mutex::new(json!({})),
+            timeline_view: Default::default(),
+            timeline_outline: Default::default(),
+            platform_replies: Default::default(),
+            timeline_requests: Default::default(),
+            platform_ids: std::sync::atomic::AtomicU64::new(1),
+            wake,
+            agent,
+            carried: Mutex::new(carried),
+            agent_released: Default::default(),
+            thread_requests: Default::default(),
+            commands: Default::default(),
+            themes: Default::default(),
+            overlays_cleared: Default::default(),
+            overlay_interactive: Default::default(),
+            slots_cleared: Default::default(),
+            toolbar_items: Default::default(),
+            panel_headers: Default::default(),
+            menu_bar: Default::default(),
+            tools: Default::default(),
+            event_subs: Default::default(),
+            export_probe: Default::default(),
+            parked: Default::default(),
+            theme_request: Default::default(),
+            effect_clipboard: Default::default(),
+            presets: Default::default(),
+            preset_sheet: Default::default(),
+            painters: Default::default(),
+            chrome: Default::default(),
+            closing: Default::default(),
+        });
+        let pool = RuntimePool::new(
+            format!("window:{project}"),
+            Config {
+                limits: Limits {
+                    // A mounted built-in holds about 10 MiB.
+                    initial_heap_bytes: 16 * 1024 * 1024,
+                    ..Limits::default()
+                },
+                watchdog: WatchdogPolicy::default(),
+                kernel: broker.clone(),
+                host: broker.clone(),
+                watchdog_hooks: broker.clone(),
+                engine: Some(broker.clone()),
+                cache: CodeCache::new(4 * 1024 * 1024),
+                // The process's one cage account: each isolate (the nine
+                // built-ins and the user's v4 extensions, §3.4/§3.7) starts
+                // at a 16 MiB slice and grows toward its own ceiling only
+                // while every window's isolates together leave room. Closed
+                // panels park to give theirs back.
+                admission: Admission::cage(),
+            },
+        )?;
+        Ok(Self {
+            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), false, false)),
+            pool,
+            broker,
+            realms: Mutex::default(),
+            panel_replacements: Mutex::default(),
+            extension_realms: Mutex::default(),
+            forks: Mutex::default(),
+        })
+    }
+    /// Ticket is awaited off the UI handler. First publication is delivered only
+    /// after Rust accepts the complete atomic surface commit.
+    pub fn mount(&mut self, panel: &str) -> Result<Ticket<Evaluation>> {
+        self.mount_builtin(panel)
+    }
+
+    /// A closed, parkable panel has no isolate until its first layout show.
+    pub fn defer_mount(&self, panel: &str) -> bool {
+        if !builtin_panel(panel).is_some_and(|p| p.parks) {
+            return false;
+        }
+        self.broker.parked.shared().insert(panel.into());
+        true
+    }
+
+    pub fn memory_pressure(&self) {
+        let extensions = self.extension_realms.shared();
+        for realm in self.realms.shared().values().chain(extensions.values()) {
+            let _ = realm.memory_pressure();
+        }
+    }
+    /// Parks a closed built-in panel: its isolate goes and its reservation
+    /// returns to the cage account; `unpark` starts it again from its first
+    /// commit. Waits (bounded) for the isolate: call off the main thread.
+    pub fn park(&self, panel: &str) -> bool {
+        let _replacement = self.panel_replacements.shared();
+        if !builtin_panel(panel).is_some_and(|p| p.parks)
+            || !self.realms.shared().contains_key(panel)
+        {
+            return false;
+        }
+        self.retire(panel);
+        self.broker.parked.shared().insert(panel.into());
+        true
+    }
+    /// A parked panel opened again, as the fork that replaced it if any.
+    pub fn unpark(&self, panel: &str) -> Option<Result<Ticket<Evaluation>>> {
+        if !self.broker.parked.shared().remove(panel) {
+            return None;
+        }
+        let fork = self.forks.shared().get(panel).cloned();
+        Some(match fork {
+            Some((fork, graph)) => self.start(panel, fork_source(&fork, &graph, panel)),
+            None => self.mount_builtin(panel),
+        })
+    }
+    pub fn is_parked(&self, panel: &str) -> bool {
+        self.broker.parked.shared().contains(panel)
+    }
+    fn mount_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        let Some(builtin) = builtin_panel(panel) else {
+            return Err(Error::Invalid("unregistered/already mounted built-in"));
+        };
+        if self.realms.shared().contains_key(panel)
+            || (self.broker.application && !builtin.application)
+        {
+            return Err(Error::Invalid("unregistered/already mounted built-in"));
+        }
+        let realm = self
+            .pool
+            .builtin_panel_realm(panel, self.broker.wake.clone())?;
+        self.start_in(
+            panel,
+            format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)),
+            realm,
+        )
+    }
+    /// A built-in panel whose realm ran out of memory: its isolate goes and a
+    /// fresh one mounts it again. Off the main thread (it waits for the old
+    /// isolate's reservation to come back).
+    pub fn restart(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        let _replacement = self.panel_replacements.shared();
+        if self
+            .broker
+            .closing
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Error::Closed);
+        }
+        if self.forks.shared().contains_key(panel) {
+            return Err(Error::StaleGeneration);
+        }
+        // Agent runs live in the native model. Move that model to the next
+        // realm in the same way an application window carries it to a project.
+        if panel == "agent"
+            && let Ok(backend) = self.backend(panel)
+            && let Some(agent) = backend.shared().native.agent.clone()
+        {
+            *self.broker.carried.shared() = Some(agent);
+        }
+        self.retire(panel);
+        self.broker.parked.shared().remove(panel);
+        self.mount_builtin(panel)
+    }
+
+    pub fn take_panel_memory_failures(&self) -> Vec<(String, Error)> {
+        self.realms
+            .shared()
+            .iter()
+            .filter_map(|(panel, realm)| Some((panel.clone(), realm.take_panel_memory_failure()?)))
+            .collect()
+    }
+
+    fn start(&self, panel: &str, source: String) -> Result<Ticket<Evaluation>> {
+        let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
+        self.start_in(panel, source, realm)
+    }
+    fn start_in(&self, panel: &str, source: String, realm: Realm) -> Result<Ticket<Evaluation>> {
+        if matches!(panel, "agent" | "settings") {
+            self.broker.agent.add_realm(realm.clone());
+        }
+        // Register the realm while queuing its first evaluation. The owner can
+        // wake the host with a failure as soon as it starts evaluating.
+        let mut realms = self.realms.shared();
+        let ticket = realm.eval(source)?;
+        realms.insert(panel.into(), realm);
+        Ok(ticket)
+    }
+    /// Retire a built-in panel's realm, its writer and its surface, so the next
+    /// mount of that id starts from its own first commit.
+    /// Waits (bounded) for the old isolate to go, so its heap reservation is
+    /// back before the next one starts: call off the main thread.
+    fn retire(&self, panel: &str) {
+        let realm = self.realms.shared().remove(panel);
+        if let Some(realm) = realm {
+            realm.close();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !realm.is_disposed() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        self.broker.forget_effects(panel);
+        self.broker.entries.shared().remove(panel);
+        if panel == "export" {
+            *self.broker.export_probe.shared() = None;
+        }
+        self.broker.publications.shared().remove(panel);
+        self.broker.forget_commands(panel);
+        self.broker.forget_themes(panel);
+        self.broker.forget_overlay(panel);
+        self.broker.forget_timeline(panel, None);
+        self.broker.forget_painter(panel);
+    }
+    /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
+    /// it: same realm identity, routes and host operations, the fork's code.
+    /// Waits for the old isolate to close, so call it off the main thread.
+    pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
+        if builtin_panel(panel).is_none_or(|p| self.broker.application && !p.application) {
+            return Err(Error::Invalid("unregistered built-in"));
+        }
+        let _replacement = self.panel_replacements.shared();
+        self.retire(panel);
+        self.forks
+            .shared()
+            .insert(panel.into(), (fork.into(), graph.clone()));
+        self.start(panel, fork_source(fork, graph, panel))
+    }
+    /// The fork went away: the shipped panel comes back.
+    pub fn restore(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        let _replacement = self.panel_replacements.shared();
+        self.retire(panel);
+        self.forks.shared().remove(panel);
+        self.broker.parked.shared().remove(panel);
+        self.mount_builtin(panel)
+    }
+    /// Realms running user code: third-party extensions and forks of
+    /// built-ins. Menus, clip painters and viewer overlays come from these.
+    fn user_realms(&self) -> Vec<(String, Realm)> {
+        let forks = self.forks.shared();
+        let realms = self.realms.shared();
+        let mut out: Vec<(String, Realm)> = forks
+            .keys()
+            .filter_map(|panel| Some((panel.clone(), realms.get(panel)?.clone())))
+            .collect();
+        drop((realms, forks));
+        out.extend(
+            self.extension_realms
+                .shared()
+                .iter()
+                .map(|(id, realm)| (id.clone(), realm.clone())),
+        );
+        out
+    }
+    /// What agent runs may use. Without this the panel reports no connection.
+    pub fn set_agent_environment(
+        &self,
+        environment: pm_agents::launch::Environment,
+        open: std::sync::Arc<pm_agents::account::Opener>,
+    ) {
+        self.broker.agent.set_environment(environment, open);
+    }
+    /// Settings › Providers' accounts (the app's key sheet saves through them).
+    pub fn agent_accounts(&self) -> Option<std::sync::Arc<pm_agents::account::Accounts>> {
+        self.broker.agent.accounts()
+    }
+    pub fn set_agent_capture(&self, capture: std::sync::Arc<agent_context::FrameCapture>) {
+        self.broker.agent.set_capture(capture);
+    }
+    pub fn set_agent_focus(&self, focus: Value) {
+        self.broker.agent.set_focus(focus);
+    }
+    /// Host-owned final verification and result recovery on workers.
+    pub fn set_agent_completion(&self, service: std::sync::Arc<agent_completion::Service>) {
+        *self.broker.agent.completion.shared() = Some(service);
+    }
+    /// Who hears that an agent run was sent, finished or asked a question.
+    pub fn set_agent_notices(&self, sink: std::sync::Arc<NoticeSink>) {
+        self.broker.agent.set_notices(sink);
+    }
+    /// A third-party v4 extension: its own isolate, the same host and native
+    /// surface path as a built-in, and a module graph from the native compiler.
+    /// `hot` is what the previous version left in `api.hot.data` (`hot()`).
+    pub fn mount_extension(
+        &self,
+        id: &str,
+        graph: &Value,
+        hot: Option<&str>,
+    ) -> Result<Ticket<Evaluation>> {
+        let mut extensions = self.extension_realms.shared();
+        if builtin_panel(id).is_some() || extensions.contains_key(id) || self.broker.application {
+            return Err(Error::Invalid("extension panel id is taken"));
+        }
+        self.broker.extensions.shared().insert(id.into());
+        let realm = self.pool.realm(RealmKind::V4Extension(id.into()))?;
+        let ticket = realm.eval(format!(
+            "{BUNDLE}\n__pmBuiltin.mountExtension({},{},undefined,{})",
+            json!(id),
+            json!(graph.to_string()),
+            hot.map_or(Value::Null, |h| json!(h)),
+        ))?;
+        extensions.insert(id.into(), realm);
+        Ok(ticket)
+    }
+    /// Before a rebuilt extension reloads: its `api.hot.data` as JSON text.
+    pub fn hot(&self, id: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(id)?.eval("__pmBuiltin.hot()")
+    }
+    /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
+    /// its writer on the isolate owner; the same id can mount again.
+    pub fn unmount_extension(&self, id: &str) {
+        if let Some(realm) = self.extension_realms.shared().remove(id) {
+            realm.close();
+        }
+        self.broker.extensions.shared().remove(id);
+        // Its surface and router go too; a late call from it is a stale generation.
+        self.broker.forget_effects(id);
+        self.broker.entries.shared().remove(id);
+        if id == "export" {
+            *self.broker.export_probe.shared() = None;
+        }
+        self.broker.forget_commands(id);
+        self.broker.forget_themes(id);
+        self.broker.forget_overlay(id);
+        self.broker.forget_slots(id);
+        self.broker.forget_toolbar(id);
+        self.broker.forget_panel_headers(id);
+        self.broker.forget_menu_bar(id);
+        self.broker.forget_tools(id);
+        self.broker.forget_events(id);
+        self.broker.forget_timeline(id, None);
+        self.broker.forget_painter(id);
+    }
+    /// Every extension command in this window when they changed since `seen`:
+    /// `(revision, [{panel, id, title, key}])`.
+    /// Themes v4 extensions offer, when they changed since `seen`: each
+    /// `{panel, id, title, tokens}`.
+    pub fn themes_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let themes = self.broker.themes.shared();
+        (themes.0 != seen).then(|| {
+            let list = themes
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |t| {
+                        let mut t = t.clone();
+                        t["panel"] = json!(panel);
+                        t
+                    })
+                })
+                .collect();
+            (themes.0, list)
+        })
+    }
+    pub fn commands_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let commands = self.broker.commands.shared();
+        (commands.0 != seen).then(|| {
+            let list = commands
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |c| {
+                        json!({"panel": panel, "id": c["id"], "title": c["title"], "key": c["key"]})
+                    })
+                })
+                .collect();
+            (commands.0, list)
+        })
+    }
+    /// Layer 1: window toolbar items contributed by v4 extensions since `seen`.
+    pub fn toolbar_items_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let items = self.broker.toolbar_items.shared();
+        (items.0 != seen).then(|| {
+            let list = items
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |item| {
+                        let mut item = item.clone();
+                        item["panel"] = json!(panel);
+                        item
+                    })
+                })
+                .collect();
+            (items.0, list)
+        })
+    }
+    /// Layer 1: panel header actions contributed by v4 extensions since `seen`.
+    pub fn panel_headers_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let items = self.broker.panel_headers.shared();
+        (items.0 != seen).then(|| {
+            let list = items
+                .1
+                .iter()
+                .flat_map(|(owner, list)| {
+                    list.as_array().into_iter().flatten().map(move |item| {
+                        let mut item = item.clone();
+                        item["owner"] = json!(owner);
+                        item
+                    })
+                })
+                .collect();
+            (items.0, list)
+        })
+    }
+    /// Layer 1: menu bar contributions from v4 extensions since `seen`.
+    pub fn menu_bar_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let menus = self.broker.menu_bar.shared();
+        (menus.0 != seen).then(|| {
+            let list = menus
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |entry| {
+                        let mut entry = entry.clone();
+                        entry["panel"] = json!(panel);
+                        entry
+                    })
+                })
+                .collect();
+            (menus.0, list)
+        })
+    }
+    /// Layer 2: interactive viewer tools registered by v4 extensions since `seen`.
+    pub fn tools_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let tools = self.broker.tools.shared();
+        (tools.0 != seen).then(|| {
+            let list = tools
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |tool| {
+                        let mut tool = tool.clone();
+                        tool["panel"] = json!(panel);
+                        tool
+                    })
+                })
+                .collect();
+            (tools.0, list)
+        })
+    }
+    /// Whether a viewer overlay (`<panel>@viewer`) accepts pointer input.
+    pub fn overlay_interactive(&self, overlay_id: &str) -> bool {
+        self.broker
+            .overlay_interactive
+            .shared()
+            .get(overlay_id)
+            .copied()
+            .unwrap_or(false)
+    }
+    /// Built-in panel slots cleared since the last drain (`<panel>@slot:<slotId>`).
+    pub fn take_cleared_slots(&self) -> Vec<String> {
+        std::mem::take(&mut *self.broker.slots_cleared.shared())
+    }
+    /// Runs a contributed toolbar button handler in its extension's realm.
+    pub fn run_toolbar(&self, panel: &str, id: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runToolbar({})", json!(id)))
+    }
+    /// Runs a contributed panel header action in its extension's realm.
+    pub fn run_panel_header(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runPanelHeader({})", json!(key)))
+    }
+    /// Runs a contributed macOS menu bar item in its extension's realm.
+    pub fn run_menu_bar(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runMenuBar({})", json!(key)))
+    }
+    /// Tells extension realms which custom tool (if any) is currently active.
+    pub fn set_active_tool(&self, active: Option<(&str, &str)>) {
+        for (panel, realm) in self.user_realms() {
+            let id = active
+                .filter(|(owner, _)| *owner == panel)
+                .map(|(_, tool)| json!(tool))
+                .unwrap_or(Value::Null);
+            let _ = realm.eval_discrete(format!("__pmBuiltin.toolState({id})"));
+        }
+    }
+    /// Routes a viewer pointer or keyboard event to an active custom tool.
+    pub fn tool_event(&self, panel: &str, tool_id: &str, event: &Value) -> Result<Ticket<Evaluation>> {
+        let realm = self.realm_of(panel)?;
+        let script = format!("__pmBuiltin.toolEvent({},{})", json!(tool_id), event);
+        if event["type"] == "move" {
+            realm.eval_latest(
+                StateChannel::Pointer {
+                    panel: format!("{panel}@tool:{tool_id}"),
+                    pointer: 1,
+                },
+                script,
+            )
+        } else {
+            realm.eval_discrete(script)
+        }
+    }
+    /// Pushes a lifecycle event (`playback`, `time`, `selection`, `document`,
+    /// `layout`, `tool`, `command`, `exportStart`, `exportComplete`) only to
+    /// extension realms currently subscribed to `name`.
+    pub fn emit_event(&self, name: &str, payload: &Value) {
+        let targets: Vec<String> = {
+            let subs = self.broker.event_subs.shared();
+            subs.iter()
+                .filter(|(_, events)| events.contains(name))
+                .map(|(panel, _)| panel.clone())
+                .collect()
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let script = format!("__pmBuiltin.emitEvent({},{})", json!(name), payload);
+        for panel in targets {
+            if let Ok(realm) = self.realm_of(&panel) {
+                let _ = if matches!(name, "time" | "playback") {
+                    realm.eval_latest(StateChannel::Control { panel: format!("{panel}@ev:{name}"), target: 0 }, script.clone())
+                } else {
+                    realm.eval_discrete(script.clone())
+                };
+            }
+        }
+    }
+    /// Runs a command an extension registered, in that extension's realm.
+    /// True while any user realm runs (context menus ask them).
+    pub fn has_extensions(&self) -> bool {
+        !self.forks.shared().is_empty() || !self.extension_realms.shared().is_empty()
+    }
+    /// The latest `themes.activate` in this window: `(number, panel, id)`,
+    /// with `id` `None` for the built-in look. Numbers only grow.
+    pub fn theme_request(&self) -> Option<ThemeRequest> {
+        self.broker.theme_request.shared().1.clone()
+    }
+    /// Every v4 extension's items for a menu opening at `location` (each
+    /// realm waits at most 100 ms on its own contributions).
+    pub fn gather_menus(
+        &self,
+        location: &str,
+        ctx: &Value,
+    ) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let script = format!("__pmBuiltin.gatherMenu({},{})", json!(location), ctx);
+        self.user_realms()
+            .into_iter()
+            .map(|(id, realm)| (id, realm.eval(script.clone())))
+            .collect()
+    }
+    /// The person chose `key` from the items `panel` gave the last gather.
+    pub fn run_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runMenu({})", json!(key)))
+    }
+    /// Clip decorations for the timeline's visible clips from each realm
+    /// with a painter (`timeline.paint`); each answers JSON text.
+    pub fn paint_clips(&self, clips: &Value) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let script = format!("__pmBuiltin.paintClips({clips})");
+        let painters = self.broker.painters.shared().1.clone();
+        self.user_realms()
+            .into_iter()
+            .filter(|(id, _)| painters.contains(id))
+            .map(|(id, realm)| (id, realm.eval(script.clone())))
+            .collect()
+    }
+    /// 0 with no clip painter; otherwise moves whenever one arrives or leaves.
+    pub fn painters_revision(&self) -> u64 {
+        let painters = self.broker.painters.shared();
+        if painters.1.is_empty() { 0 } else { painters.0 }
+    }
+    /// Viewer overlays whose extension took them down since the last look.
+    pub fn take_cleared_overlays(&self) -> Vec<String> {
+        std::mem::take(&mut *self.broker.overlays_cleared.shared())
+    }
+    /// Where the composition sits in the viewer, for extension overlays:
+    /// `{x, y, width, height, scale}` in overlay points.
+    pub fn viewer_frame(&self, frame: &Value) {
+        let script = format!("__pmBuiltin.viewerFrame({frame})");
+        for (_, realm) in self.user_realms() {
+            let _ = realm.eval_latest(StateChannel::ViewerFrame, script.clone());
+        }
+    }
+    pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval_discrete(format!(
+            "__pmBuiltin.runCommand({},{})",
+            json!(id),
+            json!(args)
+        ))
+    }
+    fn realm_of(&self, panel: &str) -> Result<Realm> {
+        if let Some(realm) = self.realms.shared().get(panel) {
+            return Ok(realm.clone());
+        }
+        self.extension_realms
+            .shared()
+            .get(panel)
+            .cloned()
+            .ok_or(Error::Closed)
+    }
+    pub fn script_queue_stats(&self, panel: &str) -> Option<QueueStats> {
+        self.realm_of(panel).ok().map(|realm| realm.queue_stats())
+    }
+    fn needs_publication(&self, panel: &str) -> bool {
+        if panel == "fxbrowser" && self.broker.preset_sheet.shared().is_some() {
+            return true;
+        }
+        let Some(entry) = self.broker.entry(panel) else {
+            return true;
+        };
+        // A busy realm may be processing an edit or an earlier publication.
+        // Keep its queued wake without waiting for any V8-owned locks here.
+        let Ok(entry) = entry.try_lock() else {
+            return true;
+        };
+        let Ok(backend) = entry.backend.try_lock() else {
+            return true;
+        };
+        if backend.has_pending_publication_work() {
+            return true;
+        }
+        match (
+            &backend.last_publication,
+            publication::Inputs::read(&backend),
+        ) {
+            (Some(last), Some(current)) => !last.unchanged(&current, panel, backend.reads_time()),
+            _ => true,
+        }
+    }
+    /// `publish` while a pointer gesture (a drag, a scrub) holds an edit
+    /// open: a shipped built-in panel publishes only when `live(id)`; the
+    /// others keep their last tree until the next full `publish`, which the
+    /// gesture's end makes. Forks and extensions, whose content the host
+    /// cannot know, publish as always. Also says whether any panel waited.
+    pub fn publish_live(
+        &self,
+        live: impl Fn(&str) -> bool,
+    ) -> (Vec<(String, Result<Ticket<Evaluation>>)>, bool) {
+        let forked: std::collections::BTreeSet<String> =
+            self.forks.shared().keys().cloned().collect();
+        let mut waited = false;
+        let realms: Vec<_> = {
+            let extensions = self.extension_realms.shared();
+            let realms = self.realms.shared();
+            realms
+                .iter()
+                .filter(|(id, _)| {
+                    if forked.contains(*id) {
+                        return true;
+                    }
+                    let needed = self.needs_publication(id);
+                    let now = live(id);
+                    waited |= needed && !now;
+                    needed && now
+                })
+                .chain(extensions.iter())
+                .map(|(id, realm)| (id.clone(), realm.clone()))
+                .collect()
+        };
+        let tickets = realms
+            .into_iter()
+            .map(|(id, realm)| {
+                (
+                    id,
+                    realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"),
+                )
+            })
+            .collect();
+        (tickets, waited)
+    }
+    pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let forked: std::collections::BTreeSet<String> =
+            self.forks.shared().keys().cloned().collect();
+        let realms: Vec<_> = {
+            let extensions = self.extension_realms.shared();
+            let realms = self.realms.shared();
+            realms
+                .iter()
+                .filter(|(id, _)| forked.contains(*id) || self.needs_publication(id))
+                .chain(extensions.iter())
+                .map(|(id, realm)| (id.clone(), realm.clone()))
+                .collect()
+        };
+        realms
+            .into_iter()
+            .map(|(id, realm)| {
+                (
+                    id,
+                    realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"),
+                )
+            })
+            .collect()
+    }
+    /// Playing, one panel follows the playhead (Properties' keyframed
+    /// values): its time facts move and it alone publishes, so the others,
+    /// and the timeline's native playhead, cost nothing. `None` while the
+    /// panel is not running.
+    pub fn follow_time(
+        &self,
+        panel: &str,
+        time: f64,
+        playing: bool,
+    ) -> Option<Result<Ticket<Evaluation>>> {
+        let realm = self.realms.shared().get(panel).cloned()?;
+        let entry = self.broker.entry(panel)?;
+        {
+            let mut facts = self.broker.facts.shared();
+            facts["time"] = json!(time);
+            facts["playing"] = json!(playing);
+        }
+        let backend = entry.shared().backend.clone();
+        {
+            let mut backend = backend.shared();
+            backend.native.facts["time"] = json!(time);
+            backend.native.facts["playing"] = json!(playing);
+        }
+        if !self.forks.shared().contains_key(panel) && !self.needs_publication(panel) {
+            return None;
+        }
+        Some(realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"))
+    }
+    /// The Export sheet's encoder checks end on a worker, which only wakes
+    /// the host: the sheet is published again here, once per finished check,
+    /// so its formats and Export Video leave "Checking…" without waiting for
+    /// some other change. The host calls it on every wake.
+    pub fn publish_finished_checks(&self) -> Option<Result<Ticket<Evaluation>>> {
+        let probe = self.broker.export_probe.shared().clone()?;
+        let finished = std::mem::take(&mut probe.lock().unwrap().unpublished);
+        finished.then(|| {
+            self.realm_of("export").and_then(|realm| {
+                realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()")
+            })
+        })
+    }
+    pub fn take_publications(&self) -> Vec<Publication> {
+        std::mem::take(&mut *self.broker.publications.shared())
+            .into_values()
+            .collect()
+    }
+    /// Read-only native view state. Sharing the Arc adds no projection work
+    /// or project writes to painting; speed edits consume it on the worker.
+    pub fn update_timeline_view(&self, view: Arc<pm_panel_timeline::TimelineModel>) {
+        *self.broker.timeline_view.shared() = Some(view);
+    }
+    pub fn update_timeline_outline(
+        &self,
+        view: Arc<pm_panel_timeline::TimelineModel>,
+        refresh: bool,
+    ) -> bool {
+        *self.broker.timeline_outline.shared() = Some(view);
+        // Geometry can change without a new project, selection, or time
+        // subscription value. Refresh the outline's native projection.
+        refresh && self.realm_of("timeline").is_ok_and(|realm| {
+            realm.notify_latest(StateChannel::TimelineOutline, "__pmBuiltin.publish(true)").is_ok()
+        })
+    }
+    fn prepare_timeline_request(
+        &self,
+        mut request: pm_kernel::Request,
+    ) -> std::result::Result<pm_kernel::Request, String> {
+        let published = self
+            .broker
+            .kernel
+            .published(&self.broker.project)
+            .ok_or("No open project")?;
+        let view = self.broker.timeline_view.shared().clone();
+        models::pin_speed_request(view, &published, &mut request)?;
+        Ok(request)
+    }
+    pub fn update_facts(&self, facts: Value) {
+        *self.broker.facts.shared() = facts.clone();
+        for entry in self.broker.all_entries() {
+            entry.shared().backend.shared().native.facts = facts.clone();
+        }
+    }
+    /// Worker-only native observations. Never expose filesystem paths to JSX.
+    pub fn update_media(
+        &self,
+        originals: BTreeMap<String, std::path::PathBuf>,
+        observed: pm_panel_media::readiness::ObservedRuntime,
+    ) {
+        for entry in self.broker.all_entries() {
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
+            if backend.native.originals != originals {
+                backend.native.originals.clone_from(&originals);
+                if backend.panel_id == "inspector" {
+                    backend.last_publication = None;
+                }
+            }
+            let mut observed = observed.clone();
+            observed.folders = backend.native.media_runtime.folders.clone();
+            if backend.native.media_runtime != observed {
+                backend.native.media_runtime = observed.clone();
+                backend.native.media_sequence += 1;
+            }
+        }
+    }
+    /// The Project panel lists only missing files from its next request; the
+    /// media sequence moves so it asks again at the next publication. Takes
+    /// every panel's locks: call it on a worker, as `update_media` is.
+    pub fn show_missing_media(&self) {
+        for entry in self.broker.all_entries() {
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
+            backend.native.show_missing = true;
+            backend.native.media_sequence += 1;
+        }
+    }
+    /// Admit worker-owned originals, then await the actor's durable outcome.
+    /// A metadata-only StoredAsset is never sufficient for live admission.
+    pub fn admit_media(
+        &self,
+        owner: &pm_panel_media::Stamp,
+        items: Vec<RetainedAsset>,
+        into: &pm_panel_media::Destination,
+        replace: Option<String>,
+        place: Vec<pm_kernel::Command>,
+        caller: pm_kernel::Caller,
+    ) -> std::result::Result<
+        pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
+        String,
+    > {
+        if self.broker.application || owner.project != self.broker.project {
+            return Err("Media completion belongs to a different project".into());
+        }
+        let published = self
+            .broker
+            .kernel
+            .published(&owner.project)
+            .ok_or("Project closed")?;
+        let catalog = pm_panel_media::Catalog::published(&published)
+            .map_err(|_| "The project's media could not be read")?;
+        let mut stored = Vec::new();
+        let mut bindings = Vec::new();
+        for item in items {
+            let id = replace.as_ref().unwrap_or(&item.id).clone();
+            stored.push(pm_panel_media::StoredAsset {
+                id: item.id,
+                metadata: item.metadata,
+                original_version: item.original.version().into(),
+            });
+            let expected = published
+                .snapshot
+                .root()
+                .and_then(|r| r.get("assets"))
+                .and_then(|a| a.get(&id))
+                .map(pm_model::Node::to_value);
+            bindings.push(pm_kernel::MediaBinding {
+                asset: id,
+                expected,
+                original: item.original,
+                previous: item.previous,
+            });
+        }
+        let mut edit = catalog
+            .prepare_import(
+                owner,
+                stored,
+                into.folder.clone(),
+                replace,
+                &into.new_folders,
+            )
+            .map_err(|error| match error {
+                pm_panel_media::Error::MissingItem => "That folder is no longer in the project",
+                _ => "The import no longer matches the project",
+            })?;
+        if !place.is_empty() {
+            edit.label = match place.len() {
+                1 => "Import file".to_owned(),
+                n => format!("Import {n} files"),
+            };
+        }
+        Ok(self.broker.kernel.call(
+            &owner.project,
+            edit.request_with_media(caller, bindings, place),
+        ))
+    }
+
+    pub fn platform_reply(&self, id: u64, result: std::result::Result<Value, String>) {
+        if id == 0 {
+            return;
+        }
+        self.broker.platform_replies.shared().insert(
+            id,
+            match result {
+                Ok(value) => json!({"accepted":true,"value":value}),
+                Err(error) => json!({"accepted":false,"error":error}),
+            },
+        );
+    }
+    pub fn observe_render_queue(&self, queue: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of("export")?.eval(format!("runtime.engine('export.queueObserve',{});__pmBuiltin.publish()", queue))
+    }
+    pub fn observe_export_destination(&self, destination: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of("export")?.eval(format!(
+            "runtime.engine('export.destinationObserve',{});__pmBuiltin.publish()", destination
+        ))
+    }
+    /// A disk inventory prepared by the app worker for this Export sheet.
+    pub fn set_export_extensions(&self, extensions: Value) {
+        if let Some(entry) = self.broker.entry("export") {
+            let entry = entry.shared();
+            let mut backend = entry.backend.shared();
+            backend.native.export_extensions = extensions;
+        }
+    }
+
+    /// The v4 definitions (effects, transitions, and custom layers) in this
+    /// runtime, with their provider ids. The kernel registry also contains
+    /// extensions mounted by other windows.
+    pub fn extension_effects(&self) -> Vec<(String, pm_protocol::definitions::DefinitionSnapshot)> {
+        let owners: BTreeMap<_, _> = self
+            .extension_realms
+            .shared()
+            .keys()
+            .filter_map(|id| {
+                let entry = self.broker.entry(id)?;
+                let owner = entry.shared().backend.shared().caller.writer;
+                Some((owner, id.clone()))
+            })
+            .collect();
+        let state = self.broker.kernel.state();
+        ["effects", "transitions", "layers"]
+            .into_iter()
+            .flat_map(|registry| state.registries.get(registry).into_iter().flatten())
+            .filter_map(|entry| {
+                let id = owners.get(&entry.owner)?;
+                let snapshot = entry.definition.get("nativeSnapshot")?;
+                let definition =
+                    serde_json::from_str(&pm_model::json::to_canonical_string(snapshot)).ok()?;
+                Some((id.clone(), definition))
+            })
+            .collect()
+    }
+
+    pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of("export")?.eval_latest(
+            StateChannel::ExportProgress,
+            format!(
+                "runtime.engine('export.observe',{});__pmBuiltin.publish()",
+                run
+            ),
+        )
+    }
+    /// Brings Settings forward on one of its pages (`shortcuts`).
+    pub fn show_section(&self, panel: &str, section: &str) -> Result<Ticket<Evaluation>> {
+        let section = serde_json::to_string(section).unwrap_or_default();
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.show({section})"))
+    }
+    /// Something done in a panel's native chrome (Settings' sidebar and
+    /// search field), for the panel's model.
+    pub fn panel_act(&self, panel: &str, intent: &Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.act({intent})"))
+    }
+    pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval_discrete("__pmBuiltin.show()")
+    }
+    /// A shell-admitted mask reveal uses the same model and persistence as M in the timeline.
+    pub fn reveal_masks(&self) -> Result<Ticket<Evaluation>> {
+        static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let millis = CLOCK
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64;
+        self.realm_of("timeline")?.eval_discrete(format!(
+            "__pmBuiltin.command('panel.timeline',{})",
+            json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
+        ))
+    }
+    pub fn timeline_key(
+        &self,
+        layer: &str,
+        channel: &str,
+        key: &str,
+        additive: bool,
+    ) -> Result<Ticket<Evaluation>> {
+        self.timeline_action(json!({"type":"selectKeys","layer":layer,"path":channel,"ids":[key],"additive":additive}))
+    }
+    /// Enqueue on the existing v4 worker. The ticket covers actor receipts and
+    /// platform acknowledgements; the main thread only polls it. Drivers can
+    /// include decimal document/revision stamps from the inspected frame.
+    pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of("timeline")?
+            .eval_discrete(format!("__pmBuiltin.command('panel.timeline',{})", intent))
+    }
+
+    /// A panel's own command with `intent`, exactly as its controls send it.
+    pub fn panel_command(
+        &self,
+        panel: &str,
+        command: &str,
+        intent: &Value,
+    ) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval_discrete(format!(
+            "__pmBuiltin.command({},{})",
+            json!(command),
+            intent
+        ))
+    }
+
+    /// Inspect exact library source and CAS revision on the panel worker.
+    pub fn timeline_easing_library(&self) -> Result<Ticket<Evaluation>> {
+        self.realm_of("timeline")?
+            .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
+    }
+    pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval_barrier(
+            StateChannel::Parameter(handle.to_owned()),
+            format!("__pmBuiltin.write({},{})", json!(handle), value),
+        )
+    }
+    pub fn write_sample(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: Value,
+    ) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval_latest(
+            StateChannel::Parameter(handle.to_owned()),
+            format!("__pmBuiltin.write({},{})", json!(handle), value),
+        )
+    }
+    /// Every panel of this window copies and pastes effects through
+    /// `clipboard` (the app's one), from panels mounted after this on.
+    pub fn share_effect_clipboard(&self, clipboard: EffectClipboard) {
+        *self.broker.effect_clipboard.shared() = clipboard;
+    }
+    /// v1's inspector service over this window's Effect Controls and the
+    /// app's effect clipboard, callable from any thread.
+    pub fn viewer_effect_visible(&self, layer: &str, effect: &str) -> Option<bool> {
+        let entries = self.broker.entries.try_lock().ok()?;
+        let mut visible = None;
+        for panel in ["layer-effects", "inspector"] {
+            let Some(entry) = entries.get(panel) else { continue };
+            let Ok(entry) = entry.try_lock() else { continue };
+            let Ok(backend) = entry.backend.try_lock() else { continue };
+            let Some(model) = backend.model.as_ref() else { continue };
+            if model.effects.layer.as_deref() == Some(layer) && model.effects.ids.iter().any(|id| id == effect) {
+                return Some(true);
+            }
+            if let Ok(open) = model.effect_disclosure(layer, effect) { visible = Some(visible.unwrap_or(false) || open); }
+        }
+        visible
+    }
+    pub fn effect_desk(&self) -> EffectDesk {
+        EffectDesk(self.broker.clone())
+    }
+    /// The layers a Properties row's binding handle in `panel` edits. Called
+    /// on the main thread, so it never waits on the panel's worker: `None`
+    /// while it is busy, and the caller asks again at the next publication.
+    pub fn bound_layers(&self, panel: &str, handle: &str) -> Option<std::sync::Arc<[String]>> {
+        let entry = self.broker.entries.try_lock().ok()?.get(panel)?.clone();
+        let entry = entry.try_lock().ok()?;
+        let backend = entry.backend.try_lock().ok()?;
+        backend.native.properties.layers_of(handle)
+    }
+    /// The host supplies ownership for paths it materialized from a native drag.
+    pub fn set_drop_lookup(&self, lookup: DropLookup) {
+        *self.broker.drop_lookup.shared() = Some(lookup);
+    }
+
+    pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
+        std::mem::take(&mut *self.broker.platform.shared())
+    }
+    /// A script asked the host for something (a menu, a picker) not yet taken.
+    pub fn platform_pending(&self) -> bool {
+        !self.broker.platform.lock().unwrap().is_empty()
+    }
+    pub fn status(&self) -> Vec<Value> {
+        let entries = self.broker.entries.shared().clone();
+        entries
+            .into_iter()
+            .map(|(panel, entry)| {
+                let queue = self.script_queue_stats(&panel).map(|stats| {
+                    json!({
+                        "busy_rejections": stats.busy_rejections,
+                        "coalesced": stats.coalesced,
+                        "deferred_discrete": stats.deferred_discrete,
+                    })
+                });
+                let entry = entry.shared();
+                json!({
+                    "panel": panel,
+                    "generation": entry.generation,
+                    "surfaceRevision": entry.surface.revision(),
+                    "subscriptions": entry.router.subscription_count(),
+                    "kernelRevision": entry.backend.shared().service_revision,
+                    "scriptQueue": queue,
+                })
+            })
+            .collect()
+    }
+    pub fn take_errors(&self) -> Vec<String> {
+        std::mem::take(&mut *self.broker.errors.shared())
+    }
+    /// Validate the exact tree revision before enqueueing. An old click must not
+    /// activate a newly selected layer after a publication or project switch.
+    pub fn event(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        self.dispatch(panel, generation, revision, target, event, detail, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+        semantic: Option<String>,
+    ) -> Result<Ticket<Evaluation>> {
+        trace(json!({"panel": panel, "dispatch": event}));
+        if let Some(owner) = panel.strip_suffix(VIEWER_OVERLAY) {
+            let entry = self.broker.entry(owner).ok_or(Error::Closed)?;
+            let mut entry = entry.shared();
+            let current_gen = entry.generation;
+            let Entry {
+                overlay,
+                overlay_interaction,
+                ..
+            } = &mut *entry;
+            let ev = overlay_interaction
+                .drive(overlay, generation, current_gen, revision, target, event, detail)
+                .map_err(Error::Host)?;
+            let wire = serde_json::to_string(&ev).map_err(|e| Error::Host(e.to_string()))?;
+            let realm = self.realm_of(owner)?;
+            return realm.eval_discrete(format!("__pmBuiltin.overlayEvent({wire})"));
+        }
+        if let Some((owner, slot)) = panel.split_once(SLOT_PREFIX) {
+            let entry = self.broker.entry(owner).ok_or(Error::Closed)?;
+            let mut entry = entry.shared();
+            let current_gen = entry.generation;
+            let (surface, interaction) = entry.slots.get_mut(slot).ok_or(Error::Closed)?;
+            let ev = interaction
+                .drive(surface, generation, current_gen, revision, target, event, detail)
+                .map_err(Error::Host)?;
+            let wire = serde_json::to_string(&ev).map_err(|e| Error::Host(e.to_string()))?;
+            let realm = self.realm_of(owner)?;
+            return realm.eval_discrete(format!(
+                "__pmBuiltin.slotEvent({},{wire})",
+                json!(slot)
+            ));
+        }
+        let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
+        let (channel, sample) = Self::event_channel(panel, target, event, &detail);
+        let source = Self::event_source(
+            &mut entry.shared(),
+            generation,
+            revision,
+            target,
+            event,
+            detail,
+            semantic,
+        )?;
+        let realm = self.realm_of(panel)?;
+        if sample {
+            realm.eval_latest(channel, source)
+        } else {
+            realm.eval_barrier(channel, source)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event_source(
+        entry: &mut Entry,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+        semantic: Option<String>,
+    ) -> Result<String> {
+        // Match the semantic identity on the same locked surface used for
+        // planning, so republishing cannot drop a valid press (Agent Stop) or
+        // break selection when a panel republishes with fresh node IDs under lag.
+        let mut target = target;
+        let semantic = semantic.and_then(|id| {
+            let matches = |node: &pm_surface::Node| {
+                node.props.get("id").and_then(Value::as_str) == Some(id.as_str())
+            };
+            if entry.surface.node(target).is_some_and(matches) {
+                Some(id)
+            } else if let Some((&found_id, _)) =
+                entry.surface.nodes().iter().find(|(_, node)| matches(node))
+            {
+                target = found_id;
+                Some(id)
+            } else {
+                None
+            }
+        });
+        let revision = if semantic.is_some() { entry.surface.revision() } else { revision };
+        let mut event = entry
+            .interaction
+            .drive(
+                &mut entry.surface,
+                generation,
+                entry.generation,
+                revision,
+                target,
+                event,
+                detail,
+            )
+            .map_err(Error::Host)?;
+        event.plan.semantic = semantic;
+        let wire = serde_json::to_string(&event).map_err(|e| Error::Host(e.to_string()))?;
+        Ok(format!("__pmBuiltin.event({wire})"))
+    }
+
+    /// A press may republish before its click lands. Activation still reaches
+    /// a node only while it carries the same semantic identity as the one hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn activate(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        semantic: Option<&str>,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        self.dispatch(
+            panel, generation, revision, target, event, detail,
+            semantic.map(str::to_owned),
+        )
+    }
+    /// Enqueue UI input in call order. Planning and model locks stay off the UI
+    /// thread. An activation may follow a republished node with the same identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_activation(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        semantic: Option<&str>,
+        event: &str,
+        detail: EventDetail,
+        sample: bool,
+    ) -> Result<Ticket<Evaluation>> {
+        self.queue_event(
+            panel,
+            generation,
+            Some(revision),
+            target,
+            semantic.map(str::to_owned),
+            event,
+            detail,
+            sample,
+        )
+    }
+
+    /// Pointer and range input address the current tree of the same generation.
+    pub fn pointer_event(
+        &self,
+        panel: &str,
+        generation: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        self.queue_event(panel, generation, None, target, None, event, detail, false)
+    }
+
+    fn event_channel(
+        panel: &str,
+        target: u64,
+        event: &str,
+        detail: &EventDetail,
+    ) -> (StateChannel, bool) {
+        let panel = panel.to_owned();
+        match event {
+            "pointermove" | "pointerdown" | "pointerup" | "pointercancel" | "pointerenter"
+            | "pointerleave" => (
+                StateChannel::Pointer {
+                    panel,
+                    pointer: detail.pointer_id.unwrap_or(1),
+                },
+                event == "pointermove",
+            ),
+            "click" | "dblclick" | "contextmenu" if detail.pointer_id.is_some() => (
+                StateChannel::Pointer {
+                    panel,
+                    pointer: detail.pointer_id.unwrap(),
+                },
+                false,
+            ),
+            "rangechange" | "wheel" => (
+                StateChannel::Range { panel, target },
+                // Wheel deltas are relative input; replacing one loses scroll distance.
+                event == "rangechange",
+            ),
+            _ => (StateChannel::Control { panel, target }, false),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_event(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: Option<u64>,
+        target: u64,
+        semantic: Option<String>,
+        event: &str,
+        detail: EventDetail,
+        sample: bool,
+    ) -> Result<Ticket<Evaluation>> {
+        let (channel, observation) = Self::event_channel(panel, target, event, &detail);
+        let realm = self.realm_of(panel)?;
+        let broker = Arc::downgrade(&self.broker);
+        let panel = panel.to_owned();
+        let event = event.to_owned();
+        realm.eval_input(channel, sample || observation, move || {
+            trace(json!({"panel": panel, "dispatch": event}));
+            let broker = broker.upgrade().ok_or(Error::Closed)?;
+            let entry = broker.entry(&panel).ok_or(Error::Closed)?;
+            let mut entry = entry.shared();
+            let semantic = semantic.filter(|id| {
+                entry
+                    .surface
+                    .node(target)
+                    .and_then(|n| n.props.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(id.as_str())
+            });
+            let revision = if semantic.is_some() {
+                entry.surface.revision()
+            } else {
+                revision.unwrap_or_else(|| entry.surface.revision())
+            };
+            Self::event_source(
+                &mut entry, generation, revision, target, &event, detail, semantic,
+            )
+        })
+    }
+    /// Resolve a Properties gain lease without publishing a gesture step.
+    pub fn gain_scrub_request(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
+        if panel != "inspector" {
+            return None;
+        }
+        let backend = self.backend(panel).ok()?;
+        let mut backend = backend.shared();
+        Self::gain_request(&mut backend, handle, value)
+    }
+    /// `gain_scrub_request` for the start of a drag, on the main thread:
+    /// `None` while the inspector's worker holds its panel (a host call, a
+    /// slow tick), and the drag takes the ordinary scrub path instead of
+    /// waiting (PM-699).
+    pub fn try_gain_scrub_request(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
+        if panel != "inspector" {
+            return None;
+        }
+        let entry = self.broker.entries.try_lock().ok()?.get(panel)?.clone();
+        let entry = entry.try_lock().ok()?;
+        let mut backend = entry.backend.try_lock().ok()?;
+        Self::gain_request(&mut backend, handle, value)
+    }
+    fn gain_request(
+        backend: &mut data::Backend,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
+        if !backend.native.properties.is_gain_handle(handle) {
+            return None;
+        }
+        let models::NativeCommand::Kernel(request) = backend
+            .native_command("panel.binding", &json!({"handle":handle,"value":value}))
+            .ok()?
+        else {
+            return None;
+        };
+        let pm_kernel::Call::Transact {
+            body: pm_kernel::WriteBody::Commands(commands),
+            ..
+        } = &request.call
+        else {
+            return None;
+        };
+        let document = backend.model.as_ref()?.document_id();
+        (!commands.is_empty()
+            && commands.iter().all(|command| match command {
+                pm_kernel::Command::Property(pm_kernel::PropertyCommand::Set(set)) => {
+                    matches!(set.channel.as_str(), "c.gain" | "c.audioGain")
+                }
+                pm_kernel::Command::Content(pm_kernel::ContentCommand::Set { patch, .. }) => {
+                    patch.len() == 1
+                        && (patch.get("gain").is_some() || patch.get("audioGain").is_some())
+                }
+                _ => false,
+            }))
+        .then(|| request.with_document(document))
+    }
+
+    pub fn commit_gain_scrub(
+        &self,
+        request: pm_kernel::Request,
+    ) -> pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>> {
+        self.broker.kernel.call(&self.broker.project, request)
+    }
+
+    /// One kernel gesture for a dragged number field, so a scrub is one undo step.
+    /// Runs off the main thread; no sample passes through V8.
+    pub fn scrub_begin(
+        &self,
+        panel: &str,
+        label: Option<&str>,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let caller = self.backend(panel)?.shared().caller;
+        Ok(self.broker.kernel.call(
+            &self.broker.project,
+            pm_kernel::Request::new(
+                caller,
+                // Named for the control dragged (Lift, Curve, Temperature),
+                // as v1's grade undo steps were.
+                pm_kernel::GestureCall::Begin {
+                    label: label.unwrap_or("Change Property").into(),
+                },
+            ),
+        ))
+    }
+    pub fn scrub_step(
+        &self,
+        panel: &str,
+        handle: &str,
+        gesture: u64,
+        value: Value,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let backend = self.backend(panel)?;
+        let (caller, command) = {
+            let mut backend = backend.shared();
+            let command = backend
+                .native_command("panel.binding", &json!({"handle":handle,"value":value}))
+                .map_err(Error::Host)?;
+            (backend.caller, command)
+        };
+        let models::NativeCommand::Kernel(request) = command else {
+            return Err(Error::Invalid("binding is not a document property"));
+        };
+        let pm_kernel::Call::Transact { body, .. } = request.call else {
+            return Err(Error::Invalid("binding is not a scrubbable edit"));
+        };
+        let request = self
+            .prepare_timeline_request(pm_kernel::Request::new(
+                caller,
+                pm_kernel::GestureCall::Step {
+                    gesture,
+                    body,
+                    replace: true,
+                },
+            ))
+            .map_err(Error::Host)?;
+        Ok(self.broker.kernel.call(&self.broker.project, request))
+    }
+    pub fn scrub_finish(
+        &self,
+        panel: &str,
+        gesture: u64,
+        commit: bool,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let caller = self.backend(panel)?.shared().caller;
+        let call = if commit {
+            pm_kernel::GestureCall::Commit { gesture }
+        } else {
+            pm_kernel::GestureCall::Cancel { gesture }
+        };
+        Ok(self
+            .broker
+            .kernel
+            .call(&self.broker.project, pm_kernel::Request::new(caller, call)))
+    }
+    fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
+        self.broker
+            .entry(panel)
+            .map(|e| e.shared().backend.clone())
+            .ok_or(Error::Closed)
+    }
+    /// Caller drops the owning window without waiting on JS. Runtime disposal
+    /// revokes its writer on the isolate owner, including after a failed mount.
+    pub fn close_panel(&self, id: &str) {
+        if let Ok(realm) = self.realm_of(id) {
+            realm.close();
+        }
+    }
+    pub fn close(&self) {
+        self.broker
+            .closing
+            .store(true, std::sync::atomic::Ordering::Release);
+        if !self
+            .broker
+            .agent_released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.broker.agent.close();
+        }
+        let extensions = self.extension_realms.shared();
+        for realm in self.realms.shared().values().chain(extensions.values()) {
+            realm.close();
+        }
+    }
+}
+impl Drop for Builtins {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+impl Broker {
+    fn realm_id(generation: &Generation) -> Option<&str> {
+        generation
+            .realm
+            .rsplit_once("V4Extension(\"")
+            .and_then(|(_, s)| s.strip_suffix("\")"))
+    }
+    fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
+        let id = Self::realm_id(generation).ok_or(Error::Invalid("not a v4 built-in realm"))?;
+        if builtin_panel(id).is_none() && !self.extensions.shared().contains(id) {
+            return Err(Error::Invalid("unknown panel"));
+        }
+        Ok(id)
+    }
+    fn report(&self, message: String) {
+        let mut errors = self.errors.shared();
+        if errors.len() < 64 {
+            errors.push(message);
+        }
+        drop(errors);
+        (self.wake)();
+    }
+}
+impl Broker {
+    /// Hands a panel's native platform requests to the host and wakes it.
+    fn forward_platform(&self, backend: &mut Backend, panel: &str, generation: u64) {
+        let requests = std::mem::take(&mut backend.native.platform);
+        if requests.is_empty() {
+            return;
+        }
+        let mut queue = self.platform.shared();
+        for (operation, input) in requests {
+            let id = if operation == "timeline.effect" {
+                let id = self
+                    .platform_ids
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.timeline_requests
+                    .shared()
+                    .insert(id, (panel.into(), generation));
+                id
+            } else {
+                0
+            };
+            let received = if operation == "project.effect"
+                && let Some(lookup) = *self.drop_lookup.shared()
+                && let Some(files) = input
+                    .pointer("/effect/Import/files")
+                    .and_then(Value::as_array)
+            {
+                let paths: Vec<_> = files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(Into::into)
+                    .collect();
+                lookup(&paths)
+            } else {
+                None
+            };
+            queue.push(PlatformRequest {
+                received,
+                id,
+                panel: panel.into(),
+                generation,
+                operation,
+                input,
+            });
+        }
+        drop(queue);
+        (self.wake)();
+    }
+}
+impl EngineProxy for Broker {
+    /// Request queues and surface staging are bounded here (256 host,
+    /// 128 platform, and the existing surface byte limit), so a
+    /// built-in panel awaiting one reply per property row stays within its
+    /// task quota. Extensions mounted through this broker stay metered.
+    fn metered(&self, generation: &Generation, operation: &str) -> bool {
+        let queue = matches!(
+            operation,
+            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll" | "surface.chunk"
+        );
+        !(queue && Self::realm_id(generation).is_some_and(|id| builtin_panel(id).is_some()))
+    }
+    fn call(
+        &self,
+        generation: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Value> {
+        budget.check()?;
+        let panel = self.panel(generation)?;
+        if operation == "identity" {
+            let mut entries = self.entries.shared();
+            if entries.contains_key(panel) {
+                return Err(Error::Invalid("duplicate panel identity"));
+            }
+            let identity = Identity {
+                realm: generation.realm.clone(),
+                generation: generation.number,
+                project: self.project.clone(),
+            };
+            let backend = Arc::new(Mutex::new(
+                Backend::new(
+                    self.kernel.clone(),
+                    identity.clone(),
+                    panel,
+                    self.application,
+                )
+                .map_err(Error::Host)?,
+            ));
+            backend.shared().native.agent_link = self.agent.clone();
+            backend.shared().native.timeline_view = self.timeline_view.clone();
+            backend.shared().native.timeline_outline = self.timeline_outline.clone();
+            if let Some(model) = backend.shared().model.as_mut() {
+                model.clipboard = self.effect_clipboard.shared().clone();
+            }
+            if panel == "agent"
+                && let Some(state) = self.carried.shared().take()
+            {
+                backend.shared().native.agent = Some(state);
+            }
+            let facts = self.facts.shared().clone();
+            if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {
+                backend.shared().native.facts = facts;
+            }
+            let router = HostRouter::new(
+                identity.clone(),
+                HostDataService::new(identity.clone(), data::Data(backend.clone()))
+                    .map_err(Error::Host)?,
+            )
+            .map_err(Error::Host)?;
+            if panel == "export" {
+                *self.export_probe.shared() = Some(backend.shared().native.export_probe.clone());
+            }
+            entries.insert(
+                panel.into(),
+                Arc::new(Mutex::new(Entry {
+                    generation: generation.number,
+                    backend,
+                    router,
+                    surface: Surface::default(),
+                    transfer: Default::default(),
+                    overlay: Surface::default(),
+                    overlay_interaction: Interaction::default(),
+                    slots: BTreeMap::new(),
+                    interaction: Interaction::default(),
+                })),
+            );
+            return Ok(serde_json::to_value(identity).unwrap());
+        }
+        let entry = self.entry(panel).ok_or(Error::StaleGeneration)?;
+        let mut entry = entry.shared();
+        if entry.generation != generation.number {
+            return Err(Error::StaleGeneration);
+        }
+        let entry = &mut *entry;
+        let assembled;
+        let input = if operation == "surface.chunk" {
+            match entry.transfer.push(input, entry.surface.limits.bytes).map_err(Error::Host)? {
+                Some(value) => {
+                    assembled = value;
+                    &assembled
+                }
+                None => return Ok(json!({"accepted":true,"staged":true,"revision":entry.surface.revision()})),
+            }
+        } else {
+            input
+        };
+        match operation {
+            "tokens.row" => Ok(json!(
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
+                    .metrics
+                    .row
+            )),
+            "host.enqueue" => {
+                entry
+                    .router
+                    .enqueue(
+                        serde_json::from_value(input.clone())
+                            .map_err(|e| Error::Host(e.to_string()))?,
+                    )
+                    .map_err(Error::Host)?;
+                Ok(Value::Null)
+            }
+            "host.poll" => {
+                {
+                    let mut backend = entry.backend.shared();
+                    // Drain effect receipts on the panel worker. Main only
+                    // deposits replies; it never locks a worker-owned backend.
+                    {
+                        let mut pending = self.timeline_requests.shared();
+                        let mut replies = self.platform_replies.shared();
+                        let ids = pending
+                            .iter()
+                            .filter(|(_, owner)| owner.0 == panel && owner.1 == generation.number)
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>();
+                        for id in ids {
+                            if let Some(reply) = replies.remove(&id) {
+                                pending.remove(&id);
+                                backend.native.timeline_effect_pending =
+                                    backend.native.timeline_effect_pending.saturating_sub(1);
+                                if reply["accepted"] != true {
+                                    backend.native.timeline_effect_result =
+                                        Some(Err(reply["error"]
+                                            .as_str()
+                                            .unwrap_or("Native timeline effect rejected")
+                                            .into()));
+                                }
+                            }
+                        }
+                    }
+                    // A panel's host work is the V8 stage a stall holds up
+                    // (`pm_perf::stall`), with its backend locked as here.
+                    pm_perf::stall::stall(pm_perf::stall::Stage::V8);
+                    backend.tick().map_err(Error::Host)?;
+                    self.forward_platform(&mut backend, panel, generation.number);
+                }
+                serde_json::to_value(
+                    entry
+                        .router
+                        .poll(input.as_u64().ok_or(Error::Invalid("request id"))?)
+                        .map_err(Error::Host)?,
+                )
+                .map_err(|e| Error::Host(e.to_string()))
+            }
+            "host.publications" => {
+                let before = {
+                    let mut backend = entry.backend.shared();
+                    backend.tick().map_err(Error::Host)?;
+                    publication::Inputs::read(&backend)
+                };
+                let publications = entry.router.publications().map_err(Error::Host)?;
+                if let Some(before) = before {
+                    let mut backend = entry.backend.shared();
+                    backend.last_publication = publication::Inputs::read(&backend)
+                        .filter(|after| before.same_publication(after));
+                }
+                // A snapshot may ask the host for something too (the Export
+                // sheet asks the viewer to measure again); it goes now, not
+                // at the panel's next command.
+                self.forward_platform(&mut entry.backend.shared(), panel, generation.number);
+                serde_json::to_value(publications).map_err(|e| Error::Host(e.to_string()))
+            }
+            "host.retire" => {
+                entry.router.retire().map_err(Error::Host)?;
+                Ok(Value::Null)
+            }
+            "effects.set" | "transitions.set" | "layers.set" => {
+                let (registry, expected_kind) = match operation {
+                    "effects.set" => ("effects", pm_protocol::definitions::DefinitionKind::Effect),
+                    "transitions.set" => (
+                        "transitions",
+                        pm_protocol::definitions::DefinitionKind::Transition,
+                    ),
+                    _ => ("layers", pm_protocol::definitions::DefinitionKind::Layer),
+                };
+                let list = input
+                    .as_array()
+                    .filter(|a| a.len() <= 64)
+                    .ok_or(Error::Invalid("definition list"))?;
+                let owner = entry.backend.shared().caller.writer;
+                let state = self.kernel.state();
+                let previous: Vec<_> = state
+                    .registries
+                    .get(registry)
+                    .into_iter()
+                    .flatten()
+                    .filter(|registration| registration.owner == owner)
+                    .cloned()
+                    .collect();
+                let mut tokens = std::collections::BTreeSet::new();
+                let mut ops = vec![];
+                for item in list {
+                    let mut definition = item["definition"].clone();
+                    let snapshot: pm_protocol::definitions::DefinitionSnapshot =
+                        serde_json::from_value(item["snapshot"].clone())
+                            .map_err(|e| Error::Host(e.to_string()))?;
+                    pm_protocol::Validate::validate(&snapshot)
+                        .map_err(|e| Error::Host(e.message))?;
+                    let id = definition["id"]
+                        .as_str()
+                        .ok_or(Error::Invalid("definition id"))?
+                        .to_owned();
+                    if snapshot.id.as_str() != id || snapshot.kind != expected_kind {
+                        return Err(Error::Invalid("definition snapshot identity"));
+                    }
+                    let registration = item["registration"]
+                        .as_u64()
+                        .filter(|n| *n > 0)
+                        .ok_or(Error::Invalid("definition registration identity"))?;
+                    let token = format!(
+                        "v4.{}.{}.{registry}.{registration}",
+                        owner.realm, owner.generation
+                    );
+                    if !tokens.insert(token.clone()) {
+                        return Err(Error::Invalid("duplicate definition registration"));
+                    }
+                    definition["nativeSnapshot"] = item["snapshot"].clone();
+                    let definition = data::model(&definition).map_err(Error::Host)?;
+                    if let Some(old) = previous.iter().find(|old| old.token == token) {
+                        if old.id == id && old.definition == definition {
+                            continue;
+                        }
+                        ops.push(pm_kernel::state::StateOp::Dispose {
+                            token: token.clone(),
+                        });
+                    }
+                    ops.push(pm_kernel::state::StateOp::Register {
+                        registry: registry.into(),
+                        entry: pm_kernel::state::Registration {
+                            project: Some(self.project.clone()),
+                            token,
+                            owner,
+                            id,
+                            definition,
+                        },
+                    });
+                }
+                // Removing a top registration reveals the preceding provider
+                // at its original position, including providers in other realms.
+                ops.extend(
+                    previous
+                        .iter()
+                        .filter(|old| !tokens.contains(&old.token))
+                        .map(|old| pm_kernel::state::StateOp::Dispose {
+                            token: old.token.clone(),
+                        }),
+                );
+                if !ops.is_empty() {
+                    self.kernel
+                        .state_transaction(pm_kernel::state::StateTransaction {
+                            expected_revision: None,
+                            ops,
+                        })
+                        .wait()
+                        .ok_or(Error::Invalid("kernel stopped"))?
+                        .map_err(|e| Error::Host(e.to_string()))?;
+                }
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "toolbar.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 32
+                        && list.iter().all(|c| {
+                            c["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && c["label"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("toolbar items need an id and a label"));
+                }
+                let mut items = self.toolbar_items.shared();
+                items.0 += 1;
+                items.1.insert(panel.into(), input.clone());
+                drop(items);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "panelHeader.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 64
+                        && list.iter().all(|c| {
+                            c["key"].as_str().is_some_and(|s| !s.is_empty())
+                                && c["panelId"].as_str().is_some_and(|s| !s.is_empty())
+                                && c["id"].as_str().is_some_and(|s| !s.is_empty())
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("panel header items need a panelId and id"));
+                }
+                let mut items = self.panel_headers.shared();
+                items.0 += 1;
+                items.1.insert(panel.into(), input.clone());
+                drop(items);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "menuBar.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 16
+                        && list.iter().all(|m| {
+                            m["menuName"]
+                                .as_str()
+                                .is_some_and(|s| (1..=64).contains(&s.len()))
+                                && m["items"].is_array()
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("menuBar contributions need a menuName and items"));
+                }
+                let mut menus = self.menu_bar.shared();
+                menus.0 += 1;
+                menus.1.insert(panel.into(), input.clone());
+                drop(menus);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "tools.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 32
+                        && list.iter().all(|t| {
+                            t["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("tools need an id and a title"));
+                }
+                let mut tools = self.tools.shared();
+                tools.0 += 1;
+                tools.1.insert(panel.into(), input.clone());
+                drop(tools);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "slot.commit" => {
+                let slot = input["slot"]
+                    .as_str()
+                    .filter(|s| BUILTIN_SLOTS.contains(s))
+                    .ok_or(Error::Invalid("unknown built-in panel slot"))?;
+                let commit = serde_json::from_value(input["commit"].clone())
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                let (surface, interaction) = entry
+                    .slots
+                    .entry(slot.to_owned())
+                    .or_insert_with(|| (Surface::default(), Interaction::default()));
+                match surface.apply(commit) {
+                    Ok(_) => {
+                        interaction.reconcile(surface);
+                        let pub_id = format!("{panel}{SLOT_PREFIX}{slot}");
+                        self.publications.shared().insert(
+                            pub_id.clone(),
+                            Publication {
+                                panel: pub_id,
+                                generation: generation.number,
+                                surface: Arc::new(surface.clone()),
+                            },
+                        );
+                        (self.wake)();
+                        Ok(json!({"accepted":true,"revision":surface.revision()}))
+                    }
+                    Err(error) => Ok(
+                        json!({"accepted":false,"revision":surface.revision(),"error":error.to_string()}),
+                    ),
+                }
+            }
+            "slot.clear" => {
+                if let Some(slot) = input["slot"].as_str() {
+                    entry.slots.remove(slot);
+                    let pub_id = format!("{panel}{SLOT_PREFIX}{slot}");
+                    self.publications.shared().remove(&pub_id);
+                    let mut cleared = self.slots_cleared.shared();
+                    if !cleared.contains(&pub_id) {
+                        cleared.push(pub_id);
+                    }
+                    (self.wake)();
+                }
+                Ok(Value::Null)
+            }
+            "events.subscribe" => {
+                let names: std::collections::BTreeSet<String> = input
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect();
+                let mut subs = self.event_subs.shared();
+                if names.is_empty() {
+                    subs.remove(panel);
+                } else {
+                    subs.insert(panel.into(), names);
+                }
+                Ok(Value::Null)
+            }
+            "themes.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 32
+                        && list.iter().all(|t| {
+                            t["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["tokens"].as_object().is_some_and(|m| m.len() <= 256)
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("themes need an id, a title and tokens"));
+                }
+                let mut themes = self.themes.shared();
+                themes.0 += 1;
+                themes.1.insert(panel.into(), input.clone());
+                drop(themes);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            // `themes.activate(id)`: the latest request in the window wins.
+            "themes.activate" => {
+                let id = match input {
+                    Value::Null => None,
+                    Value::String(id) if (1..=128).contains(&id.len()) => Some(id.clone()),
+                    _ => return Err(Error::Invalid("a theme id or null")),
+                };
+                let mut request = self.theme_request.shared();
+                request.0 += 1;
+                request.1 = Some((request.0, panel.into(), id));
+                drop(request);
+                self.themes.shared().0 += 1;
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "commands.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 64
+                        && list.iter().all(|c| {
+                            c["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && c["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && (c["key"].is_null()
+                                    || c["key"].as_str().is_some_and(|k| k.len() <= 64))
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("commands need an id and a title"));
+                }
+                let mut commands = self.commands.shared();
+                commands.0 += 1;
+                commands.1.insert(panel.into(), input.clone());
+                drop(commands);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "surface.commit" | "surface.chunk" => {
+                entry.transfer.clear();
+                let started = std::time::Instant::now();
+                let commit = serde_json::from_value(input.clone())
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                match entry.surface.apply(commit) {
+                    Ok(_) => {
+                        let applied = started.elapsed();
+                        entry.interaction.reconcile(&entry.surface);
+                        if tracing() {
+                            trace(json!({"panel": panel, "commit_ms": ms(applied),
+                                "publish_ms": ms(started.elapsed()), "input_bytes": input.to_string().len()}));
+                        }
+                        // A commit that set the tree to what it was (a
+                        // re-render that came out the same: the Effects
+                        // browser and the viewer's chrome on every selection
+                        // change) is acknowledged, not published: the panel's
+                        // view would compile, install and draw it again for
+                        // nothing. Its revision still counts, and the view's
+                        // events stay valid (nothing in them changed).
+                        if entry.surface.last_commit_changed() {
+                            let surface = Arc::new(entry.surface.clone());
+                            self.publications.shared().insert(
+                                panel.into(),
+                                Publication {
+                                    panel: panel.into(),
+                                    generation: generation.number,
+                                    surface,
+                                },
+                            );
+                            (self.wake)();
+                        }
+                        Ok(json!({"accepted":true,"revision":entry.surface.revision()}))
+                    }
+                    Err(error) => Ok(
+                        json!({"accepted":false,"revision":entry.surface.revision(),"error":error.to_string()}),
+                    ),
+                }
+            }
+            "overlay.commit" => {
+                let interactive = input["interactive"].as_bool().unwrap_or(false);
+                let mut surface = input.clone();
+                if let Some(envelope) = surface.as_object_mut() {
+                    envelope.remove("interactive");
+                }
+                let commit = serde_json::from_value(surface)
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                match entry.overlay.apply(commit) {
+                    Ok(_) => {
+                        let Entry {
+                            overlay,
+                            overlay_interaction,
+                            ..
+                        } = &mut *entry;
+                        overlay_interaction.reconcile(overlay);
+                        let id = format!("{panel}{VIEWER_OVERLAY}");
+                        self.overlay_interactive.shared().insert(id.clone(), interactive);
+                        self.publications.shared().insert(
+                            id.clone(),
+                            Publication {
+                                panel: id,
+                                generation: generation.number,
+                                surface: Arc::new(overlay.clone()),
+                            },
+                        );
+                        (self.wake)();
+                        Ok(json!({"accepted":true,"revision":overlay.revision()}))
+                    }
+                    Err(error) => Ok(
+                        json!({"accepted":false,"revision":entry.overlay.revision(),"error":error.to_string()}),
+                    ),
+                }
+            }
+            "timeline.chrome" => {
+                let patch = timeline_patch(input);
+                if patch.as_object().is_none_or(|p| p.is_empty()) {
+                    return Err(Error::Invalid(
+                        "timeline chrome needs at least one known field",
+                    ));
+                }
+                self.chrome_edit(chrome::ChromeEdit::Set {
+                    panel: panel.into(),
+                    generation: generation.number,
+                    patch,
+                });
+                Ok(Value::Null)
+            }
+            "timeline.painted" => {
+                // A painter came (`true`) or went: the timeline asks again.
+                let mut painters = self.painters.shared();
+                painters.0 += 1;
+                if input == &json!(true) {
+                    painters.1.insert(panel.into());
+                } else {
+                    painters.1.remove(panel);
+                }
+                drop(painters);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "overlay.clear" => {
+                // A publication not yet drawn goes too, so it can't come back.
+                entry.overlay = Surface::default();
+                self.forget_overlay(panel);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "export.destinationObserve" => {
+                let mut backend = entry.backend.shared();
+                if input["path"].is_string() {
+                    backend.native.export["destination"] = input.clone();
+                }
+                backend.native.export["destinationChoosing"] = json!(false);
+                backend.native.export["sequence"] = json!(backend.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                Ok(Value::Null)
+            }
+            "export.queueObserve" => {
+                let mut backend = entry.backend.shared();
+                backend.native.export["queue"] = input.clone();
+                backend.native.export["sequence"] = json!(backend.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                Ok(Value::Null)
+            }
+            "export.observe" => {
+                let mut backend = entry.backend.shared();
+                backend.native.export["run"] = input.clone();
+                backend.native.export["sequence"] =
+                    json!(backend.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                Ok(Value::Null)
+            }
+            "fields.register" => entry.backend.shared().fields(input).map_err(Error::Host),
+            "inspector.snapshot" => entry
+                .backend
+                .shared()
+                .inspector_snapshot()
+                .map_err(Error::Host),
+            "timeline.easing.library" => Ok(timeline_easing::inspect(&self.kernel)),
+            "easing.state" => entry.backend.shared().easing_state().map_err(Error::Host),
+            "timeline.frame" => entry
+                .backend
+                .shared()
+                .timeline_frame(input)
+                .map_err(Error::Host),
+            "agent.snapshot" => entry.backend.shared().agent_snapshot().map_err(Error::Host),
+            "settings.snapshot" => entry
+                .backend
+                .shared()
+                .settings_snapshot()
+                .map_err(Error::Host),
+            "project.layout" => Ok(project_layout(
+                input.get("view").and_then(Value::as_str) == Some("grid"),
+                input.get("width").and_then(Value::as_f64),
+                &pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()).metrics,
+            )),
+            "platform.enqueue" => {
+                let mut requests = self.platform.shared();
+                if requests.len() >= 128 {
+                    return Err(Error::Quota("platform queue"));
+                }
+                let id = self
+                    .platform_ids
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (operation, platform_input) = inspector_platform(panel, input)?;
+                requests.push(PlatformRequest {
+                    received: None,
+                    id,
+                    panel: panel.into(),
+                    generation: generation.number,
+                    operation: operation.into(),
+                    input: platform_input,
+                });
+                (self.wake)();
+                Ok(json!(id))
+            }
+            "platform.poll" => Ok(self
+                .platform_replies
+                .shared()
+                .remove(&input.as_u64().ok_or(Error::Invalid("platform request"))?)
+                .unwrap_or(Value::Null)),
+            "effects.bindings" => {
+                entry.backend.shared().local_fields();
+                Ok(json!({"search":"effects.search", "scope":"effects.scope"}))
+            }
+            "presets.takeSheet" => Ok(self.preset_sheet.shared().take().unwrap_or(Value::Null)),
+            "presets.list" => Ok(json!(self.presets.shared().list())),
+            "presets.action" => self.presets.shared().action(input).map_err(Error::Host),
+            "presets.choices" => {
+                let mut b = entry.backend.shared();
+                b.sync().map_err(Error::Host)?;
+                let m = b.model.as_mut().ok_or(Error::Invalid("No open project"))?;
+                let layer = input["layer"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| m.primary().map(str::to_owned))
+                    .ok_or(Error::Invalid("Select a layer"))?;
+                m.preset_choices(&layer)
+                    .map(|v| data::wire(&v))
+                    .map_err(|e| Error::Host(e.to_string()))
+            }
+            "presets.save" => {
+                let mut b = entry.backend.shared();
+                b.sync().map_err(Error::Host)?;
+                let time = b.native.facts["time"].as_f64().unwrap_or(0.);
+                let m = b.model.as_mut().ok_or(Error::Invalid("No open project"))?;
+                let layer = input["layer"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| m.primary().map(str::to_owned))
+                    .ok_or(Error::Invalid("Select a layer"))?;
+                let strings = |key: &str| {
+                    input[key]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                };
+                let saved = m
+                    .capture_preset_parameters(
+                        &layer,
+                        input["name"].as_str().unwrap_or(""),
+                        &strings("effects"),
+                        &strings("properties"),
+                        input
+                            .get("parameters")
+                            .map(|_| strings("parameters"))
+                            .as_deref(),
+                        input["animated"] == true,
+                        time,
+                    )
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                let saved = data::wire(&saved);
+                self.presets.shared().save(&saved).map_err(Error::Host)?;
+                Ok(saved)
+            }
+            "effects.registry" => {
+                let mut registry = entry.backend.shared().registry();
+                let presets = self.presets.shared().list();
+                entry.backend.shared().presets = presets.clone();
+                for p in presets {
+                    registry["items"].as_array_mut().unwrap().push(json!({"id":format!("preset:{}",p["id"].as_str().unwrap()),"label":p["name"],"group":"My Presets","kind":"preset","installed":true}));
+                }
+                registry["groups"]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, json!("My Presets"));
+                Ok(registry)
+            }
+            "effects.target" => entry.backend.shared().target().map_err(Error::Host),
+            "report" => {
+                self.report(format!("{panel}: {input}"));
+                Ok(Value::Null)
+            }
+            "platform.activatePanel" | "platform.focus" | "platform.announce" => {
+                let mut requests = self.platform.shared();
+                if requests.len() >= 128 {
+                    return Err(Error::Quota("platform queue"));
+                }
+                requests.push(PlatformRequest {
+                    received: None,
+                    id: 0,
+                    panel: panel.into(),
+                    generation: generation.number,
+                    operation: operation.into(),
+                    input: input.clone(),
+                });
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            // Menus require an asynchronous reply from AppKit. Refuse them until
+            // installed; a cancelled menu must never be reported as a choice.
+            "platform.effectMenu" | "platform.contextMenu" => {
+                Err(Error::Host("native panel menu adapter unavailable".into()))
+            }
+            _ => Err(Error::Invalid("unknown built-in host operation")),
+        }
+    }
+}
+/// Normalize owned panel requests to the existing asynchronous AppKit routes.
+fn inspector_platform<'a>(panel: &str, request: &'a Value) -> Result<(&'a str, Value)> {
+    let operation = request["operation"]
+        .as_str()
+        .ok_or(Error::Invalid("platform operation"))?;
+    let input = &request["input"];
+    if panel == "inspector" && operation == "inspector" {
+        match input["type"].as_str() {
+            Some("add-effect-menu") => return Ok(("effectMenu", input.clone())),
+            Some("font-menu") => return Ok(("fontMenu", input.clone())),
+            Some("part-menu") => return Ok(("partMenu", input.clone())),
+            Some("part-pick") => return Ok(("partPick", input.clone())),
+            Some("animator-menu") => return Ok(("contextMenu", input["items"].clone())),
+            Some("row-menu") => {
+                let items = input["items"]
+                    .as_array()
+                    .ok_or(Error::Invalid("row menu"))?;
+                let mut options = Vec::new();
+                for item in items {
+                    if item["separatorBefore"] == true {
+                        options.push(Value::Null);
+                    }
+                    options.push(json!({"id":item["action"],"label":item["label"],
+                        "disabled":item["enabled"] != true,"checked":item["checked"]}));
+                }
+                return Ok(("contextMenu", json!(options)));
+            }
+            _ => {}
+        }
+    }
+    Ok((operation, input.clone()))
+}
+
+impl KernelHooks for Broker {
+    fn load_storage(&self, _: &str) -> Result<Value> {
+        Ok(json!({}))
+    }
+    fn commit_activation(
+        &self,
+        previous: Option<&Generation>,
+        next: &Generation,
+        ops: &[Value],
+        storage: &Value,
+    ) -> Result<()> {
+        if previous.is_some_and(|old| old != next) || !ops.is_empty() || storage != &json!({}) {
+            return Err(Error::Invalid(
+                "built-in activation cannot publish untyped edits",
+            ));
+        }
+        Ok(())
+    }
+    fn commit_retained(&self, _: &Generation, _: &[Value]) -> Result<()> {
+        Err(Error::StaleGeneration)
+    }
+    fn revoke_generation(&self, generation: &Generation) {
+        let Ok(panel) = self.panel(generation) else {
+            return;
+        };
+        let Some(entry) = self.entry(panel) else {
+            return;
+        };
+        let mut entry = entry.shared();
+        if entry.generation != generation.number {
+            return;
+        }
+        let _ = entry.router.retire();
+        // A generation that failed (a quota, a crash) takes down what it put
+        // up; a closing window's realms just end.
+        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        entry.overlay = Surface::default();
+        entry.overlay_interaction = Interaction::default();
+        entry.slots.clear();
+        drop(entry);
+        let panel = panel.to_owned();
+        self.forget_overlay(&panel);
+        self.forget_slots(&panel);
+        self.forget_toolbar(&panel);
+        self.forget_panel_headers(&panel);
+        self.forget_menu_bar(&panel);
+        self.forget_tools(&panel);
+        self.forget_events(&panel);
+        self.forget_timeline(&panel, Some(generation.number));
+        self.forget_painter(&panel);
+        self.forget_themes(&panel);
+        self.forget_commands(&panel);
+        self.forget_effects(&panel);
+        (self.wake)();
+    }
+    fn seal_open_gestures(&self, _: &Generation) {}
+}
+impl Broker {
+    fn entry(&self, panel: &str) -> Option<Arc<Mutex<Entry>>> {
+        self.entries.shared().get(panel).cloned()
+    }
+    fn all_entries(&self) -> Vec<Arc<Mutex<Entry>>> {
+        self.entries.shared().values().cloned().collect()
+    }
+    /// Queues a `timeline.chrome` edit for this window's chrome writer.
+    fn chrome_edit(&self, edit: chrome::ChromeEdit) {
+        let mut writer = self.chrome.shared();
+        let tx = writer
+            .get_or_insert_with(|| chrome::spawn_writer(self.kernel.clone(), self.project.clone()));
+        let _ = tx.send(edit);
+    }
+    /// An extension (or one failed generation of it) leaving puts back the
+    /// timeline chrome it set.
+    fn forget_timeline(&self, panel: &str, generation: Option<u64>) {
+        if self.chrome.shared().is_some() {
+            self.chrome_edit(chrome::ChromeEdit::Forget {
+                panel: panel.into(),
+                generation,
+            });
+        }
+    }
+    fn forget_painter(&self, panel: &str) {
+        let mut painters = self.painters.shared();
+        if painters.1.remove(panel) {
+            painters.0 += 1;
+        }
+    }
+    fn forget_overlay(&self, panel: &str) {
+        let id = format!("{panel}{VIEWER_OVERLAY}");
+        self.publications.shared().remove(&id);
+        self.overlay_interactive.shared().remove(&id);
+        // Realm disposal and unmount may both retire the same overlay before the UI drains it.
+        let mut cleared = self.overlays_cleared.shared();
+        if !cleared.contains(&id) {
+            cleared.push(id);
+        }
+    }
+    fn forget_slots(&self, panel: &str) {
+        let prefix = format!("{panel}{SLOT_PREFIX}");
+        self.publications
+            .shared()
+            .retain(|k, _| !k.starts_with(&prefix));
+        let mut cleared = self.slots_cleared.shared();
+        for slot in BUILTIN_SLOTS {
+            let id = format!("{prefix}{slot}");
+            if !cleared.contains(&id) {
+                cleared.push(id);
+            }
+        }
+    }
+    fn forget_toolbar(&self, panel: &str) {
+        let mut items = self.toolbar_items.shared();
+        if items.1.remove(panel).is_some() {
+            items.0 += 1;
+        }
+    }
+    fn forget_panel_headers(&self, panel: &str) {
+        let mut items = self.panel_headers.shared();
+        if items.1.remove(panel).is_some() {
+            items.0 += 1;
+        }
+    }
+    fn forget_menu_bar(&self, panel: &str) {
+        let mut menus = self.menu_bar.shared();
+        if menus.1.remove(panel).is_some() {
+            menus.0 += 1;
+        }
+    }
+    fn forget_tools(&self, panel: &str) {
+        let mut tools = self.tools.shared();
+        if tools.1.remove(panel).is_some() {
+            tools.0 += 1;
+        }
+    }
+    fn forget_events(&self, panel: &str) {
+        self.event_subs.shared().remove(panel);
+    }
+    fn forget_themes(&self, panel: &str) {
+        let mut themes = self.themes.shared();
+        if themes.1.remove(panel).is_some() {
+            themes.0 += 1;
+        }
+    }
+    fn forget_effects(&self, panel: &str) {
+        if let Some(entry) = self.entry(panel) {
+            let owner = entry.shared().backend.shared().caller.writer;
+            let _ = self
+                .kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![pm_kernel::state::StateOp::DisposeOwner { owner }],
+                })
+                .wait();
+        }
+    }
+    fn forget_commands(&self, panel: &str) {
+        let mut commands = self.commands.shared();
+        if commands.1.remove(panel).is_some() {
+            commands.0 += 1;
+        }
+    }
+}
+impl HostProxy for Broker {
+    fn fetch(
+        &self,
+        _: &Generation,
+        _: FetchRequest,
+        _: Cancellation,
+    ) -> Result<Box<dyn pm_runtime_v8::HostRequest>> {
+        Err(Error::Host(
+            "built-in network access requires service permission".into(),
+        ))
+    }
+    fn console(&self, _: &Generation, level: &str, message: &str) {
+        self.report(format!("{level}: {message}"));
+    }
+}
+impl WatchdogHooks for Broker {
+    fn notice(&self, _: &Generation, _: u64) {
+        self.report("Built-in panel is taking longer than expected".into());
+    }
+    fn prompt(&self, _: &Generation, _: u64) -> WatchdogDecision {
+        self.report("Built-in panel is still running; waiting for its owner".into());
+        WatchdogDecision::Wait
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+/// A fork's mount script: the fork's module graph drawing built-in `panel`.
+fn fork_source(fork: &str, graph: &Value, panel: &str) -> String {
+    format!(
+        "{BUNDLE}\n__pmBuiltin.mountExtension({},{},{})",
+        json!(fork),
+        json!(graph.to_string()),
+        json!(panel)
+    )
+}
+
+/// v1–3's `sanitizeInterfaceEdit` for the timeline: known fields, v1's ranges.
+fn timeline_patch(input: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let number = |key: &str, low: f64, high: f64, round: bool| {
+        input[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(|v| if round { v.round() } else { v }.clamp(low, high))
+    };
+    for (key, low, high, round) in [
+        ("rowHeight", 22., 48., true),
+        ("gutterWidth", 160., 360., true),
+        ("rulerHeight", 20., 42., true),
+        ("clipRadius", 0., 12., false),
+        ("keyframeSize", 4., 12., false),
+    ] {
+        if let Some(v) = number(key, low, high, round) {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for key in ["showLayerNumbers", "showTypeBadges"] {
+        if let Some(v) = input[key].as_bool() {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for (key, allowed) in [
+        ("toolbarDensity", ["compact", "normal"]),
+        ("surfaceOrder", ["normal", "reversed"]),
+    ] {
+        if let Some(v) = input[key].as_str().filter(|v| allowed.contains(v)) {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    Value::Object(out)
+}
+
+pub mod linked_folders;
+
+impl Builtins {
+    pub fn update_folder_sync(&self, mut folders: BTreeMap<String, pm_panel_media::FolderSync>) {
+        if let Some(p) = self.broker.kernel.published(&self.broker.project) {
+            if let Some(value) = p.snapshot.document.to_value() {
+                let (all, roots) = linked_folders::linked(&crate::data::wire(&value));
+                for f in all.values() {
+                    for root in &roots {
+                        if f.path.starts_with(&all[root].path) {
+                            if let Some(state) = folders.get(root).cloned() {
+                                folders.insert(f.id.clone(), state);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.broker.all_entries() {
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
+            if backend.native.media_runtime.folders != folders {
+                backend.native.media_runtime.folders = folders.clone();
+                backend.native.media_sequence += 1;
+            }
+        }
+        (self.broker.wake)();
+    }
+}

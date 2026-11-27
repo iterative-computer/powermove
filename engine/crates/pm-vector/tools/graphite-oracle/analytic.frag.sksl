@@ -1,0 +1,22 @@
+layout(set=0, binding=0) uniform Params {
+    float4 viewport;
+    float4 xRadiiOrFlags;
+    float4 radiiOrQuadXs;
+    float4 ltrbOrQuadYs;
+    float4 center;
+    float4 mat0;
+    float4 mat1;
+    float4 mat2;
+    float4 color;
+};
+layout(location=0) in float4 jacobian;
+layout(location=1) in float4 edgeDistances;
+layout(location=2) in float4 xRadii;
+layout(location=3) in float4 yRadii;
+layout(location=4) in float2 strokeParams;
+layout(location=5) in float2 perPixelControl;
+void main() {
+    half4 coverage = analytic_rrect_coverage_fn(sk_FragCoord, jacobian, edgeDistances,
+        xRadii, yRadii, strokeParams, perPixelControl);
+    sk_FragColor = half4(color) * coverage;
+}

@@ -21,8 +21,11 @@ export const email = new Hono<Env>()
       await rateAuth(c);
       const { email } = c.req.valid('json');
       await requireHuman(c, 'email_send', email.trim().toLowerCase());
+      // Budgets per address (an hour's burst and a day), per IP (likewise) and for everyone (under the mail quota).
       await enforce(c, 'email_send_addr', email.trim().toLowerCase());
+      await enforce(c, 'email_send_addr_day', email.trim().toLowerCase());
       await enforce(c, 'email_send_ip', clientIp(c));
+      await enforce(c, 'email_send_ip_day', clientIp(c));
       await enforce(c, 'email_send_global', '*');
       await new Promise(resolve => setTimeout(resolve, 30));
       if (!c.env.OTP_SENDER && !c.env.EMAIL && c.env.DEV_LOG_OTP !== '1') {

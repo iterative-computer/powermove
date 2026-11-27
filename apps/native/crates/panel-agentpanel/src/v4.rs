@@ -1,0 +1,1720 @@
+//! Thin worker adapter for panels/agent. No renderer, Store writer,
+//! command registration or effect runner.
+use crate::{
+    Error, Result,
+    activity::{Rows, TranscriptIndex},
+    input::{self, Key},
+    interaction::Submission,
+    model::{Effect, Panel, ShellAction},
+};
+use pm_agents::{Access, ApprovalMode, Provider};
+use serde_json::{Value, json};
+use std::{borrow::Cow, ops::Range};
+
+/// Native coordinator supplies fresh ids and time, never extension-authored ids.
+pub struct Context<'a> {
+    pub run: &'a str,
+    pub request: &'a str,
+    pub new_thread: &'a str,
+    pub now: u64,
+    pub popover_open: bool,
+    /// The choices of a provider the thread switches to.
+    pub catalogs: &'a dyn Fn(Provider) -> crate::input::Catalog,
+}
+/// The provider and Quick Look own the attachment payload. The panel
+/// only needs the card, especially when republishing it on every typed key.
+fn wire_row(value: &Value) -> Cow<'_, Value> {
+    let Some(files) = value.get("attachments").and_then(Value::as_array) else {
+        return Cow::Borrowed(value);
+    };
+    if value["role"] != "user" || files.is_empty() {
+        return Cow::Borrowed(value);
+    }
+    let mut row = value
+        .as_object()
+        .expect("attachment property on object")
+        .iter()
+        .filter(|(name, _)| *name != "attachments")
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let cards = files
+        .iter()
+        .map(|file| {
+            let fields = [
+                "id",
+                "name",
+                "type",
+                "thumbnail",
+                "duration",
+                "screenPick",
+                "caption",
+            ];
+            Value::Object(
+                fields
+                    .into_iter()
+                    .filter_map(|name| file.get(name).map(|value| (name.into(), value.clone())))
+                    .collect(),
+            )
+        })
+        .collect();
+    row.insert("attachments".into(), Value::Array(cards));
+    Cow::Owned(Value::Object(row))
+}
+
+/// Keep a matching immutable archive/index together. Refresh after structural
+/// archive changes, on a worker; streaming live rows need no archive rebuild.
+pub struct Window {
+    project: String,
+    thread: String,
+    archived: Rows,
+    index: TranscriptIndex,
+}
+impl Window {
+    pub fn new(panel: &Panel, thread: &str) -> Result<Self> {
+        let archived = panel.session(thread)?.conversation.clone();
+        let index = TranscriptIndex::build(&archived);
+        Ok(Self {
+            project: panel.project().into(),
+            thread: thread.into(),
+            archived,
+            index,
+        })
+    }
+    pub fn count(&self, panel: &Panel) -> Result<usize> {
+        if panel.project() != self.project || panel.active_id() != self.thread {
+            return Err(Error::Stale);
+        }
+        let session = panel.session(&self.thread)?;
+        if session.conversation.len() != self.archived.len() {
+            return Err(Error::Stale);
+        }
+        Ok(self.index.len() + session.trace.rows.len())
+    }
+    /// Bounded serialization, including when one archived trace has 60k steps.
+    pub fn snapshot(&self, panel: &Panel, range: Range<usize>, now: u64) -> Result<Value> {
+        let count = self.count(panel)?;
+        let session = panel.session(&self.thread)?;
+        if range.start > range.end || range.end > count || range.len() > 256 {
+            return Err(Error::Invalid("v4 row window"));
+        }
+        let mut items = vec![];
+        for i in range.clone() {
+            // An archived step names the run it came from (its trace
+            // message), so the view can fold a finished turn's work.
+            let mut trace = Value::Null;
+            let (id, value) = if i < self.index.len() {
+                let row = &self.index.page(i..i + 1)[0];
+                if row.step_index.is_some()
+                    && let Some(message) = self.archived.get(&row.message)
+                {
+                    trace = json!({"id":row.message,"durationMs":message.value["durationMs"],
+                        "steering":message.value["steering"] == true});
+                }
+                (
+                    format!("history:{}", row.id),
+                    self.index
+                        .resolve(row, &self.archived)
+                        .ok_or(Error::Stale)?,
+                )
+            } else {
+                let row = session
+                    .trace
+                    .rows
+                    .at(i - self.index.len())
+                    .ok_or(Error::Stale)?;
+                (format!("live:{}", row.id), row.value.as_ref())
+            };
+            let command_id = value["id"].as_str().unwrap_or_default();
+            let chosen = session
+                .questions
+                .get(command_id)
+                .map_or_else(Default::default, |draft| draft.chosen().clone());
+            let mut item = json!({"id":id,"commandId":id,"value":wire_row(value),"chosen":chosen,
+                "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))});
+            if !trace.is_null() {
+                item["trace"] = trace;
+            }
+            items.push(item);
+        }
+        let mut value = panel.inspect(&self.thread)?;
+        let text = session.draft.text();
+        let selection = session.draft.text_selection();
+        value["draft"] = json!({"sent":session.composer_epoch,"citations":session.draft.citations(),"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
+        value["nextMessageId"] = json!(format!("history:message-{}", session.next_message));
+        value["starting"] = json!(session.starting);
+        value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
+        let mut threads = panel.summaries();
+        value["threadTitle"] = json!(
+            threads
+                .iter()
+                .find(|s| s.id == self.thread)
+                .map(|s| s.title.clone())
+                .unwrap_or_default()
+        );
+        // The thread picker's list, the latest first (v1 ThreadPicker).
+        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        value["threads"] = json!(
+            threads
+                .iter()
+                .map(|t| {
+                    let record = panel.raw_archive()["threads"].as_array().into_iter().flatten().find(|r| r["id"] == t.id);
+                    json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at,"parentId":record.map(|r|r["parentId"].clone()),"kind":record.map(|r|r["kind"].clone())})
+                })
+                .collect::<Vec<_>>()
+        );
+        value["interruptedRun"] = panel.interrupted_snapshot(&self.thread)?;
+        value["plan"] = session.plan.clone().unwrap_or(Value::Null);
+        value["result"] = session.result.clone().unwrap_or(Value::Null);
+        let idle = session.run.is_none() && !session.applying && !session.archiving;
+        value["resultActions"] = json!({
+            "apply":idle && !matches!(panel.project(),""|"builtin-application"|"powermove-global") && session.phase == crate::model::Phase::Preview && session.plan.is_some(),
+            "keep":idle && session.phase == crate::model::Phase::Result && session.result.is_some(),
+            "undo":idle && session.phase == crate::model::Phase::Result && session.result.is_some(),
+        });
+        value["elapsedMs"] = json!(session.elapsed_ms(now));
+        // What the run is doing before its first step lands.
+        value["activity"] = json!(session.activity);
+        value["stopping"] = json!(session.run.as_ref().is_some_and(|r| r.stopping));
+        value["showJump"] = json!(session.follow.show_jump);
+        let access = match session.settings.access {
+            Access::Editor => "editor",
+            Access::Computer => "full",
+            Access::Project if session.settings.approval == ApprovalMode::Supervised => {
+                "supervised"
+            }
+            Access::Project => "auto",
+        };
+        // The pickers name the model and effort that run, never a blank
+        // "Default"; a model with no effort levels lists none (no picker).
+        let catalog = &session.catalog;
+        let model = &session.settings.model;
+        value["settings"] = json!({"provider":session.settings.provider.name(),"model":catalog.resolve(model),
+            "effort":catalog.resolve_effort(model, &session.settings.effort),"access":access,"scope":session.settings.scope});
+        let choices = input::slash_choices_for(
+            &text,
+            &session.catalog,
+            model,
+            session.run.is_some(),
+            session.applying,
+        );
+        value["slash"] = json!({"visible":session.slash.visible(&text,session.applying,&choices),
+            "index":session.slash.index,"choices":choices.iter().map(|c|json!({"id":c.id,"value":c.value})).collect::<Vec<_>>()});
+        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":catalog.effort_choices(model),"defaultEffort":catalog.resolve_effort(model, "")});
+        Ok(value)
+    }
+}
+/// The text of a plain key press. The v4 host reports keys, not composed text.
+fn typed(key: &Key) -> Option<String> {
+    let mut letters = key.name.chars();
+    let letter = letters.next().filter(|_| letters.next().is_none())?;
+    (!key.meta && !key.control && !key.composing && !letter.is_control()).then(|| {
+        if key.shift {
+            letter.to_uppercase().collect()
+        } else {
+            letter.to_string()
+        }
+    })
+}
+fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
+    value[name]
+        .as_str()
+        .ok_or(Error::Invalid("v4 string argument"))
+}
+fn boolean(value: &Value, name: &str) -> Result<bool> {
+    value[name]
+        .as_bool()
+        .ok_or(Error::Invalid("v4 boolean argument"))
+}
+fn index(value: &Value) -> Result<usize> {
+    value
+        .as_u64()
+        .and_then(|v| usize::try_from(v).ok())
+        .ok_or(Error::Invalid("v4 text range"))
+}
+/// Coordinator-owned publication admission. Call on its serial worker before
+/// dispatch; advance the sequence only after a successful model action. HostClient
+/// and HostRouter separately enforce realm/generation/document revision admission.
+pub fn dispatch_at(
+    panel: &mut Panel,
+    sequence: u64,
+    envelope: &Value,
+    context: Context<'_>,
+) -> Result<Option<Effect>> {
+    dispatch_at_with_queue(panel, sequence, envelope, context, false)
+}
+pub fn dispatch_at_with_queue(
+    panel: &mut Panel,
+    sequence: u64,
+    envelope: &Value,
+    context: Context<'_>,
+    queue: bool,
+) -> Result<Option<Effect>> {
+    let thread = panel.active_id().to_owned();
+    let session = panel.session(&thread)?;
+    let run = session.run.as_ref().map(|r| &r.id);
+    let target = envelope
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or(Error::Stale)?;
+    let action = &envelope["action"];
+    let kind = action["type"].as_str().unwrap_or_default();
+    let epoch = action
+        .get("composerEpoch")
+        .map(|epoch| epoch.as_u64().ok_or(Error::Invalid("composer epoch")))
+        .transpose()?;
+    let composer = epoch.is_some() && matches!(kind, "draft" | "key" | "submit");
+    if sequence == 0
+        || target.get("project") != Some(&json!(panel.project()))
+        || target.get("thread") != Some(&json!(thread))
+        || !composer && kind != "key" && target.get("run") != Some(&json!(run))
+    {
+        return Err(Error::Stale);
+    }
+    // An input sampled before Send still belongs to the consumed draft,
+    // even if a newer publication set the field to that same text later.
+    if composer && epoch != Some(session.composer_epoch) {
+        return Ok(None);
+    }
+    if kind == "draft" && envelope["sequence"].as_u64() != Some(sequence) {
+        return Err(Error::Stale);
+    }
+    dispatch_composer(panel, &thread, action, context, composer, queue)
+}
+
+fn control_id(panel: &Panel, thread: &str, id: &str) -> Result<String> {
+    let s = panel.session(thread)?;
+    if let Some(raw) = id.strip_prefix("live:") {
+        return s
+            .trace
+            .rows
+            .get(raw)
+            .map(|_| raw.into())
+            .ok_or_else(|| Error::UnknownId(id.into()));
+    }
+    let index = TranscriptIndex::build(&s.conversation);
+    let raw = if let Some(scoped) = id.strip_prefix("history:") {
+        let row = index
+            .get(scoped)
+            .ok_or_else(|| Error::UnknownId(id.into()))?;
+        index
+            .resolve(row, &s.conversation)
+            .and_then(|v| v["id"].as_str())
+            .ok_or(Error::Stale)?
+    } else if s.trace.rows.get(id).is_some() {
+        return Ok(id.into());
+    } else {
+        id
+    };
+    let matches = index
+        .page(0..index.len())
+        .iter()
+        .filter(|row| {
+            index
+                .resolve(row, &s.conversation)
+                .is_some_and(|v| v["id"] == raw)
+        })
+        .count();
+    if matches != 1 || s.trace.rows.get(raw).is_some() {
+        return Err(Error::Invalid("ambiguous archived control"));
+    }
+    Ok(raw.into())
+}
+fn retry_turn(
+    panel: &mut Panel,
+    thread: &str,
+    message: Option<&str>,
+    run: &str,
+    request: &str,
+    now: u64,
+) -> Result<Effect> {
+    let s = panel.session(thread)?;
+    if s.run.is_some() {
+        return Err(Error::Busy);
+    }
+    let rows = s.conversation.page(0..s.conversation.len());
+    let end = match message {
+        Some(id) => rows
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| Error::UnknownId(id.into()))?,
+        None => rows.len(),
+    };
+    let user = rows
+        .get(end)
+        .filter(|row| row.value["role"] == "user" && row.value["delivery"] == "failed")
+        .or_else(|| rows[..end].iter().rev().find(|r| r.value["role"] == "user"))
+        .ok_or(Error::Invalid("retry has no user turn"))?;
+    let text = user.value["text"].as_str().unwrap_or_default().to_owned();
+    let files = user.value["attachments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut request_draft = crate::composer::Draft::from_legacy(&text, &files)
+        .or_else(|_| crate::composer::Draft::from_legacy(&text, &[]))?;
+    if let Some(citations) = user.value["citations"].as_array() {
+        request_draft.set_citations(citations.clone())?;
+    }
+    let saved = std::mem::replace(panel.draft_mut(thread)?, request_draft);
+    let effect = panel.submit(thread, run, request, now);
+    *panel.draft_mut(thread)? = saved;
+    effect
+}
+fn optional_boolean(value: &Value, name: &str) -> Result<bool> {
+    match value.get(name) {
+        None => Ok(false),
+        Some(value) => value.as_bool().ok_or(Error::Invalid("v4 key boolean")),
+    }
+}
+/// Native worker must admit the project/thread/run against its latest publication
+/// before calling. Effects are returned intact to the existing host coordinator;
+/// no successful provider, consent, archive, shell or file result is fabricated.
+fn set_submission_text(
+    panel: &mut Panel,
+    thread: &str,
+    text: Option<&str>,
+    now: u64,
+) -> Result<crate::composer::Draft> {
+    let draft = panel.draft_mut(thread)?;
+    if let Some(text) = text
+        && draft.text() != text
+    {
+        draft.set_text(text, now)?;
+        let end = text.encode_utf16().count();
+        draft.select_text(end..end)?;
+    }
+    Ok(draft.clone())
+}
+
+pub fn dispatch(
+    panel: &mut Panel,
+    thread: &str,
+    action: &Value,
+    context: Context<'_>,
+) -> Result<Option<Effect>> {
+    dispatch_composer(panel, thread, action, context, false, false)
+}
+fn dispatch_composer(
+    panel: &mut Panel,
+    thread: &str,
+    action: &Value,
+    context: Context<'_>,
+    composer: bool,
+    queue: bool,
+) -> Result<Option<Effect>> {
+    if panel.active_id() != thread {
+        return Err(Error::Stale);
+    }
+    panel.session(thread)?;
+    let now = context.now;
+    let effect = match string(action, "type")? {
+        "draft" => {
+            let text = string(action, "text")?;
+            let selection = action["selection"]
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .ok_or(Error::Invalid("v4 text range"))?;
+            let range = index(&selection[0])?..index(&selection[1])?;
+            let mut draft = panel.session(thread)?.draft.clone();
+            draft.set_text(text, now)?;
+            draft.select_text(range)?;
+            *panel.draft_mut(thread)? = draft;
+            None
+        }
+        "citations" => {
+            let citations = action["citations"]
+                .as_array()
+                .ok_or(Error::Invalid("citations"))?
+                .clone();
+            panel.draft_mut(thread)?.set_citations(citations)?;
+            None
+        }
+        "focus" => {
+            panel.focus_composer(thread, boolean(action, "focused")?)?;
+            None
+        }
+        "key" => {
+            let key = &action["key"];
+            let text = key["value"].as_str();
+            let key = Key {
+                name: string(key, "key")?.into(),
+                meta: optional_boolean(key, "metaKey")?,
+                control: optional_boolean(key, "ctrlKey")?,
+                shift: optional_boolean(key, "shiftKey")?,
+                alt: optional_boolean(key, "altKey")?,
+                repeat: optional_boolean(key, "repeat")?,
+                composing: optional_boolean(key, "composing")?,
+                code_229: false,
+            };
+            let draft =
+                if composer && key.name == "Enter" && !key.shift && !key.repeat && !key.composing {
+                    Some(set_submission_text(panel, thread, text, now)?)
+                } else {
+                    None
+                };
+            let outcome = panel.route_composer_key(
+                thread,
+                &key,
+                context.popover_open,
+                Submission {
+                    run: context.run,
+                    request: context.request,
+                },
+                now,
+                queue,
+            )?;
+            if outcome.route.intent == input::Intent::NativeText {
+                let (backward, name) = (key.name == "Backspace", key.name.as_str());
+                if backward || name == "Delete" {
+                    panel.draft_mut(thread)?.delete(backward, key.repeat, now);
+                } else if let Some(text) = typed(&key) {
+                    panel.draft_mut(thread)?.insert_text(&text, now, true);
+                }
+            }
+            let mut effect = outcome.effect;
+            if let (Some(effect), Some(draft)) = (&mut effect, draft) {
+                panel.track_composer_send(effect, draft)?;
+            }
+            effect
+        }
+        "openSettings" => Some(panel.host_settings(thread)?),
+        "subscribe" => Some(panel.host_subscribe(thread)?),
+        "submit" => {
+            let draft = if composer {
+                Some(set_submission_text(
+                    panel,
+                    thread,
+                    action["text"].as_str(),
+                    now,
+                )?)
+            } else {
+                None
+            };
+            let mut effect = if queue {
+                panel.queue_composer(thread, now)?
+            } else {
+                panel.submit(thread, context.run, context.request, now)?
+            };
+            if let Some(draft) = draft {
+                panel.track_composer_send(&mut effect, draft)?;
+            }
+            Some(effect)
+        }
+        "stop" => Some(panel.stop(thread)?),
+        "newThread" => {
+            panel.new_thread(context.new_thread, now)?;
+            None
+        }
+        "switchThread" => {
+            panel.switch(string(action, "id")?)?;
+            None
+        }
+        // Asks first: the host's confirmation, then the host archives it.
+        "deleteThread" => panel.archive_thread(string(action, "id")?, "", false, now)?,
+        "disclose" => {
+            let id = string(action, "id")?;
+            let open = boolean(action, "open")?;
+            if let Some(scoped) = id.strip_prefix("history:") {
+                let s = panel.session(thread)?;
+                if TranscriptIndex::build(&s.conversation)
+                    .get(scoped)
+                    .is_none()
+                {
+                    return Err(Error::UnknownId(id.into()));
+                }
+                panel
+                    .session_mut(thread)?
+                    .disclosures
+                    .insert(id.into(), open);
+            } else {
+                let raw = id.strip_prefix("live:").unwrap_or(id);
+                panel.disclose(thread, raw, open)?;
+                panel
+                    .session_mut(thread)?
+                    .disclosures
+                    .insert(id.into(), open);
+            }
+            None
+        }
+        "chooseSlash" => panel.choose_slash(thread, string(action, "id")?, now)?,
+        "removeAttachment" => {
+            panel
+                .draft_mut(thread)?
+                .remove_file(string(action, "id")?, now)?;
+            None
+        }
+        "openAttachment" => Some(panel.open_attachment(thread, string(action, "id")?)?),
+        "setAccess" => panel.set_access(thread, string(action, "access")?)?,
+        "setProvider" => {
+            let provider = match string(action, "provider")? {
+                "chatgpt" => Provider::Chatgpt,
+                "claude" => Provider::Claude,
+                "compatible" => Provider::Compatible,
+                "aero" => Provider::Aero,
+                _ => return Err(Error::Invalid("provider")),
+            };
+            panel.set_provider(
+                thread,
+                provider,
+                action["model"].as_str().unwrap_or_default().to_owned(),
+                (context.catalogs)(provider),
+            )?;
+            None
+        }
+        "setModel" => {
+            panel.set_model(
+                thread,
+                string(action, "model")?.into(),
+                string(action, "effort")?.into(),
+            )?;
+            None
+        }
+        "chooseAnswer" => {
+            panel.choose_answer(
+                thread,
+                &control_id(panel, thread, string(action, "step")?)?,
+                string(action, "question")?,
+                string(action, "option")?,
+            )?;
+            None
+        }
+        "typeAnswer" => {
+            panel.type_answer(
+                thread,
+                &control_id(panel, thread, string(action, "step")?)?,
+                string(action, "question")?,
+                string(action, "text")?.into(),
+            )?;
+            None
+        }
+        "answer" => Some(panel.answer_at(
+            thread,
+            &control_id(panel, thread, string(action, "step")?)?,
+            boolean(action, "skip")?,
+            now,
+        )?),
+        "stopTask" => {
+            Some(panel.stop_task(thread, &control_id(panel, thread, string(action, "id")?)?)?)
+        }
+        "resumeInterrupted" => Some(panel.resume_interrupted(
+            thread,
+            string(action, "runId")?,
+            context.run,
+            context.request,
+            now,
+        )?),
+        "dismissInterrupted" => {
+            panel.dismiss_interrupted(thread, string(action, "runId")?, now)?;
+            None
+        }
+        "keepResult" => {
+            panel.keep_result(thread)?;
+            None
+        }
+        "undoResult" => Some(panel.undo_result(thread)?),
+        "applyPlan" => Some(panel.apply_plan(thread)?),
+        "dismissPlan" => {
+            panel.dismiss_plan(thread)?;
+            None
+        }
+        // Try Again on a failed turn: the request before it, sent again
+        // (with the files it carried); the composer's own draft stays.
+        "retry" => {
+            let message = action["id"].as_str().map(|id| {
+                let id = id.strip_prefix("history:").unwrap_or(id);
+                id.split('/').next().unwrap_or(id).to_owned()
+            });
+            Some(retry_turn(
+                panel,
+                thread,
+                message.as_deref(),
+                context.run,
+                context.request,
+                now,
+            )?)
+        }
+        "artifact" => {
+            Some(panel.artifact(thread, string(action, "path")?, boolean(action, "import")?)?)
+        }
+        "shell" => Some(panel.host_action(
+            thread,
+            match string(action, "action")? {
+                "open" => ShellAction::Open,
+                "close" => ShellAction::Close,
+                "pin" => ShellAction::Pin,
+                "beginDrag" => ShellAction::BeginDrag,
+                "cancelDrag" => ShellAction::CancelDrag,
+                "commitDrag" => ShellAction::CommitDrag {
+                    dock: action["dock"].as_str().map(str::to_owned),
+                },
+                _ => return Err(Error::Invalid("v4 shell action")),
+            },
+        )?),
+        _ => return Err(Error::Invalid("unsupported v4 agent action")),
+    };
+    Ok(effect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        input::Catalog,
+        model::{EffectKind, Update},
+    };
+    use pm_agents::persistence::Store;
+    use std::{collections::BTreeMap, io};
+    #[derive(Default)]
+    struct Memory(BTreeMap<String, Value>);
+    impl Store for Memory {
+        fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
+            Ok(self.0.get(key).cloned())
+        }
+        fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
+            self.0.insert(key.into(), value.clone());
+            Ok(())
+        }
+    }
+    fn panel() -> Panel {
+        Panel::load(&mut Memory::default(), "synthetic-project", "thread", 0).unwrap()
+    }
+    #[test]
+    fn access_picker_matches_loaded_authority_and_v1_default() {
+        let mut p = panel();
+        assert_eq!(
+            p.session("thread").unwrap().settings.access,
+            Access::Project
+        );
+        assert_eq!(
+            p.session("thread").unwrap().settings.approval,
+            ApprovalMode::Auto
+        );
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
+        p.set_access("thread", "editor").unwrap();
+        assert_eq!(
+            p.session("thread").unwrap().settings.approval,
+            ApprovalMode::Auto
+        );
+        assert_eq!(snapshot(&p)["settings"]["access"], "editor");
+        let mut store = Memory::default();
+        p.save(&mut store, 1).unwrap();
+        let restored = Panel::load(&mut store, "synthetic-project", "unused", 2).unwrap();
+        assert_eq!(snapshot(&restored)["settings"]["access"], "editor");
+        assert_eq!(
+            restored.session("thread").unwrap().settings.access,
+            Access::Editor
+        );
+        p.set_access("thread", "auto").unwrap();
+        assert_eq!(
+            p.session("thread").unwrap().settings.access,
+            Access::Project
+        );
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
+    }
+    fn act(p: &mut Panel, v: Value) -> Result<Option<Effect>> {
+        dispatch(
+            p,
+            "thread",
+            &v,
+            Context {
+                run: "run",
+                request: "request",
+                new_thread: "new",
+                now: 10,
+                popover_open: true,
+                catalogs: &|_| Default::default(),
+            },
+        )
+    }
+    fn snapshot(p: &Panel) -> Value {
+        let w = Window::new(p, "thread").unwrap();
+        let count = w.index.len() + p.session("thread").unwrap().trace.rows.len();
+        w.snapshot(p, 0..count.min(256), 1000).unwrap()
+    }
+    fn draft(p: &mut Panel) {
+        act(
+            p,
+            json!({"type":"draft","text":"Authored 日本🙂\n","selection":[14,14]}),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn exact_draft_and_utf16_selection_are_published_without_attachment_payloads() {
+        let mut p = panel();
+        draft(&mut p);
+        let v = snapshot(&p);
+        assert_eq!(v["draft"]["text"], "Authored 日本🙂\n");
+        assert_eq!(v["draft"]["selection"], json!([14, 14]));
+        assert_eq!(v["sendable"], true);
+        assert_eq!(v["rows"]["count"], 0);
+    }
+    #[test]
+    fn malformed_selection_is_atomic_and_split_surrogate_is_refused() {
+        let mut p = panel();
+        draft(&mut p);
+        let before = snapshot(&p);
+        for selection in [
+            json!([0, 99]),
+            json!([12, 12]),
+            json!([2, 1]),
+            json!([0]),
+            json!([0, -1]),
+        ] {
+            assert!(
+                act(
+                    &mut p,
+                    json!({"type":"draft","text":"Authored 日本🙂\n","selection":selection})
+                )
+                .is_err()
+            );
+            assert_eq!(snapshot(&p), before);
+        }
+    }
+    #[test]
+    fn ime_and_repeat_never_submit_and_shift_return_inserts_a_newline() {
+        let mut p = panel();
+        draft(&mut p);
+        for key in [
+            json!({"key":"Enter","composing":true}),
+            json!({"key":"Enter","repeat":true}),
+        ] {
+            assert!(
+                act(&mut p, json!({"type":"key","key":key}))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(p.session("thread").unwrap().run.is_none());
+        }
+        act(
+            &mut p,
+            json!({"type":"key","key":{"key":"Enter","shiftKey":true}}),
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["draft"]["text"], "Authored 日本🙂\n\n");
+    }
+    #[test]
+    fn submit_stop_and_rejected_stop_keep_model_ownership_and_allow_explicit_retry() {
+        let mut p = panel();
+        draft(&mut p);
+        let e = act(&mut p, json!({"type":"submit"})).unwrap().unwrap();
+        assert!(matches!(e.kind, EffectKind::Send { .. }));
+        assert_eq!(e.target.thread, "thread");
+        let stop = act(&mut p, json!({"type":"stop"})).unwrap().unwrap();
+        assert!(snapshot(&p)["stopping"] == true);
+        assert!(act(&mut p, json!({"type":"stop"})).is_err());
+        p.acknowledge(stop.id, false).unwrap();
+        assert!(snapshot(&p)["stopping"] == false);
+        assert!(act(&mut p, json!({"type":"stop"})).unwrap().is_some());
+    }
+    #[test]
+    fn fresh_session_publishes_auto_access() {
+        assert_eq!(snapshot(&panel())["settings"]["access"], "auto");
+    }
+    #[test]
+    fn full_access_returns_consent_instead_of_granting_authority() {
+        let mut p = panel();
+        let e = act(&mut p, json!({"type":"setAccess","access":"full"}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::ComputerConsent));
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
+        p.acknowledge(e.id, false).unwrap();
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
+    }
+    #[test]
+    fn access_modes_and_catalog_validation_use_real_model_methods() {
+        let mut p = panel();
+        for access in ["editor", "supervised", "auto"] {
+            act(&mut p, json!({"type":"setAccess","access":access})).unwrap();
+            assert_eq!(snapshot(&p)["settings"]["access"], access);
+        }
+        p.set_catalog(
+            "thread",
+            Catalog {
+                models: vec![("model".into(), "GPT-6.1".into())],
+                efforts: vec!["high".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        act(
+            &mut p,
+            json!({"type":"setModel","model":"model","effort":"high"}),
+        )
+        .unwrap();
+        assert!(
+            act(
+                &mut p,
+                json!({"type":"setModel","model":"unknown","effort":"high"})
+            )
+            .is_err()
+        );
+        assert_eq!(snapshot(&p)["settings"]["model"], "model");
+    }
+    #[test]
+    fn pin_drag_cancel_and_close_are_shell_effects_without_a_local_layout_mirror() {
+        let mut p = panel();
+        for action in ["pin", "beginDrag", "cancelDrag", "close", "open"] {
+            let e = act(&mut p, json!({"type":"shell","action":action}))
+                .unwrap()
+                .unwrap();
+            assert!(matches!(e.kind, EffectKind::Shell(_)));
+            assert_eq!(e.target.project, "synthetic-project");
+        }
+        assert!(act(&mut p, json!({"type":"shell","action":"invented"})).is_err());
+    }
+    #[test]
+    fn escape_in_the_docked_composer_gives_the_keyboard_back_and_never_closes_the_panel() {
+        // Chike: the docked composer kept the keyboard, so Space typed into
+        // it instead of playing. Escape there hands the keyboard back.
+        let mut p = panel();
+        let docked = |p: &mut Panel, v: Value| {
+            dispatch(
+                p,
+                "thread",
+                &v,
+                Context {
+                    run: "run",
+                    request: "request",
+                    new_thread: "new",
+                    now: 10,
+                    popover_open: false,
+                    catalogs: &|_| Default::default(),
+                },
+            )
+        };
+        let e = docked(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Blur)));
+        // A run's reply, a new thread or a model pick asks nothing of the
+        // keyboard: no effect takes it for the composer.
+        let e = act(&mut p, json!({"type":"newThread"})).unwrap();
+        assert!(!e.is_some_and(|e| matches!(e.kind, EffectKind::Shell(_))));
+    }
+    #[test]
+    fn escape_in_the_popover_composer_closes_it_unless_the_shortcuts_menu_takes_it() {
+        // The reported bug: Escape in the composer never closed the popover.
+        let mut p = panel();
+        let e = act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
+        // An open shortcuts menu takes the first Escape and stays put.
+        act(&mut p, json!({"type":"focus","focused":true})).unwrap();
+        act(&mut p, json!({"type":"draft","text":"/","selection":[1,1]})).unwrap();
+        assert_eq!(snapshot(&p)["slash"]["visible"], true);
+        assert!(
+            act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(snapshot(&p)["slash"]["visible"], false);
+        let e = act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
+    }
+    #[test]
+    fn a_reply_returned_only_at_the_end_is_shown_once_after_earlier_notes() {
+        // Codex exec (Auto) streams notes, then returns its answer at the end.
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Trace(json!({"kind":"answer","text":"I'll check the project."})),
+            11,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Added the title layer.".into(),
+                error: false,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
+        let texts = |p: &Panel| -> Vec<String> {
+            snapshot(p)["rows"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|r| r["value"]["text"].as_str().map(str::to_owned))
+                .collect()
+        };
+        assert!(texts(&p).iter().any(|t| t == "Added the title layer."));
+        // A streamed reply (the app server) is not repeated.
+        draft(&mut p);
+        let ctx = Context {
+            run: "run-2",
+            request: "request-2",
+            new_thread: "new",
+            now: 30,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        };
+        dispatch(&mut p, "thread", &json!({"type":"submit"}), ctx).unwrap();
+        p.receive(
+            "thread",
+            "run-2",
+            1,
+            Update::Trace(json!({"kind":"answer","text":"Done: the title is in."})),
+            31,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run-2",
+            2,
+            Update::Complete {
+                text: "Done: the title is in.".into(),
+                error: false,
+                cancelled: false,
+            },
+            40,
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&p)
+                .iter()
+                .filter(|t| t.as_str() == "Done: the title is in.")
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn a_structured_stream_and_completion_archive_only_one_clean_reply() {
+        for chunks in [
+            [r#"{"reply":"Done\n\n"#, r#"A \"title\"."}"#],
+            ["Done\n\n", "A \"title\"."],
+        ] {
+            let mut p = panel();
+            draft(&mut p);
+            act(&mut p, json!({"type":"submit"})).unwrap();
+            for (index, text) in chunks.into_iter().enumerate() {
+                p.receive(
+                    "thread", "run", index as u64 + 1,
+                    Update::Trace(json!({"kind":"answer","text":text})), 11,
+                ).unwrap();
+            }
+            p.receive(
+                "thread", "run", 3,
+                Update::Complete {
+                    text: r#"{"reply":"Done\n\nA \"title\"."}"#.into(),
+                    error: false,
+                    cancelled: false,
+                },
+                20,
+            ).unwrap();
+            let snapshot = snapshot(&p);
+            let visible = snapshot["rows"]["items"].as_array().unwrap()
+                .iter().filter_map(|row| row["value"]["text"].as_str()).collect::<Vec<_>>();
+            assert_eq!(visible.iter().filter(|&&text| text == "Done\n\nA \"title\".").count(), 1);
+            assert!(visible.iter().all(|text| !text.contains(r#"{"reply""#)));
+        }
+    }
+
+    #[test]
+    fn a_question_still_open_after_its_run_is_answered_through_its_archived_row() {
+        // A message-transport question outlives its run (the agent asked and
+        // finished); the card's choices act on its archived row.
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive("thread","run",1,Update::Trace(json!({"kind":"question","itemId":"q","transport":"message",
+            "questions":[{"id":"title","question":"Which title?","allowOther":true,"options":[{"label":"A"},{"label":"B"}]}]})),11).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Waiting for your choice.".into(),
+                error: false,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        let row = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "question")
+            .unwrap()
+            .clone();
+        assert_eq!(row["value"]["status"], "open");
+        let step = row["commandId"].as_str().unwrap();
+        act(
+            &mut p,
+            json!({"type":"chooseAnswer","step":step,"question":"title","option":"B"}),
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        let row = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "question")
+            .unwrap()
+            .clone();
+        assert_eq!(row["chosen"]["title"], json!(["B"]));
+        assert!(
+            act(&mut p, json!({"type":"answer","step":step,"skip":false}))
+                .unwrap()
+                .is_some()
+        );
+    }
+    #[test]
+    fn try_again_sends_the_failed_turns_request_and_keeps_the_composer_draft() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Complete {
+                text: r#"{"type":"error","error":{"message":"Overloaded"}}"#.into(),
+                error: true,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        let failed = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["error"] == true)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        p.draft_mut("thread")
+            .unwrap()
+            .insert_text("next idea", 30, false);
+        let ctx = Context {
+            run: "run-2",
+            request: "request-2",
+            new_thread: "new",
+            now: 40,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        };
+        let e = dispatch(&mut p, "thread", &json!({"type":"retry","id":failed}), ctx)
+            .unwrap()
+            .unwrap();
+        match e.kind {
+            EffectKind::Send { text, .. } => assert_eq!(text, "Authored 日本🙂\n"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(snapshot(&p)["draft"]["text"], "next idea");
+        // A running turn has nothing to try again.
+        assert!(act(&mut p, json!({"type":"retry"})).is_err());
+    }
+    #[test]
+    fn the_snapshot_names_threads_and_each_archived_steps_run() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Trace(json!({"kind":"tool-start","itemId":"call","toolName":"get_project_state","label":"Get project state"})),
+            12,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Done.".into(),
+                error: false,
+                cancelled: false,
+            },
+            5_012,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        assert_eq!(v["threads"][0]["id"], "thread");
+        let step = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "tool")
+            .unwrap();
+        assert!(step["trace"]["id"].is_string());
+        assert_eq!(step["trace"]["steering"], false);
+        assert!(step["trace"]["durationMs"].as_u64().is_some());
+    }
+    #[test]
+    fn switched_thread_refuses_old_actions_and_old_windows() {
+        let mut p = panel();
+        let w = Window::new(&p, "thread").unwrap();
+        act(&mut p, json!({"type":"newThread"})).unwrap();
+        // A blank UI thread can be reused by the model. Make a second nonblank thread explicitly.
+        let active = p.active_id().to_owned();
+        p.draft_mut(&active).unwrap().insert_text("keep", 1, false);
+        p.new_thread("other", 2).unwrap();
+        assert!(matches!(
+            act(&mut p, json!({"type":"stop"})),
+            Err(Error::Stale)
+        ));
+        assert!(w.snapshot(&p, 0..0, 0).is_err());
+    }
+    #[test]
+    fn archived_sixty_thousand_steps_page_in_the_middle_without_serializing_the_trace() {
+        let mut store = Memory::default();
+        let mut p = Panel::load(&mut store, "synthetic-project", "thread", 0).unwrap();
+        p.save(&mut store, 0).unwrap();
+        store.0.get_mut("agentThreads.synthetic-project").unwrap()["threads"][0]["conversation"] = json!([{"role":"trace","steps":(0..60_000).map(|i|json!({"id":format!("t-{i}"),"kind":"tool","label":"Make the headline","status":"done"})).collect::<Vec<_>>()}]);
+        let p = Panel::load(&mut store, "synthetic-project", "thread", 0).unwrap();
+        let w = Window::new(&p, "thread").unwrap();
+        let v = w.snapshot(&p, 30_000..30_003, 0).unwrap();
+        assert_eq!(v["rows"]["count"], 60_000);
+        assert_eq!(v["rows"]["items"].as_array().unwrap().len(), 3);
+        assert_eq!(v["rows"]["items"][0]["value"]["id"], "t-30000");
+        assert!(v.to_string().len() < 10_000);
+        assert!(w.snapshot(&p, 0..257, 0).is_err());
+        assert!(w.snapshot(&p, 60_000..60_001, 0).is_err());
+    }
+    #[test]
+    fn live_streaming_preserves_row_id_and_previous_archive_snapshot() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        let w = Window::new(&p, "thread").unwrap();
+        for (seq, text) in [(1, "Authored "), (2, "日本🙂\n")] {
+            p.receive(
+                "thread",
+                "run",
+                seq,
+                Update::Trace(json!({"kind":"answer","text":text})),
+                seq + 10,
+            )
+            .unwrap();
+        }
+        let v = w.snapshot(&p, 0..2, 100).unwrap();
+        assert_eq!(v["rows"]["items"][1]["id"], "live:text-1");
+        assert_eq!(v["rows"]["items"][1]["value"]["text"], "Authored 日本🙂\n");
+    }
+    #[test]
+    fn explicit_question_choice_does_not_submit_and_secret_drafts_do_not_publish() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive("thread","run",1,Update::Trace(json!({"kind":"question","itemId":"q","requestId":"request","transport":"reply","blocking":true,
+            "questions":[{"id":"first","question":"Choose","secret":true,"allowOther":true,"options":[{"label":"A"}]}]})),11).unwrap();
+        act(&mut p,json!({"type":"typeAnswer","step":"q","question":"first","text":"synthetic-private-answer"})).unwrap();
+        assert!(
+            !snapshot(&p)
+                .to_string()
+                .contains("synthetic-private-answer")
+        );
+        let e = act(&mut p, json!({"type":"answer","step":"q","skip":false}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Answer { .. }));
+    }
+    #[test]
+    fn unknown_action_is_refused_without_consuming_draft() {
+        let mut p = panel();
+        draft(&mut p);
+        let before = snapshot(&p);
+        assert!(act(&mut p, json!({"type":"invented"})).is_err());
+        assert_eq!(snapshot(&p), before);
+    }
+    #[test]
+    fn completion_native_plan_actions_dispatch_and_preserve_failed_preview() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Plan(json!({"revision":0,"commands":[]})),
+            11,
+        )
+        .unwrap();
+        assert!(
+            p.apply_plan("thread").is_err(),
+            "active runs cannot apply a preview"
+        );
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: String::new(),
+                error: false,
+                cancelled: false,
+            },
+            12,
+        )
+        .unwrap();
+        let apply = act(&mut p, json!({"type":"applyPlan"})).unwrap().unwrap();
+        assert!(matches!(apply.kind, EffectKind::ApplyPlan(_)));
+        p.acknowledge(apply.id, false).unwrap();
+        assert!(p.session("thread").unwrap().plan.is_some());
+        act(&mut p, json!({"type":"dismissPlan"})).unwrap();
+        assert!(p.session("thread").unwrap().plan.is_none());
+    }
+    #[test]
+    fn completion_snapshot_actions_belong_only_to_the_current_settled_result() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Plan(json!({"revision":2,"commands":[]})),
+            11,
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["resultActions"]["apply"], false);
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Plan".into(),
+                error: false,
+                cancelled: false,
+            },
+            12,
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["plan"]["revision"], 2);
+        assert_eq!(snapshot(&p)["resultActions"]["apply"], true);
+        let effect = act(&mut p, json!({"type":"applyPlan"})).unwrap().unwrap();
+        assert_eq!(effect.target.run.as_deref(), Some("run"));
+        assert_eq!(snapshot(&p)["resultActions"]["apply"], false);
+        p.acknowledge(effect.id, true).unwrap();
+        p.host_result(
+            "thread",
+            "run",
+            json!({"runId":"run","summary":"Applied","changed":true}),
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["result"]["runId"], "run");
+        assert_eq!(snapshot(&p)["resultActions"]["undo"], true);
+        let undo = act(&mut p, json!({"type":"undoResult"})).unwrap().unwrap();
+        assert_eq!(undo.target.run.as_deref(), Some("run"));
+        assert_eq!(snapshot(&p)["resultActions"]["keep"], false);
+        p.acknowledge(undo.id, false).unwrap();
+        assert_eq!(snapshot(&p)["resultActions"]["undo"], true);
+        act(&mut p, json!({"type":"keepResult"})).unwrap();
+        assert!(snapshot(&p)["result"].is_null());
+        assert_eq!(snapshot(&p)["resultActions"]["undo"], false);
+    }
+    #[test]
+    fn completion_result_actions_refuse_active_and_archiving_threads() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.host_result("thread", "run", json!({"runId":"run","changed":true}))
+            .unwrap();
+        assert!(act(&mut p, json!({"type":"keepResult"})).is_err());
+        assert!(act(&mut p, json!({"type":"undoResult"})).is_err());
+        assert!(p.session("thread").unwrap().result.is_some());
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Complete {
+                text: String::new(),
+                error: false,
+                cancelled: false,
+            },
+            12,
+        )
+        .unwrap();
+        p.session_mut("thread").unwrap().archiving = true;
+        assert!(act(&mut p, json!({"type":"keepResult"})).is_err());
+        assert!(act(&mut p, json!({"type":"undoResult"})).is_err());
+        assert!(p.session("thread").unwrap().result.is_some());
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::model::EffectKind;
+    use pm_agents::persistence::Store;
+    use std::io;
+    struct Empty;
+    impl Store for Empty {
+        fn get(&mut self, _: &str) -> io::Result<Option<Value>> {
+            Ok(None)
+        }
+        fn set(&mut self, _: &str, _: &Value) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    fn context() -> Context<'static> {
+        Context {
+            run: "run",
+            request: "request",
+            new_thread: "new",
+            now: 0,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        }
+    }
+    #[test]
+    fn admission_rejects_stale_project_thread_run_and_sequence_before_mutation() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let good = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},"action":{"type":"draft","text":"Keep","selection":[4,4]}});
+        for field in ["project", "thread", "run"] {
+            let mut bad = good.clone();
+            bad["target"][field] = json!("foreign");
+            assert!(matches!(
+                dispatch_at(&mut panel, 1, &bad, context()),
+                Err(Error::Stale)
+            ));
+        }
+        assert!(matches!(
+            dispatch_at(&mut panel, 2, &good, context()),
+            Err(Error::Stale)
+        ));
+        assert!(!panel.session("t").unwrap().draft.sendable());
+        dispatch_at(&mut panel, 1, &good, context()).unwrap();
+        assert!(panel.session("t").unwrap().draft.sendable());
+    }
+    #[test]
+    fn typing_outlives_a_publication_and_a_run_boundary_but_not_a_thread() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let key = |thread: &str| {
+            json!({"sequence":1,"target":{"project":"p","thread":thread,"run":"finished"},
+                "action":{"type":"key","key":{"key":"a"}}})
+        };
+        dispatch_at(&mut panel, 9, &key("t"), context()).unwrap();
+        assert!(panel.session("t").unwrap().draft.sendable());
+        assert!(matches!(
+            dispatch_at(&mut panel, 9, &key("other"), context()),
+            Err(Error::Stale)
+        ));
+    }
+    #[test]
+    fn composer_send_uses_editor_text_even_when_the_last_input_is_still_pending() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"key","composerEpoch":0,"key":{"key":"Enter","metaKey":true,"value":"Latest text"}}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context()).unwrap();
+        assert!(matches!(
+            effect.unwrap().kind,
+            EffectKind::Send { text, .. } if text == "Latest text"
+        ));
+        assert_eq!(panel.session("t").unwrap().conversation.len(), 1);
+    }
+    #[test]
+    fn late_input_and_duplicate_return_cannot_resend_a_consumed_draft() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let envelope = |run: Value, action: Value| json!({"sequence":1,"target":{"project":"p","thread":"t","run":run},"action":action});
+        let draft = json!({"type":"draft","text":"First","selection":[5,5],"composerEpoch":0});
+        let enter = json!({"type":"key","composerEpoch":0,"key":{"key":"Enter","value":"First"}});
+        dispatch_at(
+            &mut panel,
+            1,
+            &envelope(Value::Null, draft.clone()),
+            context(),
+        )
+        .unwrap();
+        dispatch_at(
+            &mut panel,
+            1,
+            &envelope(Value::Null, enter.clone()),
+            context(),
+        )
+        .unwrap();
+        dispatch_at(&mut panel, 1, &envelope(json!("run"), draft), context()).unwrap();
+        assert!(
+            dispatch_at(&mut panel, 1, &envelope(json!("run"), enter), context())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(panel.session("t").unwrap().draft.text(), "");
+        assert_eq!(panel.session("t").unwrap().conversation.len(), 1);
+    }
+    #[test]
+    fn composer_send_launch_refusal_restores_the_thread_draft() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        panel
+            .draft_mut("t")
+            .unwrap()
+            .insert_text("Keep this", 0, false);
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let starting = Window::new(&panel, "t").unwrap()
+            .snapshot(&panel, 0..1, 1).unwrap();
+        assert_eq!(starting["starting"], true);
+        assert_eq!(starting["rows"]["items"][0]["id"], "history:message-0");
+        crate::runtime::ProviderRuns::default()
+            .refuse(
+                &mut panel,
+                &mut Empty,
+                &effect,
+                1,
+                &Error::Host("Synthetic launch refusal".into()),
+            )
+            .unwrap();
+        let session = panel.session("t").unwrap();
+        assert_eq!(session.draft.text(), "Keep this");
+        assert!(session.run.is_none());
+        assert!(!session.starting);
+        assert_eq!(session.conversation.at(0).unwrap().value["delivery"], "failed");
+        let retried = retry_turn(&mut panel, "t", Some("message-0"), "retry", "request", 2)
+            .unwrap();
+        assert!(matches!(retried.kind, EffectKind::Send { text, .. } if text == "Keep this"));
+    }
+    #[test]
+    fn composer_timer_starts_when_the_provider_worker_accepts_the_run() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","text":"Start a run","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let window = Window::new(&panel, "t").unwrap();
+        assert_eq!(window.snapshot(&panel, 0..1, 301).unwrap()["starting"], true);
+        panel.provider_started(&effect, 301).unwrap();
+        let active = window.snapshot(&panel, 0..1, 301).unwrap();
+        assert_eq!(active["starting"], false);
+        assert_eq!(active["elapsedMs"], 0);
+    }
+    #[test]
+    fn a_provider_worker_that_cannot_start_restores_the_composer_draft() {
+        use pm_agents::{approvals::Authority, claude, transport};
+        use std::time::{Duration, Instant};
+
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","text":"Keep the original draft","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let mut runs = crate::runtime::ProviderRuns::default();
+        runs.start_admitted(&mut panel, &effect, 0, || {
+            Ok(transport::spawn(
+                transport::ProcessSpec {
+                    executable: "/dev/null".into(),
+                    args: vec![],
+                    cwd: std::env::temp_dir(),
+                    env: Default::default(),
+                },
+                transport::Machine::Claude(claude::Client::new(
+                    "run".into(),
+                    Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+                    0,
+                )),
+                vec![],
+            ))
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !runs.is_empty() {
+            runs.poll(&mut panel, &mut Empty, 1, 64).unwrap();
+            assert!(Instant::now() < deadline, "startup error was not delivered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let session = panel.session("t").unwrap();
+        assert!(session.run.is_none());
+        assert_eq!(session.draft.text(), "Keep the original draft");
+        assert_eq!(session.conversation.at(0).unwrap().value["delivery"], "failed");
+    }
+    #[test]
+    fn the_sent_attachment_is_previewable_without_republishing_its_full_payload() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let attachment = crate::composer::Attachment::from_record(json!({
+            "id":"image","name":"reference.png","type":"image/png",
+            "dataUrl":"data:image/png;base64,c3ludGhldGlj","thumbnail":"synthetic-thumbnail",
+        }))
+        .unwrap();
+        panel.add_attachments("t", vec![attachment], 0).unwrap();
+        let effect = panel.submit("t", "run", "request", 1).unwrap();
+        let EffectKind::Send { attachments, .. } = effect.kind else {
+            panic!("expected send");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0]["dataUrl"],
+            "data:image/png;base64,c3ludGhldGlj"
+        );
+        let view = Window::new(&panel, "t")
+            .unwrap()
+            .snapshot(&panel, 0..1, 1)
+            .unwrap();
+        assert_eq!(view["attachments"], json!([]));
+        let sent = &view["rows"]["items"][0]["value"]["attachments"][0];
+        assert_eq!(sent["thumbnail"], "synthetic-thumbnail");
+        assert_eq!(sent["id"], "image");
+        assert!(sent.get("dataUrl").is_none());
+        let preview = panel.open_attachment("t", "image").unwrap();
+        assert!(
+            matches!(preview.kind, EffectKind::OpenAttachment { attachment, .. }
+            if attachment["dataUrl"] == "data:image/png;base64,c3ludGhldGlj")
+        );
+    }
+    #[test]
+    fn malformed_ime_flags_cannot_turn_into_a_submit() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        panel.draft_mut("t").unwrap().insert_text("Keep", 0, false);
+        assert!(
+            dispatch(
+                &mut panel,
+                "t",
+                &json!({"type":"key","key":{"key":"Enter","composing":"true"}}),
+                context()
+            )
+            .is_err()
+        );
+        assert!(panel.session("t").unwrap().run.is_none());
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+    use crate::{composer::Attachment, model::EffectKind};
+    use pm_agents::persistence::Store;
+    use std::{collections::BTreeMap, io};
+    #[derive(Default)]
+    struct Memory {
+        records: BTreeMap<String, Value>,
+        lazy_history: bool,
+    }
+    impl Store for Memory {
+        fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
+            Ok(self.records.get(key).cloned())
+        }
+        fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
+            self.records.insert(key.into(), value.clone());
+            Ok(())
+        }
+        fn lazy_history_attachments(&self) -> bool {
+            self.lazy_history
+        }
+    }
+    #[test]
+    fn region_picks_open_in_the_draft_sent_history_and_restored_history() {
+        let mut store = Memory::default();
+        let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let capture = json!({
+            "id":"region","name":"Viewer · 0:03.43","type":"image/png","screenPick":true,
+            "dataUrl":"data:image/png;base64,iVBORw0KGgo=",
+        });
+        panel
+            .add_attachments(
+                "t",
+                vec![Attachment::from_record(capture.clone()).unwrap()],
+                0,
+            )
+            .unwrap();
+
+        let open = |panel: &mut Panel| {
+            let EffectKind::OpenAttachment {
+                attachment,
+                preview: true,
+                restore_focus,
+            } = panel.open_attachment("t", "region").unwrap().kind
+            else {
+                panic!("expected a region preview");
+            };
+            assert_eq!(restore_focus, "region");
+            attachment
+        };
+        assert_eq!(open(&mut panel), capture);
+        panel.submit("t", "run", "request", 1).unwrap();
+        assert!(
+            panel.session("t").unwrap().draft.attachment("region").is_none()
+        );
+        let sent = open(&mut panel);
+        assert_eq!(sent["dataUrl"], capture["dataUrl"]);
+        assert_eq!(sent["screenPick"], true);
+
+        panel.save(&mut store, 2).unwrap();
+        store.lazy_history = true;
+        let mut restored = Panel::load(&mut store, "p", "unused", 3).unwrap();
+        let mut archived = open(&mut restored);
+        assert_eq!(archived["payloadStored"], true);
+        assert!(archived.get("dataUrl").is_none());
+        pm_agents::persistence::hydrate_attachment(&mut store, &mut archived).unwrap();
+        assert_eq!(archived["dataUrl"], capture["dataUrl"]);
+    }
+
+    #[test]
+    fn scoped_archive_disclosures_are_independent_and_ambiguous_effect_targets_are_refused() {
+        let mut store = Memory::default();
+        let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
+        panel.save(&mut store, 0).unwrap();
+        store.records.get_mut("agentThreads.p").unwrap()["threads"][0]["conversation"] = json!([{"role":"trace","steps":[{"id":"duplicate","kind":"tool"},{"id":"duplicate","kind":"tool"}]}]);
+        let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let window = Window::new(&panel, "t").unwrap();
+        let before = window.snapshot(&panel, 0..2, 0).unwrap();
+        let id = before["rows"]["items"][0]["commandId"].as_str().unwrap();
+        dispatch(
+            &mut panel,
+            "t",
+            &json!({"type":"disclose","id":id,"open":true}),
+            Context {
+                run: "r",
+                request: "q",
+                new_thread: "n",
+                now: 0,
+                popover_open: true,
+                catalogs: &|_| Default::default(),
+            },
+        )
+        .unwrap();
+        let after = window.snapshot(&panel, 0..2, 0).unwrap();
+        assert_eq!(after["rows"]["items"][0]["open"], true);
+        assert_eq!(after["rows"]["items"][1]["open"], false);
+        assert!(matches!(
+            control_id(&panel, "t", id),
+            Err(Error::Invalid("ambiguous archived control"))
+        ));
+    }
+    #[test]
+    fn text_only_draft_projection_keeps_authored_text_and_omits_attachment_bodies() {
+        let mut panel = Panel::load(&mut Memory::default(), "p", "t", 0).unwrap();
+        panel
+            .draft_mut("t")
+            .unwrap()
+            .insert_text("Authored 日本🙂\n", 0, false);
+        panel.add_attachments("t",vec![Attachment::from_record(json!({"id":"file","name":"synthetic.txt","type":"text","text":"synthetic-attachment-body"})).unwrap()],0).unwrap();
+        assert_eq!(
+            panel.session("t").unwrap().draft.text(),
+            "Authored 日本🙂\n"
+        );
+        let value = Window::new(&panel, "t")
+            .unwrap()
+            .snapshot(&panel, 0..0, 0)
+            .unwrap();
+        assert!(!value.to_string().contains("synthetic-attachment-body"));
+        assert_eq!(
+            panel
+                .session("t")
+                .unwrap()
+                .draft
+                .attachment("file")
+                .unwrap()
+                .record()["text"],
+            "synthetic-attachment-body"
+        );
+    }
+}

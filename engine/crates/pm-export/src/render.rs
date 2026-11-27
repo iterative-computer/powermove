@@ -1,0 +1,2742 @@
+//! Exports and agent stills rendered in the job engine (plan section 17,
+//! "Pipeline"; section 20, "Frames"):
+//!
+//! ```text
+//! capability check → evaluate + render (pm-render, float) → readback
+//!   ─(bounded queue)→ encoder input (matrix, siting-aware chroma, dither)
+//!   + offline mix (pm-audio) → encode → mux → verify → atomic move
+//! ```
+//!
+//! Rendering runs on the calling thread (the job engine's worker, which owns
+//! the [`Renderer`]); conversion, mixing, encoding, and muxing run on a second
+//! thread with one frame queued between them, so the GPU renders frame n + 1
+//! while frame n is encoded.
+//!
+//! Every GPU submission goes through a [`GpuGate`] (contract 13): without
+//! playback the gate admits whole frames; while the interactive engine plays it
+//! admits bands of [`BAND_ROWS`]-row units sized to the slicing budget, rendered
+//! as regions of interest (pm-render renders a region bit for bit equal to the
+//! same rows of the full frame).
+//!
+//! Capability routing (section 26, Phase 2): a composition that pm-render cannot
+//! draw, media the engine cannot open, or audio pm-audio cannot decode fails
+//! with [`JobError::Unsupported`] before anything is written, so the host sends
+//! the export to the legacy exporter instead.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use pm_model::{Document, Node, NodeKind};
+use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
+use pm_protocol::common::{PixelRect, Size, TICKS_PER_SECOND, Ticks};
+use pm_protocol::priority::{
+    AlphaOutput as WireAlpha, AudioCoding, Container as WireContainer, ExportFormat,
+    ExportSettings, ProResProfile as WireProRes, WebmCodec,
+};
+use pm_render::{OutputKind, RenderError, RenderRequest, Renderer};
+use pm_time::Rate;
+
+use crate::Error;
+use crate::convert::{Chroma, WorkingFrame};
+use crate::pipeline::{Pipeline, Sink};
+use crate::settings::{
+    AlphaOutput, AudioCodec, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec,
+    HdrMetadata, Overwrite, ProResProfile, WorkingEncoding,
+};
+
+/// Output rows per slicing unit while the interactive engine plays.
+pub const BAND_ROWS: u32 = 16;
+
+/// Why a render job did not produce its output.
+#[derive(Debug, thiserror::Error)]
+pub enum JobError {
+    /// The engine cannot render this faithfully yet; the host routes the job
+    /// to the legacy engine (section 26, Phase 2 capability routing).
+    #[error("the new engine cannot render this yet: {}", .0.join("; "))]
+    Unsupported(Vec<String>),
+    #[error("cancelled")]
+    Cancelled,
+    #[error("invalid job: {0}")]
+    Invalid(String),
+    #[error("render failed: {0}")]
+    Render(String),
+    #[error("audio failed: {0}")]
+    Audio(String),
+    /// A source frame could not be read: the person's sentence, naming the
+    /// export frame, the clip, the file, where in it and why.
+    #[error("{0}")]
+    Unread(String),
+    #[error(transparent)]
+    Export(Error),
+}
+
+impl From<Error> for JobError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Cancelled => Self::Cancelled,
+            error => Self::Export(error),
+        }
+    }
+}
+
+impl From<RenderError> for JobError {
+    fn from(e: RenderError) -> Self {
+        match e {
+            RenderError::Unsupported(list) => {
+                JobError::Unsupported(list.iter().map(ToString::to_string).collect())
+            }
+            other => JobError::Render(other.to_string()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Media
+// ---------------------------------------------------------------------------
+
+/// Asset id → file, resolved by host services (contract 14 `mediaRead`
+/// handles) before the job starts. Assets without a file are offline.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaPaths {
+    pub paths: BTreeMap<String, PathBuf>,
+    /// Assets the host is still resolving (the viewer's; exports never).
+    pub resolving: std::collections::BTreeSet<String>,
+    /// The original of an asset whose `paths` entry is a converted copy (a
+    /// proxy or optimized media).
+    pub originals: BTreeMap<String, PathBuf>,
+}
+
+impl MediaPaths {
+    pub fn insert(&mut self, asset: impl Into<String>, path: PathBuf) {
+        self.paths.insert(asset.into(), path);
+    }
+}
+
+impl pm_render::AssetResolver for MediaPaths {
+    fn path(&self, asset: &str, _record: Option<&Node>) -> Option<PathBuf> {
+        self.paths.get(asset).cloned()
+    }
+    fn resolving(&self, asset: &str) -> bool {
+        self.resolving.contains(asset)
+    }
+    fn original(&self, asset: &str) -> Option<PathBuf> {
+        self.originals.get(asset).cloned()
+    }
+}
+
+impl pm_audio::AssetResolver for MediaPaths {
+    fn resolve(&self, asset: &str) -> Option<PathBuf> {
+        self.paths.get(asset).cloned()
+    }
+}
+
+/// The asset ids a document records (`root.assets` keys): what a job asks the
+/// host to resolve before rendering.
+pub fn asset_ids(document: &Document) -> Vec<String> {
+    let Some(assets) = pm_eval::node::member(document.root(), "assets") else {
+        return vec![];
+    };
+    match assets.kind() {
+        NodeKind::Object(map) => map.keys().map(|k| k.to_string_lossy()).collect(),
+        _ => vec![],
+    }
+}
+
+/// Each asset of `document` with the digest of its record (canonical JSON):
+/// a relink or a replaced file changes the record, so hosts that keep
+/// resolved paths can tell when to resolve an asset again.
+pub fn asset_records(document: &Document) -> Vec<(String, [u8; 32])> {
+    let assets = pm_eval::node::member(document.root(), "assets");
+    asset_ids(document)
+        .into_iter()
+        .map(|asset| {
+            let digest = pm_eval::node::member(assets, &asset)
+                .map_or([0; 32], pm_model::hash::canonical_digest);
+            (asset, digest)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// GPU time slicing
+// ---------------------------------------------------------------------------
+
+/// The job engine's submission gate (contract 13). The export and still
+/// renderers ask it before every GPU submission and report what each took.
+pub trait GpuGate: Send + Sync {
+    /// Refreshes this worker's QoS at a render or encode work boundary.
+    fn sync_worker_qos(&self) {}
+    /// A refresh callback for CPU row workers spawned by the encoder thread.
+    fn worker_qos_refresh(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
+    /// Blocks until GPU work may be submitted and returns how many of the
+    /// `units` remaining units of `pass` to submit now (1 to `units`). Returns
+    /// `None` when `cancel` is set while waiting.
+    fn admit(&self, pass: u64, units: u32, cancel: &AtomicBool) -> Option<u32>;
+    /// The submission admitted last completed: `units` units of `pass` in
+    /// `measured_us` of GPU time (submission to completion).
+    fn finished(&self, pass: u64, units: u32, measured_us: f64);
+    /// [`finished`](GpuGate::finished), saying whether `measured_us` is the
+    /// submission's GPU time from timestamps (`true`) or wall time from
+    /// submission to completion, which also counts waits behind other GPU
+    /// clients (`false`). The renderer calls this one.
+    fn finished_timed(&self, pass: u64, units: u32, measured_us: f64, gpu_timed: bool) {
+        let _ = gpu_timed;
+        self.finished(pass, units, measured_us);
+    }
+    /// The submission admitted last never completed (the renderer returned an
+    /// error or panicked): releases the admission without measuring it.
+    /// Every [`admit`](GpuGate::admit) that returns `Some` is followed by
+    /// exactly one `finished` or `abandoned`; [`render_frame`] guarantees it
+    /// on every exit path.
+    fn abandoned(&self, pass: u64);
+    /// Whether `finished` needs each submission's GPU time ([`GpuSpan`]
+    /// timestamps); without it the renderer reports wall time only.
+    ///
+    /// [`GpuSpan`]: crate::gpu_time::GpuSpan
+    fn measures(&self) -> bool {
+        true
+    }
+    /// Whether an export may keep two whole frames in flight: the next
+    /// frame's CPU work runs while this one's GPU work does. Only frames
+    /// admitted whole overlap; a frame admitted in bands waits for the one
+    /// before it. Overlapped frames report wall time (`gpu_timed` false).
+    /// Exports with a `frame_post` pass or compatibility sources never
+    /// overlap, whatever the gate says.
+    fn overlaps(&self) -> bool {
+        false
+    }
+}
+
+/// Refreshes export QoS while an encoder waits for a host reply. Callers
+/// outside a playback-aware export have no installed callback.
+pub fn refresh_current_worker_qos() {
+    crate::par::refresh_current_qos();
+}
+
+thread_local! {
+    /// This thread's timestamp span for the device it renders on (each job
+    /// engine lane renders on its own thread; spans are never shared).
+    static SPAN: std::cell::RefCell<Option<(wgpu::Device, Arc<crate::gpu_time::GpuSpan>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The thread's [`GpuSpan`](crate::gpu_time::GpuSpan) on `renderer`'s
+/// device, made once per device; `None` without timestamp queries.
+fn gpu_span(renderer: &Renderer) -> Option<Arc<crate::gpu_time::GpuSpan>> {
+    SPAN.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((device, span)) = cell.as_ref()
+            && device == renderer.device()
+        {
+            return Some(span.clone());
+        }
+        let span = Arc::new(crate::gpu_time::GpuSpan::new(
+            renderer.device(),
+            renderer.queue(),
+        )?);
+        *cell = Some((renderer.device().clone(), span.clone()));
+        Some(span)
+    })
+}
+
+/// One admitted submission: released as abandoned when dropped before
+/// [`Admitted::finish`] (an early return, a panic).
+struct Admitted<'a> {
+    gate: &'a dyn GpuGate,
+    pass: u64,
+    open: bool,
+}
+
+impl Admitted<'_> {
+    fn finish(mut self, units: u32, measured_us: f64, gpu_timed: bool) {
+        self.open = false;
+        self.gate
+            .finished_timed(self.pass, units, measured_us, gpu_timed);
+    }
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.gate.abandoned(self.pass);
+        }
+    }
+}
+
+/// No interactive engine to protect (the CLI, tests): whole frames.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Unrestricted;
+
+impl GpuGate for Unrestricted {
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        (!cancel.load(Ordering::Relaxed)).then_some(units)
+    }
+
+    fn finished(&self, _: u64, _: u32, _: f64) {}
+
+    fn abandoned(&self, _: u64) {}
+
+    fn measures(&self) -> bool {
+        false
+    }
+
+    fn overlaps(&self) -> bool {
+        true
+    }
+}
+
+/// A slicing pass key for one job at one output size: units of the same job
+/// and size cost the same.
+pub fn pass_key(seed: u64, size: Size) -> u64 {
+    let mut h = seed ^ 0x9e37_79b9_7f4a_7c15;
+    for v in [u64::from(size.width), u64::from(size.height)] {
+        h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
+        h ^= h >> 29;
+    }
+    h
+}
+
+/// A rendered frame read back to the CPU.
+pub struct ReadFrame {
+    /// Premultiplied working values, top-down, `width × height × 4`.
+    pub rgba: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+    /// Layers that failed and drew nothing (section 8 isolation).
+    pub failures: Vec<pm_render::LayerFailure>,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: pm_render::FrameFootage,
+}
+
+/// Waits for the frame's commands, the watchdog looking on
+/// (`Renderer::wait_idle`).
+fn wait_idle(renderer: &mut Renderer) {
+    renderer.wait_idle();
+}
+
+/// Renders one frame through `gate`: the whole frame at once when the gate
+/// admits every unit, else bands of rows as regions of interest. A one-off
+/// frame (an agent still, a parity frame): the renderer keeps no staging
+/// buffer or frame target afterwards (an export keeps them from frame to
+/// frame, [`run_export_into`]).
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    let result = render_frame_output(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        Some(&mut crate::readback::ExportReadback::default()),
+        Vec::new(),
+        None,
+    );
+    renderer.release_frame_reuse();
+    result
+}
+
+/// [`render_frame`], keeping the frame's staging buffer and target for the
+/// next frame (an export's frames; the caller releases them with
+/// `Renderer::release_frame_reuse` when its frames end, as
+/// [`run_export_into`] does).
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_reusing(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    render_frame_output(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        None,
+        Vec::new(),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_frame_output(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+    staging: Option<&mut crate::readback::ExportReadback>,
+    rgba: Vec<f32>,
+    first: Option<u32>,
+) -> Result<ReadFrame, JobError> {
+    let span = if gate.measures() {
+        gpu_span(renderer)
+    } else {
+        None
+    };
+    renderer.set_bracket(
+        span.clone()
+            .map(|s| s as Arc<dyn pm_render::CommandBracket>),
+    );
+    let result = render_bands(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        span.as_deref(),
+        staging,
+        rgba,
+        first,
+    );
+    renderer.set_bracket(None);
+    result
+}
+
+/// [`render_frame_reusing`]'s bands, with the renderer's bracket set to `span`.
+#[allow(clippy::too_many_arguments)]
+fn render_bands(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+    span: Option<&crate::gpu_time::GpuSpan>,
+    mut staging: Option<&mut crate::readback::ExportReadback>,
+    mut rgba: Vec<f32>,
+    mut first: Option<u32>,
+) -> Result<ReadFrame, JobError> {
+    let size = request.output_size;
+    let (w, h) = (size.width, size.height);
+    let total_units = h.div_ceil(BAND_ROWS);
+    if staging.is_some() {
+        rgba.resize(w as usize * h as usize * 4, 0.0);
+    } else {
+        rgba.clear();
+    }
+    let mut failures = Vec::new();
+    // Every band is drawn from the same plan of the whole frame.
+    let mut footage = None;
+    let mut y = 0u32;
+    while y < h {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(JobError::Cancelled);
+        }
+        let remaining = (h - y).div_ceil(BAND_ROWS);
+        // The first band may come admitted already (an overlapping export
+        // asked before it knew the frame would be banded).
+        let admitted = match first.take() {
+            Some(units) => units,
+            None => gate
+                .admit(pass, remaining, cancel)
+                .ok_or(JobError::Cancelled)?,
+        }
+        .clamp(1, remaining);
+        gate.sync_worker_qos();
+        let admission = Admitted {
+            gate,
+            pass,
+            open: true,
+        };
+        let band = (admitted * BAND_ROWS).min(h - y);
+        let whole = y == 0 && band == h;
+        let mut req = request.clone();
+        if !whole {
+            req.region = Some(PixelRect {
+                x: 0,
+                y,
+                width: w,
+                height: band,
+            });
+        }
+        let mut frame = match renderer.render(document, composition, time, &req, media) {
+            Ok(frame) => frame,
+            Err(e) => {
+                // Whatever the failed render submitted finishes before the
+                // admission is released.
+                wait_idle(renderer);
+                drop(admission);
+                return Err(e.into());
+            }
+        };
+        let submitted = Instant::now();
+        wait_idle(renderer);
+        // A program ran away in this frame: its pixels are not delivered.
+        if let Some(why) = renderer.watchdog_stopped() {
+            drop(admission);
+            return Err(pm_render::RenderError::Watchdog(why.to_owned()).into());
+        }
+        let wall_us = submitted.elapsed().as_secs_f64() * 1e6;
+        // The admitted command buffer's GPU time when timestamps are
+        // available (the wall time also counts the wait behind other GPU
+        // clients); the readback below is its own small copy.
+        let gpu_us = span
+            .as_ref()
+            .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
+        let units = if whole { total_units } else { admitted };
+        admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
+        {
+            let row = w as usize * 4;
+            let at = y as usize * row;
+            if let Some(staging) = staging.as_deref_mut() {
+                staging
+                    .read_into(
+                        renderer.device(),
+                        renderer.queue(),
+                        &frame.color.texture,
+                        &mut rgba[at..at + band as usize * row],
+                    )
+                    .map_err(|e| JobError::Render(e.to_string()))?;
+            } else {
+                let pixels = renderer.read_rgba_reusing(&frame)?;
+                if whole {
+                    rgba = pixels;
+                } else {
+                    if rgba.is_empty() {
+                        rgba = vec![0f32; w as usize * h as usize * 4];
+                    }
+                    rgba[at..at + pixels.len()].copy_from_slice(&pixels);
+                    renderer.give_rgba(pixels);
+                }
+            }
+        }
+        failures.append(&mut frame.failures);
+        footage.get_or_insert_with(|| std::mem::take(&mut frame.footage));
+        renderer.recycle(frame);
+        y += band;
+    }
+    Ok(ReadFrame {
+        rgba,
+        width: w,
+        height: h,
+        failures,
+        footage: footage.unwrap_or_default(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Export settings → encoder spec
+// ---------------------------------------------------------------------------
+
+/// Frame and sample timing of an export range at the export rate (section 5,
+/// rule 6: the export rate may differ from the composition's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeline {
+    pub start: Ticks,
+    pub rate: Rate,
+    pub frames: u64,
+}
+
+impl Timeline {
+    /// `max(1, round(duration × fps))` frames from `range.start`, as today's
+    /// exporter counts them (`Math.round`, half up).
+    pub fn new(start: Ticks, end: Ticks, rate: Rate) -> Result<Timeline, JobError> {
+        let schedule = crate::schedule::FrameSchedule::new(start.get(), end.get(), rate)
+            .map_err(|e| JobError::Invalid(e.to_string()))?;
+        Ok(Timeline {
+            start,
+            rate,
+            frames: schedule.frames,
+        })
+    }
+
+    fn schedule(&self) -> crate::schedule::FrameSchedule {
+        crate::schedule::FrameSchedule {
+            start: self.start.get(),
+            rate: self.rate,
+            frames: self.frames,
+        }
+    }
+
+    /// Composition time of export frame n, relative to the exact authored in point.
+    pub fn tick(&self, n: u64) -> Ticks {
+        Ticks::new(self.schedule().tick(n)).expect("schedule clamps document ticks")
+    }
+
+    /// Composition time of the grid's frame `n`, counted from the export's
+    /// first frame to either side of it.
+    pub fn tick_at(&self, n: i64) -> Ticks {
+        Ticks::new(self.schedule().tick_at(n)).expect("schedule clamps document ticks")
+    }
+
+    /// The frames of a composition `seconds` long on the export's grid,
+    /// numbered from the export's first frame (`None`: no such length).
+    pub fn composition_frames(&self, seconds: f64) -> Option<std::ops::Range<i64>> {
+        let end = seconds * TICKS_PER_SECOND as f64;
+        (end.is_finite() && end >= 0.0 && end <= crate::schedule::MAX_DOCUMENT_TICK as f64)
+            .then(|| self.schedule().grid(end.round() as i64))
+    }
+
+    /// Project samples `[first, end)` of export frame `n` at `rate` Hz.
+    pub fn samples(&self, n: u64, sample_rate: u32) -> (i64, i64) {
+        self.schedule().samples(n, sample_rate)
+    }
+}
+
+/// The `tmcd` track of a MOV export (section 17, "Muxers"): it labels the
+/// export's first frame with the composition's own timecode at the export
+/// rate (frame `start × rate`, rounded half up, so 00:00:00:00 at the
+/// composition start), drop-frame at 29.97 and 59.94 as the timeline shows
+/// it, wrapped to one day. Start timecode and reel settings arrive with
+/// Phase 3b presets (contract 12, open question 4).
+pub fn start_timecode(timeline: &Timeline) -> crate::settings::TimecodeSpec {
+    let format = pm_time::TimecodeFormat::for_rate(timeline.rate);
+    let (num, den) = (
+        i128::from(timeline.rate.num()),
+        i128::from(timeline.rate.den()),
+    );
+    let unit = den * i128::from(TICKS_PER_SECOND);
+    let first = (2 * i128::from(timeline.start.get()) * num + unit).div_euclid(2 * unit);
+    let day = i128::from(format.frames_per_day());
+    crate::settings::TimecodeSpec {
+        start_frame: first.rem_euclid(day) as i64,
+        format,
+        reel: None,
+    }
+}
+
+/// "Frame 00:00:00:19 couldn't be exported: “Interview” reads a damaged
+/// frame of interview.mov at 00:00:00.292. Replace or trim the clip, then
+/// export again." A frame that could not be read for another reason says
+/// that reason and what to do: "… “Interview” couldn't read interview.mov
+/// at 00:00:00.292: its volume is not available. Reconnect it, then export
+/// again."
+fn unread_sentence(
+    document: &Document,
+    failure: &pm_render::LayerFailure,
+    unread: &pm_render::UnreadFrame,
+    rate: Rate,
+    tick: i64,
+) -> String {
+    use pm_render::ReadCause;
+    let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
+    let unit = den * i128::from(TICKS_PER_SECOND);
+    let frame = (2 * i128::from(tick) * num + unit).div_euclid(2 * unit);
+    let at = pm_time::TimecodeFormat::for_rate(rate).timecode_of(frame as i64);
+    let layer = layer_name(document, &failure.composition, &failure.layer)
+        .unwrap_or_else(|| failure.layer.clone());
+    let file = unread.file.file_name().map_or_else(
+        || unread.file.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let source = unread.seconds.map(|seconds| {
+        let ms = (seconds.max(0.) * 1000.).round() as u64;
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            ms / 3_600_000,
+            ms / 60_000 % 60,
+            ms / 1000 % 60,
+            ms % 1000
+        )
+    });
+    let start = format!("Frame {at} couldn't be exported: “{layer}”");
+    let read = match &source {
+        Some(source) => format!("{start} couldn't read {file} at {source}"),
+        None => format!("{start} couldn't read {file}"),
+    };
+    match (unread.cause, source) {
+        (ReadCause::Damaged, Some(source)) => format!(
+            "{start} reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
+        ),
+        // A file that is one frame (an image sequence's).
+        (ReadCause::Damaged, None) => format!(
+            "{start} reads a damaged file, {file}. Replace the file or trim the clip, then export again."
+        ),
+        (ReadCause::Unavailable, _) => {
+            format!("{read}: its volume is not available. Reconnect it, then export again.")
+        }
+        (ReadCause::NoPermission, _) => format!(
+            "{read}: Powermove doesn't have permission to read it. Allow reading in the file's Get Info, then export again."
+        ),
+        (ReadCause::Missing, _) => format!(
+            "{read}: the file is no longer there. Put it back or relink the clip, then export again."
+        ),
+        (ReadCause::OutOfMemory, _) => {
+            format!("{read}: there wasn't enough memory. Quit other apps, then export again.")
+        }
+        (ReadCause::Failed, _) => format!("{read} ({}). Export again.", unread.reason),
+    }
+}
+
+/// The name of layer `layer` of composition `composition`.
+fn layer_name(document: &Document, composition: &str, layer: &str) -> Option<String> {
+    use pm_eval::node;
+    let root = document.root()?;
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp = if open.as_deref() == Some(composition) {
+        root
+    } else {
+        node::member(node::member(Some(root), "comps"), composition)?
+    };
+    node::array(node::member(Some(comp), "layers"))?
+        .iter()
+        .find(|l| string(node::member(Some(l), "id")) == layer)
+        .map(|l| string(node::member(Some(l), "name")))
+        .filter(|name| !name.is_empty())
+}
+
+fn rate_of(settings: &ExportSettings) -> Result<Rate, JobError> {
+    let fr = settings.frame_rate;
+    Rate::new(i64::from(fr.num), i64::from(fr.den))
+        .map_err(|e| JobError::Invalid(format!("frame rate {}/{}: {e}", fr.num, fr.den)))
+}
+
+/// The encoder and container for `settings` (section 17, "Formats at cutover").
+pub fn codec_of(settings: &ExportSettings) -> Result<(Codec, Container), JobError> {
+    let bitrate_bps = settings.quality.bitrate_mbps() * 1_000_000;
+    Ok(match settings.format {
+        ExportFormat::ProRes { profile } => (
+            Codec::ProRes(match profile {
+                WireProRes::Proxy => ProResProfile::Proxy,
+                WireProRes::Lt => ProResProfile::Lt,
+                WireProRes::Standard => ProResProfile::Standard,
+                WireProRes::Hq => ProResProfile::Hq,
+                WireProRes::P4444 => ProResProfile::P4444,
+                WireProRes::P4444Xq => ProResProfile::P4444Xq,
+            }),
+            Container::Mov,
+        ),
+        ExportFormat::H264 => (Codec::H264 { bitrate_bps }, Container::Mp4),
+        ExportFormat::Hevc { ten_bit, container } => (
+            Codec::Hevc {
+                bitrate_bps,
+                ten_bit,
+            },
+            match container {
+                WireContainer::Mp4 => Container::Mp4,
+                WireContainer::Mov => Container::Mov,
+            },
+        ),
+        ExportFormat::Webm { codec } => (
+            match codec {
+                WebmCodec::Vp9 => Codec::Vp9 { bitrate_bps },
+                WebmCodec::Vp8 => Codec::Vp8 { bitrate_bps },
+            },
+            Container::Webm,
+        ),
+        ExportFormat::PngSequence { sixteen_bit } => {
+            (Codec::Png { sixteen_bit }, Container::PngSequence)
+        }
+        ExportFormat::PngStill { sixteen_bit } => (Codec::Png { sixteen_bit }, Container::PngStill),
+    })
+}
+
+/// HDR reference white in delivered light (BT.2408).
+const HDR_WHITE_NITS: u16 = 203;
+
+fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
+    match color {
+        OutputColor::Rec2100Pq => Ok(ColorTags::Rec2100Pq {
+            white_nits: HDR_WHITE_NITS,
+            metadata: None,
+        }),
+        OutputColor::Rec2100Hlg => Ok(ColorTags::Rec2100Hlg {
+            white_nits: HDR_WHITE_NITS,
+            peak_nits: peak_nits.clamp(400, 4000),
+            metadata: None,
+            dolby_vision: true,
+        }),
+        OutputColor::Rec709Broadcast => Ok(ColorTags::Rec709Broadcast),
+        OutputColor::Rec709QuickTime {
+            candidate: QuickTimeTag::Cicp1_13_1,
+        } => Ok(ColorTags::Rec709QuickTime),
+        OutputColor::SrgbImage => Ok(ColorTags::SrgbImage),
+        OutputColor::Rec709Image => Ok(ColorTags::Rec709Image),
+        other => Err(JobError::Invalid(format!(
+            "output color {other:?} is not an export tag at cutover"
+        ))),
+    }
+}
+
+/// The mastering display and light levels an HDR delivery states: the
+/// sources' where they carry them, within the project's mastering peak.
+/// An HDR delivery's mastering display: the project's stated master, its
+/// peak with Display P3 primaries and D65 (the common grading monitor,
+/// BT.2408), whatever the sources say. The light levels are measured from
+/// the frames as they are encoded, not stated here.
+fn hdr_metadata(project: &pm_protocol::color::ProjectColor) -> HdrMetadata {
+    let xy = |(x, y): (f64, f64)| [(x / 0.00002).round() as u16, (y / 0.00002).round() as u16];
+    HdrMetadata {
+        primaries: [xy((0.265, 0.690)), xy((0.150, 0.060)), xy((0.680, 0.320))],
+        white: xy((0.3127, 0.3290)),
+        max_luminance: (f64::from(project.mastering_peak) / 0.0001).round() as u32,
+        min_luminance: 0,
+        max_cll: 0,
+        max_fall: 0,
+    }
+}
+
+fn set_hdr_metadata(tags: &mut ColorTags, value: HdrMetadata) {
+    if let ColorTags::Rec2100Pq { metadata, .. } | ColorTags::Rec2100Hlg { metadata, .. } = tags {
+        *metadata = Some(value);
+    }
+}
+
+/// The audio coding of an export: the delivery option, or today's audio for
+/// the container (24-bit PCM in MOV, AAC in MP4, Opus in WebM).
+pub fn audio_codec_of(settings: &ExportSettings, container: Container) -> AudioCodec {
+    match (container, settings.delivery.audio_coding) {
+        (Container::Webm, _) => AudioCodec::Opus,
+        (_, Some(AudioCoding::Pcm16)) => AudioCodec::Pcm16,
+        (_, Some(AudioCoding::Pcm24)) => AudioCodec::Pcm24,
+        (_, Some(AudioCoding::PcmFloat)) => AudioCodec::PcmF32,
+        (_, Some(AudioCoding::Aac)) => AudioCodec::Aac,
+        (Container::Mov, None) => AudioCodec::Pcm24,
+        _ => AudioCodec::Aac,
+    }
+}
+
+/// The `tmcd` track of a MOV export: the start timecode and reel the user
+/// chose (section 17, "Comfort"), or the composition's own timecode at the
+/// first frame ([`start_timecode`]).
+pub fn timecode_of(
+    settings: &ExportSettings,
+    timeline: &Timeline,
+) -> Result<crate::settings::TimecodeSpec, JobError> {
+    let Some(tc) = &settings.delivery.timecode else {
+        return Ok(start_timecode(timeline));
+    };
+    let format = if tc.drop_frame {
+        pm_time::TimecodeFormat::drop_frame(timeline.rate)
+            .map_err(|_| JobError::Invalid("drop-frame timecode needs 29.97 or 59.94 fps".into()))?
+    } else {
+        pm_time::TimecodeFormat::non_drop(timeline.rate)
+    };
+    let start_frame = format
+        .parse(&tc.start)
+        .map_err(|e| JobError::Invalid(format!("start timecode {:?}: {e}", tc.start)))?;
+    Ok(crate::settings::TimecodeSpec {
+        start_frame: start_frame.rem_euclid(format.frames_per_day()),
+        format,
+        reel: tc.reel.clone().filter(|r| !r.is_empty()),
+    })
+}
+
+/// One export as the job engine runs it.
+#[derive(Clone)]
+pub struct ExportJob {
+    pub document: Arc<Document>,
+    pub composition: String,
+    pub settings: ExportSettings,
+    pub media: Arc<MediaPaths>,
+    /// The output: a path the user chose, or the host's temporary file
+    /// (`Overwrite::InPlace`).
+    pub destination: PathBuf,
+    pub overwrite: Overwrite,
+    /// Unix permission bits of the delivered file (agent exports: 0o600).
+    pub mode: Option<u32>,
+    /// Seeds the slicing pass key.
+    pub seed: u64,
+}
+
+/// What an export will produce, checked before anything is written.
+pub struct ExportPlan {
+    pub spec: ExportSpec,
+    pub timeline: Timeline,
+    pub request: RenderRequest,
+    /// The audio graph, when the export has audio and the composition has
+    /// audible layers (today's exporter: `hasAudibleLayers`).
+    pub audio: Option<AudioPlan>,
+    /// The document rendered: the job's, or a copy without captions when they
+    /// are delivered as a file instead of burned in.
+    pub document: Arc<Document>,
+    /// Known offline clips: their video/image frames draw nothing and their
+    /// audio contributes silence, matching the current exporter.
+    pub offline: Vec<OfflineClip>,
+    /// PNG sequences: the name frame files start with.
+    pub sequence_name: Option<String>,
+    /// Encoded-frame previews for the progress sheet.
+    pub preview: bool,
+    /// Runs over each rendered frame before it is encoded (an extension's
+    /// compatibility context drawing over today's WebM export frames;
+    /// pm-node `jobs::compat`). `None`: frames are encoded as rendered.
+    pub frame_post: Option<Arc<dyn FramePost>>,
+}
+
+/// A pass over each rendered export frame before encoding ([`ExportPlan::frame_post`]).
+pub trait FramePost: Send + Sync {
+    /// Frame `index` at `time`: its premultiplied working values
+    /// (`width × height × 4`, top-down, `working` encoding), replaced or
+    /// returned unchanged. An error fails the export.
+    fn frame(
+        &self,
+        index: u64,
+        time: Ticks,
+        width: u32,
+        height: u32,
+        working: crate::settings::WorkingEncoding,
+        rgba: Vec<f32>,
+    ) -> Result<Vec<f32>, JobError>;
+}
+
+pub struct AudioPlan {
+    pub graph: Arc<pm_audio::MixGraph>,
+    pub cache: Arc<pm_audio::SourceCache>,
+    pub sample_rate: u32,
+    /// The export's samples: the frames' span ([`export_audio_samples`]),
+    /// so the sound ends with the picture.
+    pub samples: i64,
+    /// The mixed span in seconds, from the range's start to the last frame's
+    /// end, as today's `renderOffline(t0, t1)` receives it: its clips and
+    /// envelopes start from `t0` (`pm_audio::today`).
+    pub range: (f64, f64),
+}
+
+/// An export's mix length: the samples its frames span, from the first
+/// frame's start to the last frame's end, so a file's sound lasts as long as
+/// its picture (frames ÷ rate) to the sample, at NTSC rates too.
+pub fn export_audio_samples(timeline: &Timeline, sample_rate: u32) -> i64 {
+    let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), sample_rate);
+    let (_, end) = timeline.samples(timeline.frames.saturating_sub(1), sample_rate);
+    (end - first).max(0)
+}
+
+/// Source blocks kept decoded for one export's mix.
+const AUDIO_CACHE_BYTES: usize = 256 << 20;
+
+fn evaluator() -> pm_eval::Evaluator {
+    pm_eval::Evaluator::new().with_expressions(Arc::new(pm_render::expr::PmExprEngine))
+}
+
+// ---------------------------------------------------------------------------
+// Captions and offline media
+// ---------------------------------------------------------------------------
+
+/// `document` with every captions layer drawing nothing (its type becomes
+/// `null`, keeping ids, order, and parenting), as today's exporter skips
+/// captions when they are delivered as a caption file (`PM.captionsHidden`).
+/// `None` when the document has no captions layers.
+pub fn without_captions(document: &Document) -> Option<Document> {
+    use pm_model::json::Value;
+    fn hide(layers: &mut Value) -> bool {
+        let Value::Array(items) = layers else {
+            return false;
+        };
+        let mut changed = false;
+        for layer in items {
+            if let Value::Object(map) = layer {
+                let captions = map.get("type").is_some_and(
+                    |t| matches!(t, Value::String(s) if s.to_string_lossy() == "captions"),
+                );
+                if captions {
+                    map.insert("type", Value::from("null"));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+    // Most projects have none: look before copying the document out.
+    fn has_captions(layers: Option<&pm_model::Node>) -> bool {
+        layers.is_some_and(|layers| {
+            (0..).map_while(|i| layers.at(i)).any(|layer| {
+                layer.get("type").is_some_and(|t| {
+                    matches!(t.kind(), pm_model::NodeKind::String(s) if s.as_str() == Some("captions"))
+                })
+            })
+        })
+    }
+    let tree = document.root()?;
+    let comps = tree.get("comps");
+    let any = has_captions(tree.get("layers"))
+        || comps.is_some_and(|comps| match comps.kind() {
+            pm_model::NodeKind::Object(map) => {
+                map.iter().any(|(_, c)| has_captions(c.get("layers")))
+            }
+            _ => false,
+        });
+    if !any {
+        return None;
+    }
+    let mut root = document.to_value()?;
+    let Value::Object(map) = &mut root else {
+        return None;
+    };
+    let mut changed = map.get_mut("layers").is_some_and(hide);
+    if let Some(Value::Object(comps)) = map.get_mut("comps") {
+        for (_, comp) in comps.iter_mut() {
+            if let Value::Object(c) = comp
+                && let Some(layers) = c.get_mut("layers")
+            {
+                changed |= hide(layers);
+            }
+        }
+    }
+    changed.then(|| Document::new(Some(root), document.revision()))
+}
+
+/// A clip the export needs whose file the host could not resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineClip {
+    pub asset: String,
+    /// The asset's name, for messages ("2 clips are offline").
+    pub name: String,
+}
+
+/// The media of `composition` (and every composition it nests) that is
+/// offline: video, image, and audio layers whose asset record exists but has
+/// no file in `media`. Assets without a record draw nothing, as today, and
+/// are not listed.
+pub fn offline_media(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+) -> Vec<OfflineClip> {
+    offline_media_with_audio(document, composition, media, true)
+}
+
+/// The job's offline dependencies, excluding standalone audio when the
+/// output has no audio track. Video and image layers always remain required.
+pub fn offline_media_with_audio(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+    include_audio: bool,
+) -> Vec<OfflineClip> {
+    use pm_eval::node;
+    let Some(root) = document.root() else {
+        return vec![];
+    };
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp_node = |id: &str| -> Option<&Node> {
+        if open.as_deref() == Some(id) && node::member(Some(root), "layers").is_some() {
+            return Some(root);
+        }
+        node::member(node::member(Some(root), "comps"), id)
+    };
+    let assets = node::member(Some(root), "assets");
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out: Vec<OfflineClip> = vec![];
+    let mut stack = vec![composition.to_owned()];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(comp) = comp_node(&id) else {
+            continue;
+        };
+        for layer in node::array(node::member(Some(comp), "layers")).unwrap_or(&[]) {
+            let d = node::member(Some(layer), "d");
+            match pm_render::js::layer_type(layer).as_str() {
+                "precomp" => {
+                    if let Some(c) = node::member(d, "comp").filter(|c| node::truthy(Some(c))) {
+                        let c = string(Some(c));
+                        if open.as_deref() != Some(c.as_str())
+                            || node::member(Some(root), "layers").is_none()
+                        {
+                            stack.push(c);
+                        }
+                    }
+                }
+                "audio" if !include_audio => {}
+                "video" | "image" | "audio" => {
+                    let Some(asset) = node::member(d, "asset").map(|a| string(Some(a))) else {
+                        continue;
+                    };
+                    let Some(record) = node::member(assets, &asset) else {
+                        continue;
+                    };
+                    if !media.paths.contains_key(&asset) && !out.iter().any(|c| c.asset == asset) {
+                        let name = node::member(Some(record), "name")
+                            .map(|n| string(Some(n)))
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_else(|| asset.clone());
+                        out.push(OfflineClip { asset, name });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Offline clips the export would hear in `range` (seconds): enabled audio
+/// layers, and video layers with unmuted embedded audio and no time remap,
+/// through precomps, as the shipped mixer collects them (`audioLayers`,
+/// `collectDecodedClips`). The shipped app failed any export, its agents'
+/// included, naming such a clip; silent offline media rendered absent.
+pub fn offline_audible_media(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+    range: (f64, f64),
+) -> Vec<OfflineClip> {
+    use pm_eval::node;
+    let Some(root) = document.root() else {
+        return vec![];
+    };
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp_node = |id: &str| -> Option<&Node> {
+        if open.as_deref() == Some(id) && node::member(Some(root), "layers").is_some() {
+            return Some(root);
+        }
+        node::member(node::member(Some(root), "comps"), id)
+    };
+    // A static value: a property's `v`, or the plain number.
+    let value = |n: Option<&Node>| {
+        if node::is_property(n) {
+            node::to_number(node::member(n, "v"))
+        } else {
+            node::to_number(n)
+        }
+    };
+    let finite = |x: f64| if x.is_finite() { x } else { 0. };
+    let remapped = |d: Option<&Node>| {
+        let t = node::member(d, "timeRemap");
+        if node::is_property(t) {
+            node::truthy(node::member(t, "v")) || node::has_kf_array(t)
+        } else {
+            node::truthy(t)
+        }
+    };
+    let assets = node::member(Some(root), "assets");
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let mut out: Vec<OfflineClip> = vec![];
+    // (composition, offset, window start, window end, depth)
+    let mut stack = vec![(composition.to_owned(), 0., range.0, range.1, 0u32)];
+    while let Some((id, offset, from, to, depth)) = stack.pop() {
+        let Some(comp) = comp_node(&id).filter(|_| depth <= 32) else {
+            continue;
+        };
+        let layers = node::array(node::member(Some(comp), "layers")).unwrap_or(&[]);
+        let by_id = |id: &str| {
+            layers
+                .iter()
+                .find(|l| string(node::member(Some(l), "id")) == id)
+        };
+        let groups = |layer: &Node| {
+            let mut chain = vec![];
+            let mut at = node::member(Some(layer), "group");
+            while let Some(group) = at
+                .filter(|g| node::truthy(Some(g)))
+                .and_then(|g| by_id(&string(Some(g))))
+            {
+                if chain.len() > 64 {
+                    break;
+                }
+                chain.push(group);
+                at = node::member(Some(group), "group");
+            }
+            chain
+        };
+        let soloing = layers
+            .iter()
+            .any(|l| node::truthy(node::member(Some(l), "solo")));
+        for layer in layers {
+            let off = |l: &Node| {
+                node::member(Some(l), "on")
+                    .is_some_and(|on| matches!(on.kind(), pm_model::NodeKind::Bool(false)))
+            };
+            if off(layer) {
+                continue;
+            }
+            let chain = groups(layer);
+            if soloing
+                && !node::truthy(node::member(Some(layer), "solo"))
+                && !chain
+                    .iter()
+                    .any(|g| node::truthy(node::member(Some(g), "solo")))
+            {
+                continue;
+            }
+            if chain.iter().any(|g| off(g)) {
+                continue;
+            }
+            let start = offset + finite(value(node::member(Some(layer), "from")));
+            let end = start + finite(value(node::member(Some(layer), "dur"))).max(0.);
+            let (a, b) = (from.max(start), to.min(end));
+            if b - a <= 1e-4 {
+                continue;
+            }
+            let d = node::member(Some(layer), "d");
+            let audible = match pm_render::js::layer_type(layer).as_str() {
+                "audio" => true,
+                "video" => {
+                    node::member(d, "embeddedAudio")
+                        .is_some_and(|e| matches!(e.kind(), pm_model::NodeKind::Bool(true)))
+                        && !node::member(d, "audioMuted")
+                            .is_some_and(|m| matches!(m.kind(), pm_model::NodeKind::Bool(true)))
+                        && !remapped(d)
+                }
+                "precomp" => {
+                    let muted = node::member(d, "audioMuted")
+                        .is_some_and(|m| matches!(m.kind(), pm_model::NodeKind::Bool(true)));
+                    if let Some(c) = node::member(d, "comp").filter(|c| node::truthy(Some(c)))
+                        && !muted
+                        && !remapped(d)
+                    {
+                        let trim = finite(value(node::member(d, "trim")));
+                        stack.push((string(Some(c)), start - trim, a, b, depth + 1));
+                    }
+                    false
+                }
+                _ => false,
+            };
+            if !audible {
+                continue;
+            }
+            let asset = node::member(d, "asset")
+                .map(|a| string(Some(a)))
+                .unwrap_or_default();
+            if media.paths.contains_key(&asset) || out.iter().any(|c| c.asset == asset) {
+                continue;
+            }
+            let record = node::member(assets, &asset);
+            let name = node::member(Some(layer), "name")
+                .map(|n| string(Some(n)))
+                .filter(|n| !n.is_empty())
+                .or_else(|| node::member(record, "name").map(|n| string(Some(n))))
+                .unwrap_or_else(|| "Audio".into());
+            out.push(OfflineClip { asset, name });
+        }
+    }
+    out
+}
+
+/// Validates `job` and builds its plan: capability routing (pm-render's
+/// `unsupported_with_media`, audio sources pm-audio cannot open), the encoder
+/// spec, and the audio graph. Offline media is not checked here; the job
+/// engine asks [`offline_media_with_audio`] first (queued jobs wait for it,
+/// section 14.8).
+pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, &|doc, composition, media| {
+        pm_render::unsupported_with_media(doc, composition, media)
+    })
+}
+
+/// [`plan_export`] routed with `renderer`'s own capabilities
+/// (`Renderer::unsupported_with_media`): the definitions the job embeds
+/// (contract 10; set on the renderer before planning) draw its effects,
+/// transitions, and extension layers, and its fonts its text.
+/// The request an export renders each frame with. The disk render cache
+/// fills through it too, so a cached frame is the exported one.
+pub fn frame_request(
+    s: &ExportSettings,
+    alpha: AlphaOutput,
+    output_tone: Option<pm_render::OutputTone>,
+) -> RenderRequest {
+    RenderRequest {
+        output_size: s.size,
+        scale: None,
+        region: None,
+        preview_canvas: false,
+        precision: s.precision,
+        depth_id: false,
+        // Today's alpha exports render without the composition background.
+        background: alpha == AlphaOutput::None,
+        export: true,
+        view: None,
+        // Today's export counts: 16 samples opaque, 20 with alpha (the
+        // composition's `motionBlurSamples` when set).
+        motion_blur: if s.motion_blur {
+            pm_render::motion::MotionBlur::Kind(if alpha == AlphaOutput::None {
+                pm_protocol::frame::MotionBlurKind::Export
+            } else {
+                pm_protocol::frame::MotionBlurKind::AlphaExport
+            })
+        } else {
+            pm_render::motion::MotionBlur::Off
+        },
+        sampling: pm_render::sampling::Sampling::Final,
+        output_kind: OutputKind::Final,
+        read_ahead: false,
+        viewer: false,
+        origin: None,
+        output_tone,
+        focus_group: None,
+    }
+}
+
+pub fn plan_export_for(job: &ExportJob, renderer: &Renderer) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, &|doc, composition, media| {
+        let mut list = renderer.unsupported_with_media(doc, composition, media);
+        // A renderer that leaves failing layers out (a look at the project,
+        // as the viewer: an agent's still) draws the rest of the frame.
+        if renderer.isolates_layers() {
+            list.retain(|u| u.layer.is_none());
+        }
+        list
+    })
+}
+
+/// The capability check an export plan routes with.
+pub type CapabilityCheck<'a> =
+    dyn Fn(&Document, &str, &MediaPaths) -> Vec<pm_render::Unsupported> + 'a;
+
+/// [`plan_export`] routed with a caller's capability check: an export sheet
+/// probing a format before the job's renderer (definitions, fonts) exists.
+pub fn plan_export_with(
+    job: &ExportJob,
+    check: &CapabilityCheck<'_>,
+) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, check)
+}
+
+fn plan_export_checked(
+    job: &ExportJob,
+    check: &CapabilityCheck<'_>,
+) -> Result<ExportPlan, JobError> {
+    let s = &job.settings;
+    pm_protocol::validate::Validate::validate(s).map_err(|v| JobError::Invalid(v.to_string()))?;
+    let document = if s.delivery.hide_captions {
+        without_captions(&job.document).map_or_else(|| job.document.clone(), Arc::new)
+    } else {
+        job.document.clone()
+    };
+    let offline = offline_media_with_audio(
+        &document,
+        &job.composition,
+        &job.media,
+        s.audio && !s.format.is_image(),
+    );
+    let doc = &*document;
+    let (codec, container) = codec_of(s)?;
+    let project = doc
+        .root()
+        .map(pm_render::composite::project_color)
+        .transpose()
+        .map_err(JobError::Invalid)?
+        .unwrap_or(pm_protocol::color::ProjectColor::DEFAULT);
+    let hdr_project = project.mode == pm_protocol::color::ColorMode::Hdr;
+    let mut tags = tags_of(s.color, project.mastering_peak)?;
+    if let ColorTags::Rec2100Hlg { dolby_vision, .. } = &mut tags {
+        *dolby_vision = !s.delivery.without_dolby_vision;
+    }
+    if tags.is_hdr() && !hdr_project {
+        return Err(JobError::Invalid(
+            "HDR delivery needs an HDR project".into(),
+        ));
+    }
+    let content = if hdr_project {
+        pm_render::media::hdr_content(doc, &job.composition, &*job.media)
+    } else {
+        Default::default()
+    };
+    let output_tone = hdr_project
+        .then(|| {
+            pm_render::OutputTone::for_target(
+                content.peak_nits as f32,
+                f32::from(project.mastering_peak),
+                tags.is_hdr(),
+            )
+        })
+        .flatten();
+    set_hdr_metadata(&mut tags, hdr_metadata(&project));
+    let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let rate = rate_of(s)?;
+    let mut timeline = Timeline::new(s.range.start, s.range.end, rate)?;
+    if container == Container::PngStill {
+        // A still is the range's first frame.
+        timeline.frames = 1;
+    }
+    let alpha = match s.alpha {
+        WireAlpha::None => AlphaOutput::None,
+        WireAlpha::Straight => AlphaOutput::Straight,
+        WireAlpha::Premultiplied => AlphaOutput::Premultiplied,
+    };
+    let audio_codec = audio_codec_of(s, container);
+    let audio = if s.audio && !s.format.is_image() {
+        let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
+        // An export takes today's exact lengths before it mixes.
+        cache.set_blocking_lengths(true);
+        let graph =
+            pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
+                .map_err(|e| JobError::Audio(e.to_string()))?;
+        for (name, asset, why) in &graph.problems {
+            if !offline
+                .iter()
+                .any(|clip| clip.asset.as_str() == asset.as_str())
+            {
+                problems.push(format!("audio of {name} ({asset}): {why}"));
+            }
+        }
+        if graph.voices.is_empty() {
+            None
+        } else {
+            Some(AudioPlan {
+                // Today's export OfflineAudioContext is always stereo 48 kHz,
+                // independently of the project's playback device/rate.
+                sample_rate: 48_000,
+                samples: export_audio_samples(&timeline, 48_000),
+                range: (
+                    s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
+                    timeline.tick(timeline.frames).get() as f64 / TICKS_PER_SECOND as f64,
+                ),
+                graph: Arc::new(graph),
+                cache,
+            })
+        }
+    } else {
+        None
+    };
+    if !problems.is_empty() {
+        return Err(JobError::Unsupported(problems));
+    }
+    let spec = ExportSpec {
+        width: s.size.width,
+        height: s.size.height,
+        rate,
+        frames: timeline.frames,
+        codec,
+        container,
+        tags,
+        alpha,
+        working: WorkingEncoding::Standard,
+        // On is the engine's measured rule (`Dither::Default`): 8-bit PNG,
+        // and H.264 with bits to hold it, are dithered; other lossy codecs
+        // and 10-bit and deeper outputs are not.
+        dither: if s.dither {
+            Dither::Default
+        } else {
+            Dither::Off
+        },
+        audio: audio.as_ref().map(|a| AudioSpec {
+            sample_rate: a.sample_rate,
+            channels: 2,
+            codec: audio_codec,
+        }),
+        timecode: if container == Container::Mov {
+            Some(timecode_of(s, &timeline)?)
+        } else {
+            None
+        },
+        destination: job.destination.clone(),
+        overwrite: job.overwrite,
+        mode: job.mode,
+    };
+    spec.validate()?;
+    let request = frame_request(s, alpha, output_tone);
+    Ok(ExportPlan {
+        spec,
+        timeline,
+        request,
+        audio,
+        document,
+        offline,
+        sequence_name: s.delivery.sequence_name.clone(),
+        preview: s.delivery.preview,
+        frame_post: None,
+    })
+}
+
+/// A small JPEG of an encoded frame for the export progress sheet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewFrame {
+    pub frame: u64,
+    pub width: u32,
+    pub height: u32,
+    pub jpeg: Vec<u8>,
+}
+
+/// Previews at most this often.
+pub const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A box-filtered preview of a premultiplied working frame, at most
+/// `max_edge` pixels on its long edge, over black, as JPEG.
+pub fn preview_jpeg(
+    rgba: &[f32],
+    width: u32,
+    height: u32,
+    max_edge: u32,
+) -> Result<(u32, u32, Vec<u8>), JobError> {
+    let scale = (f64::from(max_edge) / f64::from(width.max(height))).min(1.0);
+    let (pw, ph) = (
+        ((f64::from(width) * scale).round() as u32).max(1),
+        ((f64::from(height) * scale).round() as u32).max(1),
+    );
+    let mut out = vec![0u8; pw as usize * ph as usize * 4];
+    let (w, h) = (width as usize, height as usize);
+    crate::par::rows_limited(&mut out, pw as usize * 4, 4, |py, row| {
+        let y0 = py * h / ph as usize;
+        let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
+        for px in 0..pw as usize {
+            let x0 = px * w / pw as usize;
+            let x1 = ((px + 1) * w / pw as usize).max(x0 + 1);
+            let mut sum = [0f32; 3];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 4;
+                    for k in 0..3 {
+                        sum[k] += rgba[i + k];
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as f32;
+            let o = px * 4;
+            let pixel = crate::convert::rgba8_pixel(
+                [sum[0] / n, sum[1] / n, sum[2] / n, 1.0],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                crate::settings::ColorTags::SrgbImage,
+                [0.0; 3],
+            );
+            row[o..o + 4].copy_from_slice(&pixel);
+        }
+    });
+    Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
+}
+
+/// Progress of a running export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    pub frames_done: u64,
+    pub frames: u64,
+    /// A preview of the frame just encoded (plans that ask for previews, at
+    /// most every [`PREVIEW_EVERY`], and the last frame).
+    pub preview: Option<Arc<PreviewFrame>>,
+    /// The mixed sound's levels so far (exports with sound).
+    pub mix: Option<crate::verify::MixLevels>,
+    /// Once every frame is encoded, the frames of the written file checked
+    /// so far (of `frames`): the check is its own phase.
+    pub checked: Option<u64>,
+}
+
+impl Progress {
+    pub fn fraction(&self) -> f64 {
+        if self.frames == 0 {
+            0.0
+        } else {
+            (self.frames_done as f64 / self.frames as f64).clamp(0.0, 1.0)
+        }
+    }
+}
+
+enum Rendered {
+    Frame(u64, Vec<f32>, Chroma),
+    Failed(JobError),
+}
+
+/// Runs a planned export into `sink`. This thread renders, an encoder worker
+/// converts and encodes, and an audio worker mixes when there is sound.
+/// `progress` sees each encoded frame.
+#[allow(clippy::too_many_arguments)]
+pub fn run_export_into<S: Sink + Send>(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    plan: ExportPlan,
+    sink: S,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
+) -> Result<S::Output, JobError>
+where
+    S::Output: Send,
+{
+    // The mix's levels arrive with the progress; the last is the whole mix,
+    // which the finished export reports (the person is told what clipped).
+    let mut mix = None;
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, &mut |p| {
+        mix = p.mix;
+        progress(p)
+    });
+    // The frames' staging buffer, target and pixels are kept only while
+    // exporting (one-off frames release them in `render_frame`).
+    renderer.release_frame_reuse();
+    result.map(|output| S::with_mix(output, mix))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_frames<S: Sink + Send>(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    plan: ExportPlan,
+    sink: S,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
+) -> Result<S::Output, JobError>
+where
+    S::Output: Send,
+{
+    let isolated = renderer.isolates_layers();
+    let ExportPlan {
+        spec,
+        timeline,
+        request,
+        audio,
+        document,
+        offline,
+        preview: wants_preview,
+        frame_post,
+        ..
+    } = plan;
+    let working = spec.working;
+    let frames = spec.frames;
+    // One chroma decimation for each continuous piece of the composition's
+    // picture, whatever range of it is exported.
+    let mut policy = crate::chroma_policy::ChromaPolicy::new(
+        crate::chroma_policy::Delivery {
+            format: spec.input_format(),
+            tags: spec.tags,
+            tone_mapped: request.output_tone.is_some(),
+            postprocessed: frame_post.is_some(),
+        },
+        pm_eval::Comp::resolve(&document, &job.composition)
+            .ok()
+            .and_then(|comp| timeline.composition_frames(comp.duration())),
+    );
+    let pass = pass_key(job.seed, request.output_size);
+    let sound = spec.audio.map(|a| a.codec);
+    let mut pipeline = Pipeline::new(spec, sink)?;
+    let mixer = audio.map(|a| {
+        let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
+        // The playback mixer: nested speed and remapped precompositions are
+        // heard in the file as they play (today's exporter dropped both).
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(a.sample_rate),
+            document.clone(),
+            a.graph,
+            evaluator(),
+            a.cache,
+        );
+        // Today's OfflineAudioContext starts at the range's start.
+        mixer.set_today_range(a.range.0.max(0.0), a.range.1, first);
+        mixer.set_today_playhead(
+            job.settings
+                .audio_index_playhead
+                .map(|t| t.get() as f64 / TICKS_PER_SECOND as f64),
+        );
+        (
+            mixer,
+            a.sample_rate,
+            // The mix ends with the last frame.
+            first + a.samples,
+        )
+    });
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
+    // The encoder returns pixels for later frames to reuse
+    // (docs/engine/perfbench.md).
+    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let qos = crate::par::current_qos();
+    std::thread::scope(|scope| {
+        let (audio_rx, audio_worker) = mixer
+            .map(|(mut mixer, rate, last)| {
+                let (tx, rx) = std::sync::mpsc::sync_channel(3);
+                let worker = scope.spawn(move || {
+                    crate::par::apply_qos(qos);
+                    let _refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
+                    for n in 0..frames {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        gate.sync_worker_qos();
+                        let (first, end) = timeline.samples(n, rate);
+                        let first = first.min(last);
+                        let end = if n + 1 == frames { last } else { end.min(last) };
+                        let mut block = Vec::new();
+                        let result =
+                            pm_audio::offline::render(&mut mixer, first, end, 8192, |_, inter| {
+                                block.extend_from_slice(inter);
+                                Ok(())
+                            })
+                            .map_err(|e| JobError::Audio(e.to_string()))
+                            .and_then(|summary| {
+                                match summary.errors.first() {
+                                    Some((voice, why)) => {
+                                        Err(JobError::Audio(format!("{voice}: {why}")))
+                                    }
+                                    None => Ok(block),
+                                }
+                            });
+                        let failed = result.is_err();
+                        if tx.send(result).is_err() || failed {
+                            break;
+                        }
+                    }
+                });
+                (rx, worker)
+            })
+            .unzip();
+        let encoder_gate = gate;
+        let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
+            crate::par::apply_qos(qos);
+            let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
+            encoder_gate.sync_worker_qos();
+            let mut last_preview: Option<Instant> = None;
+            let mut levels = sound.map(crate::verify::MixLevels::of).unwrap_or_default();
+            let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
+            let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
+            for expected in 0..frames {
+                let (n, rgba, chroma) = loop {
+                    match rx.recv_timeout(ENCODER_IDLE) {
+                        Ok(Rendered::Frame(n, rgba, chroma)) => break (n, rgba, chroma),
+                        Ok(Rendered::Failed(e)) => return Err(e),
+                        // The render waits (a playing viewer, an extension):
+                        // the encoder must not hold frames that long.
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => pipeline.idle()?,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(JobError::Cancelled);
+                        }
+                    }
+                };
+                encoder_gate.sync_worker_qos();
+                debug_assert_eq!(n, expected);
+                let (w, h) = (request.output_size.width, request.output_size.height);
+                let frame = WorkingFrame {
+                    width: w,
+                    height: h,
+                    rgba: &rgba,
+                };
+                let started = profiling.then(Instant::now);
+                pipeline.push_frame_with(&frame, chroma)?;
+                video_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let started = profiling.then(Instant::now);
+                let due = wants_preview
+                    && (n + 1 == frames
+                        || last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_EVERY));
+                let preview = if due {
+                    last_preview = Some(Instant::now());
+                    let (pw, ph, jpeg) =
+                        preview_jpeg(&rgba, w, h, pm_protocol::priority::JOB_PREVIEW_MAX_EDGE)?;
+                    Some(Arc::new(PreviewFrame {
+                        frame: n,
+                        width: pw,
+                        height: ph,
+                        jpeg,
+                    }))
+                } else {
+                    None
+                };
+                preview_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let _ = back_tx.send(rgba);
+                let started = profiling.then(Instant::now);
+                if let Some(audio) = &audio_rx {
+                    let block = audio.recv().map_err(|_| {
+                        if cancel.load(Ordering::Relaxed) {
+                            JobError::Cancelled
+                        } else {
+                            JobError::Audio(
+                                "the offline mixer stopped before the last frame".into(),
+                            )
+                        }
+                    })??;
+                    if !block.is_empty() {
+                        levels.add(&block);
+                        pipeline.push_audio(&block)?;
+                    }
+                }
+                audio_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let started = profiling.then(Instant::now);
+                progress(Progress {
+                    frames_done: n + 1,
+                    frames,
+                    preview,
+                    mix: audio_rx.is_some().then_some(levels),
+                    checked: None,
+                });
+                progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+            }
+            if profiling {
+                eprintln!(
+                    "[export timing] encoder_video_ms={:.3} encoder_preview_ms={:.3} encoder_audio_ms={:.3} encoder_progress_ms={:.3}",
+                    video_ns as f64 / 1e6,
+                    preview_ns as f64 / 1e6,
+                    audio_ns as f64 / 1e6,
+                    progress_ns as f64 / 1e6,
+                );
+            }
+            encoder_gate.sync_worker_qos();
+            // The file is written and checked on its own thread while this
+            // one tells how far the check is.
+            let checked = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            pipeline.count_checked(checked.clone());
+            let mix = audio_rx.is_some().then_some(levels);
+            std::thread::scope(|finishing| {
+                let finished = finishing.spawn(|| pipeline.finish_with_cancel(cancel));
+                let mut told = None;
+                while !finished.is_finished() {
+                    let now = checked.load(Ordering::Acquire);
+                    if told != Some(now) {
+                        told = Some(now);
+                        progress(Progress {
+                            frames_done: frames,
+                            frames,
+                            preview: None,
+                            mix,
+                            checked: Some(now),
+                        });
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let now = checked.load(Ordering::Acquire);
+                if told != Some(now) && now > 0 {
+                    progress(Progress {
+                        frames_done: frames,
+                        frames,
+                        preview: None,
+                        mix,
+                        checked: Some(now),
+                    });
+                }
+                finished
+                    .join()
+                    .unwrap_or_else(|_| Err(crate::Error::Verify("the file check panicked".into())))
+            })
+            .map_err(|error| match error {
+                crate::Error::Cancelled => JobError::Cancelled,
+                error => JobError::Export(error),
+            })
+        });
+        let mut render_error = None;
+        let _qos_refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
+        let mut staging = crate::readback::ExportReadback::default();
+        let mut render_ns = 0u128;
+        let render_started = Instant::now();
+        let mut available_pixels: Vec<Vec<f32>> = Vec::new();
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let total_units = h.div_ceil(BAND_ROWS);
+        // The frame submitted whole whose pixels are still on their way
+        // back (`GpuGate::overlaps`), and the readback slots it uses.
+        let mut flight: Option<(u64, InFlight<'_>)> = None;
+        // A `frame:rendered` pass or a raster override may carry state from
+        // one frame into the next (an extension's handler, its canvas): such
+        // exports render each frame only after the one before is finished,
+        // as serial frames do.
+        let overlap = gate.overlaps()
+            && frame_post.is_none()
+            && !request.depth_id
+            && job.settings.delivery.compat.is_empty();
+        let mut whole = WholeReadback::default();
+        let mut sent = 0u64;
+        // Three frames' pixels circulate.
+        let mut pixels = |sent: u64| {
+            if sent >= PIXEL_BUFFERS
+                && let Ok(rgba) = back_rx.recv()
+            {
+                available_pixels.push(rgba);
+            }
+            available_pixels.pop().unwrap_or_default()
+        };
+        // A read frame, checked and finished as the exporting window leaves
+        // it, to the encoder in order. False: the encoder is gone.
+        let mut deliver = |renderer: &mut Renderer,
+                           n: u64,
+                           read: Result<ReadFrame, JobError>|
+         -> Result<bool, JobError> {
+            let mut f = read?;
+            // A renderer that leaves failing layers out drew the rest.
+            if isolated {
+                f.failures.clear();
+            }
+            // Offline clips render absent (their names go in the report).
+            f.failures.retain(|failure| {
+                let asset = failure
+                    .message
+                    .strip_prefix("media for asset ")
+                    .and_then(|rest| rest.strip_suffix(" is offline"));
+                !offline
+                    .iter()
+                    .any(|clip| asset == Some(clip.asset.as_str()))
+            });
+            // A source frame that does not read stops the export, said
+            // where and why; nothing stands in for it.
+            if let Some((failure, unread)) = f
+                .failures
+                .iter()
+                .find_map(|l| pm_render::UnreadFrame::parse(&l.message).map(|d| (l, d)))
+            {
+                return Err(JobError::Unread(unread_sentence(
+                    &document,
+                    failure,
+                    &unread,
+                    timeline.rate,
+                    timeline.tick(n).get(),
+                )));
+            }
+            if !f.failures.is_empty() {
+                return Err(JobError::Unsupported(
+                    f.failures
+                        .iter()
+                        .map(|l| format!("layer {} in {}: {}", l.layer, l.composition, l.message))
+                        .collect(),
+                ));
+            }
+            // The frame as the exporting window's compatibility context
+            // leaves it (today's WebM frames: `frame:rendered` handlers drew
+            // on the compositor's canvas before it was encoded).
+            let rgba = match &frame_post {
+                None => f.rgba,
+                Some(post) => post.frame(n, timeline.tick(n), w, h, working, f.rgba)?,
+            };
+            // Frames are delivered in order; a piece of untouched footage
+            // is looked along, by its plans alone, at its first frame.
+            let chroma = policy.frame(n, f.footage, renderer, &mut |renderer, m| {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                renderer
+                    .footage(
+                        &document,
+                        &job.composition,
+                        timeline.tick_at(m),
+                        &request,
+                        &*job.media,
+                    )
+                    .ok()
+            });
+            Ok(tx.send(Rendered::Frame(n, rgba, chroma)).is_ok())
+        };
+        for n in 0..frames {
+            pm_perf::stall::stall(pm_perf::stall::Stage::Export);
+            gate.sync_worker_qos();
+            if cancel.load(Ordering::Relaxed) {
+                render_error = Some(JobError::Cancelled);
+                break;
+            }
+            let frame_started = Instant::now();
+            // Whether a frame went to the encoder (`None`: none yet; false:
+            // the encoder is gone).
+            let step = (|| -> Result<Option<bool>, JobError> {
+                let time = timeline.tick(n);
+                if !overlap {
+                    let read = render_frame_output(
+                        renderer,
+                        &document,
+                        &job.composition,
+                        time,
+                        &request,
+                        &job.media,
+                        gate,
+                        pass,
+                        cancel,
+                        Some(&mut staging),
+                        pixels(sent),
+                        None,
+                    );
+                    return deliver(renderer, n, read).map(Some);
+                }
+                let units = gate
+                    .admit(pass, total_units, cancel)
+                    .ok_or(JobError::Cancelled)?
+                    .clamp(1, total_units);
+                if units == total_units {
+                    // Submitted now; the frame before it is read while this
+                    // one's commands run.
+                    let next = submit_whole(
+                        renderer,
+                        &document,
+                        &job.composition,
+                        time,
+                        &request,
+                        &job.media,
+                        gate,
+                        pass,
+                        units,
+                        &mut whole,
+                    )?;
+                    return match flight.replace((n, next)) {
+                        Some((m, prev)) => {
+                            let read = finish_whole(renderer, prev, &mut whole, pixels(sent), w, h);
+                            deliver(renderer, m, read).map(Some)
+                        }
+                        None => Ok(None),
+                    };
+                }
+                // Admitted in bands: the frame before goes first.
+                if let Some((m, prev)) = flight.take() {
+                    let read = finish_whole(renderer, prev, &mut whole, pixels(sent), w, h);
+                    if !deliver(renderer, m, read)? {
+                        return Ok(Some(false));
+                    }
+                    sent += 1;
+                }
+                let read = render_frame_output(
+                    renderer,
+                    &document,
+                    &job.composition,
+                    time,
+                    &request,
+                    &job.media,
+                    gate,
+                    pass,
+                    cancel,
+                    Some(&mut staging),
+                    pixels(sent),
+                    Some(units),
+                );
+                deliver(renderer, n, read).map(Some)
+            })();
+            render_ns += frame_started.elapsed().as_nanos();
+            match step {
+                Ok(Some(true)) => sent += 1,
+                Ok(None) => {}
+                Ok(Some(false)) => break,
+                Err(e) => {
+                    render_error = Some(e);
+                    break;
+                }
+            }
+        }
+        if render_error.is_none()
+            && let Some((m, prev)) = flight.take()
+        {
+            // Collect the watchdog's final timestamps before delivery.
+            renderer.wait_idle();
+            let read = finish_whole(renderer, prev, &mut whole, pixels(sent), w, h);
+            if let Err(e) = deliver(renderer, m, read) {
+                render_error = Some(e);
+            }
+        }
+        drop(flight);
+        // Whatever an abandoned frame submitted completes before the
+        // renderer is reused.
+        renderer.wait_idle();
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] render_ms={:.3} render_pipeline_ms={:.3} qos={:?}",
+                render_ns as f64 / 1e6,
+                render_started.elapsed().as_secs_f64() * 1e3,
+                crate::par::current_qos()
+            );
+        }
+        if let Some(e) = render_error {
+            // The encoder side stops at the failure (or sees the channel
+            // close); its partial output is removed when the sink drops.
+            let _ = tx.send(Rendered::Failed(e));
+        }
+        drop(tx);
+        let encoded = encoder
+            .join()
+            .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())));
+        // The encoder has dropped its audio receiver, so a mixer blocked
+        // sending wakes. Joined here, a panic in the mixer is the job's
+        // error rather than the scope's panic; an error of the render or
+        // encoder's own stands (the encoder's audio error only says the
+        // mixer stopped).
+        let mixed = audio_worker.map(|worker| worker.join());
+        match (encoded, mixed) {
+            (Ok(_) | Err(JobError::Audio(_)), Some(Err(_))) => {
+                Err(JobError::Audio("the offline mixer panicked".into()))
+            }
+            (encoded, _) => encoded,
+        }
+    })
+}
+
+/// Frames' pixel buffers an export keeps in circulation between the render
+/// and encoder threads.
+const PIXEL_BUFFERS: u64 = 3;
+
+/// Whole-frame staging stays separate from the renderer's band targets.
+#[derive(Default)]
+struct WholeReadback {
+    ring: pm_gpu::readback::ReadbackRing,
+    target: Option<pm_gpu::target::Target>,
+}
+
+/// A frame submitted whole, with readback in the render command buffer.
+struct InFlight<'g> {
+    target: pm_gpu::target::Target,
+    rendered: pm_render::Rendered,
+    ticket: pm_gpu::readback::ReadbackTicket,
+    mapped: Arc<AtomicBool>,
+    submitted: Instant,
+    units: u32,
+    admission: Admitted<'g>,
+}
+
+/// Renders an admitted whole frame and starts mapping its staging buffer.
+#[allow(clippy::too_many_arguments)]
+fn submit_whole<'g>(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &'g dyn GpuGate,
+    pass: u64,
+    units: u32,
+    readback: &mut WholeReadback,
+) -> Result<InFlight<'g>, JobError> {
+    gate.sync_worker_qos();
+    let admission = Admitted {
+        gate,
+        pass,
+        open: true,
+    };
+    let target = readback.target.take().unwrap_or_else(|| {
+        let size = request.target_size();
+        pm_gpu::target::Target::new(
+            renderer.device(),
+            "pm export frame",
+            size.width,
+            size.height,
+            renderer.device_target_format(document, request),
+            pm_gpu::target::working_usage(),
+        )
+    });
+    let (ticket, copy) = readback
+        .ring
+        .reserve(renderer.device(), &target.texture, u64::MAX)
+        .map_err(|e| JobError::Render(e.to_string()))?
+        .ok_or_else(|| JobError::Render("no free export readback slot".into()))?;
+    let rendered = match renderer.render_viewer_snapshot_into_copy(
+        document,
+        composition,
+        time,
+        request,
+        media,
+        &target,
+        &copy,
+    ) {
+        Ok((frame, _)) => frame,
+        Err(e) => {
+            wait_idle(renderer);
+            readback.ring.cancel(ticket, u64::MAX);
+            return Err(e.into());
+        }
+    };
+    let submitted = Instant::now();
+    let mapped = Arc::new(AtomicBool::new(false));
+    let ready = mapped.clone();
+    readback
+        .ring
+        .start_map(ticket, move || ready.store(true, Ordering::Release));
+    Ok(InFlight {
+        target,
+        rendered,
+        ticket,
+        mapped,
+        submitted,
+        units,
+        admission,
+    })
+}
+
+/// Waits for this frame's map callback while newer GPU commands can run.
+fn finish_whole(
+    renderer: &mut Renderer,
+    flight: InFlight<'_>,
+    readback: &mut WholeReadback,
+    mut rgba: Vec<f32>,
+    width: u32,
+    height: u32,
+) -> Result<ReadFrame, JobError> {
+    let InFlight {
+        target,
+        rendered,
+        ticket,
+        mapped,
+        submitted,
+        units,
+        admission,
+    } = flight;
+    let _ = renderer.device().poll(wgpu::PollType::Poll);
+    while !mapped.load(Ordering::Acquire) {
+        // A wait on the entire queue could hold this frame behind the next
+        // one. Bound the wait while polling for this slot's callback.
+        let _ = renderer.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_millis(1)),
+        });
+        renderer.watchdog_watch();
+    }
+    renderer.watchdog_watch();
+    if let Some(why) = renderer.watchdog_stopped() {
+        readback.ring.cancel(ticket, u64::MAX);
+        return Err(pm_render::RenderError::Watchdog(why.to_owned()).into());
+    }
+    admission.finish(units, submitted.elapsed().as_secs_f64() * 1e6, false);
+    let format = target.format();
+    rgba.resize(width as usize * height as usize * 4, 0.0);
+    readback
+        .ring
+        .try_with_mapped_rows(
+            ticket,
+            |data, row, padded, rows| {
+                crate::readback::decode_rows(format, data, row, padded, rows, &mut rgba)
+            },
+            u64::MAX,
+        )
+        .expect("the map callback has completed")
+        .map_err(|e| JobError::Render(e.to_string()))?
+        .map_err(|e| JobError::Render(e.to_string()))?;
+    readback.target = Some(target);
+    Ok(ReadFrame {
+        rgba,
+        width,
+        height,
+        failures: rendered.failures,
+        footage: rendered.footage,
+    })
+}
+
+/// How long the encoder waits for a frame before it finishes the frames it
+/// holds for reordering (`Sink::idle`). The hardware H.264 encoder dropped
+/// held frames when the next one came 75 s late (30 s was fine); frames that
+/// arrive within this keep their B-frame structure.
+const ENCODER_IDLE: Duration = Duration::from_secs(5);
+
+/// Pacing used by an encoder attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderPacing {
+    Normal,
+    Backpressure,
+}
+
+/// Retries one transient encoder drop with a fresh sink. A VideoToolbox
+/// session requires increasing timestamps, so it cannot accept a dropped
+/// frame's original timestamp again. A clean attempt preserves its timing
+/// and starts with an empty output file. If retrying fails, keep the first
+/// encoder diagnostic unless the person cancelled the export.
+pub fn with_encoder_retry<T>(
+    cancel: &AtomicBool,
+    mut attempt: impl FnMut(EncoderPacing) -> Result<T, JobError>,
+) -> Result<T, JobError> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(JobError::Cancelled);
+    }
+    match attempt(EncoderPacing::Normal) {
+        Err(original @ JobError::Export(Error::EncoderBackpressure(_))) => {
+            if cancel.load(Ordering::Acquire) {
+                return Err(JobError::Cancelled);
+            }
+            match attempt(EncoderPacing::Backpressure) {
+                Err(JobError::Cancelled) => Err(JobError::Cancelled),
+                Err(_) if cancel.load(Ordering::Acquire) => Err(JobError::Cancelled),
+                Err(_) => Err(original),
+                result => result,
+            }
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod encoder_retry_tests {
+    use super::*;
+
+    fn dropped_frame() -> JobError {
+        Error::EncoderBackpressure("VideoToolbox dropped a frame".into()).into()
+    }
+
+    #[test]
+    fn retries_an_encoder_drop_once_with_backpressure() {
+        let mut calls = Vec::new();
+        let delivered = with_encoder_retry(&AtomicBool::new(false), |pacing| {
+            calls.push(pacing);
+            match pacing {
+                EncoderPacing::Normal => Err(dropped_frame()),
+                EncoderPacing::Backpressure => Ok(42),
+            }
+        });
+        assert_eq!(delivered.unwrap(), 42);
+        assert_eq!(calls, [EncoderPacing::Normal, EncoderPacing::Backpressure]);
+    }
+
+    #[test]
+    fn persistent_encoder_backpressure_does_not_loop() {
+        let mut calls = 0;
+        let failure = with_encoder_retry(&AtomicBool::new(false), |_| {
+            calls += 1;
+            Err::<(), _>(dropped_frame())
+        });
+        assert!(matches!(
+            failure,
+            Err(JobError::Export(Error::EncoderBackpressure(_)))
+        ));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_failed_retry_keeps_the_original_encoder_error() {
+        let failure = with_encoder_retry(&AtomicBool::new(false), |pacing| match pacing {
+            EncoderPacing::Normal => Err::<(), _>(dropped_frame()),
+            EncoderPacing::Backpressure => {
+                Err(Error::Verify("retry output failed verification".into()).into())
+            }
+        });
+        assert_eq!(
+            failure.unwrap_err().to_string(),
+            "encoder: VideoToolbox dropped a frame"
+        );
+    }
+
+    #[test]
+    fn does_not_retry_a_verified_failure_or_a_cancelled_export() {
+        let cancel = AtomicBool::new(false);
+        let mut calls = 0;
+        let failure = with_encoder_retry(&cancel, |_| {
+            calls += 1;
+            Err::<(), _>(Error::Verify("bad file".into()).into())
+        });
+        assert!(matches!(failure, Err(JobError::Export(Error::Verify(_)))));
+        assert_eq!(calls, 1);
+
+        let failure = with_encoder_retry(&cancel, |_| {
+            calls += 1;
+            cancel.store(true, Ordering::Release);
+            Err::<(), _>(dropped_frame())
+        });
+        assert!(matches!(failure, Err(JobError::Cancelled)));
+        assert_eq!(calls, 2);
+    }
+}
+
+/// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
+/// libvpx and libopus (WebM), or the engine's PNG writer.
+pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
+    sink_for_with_pacing(plan, EncoderPacing::Normal)
+}
+
+pub fn sink_for_with_pacing(
+    plan: &ExportPlan,
+    _pacing: EncoderPacing,
+) -> Result<crate::OutputSink, JobError> {
+    let mut sink = crate::OutputSink::new(&plan.spec)?;
+    #[cfg(all(feature = "engine", target_os = "macos"))]
+    if _pacing == EncoderPacing::Backpressure
+        && let crate::OutputSink::VideoToolbox(vt) = &mut sink
+    {
+        vt.set_backpressure();
+    }
+    if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
+        png.set_stem(name);
+    }
+    Ok(sink)
+}
+
+/// Plans and runs an export of any format, with verification and the atomic
+/// move.
+pub fn run_export(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
+) -> Result<crate::Delivered, JobError> {
+    with_encoder_retry(cancel, |pacing| {
+        let plan = plan_export(job)?;
+        let sink = sink_for_with_pacing(&plan, pacing)?;
+        run_export_into(renderer, job, plan, sink, gate, cancel, progress)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Agent stills
+// ---------------------------------------------------------------------------
+
+/// The output size of an agent still: the composition scaled so its longest
+/// edge is at most `max_dimension`, never enlarged (today's
+/// `Export.snapshot`: `s = min(1, maxW / w)`), at least 2 × 2.
+pub fn still_size(comp_w: u32, comp_h: u32, max_dimension: u32) -> Size {
+    let (w, h) = (f64::from(comp_w.max(1)), f64::from(comp_h.max(1)));
+    let s = (f64::from(max_dimension) / w.max(h)).min(1.0);
+    Size::new(
+        ((w * s).round() as u32).max(2),
+        ((h * s).round() as u32).max(2),
+    )
+}
+
+/// The composition's own size (`w`, `h`), as the legacy compositor reads it.
+pub fn composition_size(document: &Document, composition: &str) -> Result<(u32, u32), JobError> {
+    let comp = pm_eval::Comp::resolve(document, composition)
+        .map_err(|_| JobError::Invalid(format!("composition {composition:?} not found")))?;
+    let dim = |k: &str| {
+        let v = pm_eval::node::to_number(comp.member(k));
+        if v.is_finite() && v >= 1.0 {
+            Ok(v.round() as u32)
+        } else {
+            Err(JobError::Invalid(format!(
+                "composition {composition:?} has no {k}"
+            )))
+        }
+    };
+    Ok((dim("w")?, dim("h")?))
+}
+
+/// Premultiplied, already E-encoded frame values to opaque 8-bit sRGB RGBA.
+/// The shared SDR boundary maps the over-black RGB before quantizing.
+pub fn to_rgba8(rgba: &[f32]) -> Vec<u8> {
+    assert!(
+        rgba.len().is_multiple_of(4),
+        "RGBA has four channels per pixel"
+    );
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            crate::convert::rgba8_pixel(
+                [p[0], p[1], p[2], p[3]],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                crate::settings::ColorTags::SrgbImage,
+                [0.0; 3],
+            )
+        })
+        .collect()
+}
+
+/// Encodes an opaque RGBA8 image as baseline JPEG (4:2:0) at `quality` in
+/// (0, 1]; alpha is ignored (premultiplied values are already over black, as
+/// a canvas's `toDataURL('image/jpeg')` composites them).
+pub fn encode_jpeg(
+    rgba8: &[u8],
+    width: u32,
+    height: u32,
+    quality: f32,
+) -> Result<Vec<u8>, JobError> {
+    let rgb: Vec<u8> = rgba8
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let q = (quality.clamp(0.01, 1.0) * 100.0).round() as u8;
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q.max(1))
+        .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|e| JobError::Render(format!("JPEG: {e}")))?;
+    Ok(out)
+}
+
+/// Encodes RGBA8 as PNG.
+pub fn encode_png(rgba8: &[u8], width: u32, height: u32) -> Result<Vec<u8>, JobError> {
+    let mut out = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut out),
+        rgba8,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|e| JobError::Render(format!("PNG: {e}")))?;
+    Ok(out)
+}
+
+/// Capability routing of agent stills (as [`plan_export`] routes exports):
+/// the renderer's own check (`Renderer::unsupported_with_media`: its
+/// definitions and fonts) for each composition, checked once per batch and
+/// definition set because it opens media headers.
+#[derive(Debug, Default)]
+pub struct StillRouting {
+    checked: std::collections::HashMap<(String, Option<u64>), Vec<String>>,
+}
+
+impl StillRouting {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `Err(Unsupported)` when the engine cannot render `composition` with
+    /// `renderer` as configured.
+    pub fn check(
+        &mut self,
+        renderer: &Renderer,
+        document: &Document,
+        composition: &str,
+        media: &MediaPaths,
+    ) -> Result<(), JobError> {
+        let generation = renderer
+            .effects()
+            .configured()
+            .then(|| renderer.effects().generation().map_or(0, |g| g.get()));
+        let problems = self
+            .checked
+            .entry((composition.to_owned(), generation))
+            .or_insert_with(|| {
+                renderer
+                    .unsupported_with_media(document, composition, media)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            });
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(JobError::Unsupported(problems.clone()))
+        }
+    }
+}
+
+/// One agent still: the composition at `time`, opaque (today's
+/// `renderFrameTo` with the background), 16-bit intermediates, motion blur
+/// off. Capability routing as for exports, through `routing`, before any
+/// GPU work is admitted.
+#[allow(clippy::too_many_arguments)]
+pub fn render_still(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    max_dimension: u32,
+    media: &MediaPaths,
+    routing: &mut StillRouting,
+    gate: &dyn GpuGate,
+    seed: u64,
+    cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    routing.check(renderer, document, composition, media)?;
+    let (cw, ch) = composition_size(document, composition)?;
+    let size = still_size(cw, ch, max_dimension);
+    let request = RenderRequest {
+        output_kind: OutputKind::Final,
+        ..RenderRequest::sized(size, Precision::Float16)
+    };
+    let frame = render_frame(
+        renderer,
+        document,
+        composition,
+        time,
+        &request,
+        media,
+        gate,
+        pass_key(seed, size),
+        cancel,
+    )?;
+    if !frame.failures.is_empty() {
+        return Err(JobError::Unsupported(
+            frame
+                .failures
+                .iter()
+                .map(|l| format!("layer {} in {}: {}", l.layer, l.composition, l.message))
+                .collect(),
+        ));
+    }
+    Ok(frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_cancellation_remains_cancelled_at_the_job_boundary() {
+        assert!(matches!(
+            JobError::from(Error::Cancelled),
+            JobError::Cancelled
+        ));
+        assert!(matches!(
+            JobError::from(Error::Encode("failed".into())),
+            JobError::Export(_)
+        ));
+    }
+
+    #[test]
+    fn timeline_counts_frames_like_todays_exporter_and_lands_on_the_grid() {
+        let s = Ticks::from_whole_seconds(1);
+        let e = Ticks::from_whole_seconds(3);
+        let t = Timeline::new(s, e, Rate::FPS_23_976).unwrap();
+        // round(2 × 23.976) = 48.
+        assert_eq!(t.frames, 48);
+        // Frame n lands on n × 1001/24000 s exactly (the rate divides the flick).
+        for n in [0u64, 1, 47, 48] {
+            let want = s.get() as i128 + n as i128 * 1001 * TICKS_PER_SECOND as i128 / 24000;
+            assert_eq!(t.tick(n).get() as i128, want);
+        }
+        // A range whose end frame is past the latest tick is refused, not
+        // wrapped back to the start.
+        let late = Ticks::new(Ticks::MAX.get() - TICKS_PER_SECOND).unwrap();
+        // 24 frames at 23.976 end 1.001 s after `late`: past the latest tick.
+        assert!(Timeline::new(late, Ticks::MAX, Rate::FPS_23_976).is_err());
+        let t = Timeline::new(late, Ticks::MAX, Rate::FPS_30).unwrap();
+        assert!(t.tick(t.frames) <= Ticks::MAX && t.tick(t.frames) > t.tick(0));
+        assert_eq!(t.tick(u64::MAX >> 8), Ticks::MAX);
+        let one = Timeline::new(Ticks::ZERO, Ticks::new(1).unwrap(), Rate::FPS_30).unwrap();
+        assert_eq!(one.frames, 1, "at least one frame");
+        assert!(Timeline::new(e, s, Rate::FPS_30).is_err());
+        // Half a frame rounds up (Math.round).
+        let half = Ticks::new(TICKS_PER_SECOND / 60).unwrap();
+        assert_eq!(
+            Timeline::new(Ticks::ZERO, half, Rate::FPS_30)
+                .unwrap()
+                .frames,
+            1
+        );
+        let span = Ticks::new(TICKS_PER_SECOND / 60 * 3).unwrap();
+        assert_eq!(
+            Timeline::new(Ticks::ZERO, span, Rate::FPS_30)
+                .unwrap()
+                .frames,
+            2
+        );
+    }
+
+    #[test]
+    fn frame_samples_tile_the_range_exactly() {
+        let t = Timeline::new(Ticks::ZERO, Ticks::from_whole_seconds(10), Rate::FPS_29_97).unwrap();
+        let mut at = t.samples(0, 48_000).0;
+        let mut total = 0;
+        for n in 0..t.frames {
+            let (a, b) = t.samples(n, 48_000);
+            assert_eq!(a, at, "frame {n} starts where the last ended");
+            total += b - a;
+            at = b;
+        }
+        // round(frames / 29.97 × 48000).
+        let want = (t.frames as f64 * 1001.0 / 30000.0 * 48000.0).round() as i64;
+        assert_eq!(total, want);
+    }
+
+    #[test]
+    fn still_sizes_follow_todays_snapshot() {
+        assert_eq!(still_size(1920, 1080, 720), Size::new(720, 405));
+        assert_eq!(still_size(1080, 1920, 720), Size::new(405, 720));
+        assert_eq!(
+            still_size(320, 180, 720),
+            Size::new(320, 180),
+            "never enlarged"
+        );
+        assert_eq!(still_size(4000, 2, 720), Size::new(720, 2), "at least 2");
+    }
+
+    #[test]
+    fn pass_keys_differ_by_size_and_seed() {
+        let a = pass_key(1, Size::new(1920, 1080));
+        assert_ne!(a, pass_key(2, Size::new(1920, 1080)));
+        assert_ne!(a, pass_key(1, Size::new(1080, 1920)));
+        assert_eq!(a, pass_key(1, Size::new(1920, 1080)));
+    }
+
+    #[test]
+    fn rgba8_rounds_and_clamps() {
+        assert_eq!(to_rgba8(&[0.0, 0.0, 0.5, 1.0]), vec![0, 0, 128, 255]);
+        assert_eq!(to_rgba8(&[f32::NAN, 0.0, 0.0, 1.0]), vec![0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn jpeg_and_png_encode() {
+        let (w, h) = (16u32, 8u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [i as u8, 128, 255 - i as u8, 255])
+            .collect();
+        let jpeg = encode_jpeg(&rgba, w, h, 0.74).unwrap();
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+        let png = encode_png(&rgba, w, h).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+
+    // Retain the serial filter as the exact oracle, including its summation
+    // order, alpha byte and JPEG encoder boundary.
+    fn serial_preview_jpeg(
+        rgba: &[f32],
+        width: u32,
+        height: u32,
+        max_edge: u32,
+    ) -> Result<(u32, u32, Vec<u8>), JobError> {
+        let scale = (f64::from(max_edge) / f64::from(width.max(height))).min(1.0);
+        let (pw, ph) = (
+            ((f64::from(width) * scale).round() as u32).max(1),
+            ((f64::from(height) * scale).round() as u32).max(1),
+        );
+        let mut out = vec![0u8; pw as usize * ph as usize * 4];
+        let (w, h) = (width as usize, height as usize);
+        for py in 0..ph as usize {
+            let y0 = py * h / ph as usize;
+            let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
+            for px in 0..pw as usize {
+                let x0 = px * w / pw as usize;
+                let x1 = ((px + 1) * w / pw as usize).max(x0 + 1);
+                let mut sum = [0f32; 3];
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = (y * w + x) * 4;
+                        for k in 0..3 {
+                            sum[k] += rgba[i + k];
+                        }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as f32;
+                let o = (py * pw as usize + px) * 4;
+                let rgb = (sum.map(|v| v / n)).map(f64::from);
+                let mapped = pm_color::delivery::sdr(rgb);
+                for k in 0..3 {
+                    out[o + k] = (mapped[k] * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+                }
+                out[o + 3] = 255;
+            }
+        }
+        Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
+    }
+
+    #[test]
+    fn preview_parallel_rows_match_serial_jpeg_bytes() {
+        for (width, height, edge) in [
+            (1920u32, 1080u32, 640u32),
+            (641, 359, 321),
+            (321, 181, 640),
+            (319, 183, 53),
+        ] {
+            for phase in [0usize, 7] {
+                let rgba: Vec<f32> = (0..width as usize * height as usize)
+                    .flat_map(|i| {
+                        let x = i % width as usize;
+                        let y = i / width as usize;
+                        let moving = ((x * 37 + y * 19 + phase * 101) % 1021) as f32 / 1020.0;
+                        let red = if (i + phase).is_multiple_of(701) {
+                            f32::NAN
+                        } else {
+                            moving
+                        };
+                        let green = if (i + phase).is_multiple_of(997) {
+                            f32::INFINITY
+                        } else {
+                            moving - 0.1
+                        };
+                        let blue = if (i + phase).is_multiple_of(1201) {
+                            f32::NEG_INFINITY
+                        } else {
+                            1.1 - moving
+                        };
+                        [red, green, blue, moving]
+                    })
+                    .collect();
+                let expected = serial_preview_jpeg(&rgba, width, height, edge).unwrap();
+                let actual = preview_jpeg(&rgba, width, height, edge).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "{width}×{height}, edge {edge}, phase {phase}"
+                );
+            }
+        }
+    }
+}

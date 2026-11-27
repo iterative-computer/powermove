@@ -1,0 +1,41 @@
+[package]
+name = "pm-mcp"
+description = "Headless automation and the frozen Powermove MCP contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-agents = { path = "../agents" }
+tempfile = "3"
+pm-glsl = { path = "../../../../engine/crates/pm-glsl" }
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
+pm-scene3d = { path = "../scene3d" }
+pm-panel-studio3d = { path = "../panel-studio3d" }
+pm-kernel = { path = "../kernel" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+libc = "0.2"
+icu_collator = "2"
+async-channel = "2"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+pm-glsl = { path = "../../../../engine/crates/pm-glsl", features = ["test-admission"] }
+
+[features]
+# Synthetic large projects for the scale bench (pm_kernel::synthetic).
+synthetic = ["pm-kernel/synthetic"]
+
+[[bench]]
+name = "apply_scale"
+harness = false
+required-features = ["synthetic"]
+
+[[bin]]
+name = "powermove-mcp"
+path = "src/main.rs"

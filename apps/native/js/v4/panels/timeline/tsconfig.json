@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "paths": {
+      "powermove/ui": ["./src/ui.ts"],
+      "powermove-v4/jsx-runtime": ["./src/jsx-runtime.ts"]
+    }
+  },
+  "include": ["./**/*.ts", "./**/*.tsx"]
+}

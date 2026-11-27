@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100" viewBox="0 0 120 100">
+<filter id="glow" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB">
+<feFlood flood-color="#FF3D7F" flood-opacity="0.9" result="c"/>
+<feComposite in="c" in2="SourceAlpha" operator="in" result="t"/>
+<feGaussianBlur in="t" stdDeviation="6" result="b"/>
+<feComponentTransfer in="b" result="k"><feFuncA type="linear" slope="1.6"/></feComponentTransfer>
+<feMerge><feMergeNode in="k"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+<rect x="20" y="16" width="80" height="64" rx="8" fill="#1B1F2A" filter="url(#glow)"/>
+</svg>

@@ -1,0 +1,57 @@
+{
+ "id": "panel-native",
+ "title": "A new panel",
+ "scale": 2,
+ "pass_mean": 1.25,
+ "evaluator_sees": [
+  "the prompt",
+  "a capture of the panel docked",
+  "the panel's text and controls after the probe"
+ ],
+ "criteria": [
+  {
+   "id": "works",
+   "question": "Does the panel do what was asked when used?",
+   "weight": 2,
+   "hard": true,
+   "anchors": {
+    "0": "No",
+    "1": "Partly",
+    "2": "Fully"
+   }
+  },
+  {
+   "id": "native",
+   "question": "Does it look like part of Powermove: theme tokens, system type, spacing, quiet lists, native controls?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Looks foreign",
+    "1": "Close, with off details",
+    "2": "Indistinguishable from built-ins"
+   }
+  },
+  {
+   "id": "clarity",
+   "question": "Are labels plain and the layout obvious without explanation?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Confusing",
+    "1": "Mostly clear",
+    "2": "Clear"
+   }
+  },
+  {
+   "id": "restraint",
+   "question": "Is it free of decorative chrome, counts, glyphs and filler?",
+   "weight": 1,
+   "hard": false,
+   "anchors": {
+    "0": "Cluttered",
+    "1": "Some clutter",
+    "2": "Quiet"
+   }
+  }
+ ]
+}

@@ -1,0 +1,276 @@
+//! Semantic UI session patches preserve opaque legacy/extension fields (N4).
+use crate::{Disclosure, GraphDisplay, GraphMode, TimelineMode, TimelineModel};
+use pm_kernel::state::UiState;
+use pm_model::Value;
+/// The viewport and extension fields do not affect the model's rows.
+pub(crate) fn same_model_ui(a: &Value, b: &Value) -> bool {
+    [
+        "mode",
+        "graph",
+        "graphCombined",
+        "graphMode",
+        "graphMerge",
+        "keySelectionActive",
+        "trackSnap",
+        "hideShy",
+    ]
+    .into_iter()
+    .all(|key| a.get(key) == b.get(key))
+        && ["focusedGroup", "disclosure", "trackDisclosure"]
+            .into_iter()
+            .all(|key| {
+                a.get("nativeModel").and_then(|model| model.get(key))
+                    == b.get("nativeModel").and_then(|model| model.get(key))
+            })
+}
+
+impl TimelineModel {
+    pub fn restore_ui(&mut self, ui: &UiState) {
+        let value = &ui.timeline;
+        let mode = self.mode;
+        let hide_shy = self.hide_shy;
+        let focused_group = self.focused_group.clone();
+        let mut disclosure_changed = false;
+        self.graph_display = if value.get("graph").and_then(Value::as_bool) == Some(true) {
+            if value.get("graphCombined").and_then(Value::as_bool) == Some(true) {
+                GraphDisplay::Combined
+            } else {
+                GraphDisplay::Graph
+            }
+        } else {
+            GraphDisplay::DopeSheet
+        };
+        self.graph_mode = if value.get("graphMode").and_then(Value::as_str) == Some("speed") {
+            GraphMode::Speed
+        } else {
+            GraphMode::Value
+        };
+        self.graph_merge = value.get("graphMerge").and_then(Value::as_bool) == Some(true);
+        self.key_selection_active = value
+            .get("keySelectionActive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.track_snap_disabled = value.get("trackSnap").and_then(Value::as_bool) == Some(false);
+        self.hide_shy = value.get("hideShy").and_then(Value::as_bool) == Some(true);
+        self.focused_group = crate::focused_group_from_ui(ui).map(str::to_owned);
+        self.mode = if value.get("mode").and_then(Value::as_str) == Some("tracks") {
+            TimelineMode::Tracks
+        } else {
+            TimelineMode::Layers
+        };
+        if let Some(layers) = value
+            .get("nativeModel")
+            .and_then(|v| v.get("disclosure"))
+            .and_then(Value::as_object)
+        {
+            for (id, d) in layers.iter() {
+                if let Some(id) = id.as_str() {
+                    let paths = d.get("paths").and_then(Value::as_array).map(|p| {
+                        p.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    });
+                    let next = Disclosure {
+                        collapsed: d.get("collapsed").and_then(Value::as_bool).unwrap_or(true),
+                        group_collapsed: d
+                            .get("groupCollapsed")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                        paths,
+                    };
+                    if self.reveal.layers.get(id) != Some(&next) {
+                        self.reveal.layers.insert(id.into(), next);
+                        disclosure_changed = true;
+                    }
+                }
+            }
+        }
+        let previous_tracks = std::mem::take(&mut self.reveal.tracks);
+        if let Some(comps) = value
+            .get("nativeModel")
+            .and_then(|v| v.get("trackDisclosure"))
+            .and_then(Value::as_object)
+        {
+            for (comp, tracks) in comps.iter() {
+                let (Some(comp), Some(tracks)) = (comp.as_str(), tracks.as_object()) else {
+                    continue;
+                };
+                let restored = self.reveal.tracks.entry(comp.into()).or_default();
+                for (key, collapsed) in tracks.iter() {
+                    let (Some(key), Some(collapsed)) = (key.as_str(), collapsed.as_bool()) else {
+                        continue;
+                    };
+                    let Some((area, lane)) = key.split_once(':') else {
+                        continue;
+                    };
+                    let area = match area {
+                        "Video" => crate::tracks::Area::Video,
+                        "Audio" => crate::tracks::Area::Audio,
+                        "Captions" => crate::tracks::Area::Captions,
+                        _ => continue,
+                    };
+                    let Ok(lane) = lane.parse::<usize>() else {
+                        continue;
+                    };
+                    restored.insert((area, lane), collapsed);
+                }
+            }
+        }
+        if self.rebuilds == 0
+            || disclosure_changed
+            || mode != self.mode
+            || hide_shy != self.hide_shy
+            || focused_group != self.focused_group
+            || previous_tracks != self.reveal.tracks
+        {
+            self.rebuild_rows();
+        }
+    }
+    /// Patch only owned semantic members. pps, scroll, extension state, unknown
+    /// disclosure fields, transport, viewer and session values remain intact.
+    pub fn patch_ui(&self, old: &UiState) -> UiState {
+        let mut ui = old.clone();
+        let mut timeline = ui.timeline.as_object().cloned().unwrap_or_default();
+        timeline.insert(
+            "graph",
+            Value::Bool(self.graph_display != GraphDisplay::DopeSheet),
+        );
+        timeline.insert(
+            "graphCombined",
+            Value::Bool(self.graph_display == GraphDisplay::Combined),
+        );
+        timeline.insert("graphMerge", Value::Bool(self.graph_merge));
+        timeline.insert(
+            "graphMode",
+            Value::from(if self.graph_mode == GraphMode::Speed {
+                "speed"
+            } else {
+                "value"
+            }),
+        );
+        timeline.insert("keySelectionActive", Value::Bool(self.key_selection_active));
+        timeline.insert(
+            "mode",
+            Value::from(if self.mode == TimelineMode::Tracks {
+                "tracks"
+            } else {
+                "layers"
+            }),
+        );
+        timeline.insert("trackSnap", Value::Bool(!self.track_snap_disabled));
+        timeline.insert("hideShy", Value::Bool(self.hide_shy));
+        let mut native = timeline
+            .get("nativeModel")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut layers = native
+            .get("disclosure")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (id, d) in &self.reveal.layers {
+            let mut value = layers
+                .get(id.as_str())
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            value.insert("collapsed", Value::Bool(d.collapsed));
+            value.insert("groupCollapsed", Value::Bool(d.group_collapsed));
+            value.insert(
+                "paths",
+                d.paths
+                    .as_ref()
+                    .map(|p| Value::Array(p.iter().cloned().map(Value::from).collect()))
+                    .unwrap_or(Value::Null),
+            );
+            layers.insert(id.as_str(), Value::Object(value));
+        }
+        native.insert("disclosure", Value::Object(layers));
+        native.insert(
+            "focusedGroup",
+            self.active_focused_group()
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+        let mut comps = native
+            .get("trackDisclosure")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (comp, disclosure) in &self.reveal.tracks {
+            let mut tracks = comps
+                .get(comp.as_str())
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for ((area, lane), collapsed) in disclosure {
+                tracks.insert(format!("{area:?}:{lane}"), Value::Bool(*collapsed));
+            }
+            comps.insert(comp.as_str(), Value::Object(tracks));
+        }
+        if !comps.is_empty() {
+            native.insert("trackDisclosure", Value::Object(comps));
+        }
+        timeline.insert("nativeModel", Value::Object(native));
+        ui.timeline = Value::Object(timeline);
+        ui
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+
+    #[test]
+    fn disclosure_of_300_children_rebuilds_once_and_viewport_persistence_shares_rows() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let mut layers = vec![serde_json::json!({"id":"group","type":"group"})];
+        layers.extend((0..300).map(|i| {
+            serde_json::json!({
+                "id": format!("layer-{i}"),
+                "type": "shape",
+                "name": "Layer",
+                "group": "group",
+                "from": i,
+                "dur": 2,
+            })
+        }));
+        let project = serde_json::json!({"id":"p","name":"Test","dur":5,"layers":layers});
+        let project = pm_model::json::parse(&project.to_string()).unwrap();
+        kernel
+            .open("test", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let mut published = (*kernel.published("test").unwrap()).clone();
+        let mut model = TimelineModel::default();
+        model.sync(&published);
+        assert_eq!(model.rows().len(), 1);
+        let group = model.index.layer("group").unwrap();
+        assert_eq!(model.index.strip_span(group), (0., 301.));
+        assert_eq!(model.index.maximum_time(), 301.);
+
+        for expected in [301, 1, 301, 1] {
+            let rebuilds = model.rebuilds;
+            model.toggle_disclosure("group").unwrap();
+            assert_eq!(model.rows().len(), expected);
+            assert_eq!(model.rebuilds, rebuilds + 1);
+            let before_ack = model.clone();
+            published.ui_state = model.patch_ui(&published.ui_state);
+            model.sync(&published);
+            assert!(std::ptr::eq(model.rows(), before_ack.rows()));
+            assert_eq!(model.rebuilds, rebuilds + 1);
+
+            let mut timeline = published.ui_state.timeline.as_object().unwrap().clone();
+            timeline.insert("nativePps", Value::from(expected as f64));
+            timeline.insert("nativeScrollY", Value::from(400.));
+            published.ui_state.timeline = Value::Object(timeline);
+            model.sync(&published);
+            assert!(model.follows_publication(&published));
+            assert!(std::ptr::eq(model.rows(), before_ack.rows()));
+        }
+    }
+}

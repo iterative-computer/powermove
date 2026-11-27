@@ -1,0 +1,976 @@
+//! Opening and saving `.pmv` projects.
+//!
+//! # Open ([`open_project`])
+//!
+//! Blocking and I/O heavy: call it **off the UI thread** (GPUI callers pass
+//! it to their background executor; [`spawn_open`] is a plain-thread
+//! fallback). It reads JSON, PMV3 and PMV4 through
+//! [`pm_model::container::read_container`], then, like `ProjectFiles.open`
+//! in the old app:
+//!
+//! * hashes the whole file in one pass (`hashProjectFile`), verifying every
+//!   PMV4 media checksum on the way; the hash is the file's
+//!   [`FileVersion`], the guard every later in-place save checks;
+//! * refuses a file that changed while it was being read;
+//! * validates the stored project (`assertProjectDocument`: an object with a
+//!   `layers` array and finite `w` and `h`);
+//! * splits the saved envelope (`{ v, proj, history, ws, ... }`) from the
+//!   project, keeping `history`, `ws` and every member it does not know
+//!   verbatim ([`Envelope`]);
+//! * canonicalizes the project ([`pm_model::canonical::canonical_project`]:
+//!   every composition in `comps/<id>`, `compId` names the open one);
+//! * builds the [`MediaTable`]: every embedded record as a *range of the file
+//!   it came from* (never loaded into memory), plus legacy base64 `media` of
+//!   old JSON files decoded into memory;
+//! * imports the saved undo history when it is replayable
+//!   ([`History::from_saved`]).
+//!
+//! # Save ([`SavePlan::run`])
+//!
+//! Always writes PMV4, the format and layout of the old `ProjectSave`; see
+//! the [`save`] module for the algorithm and guarantees.
+
+pub mod autosave;
+pub(crate) mod base64;
+mod durable;
+mod envelope;
+#[cfg(test)]
+mod main_delta_tests;
+pub mod media_jobs;
+pub mod save;
+mod transaction;
+
+use std::collections::HashSet;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use pm_model::canonical::open_comp_id;
+use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_container};
+use pm_model::{JsString, Map, Value};
+use sha2::{Digest, Sha256};
+
+pub use crate::error::kept_beside;
+pub(crate) use durable::stat_of as durable_stat_of;
+pub use durable::{
+    BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, is_recovery_stage,
+    list_backups, local_time, temporary_sibling, tidy_backups,
+};
+pub(crate) use durable::{Host, folder_sync_now, lstat_file, remove_abandoned_temps};
+pub use durable::{
+    PublishHook, PublishHooks, ReadHook, SharedWriteCoordinator, StepHook, Stray, Strays,
+    TrashHook, WholeReads, WriteCoordinator, watch_whole_reads,
+};
+pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
+pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};
+pub(crate) use transaction::{kept_notices, kept_seen, leftovers, pending, settle, use_leftover};
+
+use crate::error::{ProjectIoError, io_err};
+use crate::history::History;
+
+/// The `v` member the old app wrote (`PM.version`). Every save writes it,
+/// whatever the opened file had, as the old app did.
+pub const ENVELOPE_VERSION: &str = "1.0.0";
+
+/// Where the bytes of one embedded media item come from when saving.
+#[derive(Clone, Debug)]
+pub enum MediaSource {
+    /// A range of a project file we opened or saved. Copied into the new
+    /// file and checksum verified; never held in memory. `file` is the
+    /// version the range belongs to and is re-checked before reading, so a
+    /// replaced source is an error, never silent corruption.
+    Embedded {
+        file: Arc<FileVersion>,
+        offset: u64,
+        length: u64,
+        /// Known for PMV4 sources; PMV3 records carry none.
+        sha256: Option<String>,
+    },
+    /// A file on disk (an import or a linked clip). `length` is what the
+    /// catalog recorded; a different size at save time is an error.
+    File {
+        path: PathBuf,
+        length: u64,
+        sha256: Option<String>,
+    },
+    /// Bytes in memory (small generated assets, legacy base64 media).
+    Memory(Arc<[u8]>),
+}
+
+/// One item of the project's embedded media.
+#[derive(Clone, Debug)]
+pub struct MediaEntry {
+    /// The asset id (`assets[id]` in the project).
+    pub id: JsString,
+    /// MIME type recorded in the file (`type`).
+    pub media_type: JsString,
+    /// Storage revision. Different bytes must have a different revision:
+    /// an in-place save reuses the previous file's range for an id only when
+    /// revision and length both match (`ProjectSave.create`).
+    pub revision: JsString,
+    pub source: MediaSource,
+}
+
+impl MediaEntry {
+    pub fn length(&self) -> u64 {
+        match &self.source {
+            MediaSource::Embedded { length, .. } | MediaSource::File { length, .. } => *length,
+            MediaSource::Memory(bytes) => bytes.len() as u64,
+        }
+    }
+
+    /// Stream this read capability to a new private cache file. Never writes a
+    /// source project or creates a source-side lock. Checks version and digest.
+    /// The version check is the save path's: the container was hashed at open,
+    /// and identity, size, mtime and ctime rehash it only when it changed, so a
+    /// project with many items is never hashed once per item (a 285 MB PMV3
+    /// file sat on Opening for minutes). An item's own digest proves its bytes.
+    pub fn copy_to(&self, destination: &Path) -> Result<(), ProjectIoError> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut input: Box<dyn Read> = match &self.source {
+            MediaSource::Memory(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
+            MediaSource::File { path, length, .. } => {
+                let file = File::open(path).map_err(|e| io_err(path, e))?;
+                if file.metadata().map_err(|e| io_err(path, e))?.len() != *length {
+                    return Err(ProjectIoError::Invalid("Media source changed".into()));
+                }
+                Box::new(file.take(*length))
+            }
+            MediaSource::Embedded {
+                file,
+                offset,
+                length,
+                ..
+            } => {
+                file.check(false)?;
+                let mut input = File::open(&file.path).map_err(|e| io_err(&file.path, e))?;
+                input
+                    .seek(SeekFrom::Start(*offset))
+                    .map_err(|e| io_err(&file.path, e))?;
+                Box::new(input.take(*length))
+            }
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options
+            .open(destination)
+            .map_err(|e| io_err(destination, e))?;
+        let result = (|| {
+            let mut total = 0;
+            let mut digest = Sha256::new();
+            let mut buffer = vec![0; 1 << 20];
+            loop {
+                let n = input
+                    .read(&mut buffer)
+                    .map_err(|e| io_err(destination, e))?;
+                if n == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..n])
+                    .map_err(|e| io_err(destination, e))?;
+                digest.update(&buffer[..n]);
+                total += n as u64;
+            }
+            let hash = match &self.source {
+                MediaSource::Embedded { sha256, .. } | MediaSource::File { sha256, .. } => {
+                    sha256.as_deref()
+                }
+                _ => None,
+            };
+            if total != self.length()
+                || hash.is_some_and(|hash| hash != durable::hex(&digest.finalize()))
+            {
+                return Err(ProjectIoError::Invalid(
+                    "Media source length or checksum changed".into(),
+                ));
+            }
+            if let MediaSource::Embedded { file, .. } = &self.source {
+                file.check(false)?;
+            }
+            output.sync_all().map_err(|e| io_err(destination, e))
+        })();
+        drop(output);
+        if result.is_err() {
+            let _ = std::fs::remove_file(destination);
+        }
+        result
+    }
+
+    /// A new revision string for bytes without one (`crypto.randomUUID()`).
+    pub fn fresh_revision() -> JsString {
+        JsString::from(durable::random_uuid().as_str())
+    }
+}
+
+/// Embedded media by asset id, in file order.
+#[derive(Clone, Debug, Default)]
+pub struct MediaTable {
+    entries: Arc<Vec<MediaEntry>>,
+    /// Explicit provenance, independent of File vs Memory. Generated/imported
+    /// owned files must never be mistaken for source links.
+    linked: Arc<HashSet<JsString>>,
+    /// Bytes known to be a playback proxy whatever the asset record says
+    /// (the first launch found the original gone). Never an export's original.
+    proxy_only: Arc<HashSet<JsString>>,
+}
+
+impl MediaTable {
+    /// O(1) identity of immutable entry storage held by a publication/worker.
+    pub fn shares_entries_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.entries, &other.entries)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &MediaEntry> {
+        self.entries.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&MediaEntry> {
+        self.entries.iter().find(|e| e.id == *id)
+    }
+
+    /// Adds or replaces an entry by id; an existing id keeps its position.
+    pub fn insert(&mut self, entry: MediaEntry) {
+        Arc::make_mut(&mut self.linked).remove(&entry.id);
+        Arc::make_mut(&mut self.proxy_only).remove(&entry.id);
+        let entries = Arc::make_mut(&mut self.entries);
+        match entries.iter_mut().find(|e| e.id == entry.id) {
+            Some(slot) => *slot = entry,
+            None => entries.push(entry),
+        }
+    }
+
+    /// Register a source link after admission has verified its complete digest.
+    /// Normal saves retain the document reference without reading these bytes;
+    /// portable saves stream them and re-check the digest.
+    pub fn insert_link(&mut self, entry: MediaEntry) -> Result<(), ProjectIoError> {
+        if !matches!(&entry.source, MediaSource::File { sha256: Some(hash), .. }
+            if hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+        {
+            return Err(ProjectIoError::Invalid(
+                "A source link needs a verified SHA-256.".into(),
+            ));
+        }
+        let id = entry.id.clone();
+        self.insert(entry);
+        Arc::make_mut(&mut self.linked).insert(id);
+        Ok(())
+    }
+
+    pub fn is_linked(&self, id: &JsString) -> bool {
+        self.linked.contains(id)
+    }
+
+    /// Adds bytes that are a playback proxy of an original that is gone.
+    pub fn insert_proxy_only(&mut self, entry: MediaEntry) {
+        let id = entry.id.clone();
+        self.insert(entry);
+        Arc::make_mut(&mut self.proxy_only).insert(id);
+    }
+
+    /// Whether `id`'s bytes are a proxy whose original is gone.
+    pub fn is_proxy_only(&self, id: &str) -> bool {
+        self.proxy_only.iter().any(|p| *p == *id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<MediaEntry> {
+        let pos = self.entries.iter().position(|e| e.id == *id)?;
+        let entry = Arc::make_mut(&mut self.entries).remove(pos);
+        Arc::make_mut(&mut self.linked).remove(&entry.id);
+        Arc::make_mut(&mut self.proxy_only).remove(&entry.id);
+        Some(entry)
+    }
+}
+
+/// The saved document minus the project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Envelope {
+    /// Validated original index, used to retain unknown range/media metadata.
+    pub container_index: Option<Value>,
+    /// `v` as read (informational: saves write [`ENVELOPE_VERSION`]).
+    pub version: Option<Value>,
+    /// `history` exactly as read. Written back unchanged when it could not be
+    /// imported and this session recorded no undo step.
+    pub history: Option<crate::history::CompactJson>,
+    /// `ws` (the workspace snapshot), kept verbatim.
+    pub workspace: Option<Value>,
+    /// Every other member, kept verbatim (a newer app's fields survive).
+    pub extra: Map,
+    /// `false` for a bare project file (no `proj` wrapper). It is wrapped on
+    /// its first save, as the old app did.
+    pub wrapped: bool,
+    /// Whether the stored project had a `comps` member, so a project that
+    /// had none does not gain an empty one.
+    pub had_comps: bool,
+}
+
+impl Default for Envelope {
+    fn default() -> Envelope {
+        Envelope {
+            container_index: None,
+            version: Some(Value::from(ENVELOPE_VERSION)),
+            history: None,
+            workspace: None,
+            extra: Map::new(),
+            wrapped: true,
+            had_comps: true,
+        }
+    }
+}
+
+/// Everything about the file a project came from that saving needs.
+#[derive(Clone, Debug)]
+pub struct ProjectFile {
+    /// `None` for an untitled project.
+    pub path: Option<PathBuf>,
+    /// The format it was read as.
+    pub format: ContainerFormat,
+    /// The file as we last read or wrote it (`None` when untitled).
+    pub version: Option<Arc<FileVersion>>,
+    pub envelope: Envelope,
+    pub media: MediaTable,
+}
+
+impl ProjectFile {
+    /// A project that has never been saved.
+    pub fn untitled() -> ProjectFile {
+        ProjectFile {
+            path: None,
+            format: ContainerFormat::Pmv4,
+            version: None,
+            envelope: Envelope::default(),
+            media: MediaTable::default(),
+        }
+    }
+}
+
+/// A project read from disk, ready for [`DocumentStore::open`](crate::DocumentStore::open).
+#[derive(Debug)]
+pub struct OpenedProject {
+    pub file: ProjectFile,
+    /// The canonical project (the open composition in `comps/<compId>`) as a
+    /// revisioned tree at revision 1, built on the opening thread.
+    pub document: pm_model::Document,
+    /// The open composition (`None` for a legacy root-layers project).
+    pub open_comp: Option<String>,
+    /// The saved undo history, when replayable.
+    pub history: Option<History>,
+}
+
+/// How to open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenOptions {
+    /// Verify every PMV4 media checksum while hashing the file. On by
+    /// default, as in the old app.
+    pub verify_media: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions { verify_media: true }
+    }
+}
+
+/// `hashProjectFile`: the SHA-256 of the whole file. It reads beside the
+/// container's parse (`open_project`); media checksums, which need the
+/// container's index, are verified after it (`verify_media`).
+/// Stops between chunks once `stop` is set (the container failed: its error
+/// is the open's, so the rest of the file need not be read).
+fn hash_project_file(
+    file: &File,
+    path: &Path,
+    size: u64,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<String, ProjectIoError> {
+    durable::reading_whole(path);
+    let mut whole = Sha256::new();
+    read_range(file, path, 0, size, |bytes| {
+        whole.update(bytes);
+        !stop.load(std::sync::atomic::Ordering::Relaxed)
+    })?;
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(ProjectIoError::Invalid("The open stopped.".into()));
+    }
+    Ok(durable::hex(&whole.finalize()))
+}
+
+/// Reads `length` bytes of `file` from `offset` a megabyte at a time, until
+/// `take` says to stop.
+fn read_range(
+    file: &File,
+    path: &Path,
+    offset: u64,
+    length: u64,
+    mut take: impl FnMut(&[u8]) -> bool,
+) -> Result<(), ProjectIoError> {
+    let mut buf = vec![0u8; (1usize << 20).min(length.max(1) as usize)];
+    let end = offset + length;
+    let mut position = offset;
+    #[cfg(unix)]
+    use std::os::unix::fs::FileExt;
+    while position < end {
+        let want = (buf.len() as u64).min(end - position) as usize;
+        #[cfg(unix)]
+        let n = durable::read_retry(|| file.read_at(&mut buf[..want], position))
+            .map_err(|e| io_err(path, e))?;
+        #[cfg(not(unix))]
+        let n = {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = file;
+            f.seek(SeekFrom::Start(position))
+                .map_err(|e| io_err(path, e))?;
+            f.read(&mut buf[..want]).map_err(|e| io_err(path, e))?
+        };
+        if n == 0 {
+            return Err(ProjectIoError::Container(
+                pm_model::container::ContainerError::Invalid("The project container is truncated."),
+            ));
+        }
+        if !take(&buf[..n]) {
+            return Ok(());
+        }
+        position += n as u64;
+    }
+    Ok(())
+}
+
+/// Verifies the given (already validated) media ranges against their
+/// checksums, records in parallel.
+fn verify_media(file: &File, path: &Path, media: &[&MediaRecord]) -> Result<(), ProjectIoError> {
+    let bad = || {
+        ProjectIoError::Container(pm_model::container::ContainerError::Invalid(
+            "The project media checksum does not match.",
+        ))
+    };
+    let empty = durable::hex(&Sha256::digest([]));
+    for record in media {
+        if record.length == 0 && record.sha256.as_deref().is_some_and(|s| s != empty) {
+            return Err(bad());
+        }
+    }
+    let ranges: Vec<&MediaRecord> = media
+        .iter()
+        .copied()
+        .filter(|r| r.length > 0 && r.sha256.is_some())
+        .collect();
+    pm_model::parallel::map(ranges.len(), |i| {
+        let record = ranges[i];
+        let mut hash = Sha256::new();
+        read_range(file, path, record.offset, record.length, |bytes| {
+            hash.update(bytes);
+            true
+        })?;
+        if Some(durable::hex(&hash.finalize()).as_str()) != record.sha256.as_deref() {
+            return Err(bad());
+        }
+        Ok(())
+    })
+    .into_iter()
+    .collect()
+}
+
+/// Opens a project file. **Blocking**: run it off the UI thread.
+pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, ProjectIoError> {
+    // Before the first read of the file: the version's stat proves its bytes
+    // later only if this sample is past the tick of its stamps.
+    let taken = durable::wall_ns();
+    // Non-blocking open: a named pipe or device would otherwise block the
+    // kernel thread forever before the regular-file check below can refuse
+    // it. The flag changes nothing for reads of a regular file.
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|e| io_err(path, e))?
+    };
+    let meta = file.metadata().map_err(|e| io_err(path, e))?;
+    if !meta.is_file() {
+        return Err(ProjectIoError::Invalid(
+            "This is not a readable project file.".into(),
+        ));
+    }
+    let before = durable::stat_of(&meta);
+    // The start of a copy (a sync client's, another computer's save) is
+    // not a damaged project: it is refused as one still arriving.
+    if durable::file_head_held_back(&file) {
+        return Err(ProjectIoError::StillCopying);
+    }
+    // Index and document checksums are always verified by the reader. The
+    // whole file's hash needs nothing from it, so it reads beside the parse
+    // (a 285 MB project: both are hundreds of milliseconds); media
+    // checksums need the index, so they are verified after it.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (container, hash) = std::thread::scope(|scope| {
+        let whole = scope.spawn(|| hash_project_file(&file, path, before.size, &stop));
+        let container = read_container(
+            &file,
+            ReadOptions {
+                verify_media: false,
+            },
+        );
+        // A container that failed is the open's error: the hash stops at
+        // its next chunk instead of reading the rest of the file.
+        if container.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let hash = whole
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (container, hash)
+    });
+    let container = container?;
+    let hash = hash?;
+    if options.verify_media {
+        let records: Vec<&MediaRecord> = container
+            .media
+            .iter()
+            .chain(&container.archived_media)
+            .collect();
+        verify_media(&file, path, &records)?;
+    }
+    let after = durable::stat_of(&file.metadata().map_err(|e| io_err(path, e))?);
+    if before.size != after.size
+        || before.mtime_ns != after.mtime_ns
+        || before.ctime_ns != after.ctime_ns
+    {
+        return Err(ProjectIoError::Invalid(
+            "The project changed while opening. Try opening it again.".into(),
+        ));
+    }
+    let version = Arc::new(FileVersion {
+        path: path.to_owned(),
+        stat: after,
+        hash,
+        held: file.try_clone().ok().map(durable::HeldFile::new),
+        stat_taken: taken,
+    });
+    from_container(container, Some(path.to_owned()), Some(version))
+}
+
+/// Legacy files predate native colour management. Keep their preview intent
+/// on each asset so saving to PMV4 does not lose it, and native imports keep
+/// their tagged/HDR reading. Explicit Interpret Footage fields still win.
+/// Projects read from a v1 library slot take the same rule as a PMV4 file
+/// (`LibraryStore::load`), so a project reads its video the same however it
+/// is opened, and a Save As and reopen never changes the picture.
+pub(crate) fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
+    let has_3d = |comp: &Value| {
+        comp.get("layers")
+            .and_then(Value::as_array)
+            .is_some_and(|layers| {
+                layers.iter().any(|layer| {
+                    layer
+                        .get("d")
+                        .and_then(|d| d.get("definition"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("powermove.3d."))
+                })
+            })
+    };
+    if legacy_container
+        && (has_3d(project)
+            || project
+                .get("comps")
+                .and_then(Value::as_object)
+                .is_some_and(|comps| comps.values().any(has_3d)))
+        && project.get("render3d").is_none()
+        && let Some(root) = project.as_object_mut()
+    {
+        root.insert("render3d", Value::from("electron"));
+    }
+    let Some(assets) = project
+        .as_object_mut()
+        .and_then(|p| p.get_mut("assets"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for (_, asset) in assets.iter_mut() {
+        adopt_electron_asset(asset, legacy_container);
+    }
+}
+
+/// One asset record as [`adopt_electron_rendering`] leaves it: a v1 video
+/// asset gains `videoColor: "electron"`. Also applied to the asset records
+/// an imported Undo history restores (`History::import`).
+pub(crate) fn adopt_electron_asset(asset: &mut Value, legacy_container: bool) {
+    let Some(asset) = asset.as_object_mut() else {
+        return;
+    };
+    if asset.get("kind").and_then(Value::as_str) == Some("video")
+        && !asset.contains_key("videoColor")
+        // New native imports write timing:2. Older Electron PMV4 files
+        // have the same container version as native, so the asset's own
+        // legacy timing provenance identifies their preview reading.
+        && (legacy_container
+            || !asset.contains_key("timing")
+                && asset
+                    .get("interpret")
+                    .and_then(Value::as_object)
+                    .is_none_or(|p| p.is_empty()))
+    {
+        asset.insert("videoColor", Value::from("electron"));
+    }
+}
+
+/// Splits, validates and canonicalizes a decoded container (shared by
+/// [`open_project`] and tests that build files in memory).
+pub(crate) fn from_container(
+    container: pm_model::container::Container,
+    path: Option<PathBuf>,
+    version: Option<Arc<FileVersion>>,
+) -> Result<OpenedProject, ProjectIoError> {
+    let format = container.format;
+    // `document.proj || document`.
+    let (mut fields, mut project, wrapped) = match container.document {
+        Value::Object(mut map) if map.get("proj").is_some_and(Value::is_truthy) => {
+            let proj = map.remove("proj").unwrap_or(Value::Null);
+            (map, proj, true)
+        }
+        other => (Map::new(), other, false),
+    };
+    validate_stored_project(&project)?;
+    adopt_electron_rendering(&mut project, format != ContainerFormat::Pmv4);
+    crate::asset_order::adopt(&mut project, container.asset_order);
+    if let Some(metadata) = container.legacy_metadata {
+        let key = "nativePmv3Metadata";
+        let retained = match fields.remove(key) {
+            Some(old) if old == metadata => old,
+            Some(old) => Value::Array(vec![old, metadata]),
+            None => metadata,
+        };
+        fields.insert(key, retained);
+    }
+    let had_comps = project.get("comps").is_some();
+
+    let mut media = MediaTable::default();
+    if let Some(version) = &version {
+        for record in container.media.iter().chain(&container.archived_media) {
+            media.insert(MediaEntry {
+                id: record.id.clone(),
+                media_type: record.media_type.clone(),
+                revision: record
+                    .revision
+                    .clone()
+                    .unwrap_or_else(MediaEntry::fresh_revision),
+                source: MediaSource::Embedded {
+                    file: version.clone(),
+                    offset: record.offset,
+                    length: record.length,
+                    sha256: record.sha256.clone(),
+                },
+            });
+        }
+    }
+
+    // Legacy JSON: `media: { <id>: { type, data: "<base64>" } }` beside the
+    // project. Preserve the raw member (including unknown per-media metadata)
+    // and every decodable payload, even if only a future consumer owns it.
+    if container.media.is_empty()
+        || fields.get("media").is_some()
+        || fields.get("nativeLegacyMediaArchive").is_some()
+    {
+        let legacy = if wrapped {
+            fields
+                .remove("media")
+                .or_else(|| fields.get("nativeLegacyMediaArchive").cloned())
+        } else {
+            project.get("media").cloned()
+        };
+        if let Some(legacy) = legacy {
+            let key = "nativeLegacyMediaArchive";
+            let retained = match fields.remove(key) {
+                Some(old) if old == legacy => old,
+                Some(old) => Value::Array(vec![old, legacy.clone()]),
+                None => legacy.clone(),
+            };
+            fields.insert(key, retained);
+            let reachable = reachable_in_stored(&project, fields.get("history"));
+            if let Value::Object(legacy) = legacy {
+                for (id, source) in legacy.iter() {
+                    let Some(id_str) = id.as_str() else { continue };
+                    if !reachable.contains(id_str) {
+                        continue;
+                    }
+                    let ty = source.get("type").and_then(Value::as_js_string);
+                    let data = source.get("data").and_then(Value::as_str);
+                    let bytes = data.and_then(base64::decode);
+                    let (Some(ty), Some(bytes)) = (ty, bytes) else {
+                        if !reachable.contains(id_str) {
+                            continue;
+                        }
+                        return Err(ProjectIoError::Media {
+                            id: id.to_string_lossy(),
+                            reason: "Invalid saved media".into(),
+                        });
+                    };
+                    // Binary records are authoritative when both representations
+                    // occur. The original JSON stays intact in the envelope.
+                    if media.get(id_str).is_some() {
+                        continue;
+                    }
+                    media.insert(MediaEntry {
+                        id: id.clone(),
+                        media_type: ty.clone(),
+                        revision: MediaEntry::fresh_revision(),
+                        source: MediaSource::Memory(bytes.into()),
+                    });
+                }
+            }
+        }
+    }
+
+    let version_member = fields.remove("v");
+    let raw_history = fields.remove("history");
+    let workspace = fields.remove("ws");
+    normalize_compositions(&mut project);
+    let canonical = crate::model::to_canonical(project);
+    let open_comp = open_comp_id(&canonical).map(str::to_owned);
+    let (retained_history, history) = pm_model::parallel::join(
+        || {
+            raw_history
+                .as_ref()
+                .map(crate::history::CompactJson::history)
+        },
+        || {
+            raw_history
+                .as_ref()
+                .and_then(|h| History::from_saved(h, open_comp.as_deref()))
+        },
+    );
+    // Free the parsed history tree before asking malloc to return pages.
+    drop(raw_history);
+    let opened = OpenedProject {
+        file: ProjectFile {
+            path,
+            format,
+            version,
+            envelope: Envelope {
+                container_index: container.index,
+                version: version_member,
+                history: retained_history,
+                workspace,
+                extra: fields,
+                wrapped,
+                had_comps,
+            },
+            media,
+        },
+        document: pm_model::Document::new(Some(canonical), 1),
+        open_comp,
+        history,
+    };
+    crate::memory::pressure_relief();
+    Ok(opened)
+}
+
+/// `normalizeCompositions` (main `core/validate/project.ts`): a project from
+/// before compositions gets an id and name for its open composition. Without
+/// one the viewer and timeline had no composition to show. The id is derived
+/// from the project's, so every open of an unsaved file has one journal base.
+fn normalize_compositions(project: &mut Value) {
+    let Value::Object(root) = project else {
+        return;
+    };
+    let named = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    if !named(root.get("compId")) {
+        let seed = root
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("Comp")
+            .to_owned();
+        let taken = |id: &str| {
+            root.get("comps")
+                .and_then(Value::as_object)
+                .is_some_and(|c| c.contains_key(id))
+        };
+        let mut n = 0u32;
+        let id =
+            loop {
+                let digest = Sha256::digest(format!("{seed}\0{n}"));
+                let id: String =
+                    std::iter::once('C')
+                        .chain(digest.iter().take(7).map(|b| {
+                            b"0123456789abcdefghijklmnopqrstuvwxyz"[*b as usize % 36] as char
+                        }))
+                        .collect();
+                if !taken(&id) {
+                    break id;
+                }
+                n += 1;
+            };
+        root.insert("compId", Value::from(id));
+        if !named(root.get("compName")) {
+            let name = root
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Comp 1")
+                .to_owned();
+            root.insert("compName", Value::from(name));
+        }
+    }
+}
+
+/// A saved history needs an archive before an edit replaces it unless this
+/// kernel imports it losslessly: nothing refused, trimmed or dropped, and its
+/// re-export equal in content to what the file holds (unpacked, for main's
+/// dictionary form, which this kernel writes for large histories). Anything
+/// else (newer metadata, unknown operations, entries over the byte budget)
+/// is kept as `nativeHistoryArchive`.
+pub(crate) fn history_needs_archive(raw: &Value, open: Option<&str>) -> bool {
+    let Ok(history) = History::import(raw, open) else {
+        return true;
+    };
+    // Unpacking keeps only the keys it reads: anything else in the
+    // dictionary itself or its items would be lost, so judge those first.
+    if raw.get("format").is_some() {
+        let unknown = |value: &Value, known: &[&str]| {
+            value.as_object().is_none_or(|map| {
+                map.keys()
+                    .any(|key| !key.as_str().is_some_and(|key| known.contains(&key)))
+            })
+        };
+        let items_unknown = raw
+            .get("history")
+            .and_then(|h| h.get("entries"))
+            .and_then(Value::as_array)
+            .is_none_or(|entries| {
+                entries.iter().any(|entry| {
+                    ["forward", "backward"].into_iter().any(|side| {
+                        entry
+                            .get(side)
+                            .and_then(Value::as_array)
+                            .is_none_or(|items| {
+                                items.iter().any(|item| unknown(item, &["patch", "refs"]))
+                            })
+                    })
+                })
+            });
+        if unknown(raw, &["format", "version", "records", "history"]) || items_unknown {
+            return true;
+        }
+    }
+    crate::history::unpack(raw).is_none_or(|unpacked| history.snapshot().to_saved() != unpacked)
+}
+
+/// Asset ids reachable from a *stored* project and its saved history
+/// (`fileAssets` in `legacy/core/project-file.ts`).
+fn reachable_in_stored(project: &Value, history: Option<&Value>) -> HashSet<String> {
+    let unpacked = history
+        .and_then(|h| History::from_saved(h, open_comp_id(project)))
+        .map(|h| h.snapshot().to_saved());
+    let history = unpacked.as_ref().or(history);
+    let mut ids = HashSet::new();
+    let mut add_keys = |obj: Option<&Value>, ids: &mut HashSet<String>| {
+        if let Some(Value::Object(map)) = obj {
+            ids.extend(map.keys().filter_map(|k| k.as_str().map(str::to_owned)));
+        }
+    };
+    if let Some(entries) = history
+        .and_then(|h| h.get("entries"))
+        .and_then(Value::as_array)
+    {
+        for entry in entries {
+            for side in ["forward", "backward"] {
+                let Some(patches) = entry.get(side).and_then(Value::as_array) else {
+                    continue;
+                };
+                for patch in patches {
+                    let Ok(patch) = pm_model::Patch::from_value(patch) else {
+                        continue;
+                    };
+                    collect_patch_assets(&patch, &mut ids, &mut add_keys);
+                }
+            }
+        }
+    }
+    add_keys(project.get("assets"), &mut ids);
+    crate::commands::scene3d::collect_original_assets(project, &mut ids);
+    if let Some(history) = history {
+        crate::commands::scene3d::collect_original_assets(history, &mut ids);
+    }
+    ids
+}
+
+pub(crate) fn collect_patch_assets(
+    patch: &pm_model::Patch,
+    ids: &mut HashSet<String>,
+    add_keys: &mut impl FnMut(Option<&Value>, &mut HashSet<String>),
+) {
+    use pm_model::PathPart;
+    if !patch.exists {
+        return;
+    }
+    let key = |i: usize| match patch.path.get(i) {
+        Some(PathPart::Key(k)) => k.as_str(),
+        _ => None,
+    };
+    let value = patch.value.as_ref();
+    match patch.path.len() {
+        0 => add_keys(value.and_then(|v| v.get("assets")), ids),
+        1 if key(0) == Some("assets") => add_keys(value, ids),
+        2 if key(0) == Some("assets") => {
+            if value
+                .and_then(|v| v.get("id"))
+                .is_some_and(Value::is_truthy)
+                && let Some(id) = key(1)
+            {
+                ids.insert(id.to_owned());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `assertProjectDocument` on the stored project: an object with a `layers`
+/// array and finite `w` and `h`.
+pub(crate) fn validate_stored_project(project: &Value) -> Result<(), ProjectIoError> {
+    let finite = |k: &str| {
+        project
+            .get(k)
+            .and_then(Value::as_f64)
+            .is_some_and(f64::is_finite)
+    };
+    let ok = project.as_object().is_some()
+        && project
+            .get("layers")
+            .is_some_and(|l| l.as_array().is_some())
+        && finite("w")
+        && finite("h");
+    if ok {
+        Ok(())
+    } else {
+        Err(ProjectIoError::NotAProject)
+    }
+}
+
+/// Runs [`open_project`] on a new thread. GPUI callers usually use their
+/// own background executor instead.
+pub fn spawn_open(
+    path: PathBuf,
+    options: OpenOptions,
+) -> std::thread::JoinHandle<Result<OpenedProject, ProjectIoError>> {
+    std::thread::Builder::new()
+        .name("pm-open-project".into())
+        .spawn(move || open_project(&path, options))
+        .expect("spawn the open thread")
+}

@@ -1,0 +1,9658 @@
+//! Native timeline host element. Pointer input runs Rust gesture sessions against
+//! the kernel on a worker; JS keeps the outline and hears about it by publication.
+//! Layer-header reorders share the native pointer gesture lifecycle.
+//! No sample waits on V8, and the main thread never waits on the kernel.
+#[path = "timeline_audio.rs"]
+mod audio;
+use crate::v4_view::{Outline, TimelineOutline};
+use gpui::{prelude::*, *};
+use pm_design::Tokens;
+use pm_engine_service::audio::GainPreview;
+use pm_kernel::{Call, Caller, KernelHandle, Published, QueryMirror, SelectionCall};
+use pm_panel_timeline::{
+    Context as MenuContext, DragKind, DragSample, EditTool, GraphDisplay, HostEffect,
+    KeyMovePreview, MarqueeSession, Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub,
+    TimelineClient, TimelineMode, TimelineModel,
+    footer::Part,
+    frame,
+    graph_render::{self, Graph},
+    render::{
+        BarState, Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, SceneSelection,
+        Viewport, WaveformCache,
+    },
+};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
+
+/// Host services a gesture needs. Implemented by the Controller; tests record.
+/// Media dropped on the timeline: placed at `at`, joining the stack at
+/// `index` (0 the top; `None` the bottom).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaDrop {
+    pub at: f64,
+    pub index: Option<usize>,
+    pub what: Dropped,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dropped {
+    /// From Finder; Option held keeps a folder's files apart.
+    Files {
+        paths: Vec<std::path::PathBuf>,
+        alt: bool,
+    },
+    /// What the Project panel is dragging.
+    ProjectItems,
+}
+/// The Effects panel's id (`js/v4/app/panels.json`): its rows drag effects
+/// onto layers.
+pub const EFFECTS_PANEL: &str = "fxbrowser";
+
+#[cfg(test)]
+mod panel_id_tests {
+    /// The Effects panel the drop targets listen for is a built-in panel.
+    #[test]
+    fn the_effects_panel_id_is_a_built_in_panel() {
+        assert!(pm_builtins::builtin_panel(super::EFFECTS_PANEL).is_some());
+        assert!(pm_builtins::builtin_panel(pm_builtins::PROJECT_PANEL).is_some());
+    }
+}
+/// How far either side of a cut a dropped transition still goes across it.
+const CUT_REACH: f64 = 8.;
+/// An effect dragged from the Effects panel `panel` dropped on `layer`'s row
+/// (`None`: no row there, and the selected layer takes it, as v1.2.0).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectDrop {
+    pub panel: String,
+    pub definition: String,
+    pub label: String,
+    pub layer: Option<String>,
+    /// A transition (`definition` reads `transition:<id>`): the clip edge it
+    /// landed on, the nearer half (v1: left half In, right half Out).
+    pub edge: Option<pm_kernel::commands::effects::Edge>,
+    /// Tracks mode: the clip on the other side of that edge's cut, on the
+    /// same track. The transition goes across the cut.
+    pub across: Option<String>,
+    /// Pointer time for a transition dropped on a cut; effects use the playhead.
+    pub at: Option<f64>,
+}
+pub trait Delegate: 'static {
+    fn timing_preview(&self, _snapshot: Option<pm_kernel::Snapshot>, _cx: &mut App) {}
+    fn audio_gain_preview(&self, _message: GainPreview, _cx: &mut App) {}
+    /// Latest output-mix peaks, media tick and playback flag. The timeline
+    /// expires paused scrub taps from their media tick.
+    fn audio_peaks(&self, _cx: &App) -> Option<([f64; 2], i64, bool)> { None }
+    /// The immutable model behind the displayed lanes, for native edits
+    /// made outside the timeline (notably speed in Properties).
+    fn tracks_view(&self, _view: Arc<TimelineModel>, _cx: &mut App) {}
+    /// The model whose row geometry the outline worker should project.
+    fn timeline_outline(&self, _view: Arc<TimelineModel>, _refresh: bool, _cx: &mut App) {}
+    fn time(&self, cx: &App) -> f64;
+    /// Media dropped on the timeline (Finder files, Project items).
+    fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
+    /// An effect from the Effects panel dropped on the timeline.
+    fn drop_effect(&self, _drop: EffectDrop, _cx: &mut App) {}
+    fn seek(&self, seconds: f64, cx: &mut App);
+    fn effect(&self, effect: HostEffect, cx: &mut App);
+    fn report(&self, message: String, cx: &mut App);
+    /// Run a shell command by name, as its menu item or chord would.
+    fn command(&self, name: &str, cx: &mut App);
+    /// A command with arguments (a menu row that names its target).
+    fn run(&self, name: &str, _args: Vec<serde_json::Value>, cx: &mut App) {
+        self.command(name, cx);
+    }
+    /// The layer menu's rows for the layer under the pointer
+    /// (`layer_commands::layer_menu`).
+    fn layer_menu_rows(&self, _layer: &str, _cx: &App) -> Vec<serde_json::Value> {
+        vec![]
+    }
+    /// `choose` runs with the picked row, on the main thread, once tracking ends.
+    fn menu(
+        &self,
+        items: Vec<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Choose,
+    );
+    /// Asks extension clip painters (`timeline.paint`) for decorations of
+    /// `clips`; `done` gets `{clipId: shapes}` merged, on the main thread.
+    fn paint_clips(&self, _clips: serde_json::Value, _done: PaintDone, _cx: &mut App) {}
+    /// What v1–3's `timeline` service reports moved: view, mode and the
+    /// visible rows' layers in window points.
+    fn view_facts(&self, _facts: serde_json::Value, _cx: &mut App) {}
+    /// Moves when a clip painter arrives or leaves.
+    fn painters_revision(&self, _cx: &App) -> u64 {
+        0
+    }
+    /// The time under the panel moved (scroll, zoom, a resize): the native
+    /// playhead, drawn outside GPUI, is placed again.
+    fn view_moved(&self, _cx: &mut App) {}
+    /// The skimmer moved to `seconds` (`None`: it left the timeline).
+    fn skim(&self, _seconds: Option<f64>, _cx: &mut App) {}
+    /// A ruler scrub starts (`true`) or ends: during it the app publishes
+    /// only what follows the time frame by frame.
+    fn scrubbing(&self, _on: bool, _cx: &mut App) {}
+    /// Whether skimming is on (View ▸ Skimming).
+    fn skimming(&self, _cx: &App) -> bool {
+        false
+    }
+    /// Whether the viewer still shows the skimmer's frame.
+    fn skimmer_shown(&self, _cx: &App) -> bool {
+        true
+    }
+    /// A context menu whose native rows come first, then what extensions add
+    /// for each of `locations` (v1–3's `MenuLocation` and what it was opened on).
+    fn extension_menu(
+        &self,
+        _locations: Vec<(&'static str, serde_json::Value)>,
+        items: Vec<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Choose,
+    ) {
+        self.menu(items, window, cx, choose);
+    }
+}
+/// Receives extension clip decorations, and whether every painter answered.
+pub type PaintDone = Box<dyn FnOnce(pm_panel_timeline::render::Decorations, bool, &mut App)>;
+/// Runs with the picked row index once a native menu closes.
+pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
+#[derive(Clone, Debug)]
+enum Spec {
+    Layers,
+    /// Option-drag: copies follow the pointer, the originals stay.
+    Duplicate,
+    Trim(Edge),
+    Locked {
+        layer: String,
+        source: String,
+        trim: bool,
+        action: &'static str,
+    },
+    Offset,
+    Ripple(Edge),
+    Roll(Edge),
+    Slip,
+    Slide,
+    Keys,
+    GraphKeys,
+    /// A grip of the selected keys' transform box (`TimelineSurface::transform`):
+    /// the composition time and value it scales about.
+    Transform {
+        anchor_time: f64,
+        anchor_value: f64,
+    },
+    /// A key's direction handle in the Value Graph.
+    Handle {
+        key: String,
+        side: pm_kernel::commands::keyframes::EaseSide,
+    },
+    Property {
+        layer: String,
+        path: String,
+        motion: pm_surface::kit::NumericMotion,
+    },
+    WorkIn,
+    WorkOut,
+    WorkMove,
+    /// ⌥ on a key: stretch the selected keys' timing (the grabbed key's
+    /// composition time).
+    StretchKeys {
+        grabbed: f64,
+    },
+    QuickOffsetKeys,
+    TextStagger {
+        band: pm_panel_timeline::stagger::Band,
+        end: bool,
+    },
+
+}
+/// A transform box drag (v1's `dragGraphTransform`): the selected keys'
+/// span when the grip was pressed, which grip, and whether ⌘ scales about
+/// the box's centre.
+#[derive(Clone, Copy, Debug)]
+struct TransformBox {
+    t0: f64,
+    t1: f64,
+    v0: f64,
+    v1: f64,
+    grip: usize,
+    centred: bool,
+}
+impl TransformBox {
+    fn sides(&self) -> (bool, bool, bool, bool) {
+        let name = graph_render::GRIPS[self.grip];
+        (
+            name.contains('e'),
+            name.contains('w'),
+            name.contains('n'),
+            name.contains('s'),
+        )
+    }
+    /// The time and value the drag scales about (the opposite edge, or the
+    /// centre with ⌘).
+    fn anchor(&self) -> (f64, f64) {
+        let (east, west, north, south) = self.sides();
+        let (mid_t, mid_v) = ((self.t0 + self.t1) / 2., (self.v0 + self.v1) / 2.);
+        let time = if self.centred || !(east || west) {
+            mid_t
+        } else if east {
+            self.t0
+        } else {
+            self.t1
+        };
+        let value = if self.centred || !(north || south) {
+            mid_v
+        } else if north {
+            self.v0
+        } else {
+            self.v1
+        };
+        (time, value)
+    }
+    /// The scales for a pointer that has travelled `dt` seconds and `dv`
+    /// in value from the press: the grabbed edge follows the pointer from
+    /// where it was (the grip stands off the keys, so the keys never jump
+    /// to the pointer at the first move).
+    fn scales(&self, dt: f64, dv: f64) -> (f64, f64) {
+        let (east, west, north, south) = self.sides();
+        let (at, av) = self.anchor();
+        let moving_t = if east { self.t1 } else { self.t0 };
+        let moving_v = if north { self.v1 } else { self.v0 };
+        let (time, value) = (moving_t + dt, moving_v + dv);
+        let ts = if (east || west) && (moving_t - at).abs() > 1e-9 {
+            (time - at) / (moving_t - at)
+        } else {
+            1.
+        };
+        let vs = if (north || south) && (moving_v - av).abs() > 1e-9 {
+            (value - av) / (moving_v - av)
+        } else {
+            1.
+        };
+        (ts, vs)
+    }
+}
+enum Job {
+    Sync,
+    RebuildPresentation,
+    Disclosure(String),
+    SelectLayer(String, Mods),
+    PaletteSelectLayer {
+        layer: String,
+        document: u64,
+        composition: Option<String>,
+    },
+    SelectAll(Option<(u64, Option<String>, String)>),
+    /// The transition selected on a clip's edge, or none.
+    SelectTransition(Option<(String, pm_panel_timeline::render::Edge)>),
+    SelectKey {
+        layer: String,
+        channel: String,
+        key: String,
+        additive: bool,
+        dragging: bool,
+    },
+    Begin(Spec, f64),
+    Sample(DragSample),
+    Finish(bool),
+    SwitchBegin {
+        label: String,
+        commands: Vec<pm_kernel::Command>,
+    },
+    SwitchStep(Vec<pm_kernel::Command>),
+    SwitchFinish(bool),
+    Apply(Plan),
+    FinishMarquee {
+        plan: Plan,
+        composition: Option<String>,
+        selection: Option<Arc<SceneSelection>>,
+    },
+    CommitGain(Plan, u64),
+    Command {
+        id: String,
+        time: f64,
+        frames: Option<i32>,
+        shift: bool,
+    },
+    PasteKeys(Vec<pm_panel_timeline::ClipboardTrack>, f64),
+    Menu {
+        context: MenuContext,
+        action: String,
+        time: f64,
+    },
+    Persist(Viewed),
+    Reveal {
+        layer: String,
+        keys: Vec<String>,
+    },
+    ShowGraph {
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+    },
+    FocusGraph {
+        layer: String,
+        channel: String,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Viewed {
+    pps: f64,
+    scroll_time: f64,
+    scroll_y: f64,
+    layer_column: f64,
+    /// The person set the column (a drag); only then is it saved with the
+    /// project, so a default never sticks as if it had been chosen.
+    column_chosen: bool,
+}
+struct Built {
+    scene: Arc<Scene>,
+    graph: Option<Arc<Graph>>,
+    model: Arc<TimelineModel>,
+    outline_requested: bool,
+    selection_only: bool,
+    /// Audio clips whose waveforms the scene drew as still reading.
+    wanted: Vec<crate::waveforms::Key>,
+}
+/// Audio originals by asset id, for waveforms.
+type Sources = Arc<BTreeMap<String, PathBuf>>;
+struct Press {
+    origin: Point<Pixels>,
+    spec: Option<Spec>,
+    /// A plain click on an already selected item narrows selection on release.
+    release: Option<Job>,
+}
+/// Frozen ruler mapping for work-area gestures. Handles follow absolute
+/// pointer time (including the hit-zone offset); the body follows pointer delta.
+#[derive(Clone, Copy)]
+struct WorkDragMapping {
+    edge: Option<f64>,
+    pps: f64,
+    scroll_time: f64,
+    column: f64,
+}
+impl WorkDragMapping {
+    fn delta(self, x: f64, dx: f64) -> f64 {
+        self.edge.map_or(dx / self.pps, |edge| {
+            (self.scroll_time + (x - self.column) / self.pps).max(0.) - edge
+        })
+    }
+}
+
+struct TransitionDrag {
+    layer: String,
+    edge: String,
+    origin_x: f64,
+    part: i8,
+    start: f64,
+    duration: f64,
+    offset: f64,
+    current: (f64, f64),
+    intent: (f64, f64),
+    scene: Option<Arc<Scene>>,
+    document: u64,
+    revision: u64,
+}
+enum Gesture {
+    Transition(TransitionDrag),
+    ParentPick {
+        ids: Vec<String>,
+        origin: Point<Pixels>,
+        at: Point<Pixels>,
+        target: Option<String>,
+        moved: bool,
+    },
+    /// Press-and-drag bulk toggle across a timeline switch column (After Effects style).
+    SwitchPaint {
+        switch: pm_panel_timeline::LayerSwitch,
+        target: bool,
+        applied: BTreeSet<String>,
+        last_row: Option<usize>,
+    },
+    Idle,
+    Pressed(Press),
+    Dragging {
+        origin: Point<Pixels>,
+        proedit: bool,
+        keys: bool,
+        work: Option<WorkDragMapping>,
+        property_motion: Option<pm_surface::kit::NumericMotion>,
+        property_infinite: crate::infinite_drag::InfiniteDrag,
+        quick: Option<(Point<Pixels>, f64, usize)>,
+        quick_limits: Vec<(f64, f64)>,
+        /// A handle drag: its key's `(layer_from, key_id, side)`.
+        handle: Option<(f64, String, pm_kernel::commands::keyframes::EaseSide)>,
+    },
+    /// A ruler scrub and the frame time it last sought.
+    Scrub {
+        scrub: Scrub,
+        sought: f64,
+        before: f64,
+    },
+    Marquee {
+        session: MarqueeSession,
+        origin: Point<Pixels>,
+        at: Point<Pixels>,
+    },
+    Pan {
+        at: Point<Pixels>,
+    },
+    Column,
+    /// The bottom bar: the zoom slider held; the navigator's thumb or the
+    /// row thumb held this far from its start.
+    Zoom,
+    Navigate {
+        grab: f64,
+    },
+    Rows {
+        grab: f64,
+    },
+    /// A layer header pressed in the layer list: a click stays the row's
+    /// (it selects on release); past 4 pt it lifts into a reorder.
+    LayerPress {
+        layer: String,
+        origin: Point<Pixels>,
+    },
+    /// v1's layer reorder (timeline.ts gutterDown): the layers moving and
+    /// where they would land.
+    Reorder {
+        moving: Vec<String>,
+        at: Point<Pixels>,
+        drop: Option<LayerDrop>,
+    },
+}
+/// Where a reorder would land (v1's `layerDrop`), in panel space.
+#[derive(Clone, Debug)]
+struct LayerDrop {
+    target: String,
+    mode: pm_panel_timeline::DropMode,
+    /// The insertion line (before/after) and its left end (the depth cue).
+    line: f64,
+    left: f64,
+    /// The target label for the insertion cue.
+    name: String,
+}
+pub struct TimelineSurface {
+    agent_ink: pm_panel_timeline::agent_ink::AgentInk,
+    agent_drag_touch: Option<String>,
+    agent_ink_clock: std::time::Instant,
+    agent_ink_task: Option<Task<()>>,
+    agent_ink_frames: u64,
+    agent_ink_samples: [f64; 64],
+    agent_ink_sample_count: usize,
+
+    kernel: KernelHandle,
+    project: String,
+    tokens: Tokens,
+    delegate: Rc<dyn Delegate>,
+    outline: Rc<Outline>,
+    client: Option<TimelineClient>,
+    queue: VecDeque<Job>,
+    busy: bool,
+    sample_scheduled: bool,
+    viewer_previewing: bool,
+    key_preview: Option<Arc<KeyMovePreview>>,
+    gain_previewing: Option<u64>,
+    gain_picture: Option<pm_kernel::Snapshot>,
+    /// Assets this editor's viewer cannot read: their clips show Media
+    /// Offline (docs/native/design/media-offline.md).
+    offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+    /// Waveform files being read for this timeline.
+    reading: BTreeSet<crate::waveforms::Key>,
+    audio: audio::AudioState,
+    model: Arc<TimelineModel>,
+    scene: Option<Arc<Scene>>,
+    pending_scene: Option<(Built, bool)>,
+    pending_scene_fallback: Option<Task<()>>,
+    seen_reveal_serial: u64,
+    outline_runtime: std::sync::Weak<pm_builtins::Builtins>,
+    /// The timeline panel holds the keyboard (the shell says, as it lays
+    /// the panel out): selected rows take the accent tint only then.
+    focused: bool,
+    /// Shared flag mirrored from `self.model` so `Controller::follow_playback`
+    /// can check whether expanded property rows are visible without re-entrantly
+    /// borrowing `TimelineSurface` during ruler/playhead pointer callbacks.
+    expanded_properties: Rc<std::cell::Cell<bool>>,
+    focused_layer: Option<(u64, Option<String>, String)>,
+    last_pointer_activity: std::time::Instant,
+    pointer_timeout: Option<Task<()>>,
+    snap_guide: Option<f64>,
+    /// The graph on screen; its value range may be held (`steady_graph`).
+    graph: Option<Arc<Graph>>,
+    /// The latest graph over its own fitted range, for Fit Selected Curves.
+    graph_fitted: Option<Arc<Graph>>,
+    /// The value range the wheel panned the graph to, for one view (v1's
+    /// `graphViewBounds`).
+    graph_view: Option<(String, f64, f64)>,
+    /// A transform box drag in progress.
+    transform: Option<TransformBox>,
+    /// A key drag in the graph: ⇧ also locks it to its main axis (v1).
+    graph_axis: bool,
+    /// Graph element currently hovered under an idle pointer.
+    graph_hover: Option<graph_render::GraphHit>,
+    /// Graph Bézier handle currently pressed or being dragged.
+    graph_active_handle: Option<(String, pm_kernel::commands::keyframes::EaseSide)>,
+    /// The drag readout's text and where the pointer is (surface points).
+    readout: Option<(String, f64, f64)>,
+    frame: Option<Arc<Frame>>,
+    frame_reach: f64,
+    waveforms: WaveformCache,
+    outline_geometry: Option<(f32, f32, Option<(usize, usize)>)>,
+    service_dirty: bool,
+    zooming: bool,
+    transition_selected: Option<(String, String)>,
+    /// The rows a viewport past each edge, and while `sideways` the tracks
+    /// and the ruler the tracks' width past each side (`Scene::prepare_native`,
+    /// that reach), prepared for the view of the `frame` they follow: what
+    /// the scroll layers record.
+    rows: Option<(Arc<Frame>, Arc<Frame>, f64)>,
+    /// A sideways scroll is under way (since a sideways wheel step, until a
+    /// zoom or a press): only then do the layers record past each side,
+    /// which costs every full draw (a drag, a pinch) more than half again.
+    sideways: bool,
+    /// The driven scroll layers (P-SCROLL-LAYER): the outline column's rows
+    /// move with the vertical scroll, the tracks with it and the time, the
+    /// ruler with the time, and the scrollbar thumbs with their axis; a wheel
+    /// step replays what they drew, shifted.
+    rows_handle: ScrollHandle,
+    tracks_handle: ScrollHandle,
+    ruler_handle: ScrollHandle,
+    time_thumb_handle: ScrollHandle,
+    rows_thumb_handle: ScrollHandle,
+    /// The tracks' and the ruler's x offset when they last drew and the time
+    /// then at their left edge: a step's offset is that less the time
+    /// scrolled since.
+    drawn: (f32, f64),
+    /// Each scrollbar thumb's `(from, length)` as last painted and its scroll
+    /// layer's recorded base offset.
+    time_thumb_drawn: (Option<(f64, f64)>, f32),
+    rows_thumb_drawn: (Option<(f64, f64)>, f32),
+    /// The clip under the pointer and the pointer's x in the panel: its strip
+    /// draws hovered, with the trim grip inside the nearer edge.
+    hover_clip: Option<(String, f64)>,
+    bounds: Bounds<Pixels>,
+    /// The panel's whole body: `bounds` (the ruler and the rows) and the
+    /// bottom bar under them.
+    body: Bounds<Pixels>,
+    /// The part of the bottom bar or the row thumb under the pointer or held.
+    lit: Option<Part>,
+    view: Viewed,
+    /// The native playhead's time mapping: pixels per second, first second and
+    /// time column of the frame last painted.
+    shown: (f64, f64, f64),
+    shown_bounds: Bounds<Pixels>,
+    fitted: bool,
+    /// The composition length last shown: when it changes while the view
+    /// shows all of it from 0, the view refits to the new length.
+    fit_duration: f64,
+    gesture: Gesture,
+    gesture_view: Option<(Viewed, bool)>,
+    drag_scene: Option<(Arc<Scene>, Arc<pm_panel_timeline::TimelineIndex>)>,
+    suppress_left_up: bool,
+    marquee_selection: Option<Arc<SceneSelection>>,
+    cursor: CursorStyle,
+    /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
+    tip: Option<(SharedString, (f64, f64))>,
+    tip_wait: Option<Task<()>>,
+    row_scroll: Option<Task<()>>,
+    /// A wheel or pinch view change waiting for the gesture to rest.
+    idle_persist: Option<Task<()>>,
+    /// Extension clip decorations by clip id (`timeline.paint`), and what
+    /// they were asked for (painter revision, visible clips) and the request
+    /// in flight; `late` is when a request some painter missed was asked.
+    decorations: Arc<pm_panel_timeline::render::Decorations>,
+    painted: Option<(u64, String)>,
+    painting: bool,
+    late: Option<std::time::Instant>,
+    /// The service facts last told to the delegate.
+    told: Option<serde_json::Value>,
+    /// The skimmer's time while the pointer hovers the time area (Final
+    /// Cut's skimming): a ghost playhead; the playhead itself stays.
+    skimmer: Option<f64>,
+    /// Where the timeline last saw the pointer (a move, a press, a wheel
+    /// event): a skim starts only when the pointer moves from there, never
+    /// from a scroll or a move event that did not move it.
+    pointer: Option<Point<Pixels>>,
+    /// The playhead's time when the pointer last moved the skimmer: with no
+    /// pointer motion since, a skim goes on (a scroll, a move event that did
+    /// not move it) only while the viewer still shows it and the playhead
+    /// has not moved (a seek, a click, playback put the viewer back on the
+    /// playhead's frame).
+    skim_playhead: Option<f64>,
+    /// A wheel step moves the skimmer: no panel draw for it.
+    quiet_skim: bool,
+    /// Clears the skimmer when the window stops being active (Cmd-Tab, key
+    /// loss, hide): the pointer may never move out of the timeline.
+    activation: Option<Subscription>,
+    split_modifiers: Option<Subscription>,
+    /// A click dismisses the cut preview until actual pointer motion.
+    split_preview_hidden: bool,
+    /// Where media being dragged over the timeline would land (window
+    /// position), for the insertion line.
+    media_over: Option<Point<Pixels>>,
+    /// An effect from the Effects panel over the timeline: the pointer.
+    effect_over: Option<Point<Pixels>>,
+}
+const WHEEL_ZOOM: f64 = 0.01;
+/// How often a growing render bar is read again (PM-431).
+const RENDER_BAR_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+/// The tracks and the ruler draw this many of their widths in from their
+/// layers' left edge, in content `2 × SIDEWAYS + 1` widths wide: a sideways
+/// step inside the width the layer records past each side replays it.
+const SIDEWAYS: f64 = 2.;
+/// The fewest letters of a clip's name worth showing before its ellipsis.
+const NAME_LEAST: usize = 3;
+const PPS: (f64, f64) = (4., 4000.);
+/// How far past the timeline's end the view may run, in points.
+const END_ROOM: f64 = 48.;
+/// The room a fitted view leaves after the composition's end (v1
+/// `frameView`), so the last strips' ends stand clear of the row scroller.
+const FIT_ROOM: f64 = 40.;
+impl TimelineSurface {
+    pub fn new(
+        kernel: KernelHandle,
+        project: String,
+        tokens: Tokens,
+        delegate: Rc<dyn Delegate>,
+        outline: Rc<Outline>,
+        offline: BTreeSet<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let layer_column = default_layer_column(&tokens.metrics);
+        let view = Viewed {
+            pps: 100.,
+            scroll_time: 0.,
+            scroll_y: 0.,
+            layer_column,
+            column_chosen: false,
+        };
+        outline.column.set(layer_column as f32);
+        outline.bind_surface(cx.entity().downgrade());
+        timeline_opened();
+        let mut this = Self {
+            agent_ink: Default::default(),
+            agent_drag_touch: None,
+            agent_ink_clock: std::time::Instant::now(),
+            agent_ink_task: None,
+            agent_ink_frames: 0,
+            agent_ink_samples: [0.; 64],
+            agent_ink_sample_count: 0,
+            kernel: kernel.clone(),
+            project: project.clone(),
+            tokens: tokens.clone(),
+            delegate,
+            outline,
+            client: None,
+            queue: VecDeque::new(),
+            busy: true,
+            sample_scheduled: false,
+            viewer_previewing: false,
+            key_preview: None,
+            gain_previewing: None,
+            gain_picture: None,
+            offline: Arc::new(offline),
+            sources: Default::default(),
+            reading: Default::default(),
+            audio: Default::default(),
+            model: Default::default(),
+            expanded_properties: Rc::new(std::cell::Cell::new(false)),
+            scene: None,
+            pending_scene: None,
+            pending_scene_fallback: None,
+            seen_reveal_serial: 0,
+            outline_runtime: std::sync::Weak::new(),
+            snap_guide: None,
+            graph: None,
+            graph_fitted: None,
+            graph_view: None,
+            transform: None,
+            graph_axis: false,
+            graph_hover: None,
+            graph_active_handle: None,
+            readout: None,
+            frame: None,
+            frame_reach: 0.,
+            waveforms: WaveformCache::default(),
+            outline_geometry: None,
+            service_dirty: true,
+            zooming: false,
+            transition_selected: None,
+            rows: None,
+            rows_handle: ScrollHandle::new(),
+            tracks_handle: ScrollHandle::new(),
+            ruler_handle: ScrollHandle::new(),
+            time_thumb_handle: ScrollHandle::new(),
+            rows_thumb_handle: ScrollHandle::new(),
+            sideways: false,
+            drawn: (0., view.scroll_time),
+            time_thumb_drawn: (None, 0.),
+            rows_thumb_drawn: (None, 0.),
+            bounds: Bounds::default(),
+            body: Bounds::default(),
+            lit: None,
+            view,
+            shown: (view.pps, view.scroll_time, view.layer_column),
+            shown_bounds: Bounds::default(),
+            fitted: false,
+            fit_duration: 0.,
+            gesture: Gesture::Idle,
+            gesture_view: None,
+            drag_scene: None,
+            suppress_left_up: false,
+            marquee_selection: None,
+            cursor: CursorStyle::Arrow,
+            tip: None,
+            tip_wait: None,
+            row_scroll: None,
+            idle_persist: None,
+            decorations: Default::default(),
+            painted: None,
+            painting: false,
+            told: None,
+            skimmer: None,
+            pointer: None,
+            skim_playhead: None,
+            quiet_skim: false,
+            hover_clip: None,
+            // As the scene and the panel's model start: the shell's first
+            // word (unfocused, at the first layout) is then a change, and
+            // both hear it.
+            focused: true,
+            focused_layer: None,
+            last_pointer_activity: std::time::Instant::now(),
+            pointer_timeout: None,
+            activation: None,
+            split_modifiers: None,
+            split_preview_hidden: false,
+            media_over: None,
+            effect_over: None,
+            late: None,
+        };
+        cx.on_release(|s, cx| {
+            s.release_gain_preview(cx);
+            if let Some(gesture) = s.audio.pending_gain.take() {
+                let delegate = s.delegate.clone();
+                cx.defer(move |cx| {
+                    delegate.audio_gain_preview(
+                        GainPreview::Finish {
+                            gesture,
+                            revision: None,
+                        },
+                        cx,
+                    )
+                });
+            }
+            s.finish_key_gain(None, cx);
+            if s.viewer_previewing {
+                let delegate = s.delegate.clone();
+                cx.defer(move |cx| delegate.timing_preview(None, cx));
+            }
+        })
+        .detach();
+        this.restore_view();
+        // The render bar follows the disk render cache (Render Selection,
+        // the background render). A background render reports every frame
+        // it stores: the bar is read at most once a `RENDER_BAR_EVERY` while
+        // it grows (the channel keeps one report), and the panel draws again
+        // only when the bar would draw other points at this zoom (PM-431: an
+        // untouched app drew the timeline nine times a second).
+        let changes = crate::render_frames::watch();
+        cx.spawn(async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                if this.update(cx, |s, cx| s.render_bars_changed(cx)).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(RENDER_BAR_EVERY).await;
+            }
+        })
+        .detach();
+        let offline = this.offline.clone();
+        let sources = this.sources.clone();
+        cx.spawn(async move |this, cx| {
+            // Indexing the document is O(layers): never on the main thread.
+            let created = cx
+                .background_executor()
+                .spawn(async move {
+                    TimelineClient::new(kernel, project, Caller::native()).map(|mut client| {
+                        let _ = client.adopt_view();
+                        let built = build(&client, &tokens, offline, sources);
+                        (client, built)
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.busy = false;
+                match created {
+                    Ok((client, built)) => {
+                        s.client = Some(client);
+                        s.install(built, false, cx);
+                        s.pump(cx);
+                    }
+                    Err(error) => s.delegate.report(error.to_string(), cx),
+                }
+            });
+        })
+        .detach();
+        this
+    }
+    fn restore_view(&mut self) {
+        let Some(p) = self.kernel.published(&self.project) else {
+            return;
+        };
+        let ui = &p.ui_state.timeline;
+        let number = |key: &str| ui.get(key).and_then(pm_model::Value::as_f64);
+        if let Some(pps) = number("nativePps").filter(|p| p.is_finite()) {
+            self.view.pps = pps.clamp(PPS.0, PPS.1);
+            self.fitted = true;
+        }
+        if let Some(time) = number("nativeScrollTime").filter(|t| t.is_finite()) {
+            self.view.scroll_time = time.max(0.);
+        }
+        if let Some(y) = number("nativeScrollY").filter(|y| y.is_finite()) {
+            self.view.scroll_y = y.max(0.);
+        }
+        if let Some(column) = number("nativeLayerColumn").filter(|c| c.is_finite()) {
+            // A width saved narrower than a row's least (before it had one)
+            // opens at the least.
+            let column = column.max(least_layer_column(&self.tokens.metrics));
+            self.view.layer_column = column;
+            self.view.column_chosen = true;
+            self.outline.column.set(column as f32);
+        }
+    }
+    pub fn agent_presence(
+        &mut self,
+        events: Vec<pm_mcp::presence::Presence>,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::agent_ink::{Event, Kind};
+        let now = self.agent_ink_clock.elapsed().as_millis() as u64;
+        for event in events {
+            let kind = match event.kind {
+                pm_mcp::presence::Kind::Focus => Kind::Focus,
+                pm_mcp::presence::Kind::Create => Kind::Create,
+                pm_mcp::presence::Kind::Key => Kind::Key,
+                pm_mcp::presence::Kind::Remove => Kind::Remove,
+                pm_mcp::presence::Kind::Held => Kind::Held,
+                pm_mcp::presence::Kind::Dropped => Kind::Dropped,
+                pm_mcp::presence::Kind::RunEnd => Kind::End,
+                _ => Kind::Set,
+            };
+            self.agent_ink.receive(
+                Event {
+                    layer: event.layer.unwrap_or_default(),
+                    property: event.property,
+                    kind,
+                    times: event.times,
+                    step: event.step,
+                    committed: true,
+                },
+                now,
+            );
+        }
+        if self.agent_ink_task.is_none()
+            && self
+                .agent_ink
+                .moving_with_motion(now, self.tokens.accessibility.reduce_motion)
+        {
+            self.agent_ink_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    let moving = this
+                        .update(cx, |s, cx| {
+                            let now = s.agent_ink_clock.elapsed().as_millis() as u64;
+                            let moving = s
+                                .agent_ink
+                                .moving_with_motion(now, s.tokens.accessibility.reduce_motion);
+                            if !moving {
+                                s.agent_ink_task = None;
+                            }
+                            s.agent_ink_frames += 1;
+                            cx.notify();
+                            moving
+                        })
+                        .unwrap_or(false);
+                    if !moving {
+                        break;
+                    }
+                }
+            }));
+        }
+        self.agent_ink_frames += 1;
+        cx.notify();
+    }
+    pub fn agent_ink_metrics(&self) -> serde_json::Value {
+        let mut samples = self.agent_ink_samples;
+        let n = self.agent_ink_sample_count.min(64);
+        samples[..n].sort_by(f64::total_cmp);
+        serde_json::json!({"frames":self.agent_ink_frames,"paint_p95_ms":if n==0 {0.}else{samples[(n-1)*95/100]},"samples":self.agent_ink_sample_count})
+    }
+    /// A kernel publication landed: follow it on a worker.
+    pub fn set_outline_runtime(&mut self, runtime: &Arc<pm_builtins::Builtins>) {
+        self.outline_runtime = Arc::downgrade(runtime);
+    }
+
+    pub fn published(&mut self, cx: &mut Context<Self>) {
+        if self.scene.is_some() && !self.current_composition(&self.model) {
+            let timeline = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = timeline.update(cx, |t, cx| t.cancel_pointer_gesture(cx));
+            });
+            self.focused_layer = None;
+            self.pending_scene = None;
+            self.key_preview = None;
+            self.marquee_selection = None;
+            self.outline_geometry = None;
+            self.scene = None;
+            self.frame = None;
+            self.graph = None;
+            self.graph_fitted = None;
+            self.outline.clear_composition(cx);
+            cx.notify();
+        }
+        if !matches!(self.queue.back(), Some(Job::Sync)) {
+            self.queue.push_back(Job::Sync);
+        }
+        self.pump(cx);
+    }
+    fn rebuild_presentation(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.queue.back(), Some(Job::RebuildPresentation)) {
+            self.queue.push_back(Job::RebuildPresentation);
+        }
+        self.pump(cx);
+    }
+
+    pub(crate) fn palette_select_layer(
+        &mut self,
+        published: &pm_kernel::Published,
+        args: &[serde_json::Value],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(layer) = args.first().and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        self.queue.push_back(Job::PaletteSelectLayer {
+            layer: layer.to_owned(),
+            document: published.snapshot.doc_id,
+            composition: published.snapshot.open_comp(),
+        });
+        self.pump(cx);
+        true
+    }
+
+    pub(crate) fn toggle_disclosure(&mut self, layer: String, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::Disclosure(layer));
+        self.pump(cx);
+    }
+    pub fn set_offline_media(&mut self, offline: BTreeSet<String>, cx: &mut Context<Self>) {
+        if *self.offline != offline {
+            self.offline = Arc::new(offline);
+            self.rebuild_presentation(cx);
+        }
+    }
+    /// Readable audio originals by asset id: their clips draw waveforms.
+    pub fn set_audio_sources(
+        &mut self,
+        sources: BTreeMap<String, PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if *self.sources != sources {
+            self.sources = Arc::new(sources);
+            self.rebuild_presentation(cx);
+        }
+    }
+    pub fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
+        if self.tokens != tokens {
+            // A layer column the person never dragged follows the theme's
+            // (workspace timeline chrome); a dragged one stays.
+            let (old, new) = (
+                default_layer_column(&self.tokens.metrics),
+                default_layer_column(&tokens.metrics),
+            );
+            let follows = (self.view.layer_column - old).abs() < 0.5 && old != new;
+            self.tokens = tokens;
+            if follows {
+                self.view.layer_column = new;
+                self.changed(false, cx);
+            }
+            self.frame = None;
+            self.rebuild_presentation(cx);
+        }
+    }
+    /// Keymap and menu entry: the same model command the panel used to reach.
+    pub fn command(
+        &mut self,
+        id: &str,
+        time: f64,
+        frames: Option<i32>,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if id == "delete"
+            && let Some((layer, edge)) = self.transition_selected.take()
+            && self.model.selection.layers().len() == 1
+            && self.model.selection.layers().first() == Some(&layer)
+        {
+            self.delegate.run(
+                "removeTransition",
+                vec![
+                    serde_json::json!("crossfade"),
+                    serde_json::json!(layer),
+                    serde_json::json!(edge),
+                ],
+                cx,
+            );
+            return;
+        }
+        // The time scale is this surface's own view, not the model's: the
+        // keys zoom as the bottom bar's ends do.
+        use pm_panel_timeline::footer::ZOOM_STEP;
+        match id {
+            // The playhead is the caller's: this runs inside the editor's own
+            // command, where asking it for the time is not allowed.
+            "timeline.zoomIn" => return self.zoom_about(self.view.pps * ZOOM_STEP, time, cx),
+            "timeline.zoomOut" => return self.zoom_about(self.view.pps / ZOOM_STEP, time, cx),
+            "timeline.fit" => return self.fit_time(cx),
+            _ => {}
+        }
+        self.queue.push_back(Job::Command {
+            id: id.into(),
+            time,
+            frames,
+            shift,
+        });
+        self.pump(cx);
+    }
+    pub fn select_all(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.focused {
+            return false;
+        }
+        self.queue
+            .push_back(Job::SelectAll(self.focused_layer.clone()));
+        self.pump(cx);
+        true
+    }
+
+    /// A row chosen from one of the timeline's own context menus.
+    pub(crate) fn choose_menu(&mut self, context: MenuContext, action: &str, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.queue.push_back(Job::Menu {
+            context,
+            action: action.to_owned(),
+            time,
+        });
+        self.pump(cx);
+    }
+    /// Menu checkmarks: the timeline shows tracks, and clips snap in them.
+    pub fn toggles(&self) -> (bool, bool) {
+        (
+            self.model.mode == TimelineMode::Tracks,
+            !self.model.track_snap_disabled,
+        )
+    }
+    /// The edit tool a clip drag uses (View menu checkmarks).
+    pub fn edit_tool(&self) -> pm_panel_timeline::EditTool {
+        self.model.edit_tool
+    }
+    /// View ▸ Hide Shy Layers is on.
+    pub fn hides_shy(&self) -> bool {
+        self.model.hide_shy
+    }
+    /// The keyframe clipboard payload, or nothing with no keys selected.
+    pub fn copied_keys(&self) -> Vec<pm_panel_timeline::ClipboardTrack> {
+        self.model.copy_keys(self.model.selection.keys())
+    }
+    /// Pastes each copied track back on its own channel at the playhead.
+    pub fn paste_keys(
+        &mut self,
+        tracks: Vec<pm_panel_timeline::ClipboardTrack>,
+        time: f64,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(Job::PasteKeys(tracks, time));
+        self.pump(cx);
+    }
+    fn finish_key_gain(&mut self, revision: Option<u64>, cx: &mut App) {
+        self.gain_picture = None;
+        if let Some(gesture) = self.gain_previewing.take() {
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| {
+                delegate.audio_gain_preview(GainPreview::Finish { gesture, revision }, cx)
+            });
+        }
+    }
+    /// Escape also leaves the split tool, even when no pointer gesture is active.
+    pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self.cancel_pointer_gesture(cx);
+        self.suppress_left_up |= cancelled;
+        if self.model.edit_tool != EditTool::Split {
+            return cancelled;
+        }
+        self.queue.push_back(Job::Command {
+            id: "timeline.tool:selection".into(),
+            time: 0.,
+            frames: None,
+            shift: false,
+        });
+        self.pump(cx);
+        true
+    }
+
+    fn cancel_pointer_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pointer_timeout = None;
+        self.row_scroll = None;
+        let cancelled_audio = self.audio_cancel(cx);
+        let gesture = std::mem::replace(&mut self.gesture, Gesture::Idle);
+        let before_view = self.gesture_view.take();
+        let drag_scene = self.drag_scene.take();
+        if matches!(gesture, Gesture::Idle) {
+            return cancelled_audio;
+        }
+        let restore_saved_view = matches!(
+            gesture,
+            Gesture::Zoom | Gesture::Navigate { .. } | Gesture::Rows { .. }
+        );
+        if let Some((view, fitted)) = before_view
+            && (self.view != view || self.fitted != fitted)
+        {
+            self.view = view;
+            self.fitted = fitted;
+            if restore_saved_view {
+                self.idle_persist = None;
+                self.zooming = false;
+            }
+            self.changed(restore_saved_view, cx);
+        }
+        self.snap_guide = None;
+        self.finish_key_gain(None, cx);
+        self.cursor = CursorStyle::Arrow;
+        self.lit = None;
+        self.transform = None;
+        self.graph_axis = false;
+        self.graph_active_handle = None;
+        self.readout = None;
+        self.outline.layer_dragged.set(false);
+        match gesture {
+            Gesture::Dragging { .. } => {
+                if self.key_preview.take().is_some() {
+                    self.frame = None;
+                }
+                if self.viewer_previewing {
+                    self.delegate.timing_preview(None, cx);
+                    self.viewer_previewing = false;
+                    if let Some((scene, index)) = drag_scene
+                        && Arc::ptr_eq(&index, &self.model.index)
+                    {
+                        let mut scene = Scene::clone(&scene);
+                        scene.preview_selection(Arc::new(SceneSelection::new(
+                            self.model.selection.layers(),
+                            &self.model.selected_key_pairs(),
+                        )));
+                        self.scene = Some(self.with_focus(Arc::new(scene)));
+                        self.frame = None;
+                    }
+                }
+                self.queue.retain(|job| !matches!(job, Job::Sample(_)));
+                self.sample_scheduled = false;
+                self.queue.push_back(Job::Finish(false));
+            }
+            Gesture::Transition(drag) => {
+                if self.model.index.doc_id == drag.document
+                    && self.model.index.revision == drag.revision
+                {
+                    self.scene = drag.scene;
+                }
+                self.frame = None;
+                self.rows = None;
+                self.queue.push_back(Job::Sync);
+            }
+            Gesture::Marquee { .. } => {
+                if self.marquee_selection.take().is_some() {
+                    self.frame = None;
+                }
+            }
+            Gesture::SwitchPaint { .. } => {
+                self.queue.retain(|job| !matches!(job, Job::SwitchStep(_)));
+                self.queue.push_back(Job::SwitchFinish(false));
+            }
+            Gesture::Scrub { before, sought, .. } => {
+                if before != sought && self.current_composition(&self.model) {
+                    self.delegate.seek(before, cx);
+                }
+                self.delegate.scrubbing(false, cx);
+            }
+            _ => {}
+        }
+        cx.notify();
+        self.pump(cx);
+        true
+    }
+
+    fn start_pointer_gesture(&mut self, cx: &mut Context<Self>) {
+        self.cancel_pointer_gesture(cx);
+        if self.marquee_selection.take().is_some() {
+            self.frame = None;
+        }
+        self.gesture_view = Some((self.view, self.fitted));
+        self.last_pointer_activity = std::time::Instant::now();
+        self.pointer_timeout = Some(cx.spawn(async move |timeline, cx| {
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            const BUTTON_POLL: std::time::Duration = std::time::Duration::from_millis(80);
+            let mut remaining = TIMEOUT;
+            loop {
+                let wait = if cfg!(test) {
+                    remaining
+                } else {
+                    remaining.min(BUTTON_POLL)
+                };
+                cx.background_executor().timer(wait).await;
+                let update = timeline.update(cx, |timeline, cx| {
+                    if !cfg!(test)
+                        && !matches!(
+                            timeline.gesture,
+                            Gesture::Idle | Gesture::Pan { .. }
+                        )
+                        && !pm_shell::left_button_held()
+                    {
+                        timeline.on_up(cx);
+                        return std::time::Duration::ZERO;
+                    }
+                    let remaining =
+                        TIMEOUT.saturating_sub(timeline.last_pointer_activity.elapsed());
+                    if remaining.is_zero() {
+                        timeline.cancel_pointer_gesture(cx);
+                    }
+                    remaining
+                });
+                match update {
+                    Ok(delay) if !delay.is_zero() => remaining = delay,
+                    _ => break,
+                }
+            }
+        }));
+    }
+
+    pub fn fit_time(&mut self, cx: &mut Context<Self>) {
+        let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
+        if self.model.index.duration > 0. {
+            self.view.pps =
+                ((width - FIT_ROOM).max(1.) / self.model.index.duration).clamp(PPS.0, PPS.1);
+            self.view.scroll_time = 0.;
+            self.changed(true, cx);
+        }
+    }
+    /// View ▸ Merge Selected Curves is on.
+    pub fn graph_merged(&self) -> bool {
+        self.model.graph_merge
+    }
+    /// Fit Selected Curves: the span from the graph's first key to its last
+    /// fills the time area, with a little room at both ends.
+    fn fit_span(&mut self, first: f64, last: f64, cx: &mut Context<Self>) {
+        const ROOM: f64 = 24.;
+        let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 2. * ROOM;
+        let frame = 1. / self.model.index.fps.max(1.);
+        self.view.pps = (width.max(1.) / (last - first).max(frame)).clamp(PPS.0, PPS.1);
+        self.view.scroll_time = first - ROOM / self.view.pps;
+        self.clamp_time();
+        // The values refit too: the curves fill the graph's height again.
+        self.graph_view = None;
+        if self.graph_fitted.is_some() {
+            self.graph = self.graph_fitted.clone();
+        }
+        self.fitted = true;
+        self.changed(true, cx);
+    }
+    fn zoom_at(&mut self, x: f64, factor: f64, cx: &mut Context<Self>) {
+        let scale = (self.view.pps * factor).clamp(self.least_pps(), PPS.1);
+        if scale == self.view.pps || !scale.is_finite() {
+            return;
+        }
+        self.sideways = false;
+        self.zooming = true;
+        let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
+        self.view.pps = scale;
+        self.view.scroll_time = anchor - (x - self.view.layer_column) / self.view.pps;
+        self.clamp_time();
+        self.fitted = true;
+        self.changed_while_hot(cx);
+    }
+    /// The time area's width in points (none before the first layout).
+    fn time_width(&self) -> Option<f64> {
+        let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column;
+        (width > END_ROOM).then_some(width)
+    }
+    /// The farthest a person can zoom out fits the timeline from zero with
+    /// room at its end.
+    fn least_pps(&self) -> f64 {
+        let index = &self.model.index;
+        let span = index.maximum_time().max(1. / index.fps.max(1.));
+        self.time_width()
+            .map_or(PPS.0, |w| ((w - END_ROOM) / span).clamp(PPS.0, PPS.1))
+    }
+    fn time_end(&self) -> f64 {
+        self.model.index.maximum_time() + END_ROOM / self.view.pps
+    }
+    /// Start the visible ruler at or after composition zero. Layers can still
+    /// start before zero and continue into the visible range.
+    fn clamp_time(&mut self) {
+        let most = self.time_width().map_or(f64::INFINITY, |w| {
+            self.time_end() - w / self.view.pps
+        });
+        self.view.scroll_time = self.view.scroll_time.min(most).max(0.);
+    }
+    /// The ruler and the rows: the body less the bottom bar, which a body
+    /// too short for both gives up.
+    /// The bottom bar's height under the tracks (none in a panel too short).
+    fn bar_of(body: Bounds<Pixels>, t: &Tokens) -> f32 {
+        f32::from(body.size.height - Self::above_bar(body, t).size.height)
+    }
+    fn above_bar(body: Bounds<Pixels>, t: &Tokens) -> Bounds<Pixels> {
+        let bar = px(t.metrics.ruler);
+        if body.size.height < bar * 4. {
+            return body;
+        }
+        Bounds::new(body.origin, size(body.size.width, body.size.height - bar))
+    }
+    /// The bottom bar's layout for the view as it stands.
+    pub(crate) fn bar(&self) -> Option<pm_panel_timeline::footer::Layout> {
+        let scene = self.scene.as_ref()?;
+        let (top, height) = (
+            f32::from(self.bounds.size.height) as f64,
+            f32::from(self.body.size.height - self.bounds.size.height) as f64,
+        );
+        (height > 0.).then_some(pm_panel_timeline::footer::Layout {
+            width: f32::from(self.bounds.size.width) as f64,
+            top,
+            height,
+            layer_column: self.view.layer_column,
+            pps: self.view.pps,
+            pps_range: PPS,
+            scroll_time: self.view.scroll_time,
+            time: (0., self.time_end()),
+            rows_top: self.tokens.metrics.ruler as f64,
+            scroll_y: self.view.scroll_y,
+            // Under a graph the rows do not scroll.
+            content_height: if self.graph_region().is_some() {
+                0.
+            } else {
+                scene.content_height()
+            },
+        })
+    }
+    fn bar_ops(&self) -> Vec<Op> {
+        self.bar()
+            .map(|bar| bar.ops(self.lit, &self.tokens))
+            .unwrap_or_default()
+    }
+    /// The bar's part at `(x, y)`. A strip's trim zone beside the row
+    /// scroller's track wins over the track: a strip that runs to the view's
+    /// end is trimmed there (the thumb itself still wins).
+    fn bar_part(&self, x: f64, y: f64) -> Option<pm_panel_timeline::footer::Part> {
+        let part = self.bar()?.hit(x, y, &self.tokens)?;
+        let trims = self
+            .frame
+            .as_ref()
+            .and_then(|f| f.hit_clip(x, y))
+            .is_some_and(|(_, edge)| edge.is_some());
+        (!(trims && part == pm_panel_timeline::footer::Part::RowsTrack)).then_some(part)
+    }
+    /// Lights the part of the bar under an idle pointer; true over the bar
+    /// or the row thumb, where the tracks' hover and skimmer stand down.
+    fn over_bar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let (x, y) = self.local(position);
+        let inside = self.body.contains(&position);
+        if inside {
+            self.ensure_frame(cx);
+        }
+        let part = self
+            .bar()
+            .filter(|_| inside)
+            .and_then(|_| self.bar_part(x, y));
+        let over = part.is_some() || (inside && y >= f32::from(self.bounds.size.height) as f64);
+        if over && self.cursor != CursorStyle::Arrow {
+            self.cursor = CursorStyle::Arrow;
+            cx.notify();
+        }
+        if self.lit != part {
+            self.lit = part;
+            cx.notify();
+        }
+        over
+    }
+    /// Zooms to `pps` about the playhead when it is on screen, else about
+    /// the middle of the tracks.
+    fn zoom_to(&mut self, pps: f64, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.zoom_about(pps, time, cx);
+    }
+    /// [`Self::zoom_to`] with the playhead at `time`.
+    fn zoom_about(&mut self, pps: f64, time: f64, cx: &mut Context<Self>) {
+        let width = f32::from(self.bounds.size.width) as f64;
+        let column = self.view.layer_column;
+        let playhead = column + (time - self.view.scroll_time) * self.view.pps;
+        let about = if playhead >= column && playhead <= width {
+            playhead
+        } else {
+            (column + width) / 2.
+        };
+        self.zoom_at(about, pps / self.view.pps, cx);
+    }
+    fn press_bar(
+        &mut self,
+        part: Part,
+        bar: pm_panel_timeline::footer::Layout,
+        x: f64,
+        y: f64,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::footer::ZOOM_STEP;
+        self.start_pointer_gesture(cx);
+        let t = &self.tokens;
+        self.lit = Some(part);
+        match part {
+            Part::ZoomOut => self.zoom_to(self.view.pps / ZOOM_STEP, cx),
+            Part::ZoomIn => self.zoom_to(self.view.pps * ZOOM_STEP, cx),
+            // Twice on the slider fits the composition (the first press has
+            // brought the knob under the pointer); once on the track sets
+            // the zoom there and holds the knob.
+            Part::Zoom | Part::ZoomTrack if clicks == 2 => self.fit_time(cx),
+            Part::Zoom => self.gesture = Gesture::Zoom,
+            Part::ZoomTrack => {
+                self.gesture = Gesture::Zoom;
+                self.drag_bar(Part::Zoom, x, y, 0., cx);
+            }
+            Part::Time | Part::TimeTrack => {
+                let (from, length) = bar.time_thumb(t).unwrap_or_default();
+                let grab = if part == Part::Time {
+                    x - from
+                } else {
+                    length / 2.
+                };
+                self.gesture = Gesture::Navigate { grab };
+                self.drag_bar(Part::Time, x, y, grab, cx);
+            }
+            Part::Rows | Part::RowsTrack => {
+                let (from, length) = bar.rows_thumb().unwrap_or_default();
+                let grab = if part == Part::Rows {
+                    y - from
+                } else {
+                    length / 2.
+                };
+                self.gesture = Gesture::Rows { grab };
+                self.drag_bar(Part::Rows, x, y, grab, cx);
+            }
+        }
+        cx.notify();
+    }
+    fn drag_bar(&mut self, part: Part, x: f64, y: f64, grab: f64, cx: &mut Context<Self>) {
+        let Some(bar) = self.bar() else {
+            return;
+        };
+        match part {
+            Part::Zoom => {
+                if let Some(pps) = bar.zoom_at(x, &self.tokens) {
+                    self.zoom_to(pps, cx);
+                }
+            }
+            Part::Time => {
+                if let Some(time) = bar.scroll_time_at(x - grab, &self.tokens) {
+                    self.view.scroll_time = time;
+                    self.clamp_time();
+                    self.fitted = true;
+                    self.changed_while_hot(cx);
+                }
+            }
+            _ => {
+                if let Some(scroll) = bar.scroll_y_at(y - grab) {
+                    self.view.scroll_y = scroll;
+                    self.clamp_scroll();
+                    self.changed_while_hot(cx);
+                }
+            }
+        }
+    }
+    /// Wheel and pinch move the view locally on every event; each write
+    /// publishes to every panel, so it waits until the gesture rests.
+    fn changed_while_hot(&mut self, cx: &mut Context<Self>) {
+        self.changed(false, cx);
+        self.persist_when_idle(true, cx);
+    }
+    /// A wheel step: the driven scroll layers replay what they drew at the new
+    /// scroll when they recorded that far, else the timeline draws again.
+    /// Vertical travel moves rows, tracks, outline, and row thumb; horizontal
+    /// travel moves tracks, ruler, playhead, skimmer, and time thumb.
+    fn scrolled_while_hot(
+        &mut self,
+        moved_x: bool,
+        moved_y: bool,
+        pointer_x: f64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.step_layers(moved_x, moved_y, window, cx) {
+            if moved_x {
+                // A skim showing stays under the pointer: the time there now,
+                // drawn with the playhead, not by a panel draw.
+                self.quiet_skim = true;
+                self.reskim(pointer_x, cx);
+                self.quiet_skim = false;
+            }
+            // The layers draw the view once the steps stop.
+            self.persist_when_idle(false, cx);
+        } else {
+            if moved_x {
+                self.reskim(pointer_x, cx);
+            }
+            self.changed_while_hot(cx);
+        }
+    }
+    /// The tracks' and the ruler's x offset for the time now: as drawn, less
+    /// what scrolled since.
+    fn tracks_x(&self) -> f32 {
+        self.drawn.0 - ((self.view.scroll_time - self.drawn.1) * self.view.pps) as f32
+    }
+    /// The layers' step with no render: the frame hit-testing reads is
+    /// prepared for the new scroll; what they drew stays as recorded. False
+    /// when a layer has to draw (a step past its recording, a gesture or a
+    /// graph on screen, thumb resizing, or the layer off).
+    fn step_layers(
+        &mut self,
+        moved_x: bool,
+        moved_y: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.record_scroll_layers()
+            || !matches!(self.gesture, Gesture::Idle)
+            || self.graph_region().is_some()
+            || self.media_over.is_some()
+            || self.effect_over.is_some()
+            || self.tip.is_some()
+            // Recorded no further than the view.
+            || (moved_x && !self.rows.as_ref().is_some_and(|(_, _, reach)| *reach > 0.))
+        {
+            return false;
+        }
+        let Some(bar) = self.bar() else {
+            return false;
+        };
+        let y = self.view.scroll_y as f32;
+        let x = self.tracks_x();
+        // Each layer at exactly the offset asked (a layer drawn for another
+        // width clamps it).
+        let step = |handle: &ScrollHandle, at: Point<Pixels>, window: &mut Window, cx: &mut App| {
+            let near = |a: Pixels, b: Pixels| f32::from(a - b).abs() < 0.5;
+            window.step_scroll_layer(handle, at, cx)
+                && near(handle.offset().x, at.x)
+                && near(handle.offset().y, at.y)
+        };
+        let mut stepped = step(&self.tracks_handle, point(px(x), px(-y)), window, cx);
+        if stepped && moved_x {
+            stepped = step(&self.ruler_handle, point(px(x), px(0.)), window, cx);
+            if stepped {
+                let next_thumb = bar.time_thumb(&self.tokens);
+                stepped = match (self.time_thumb_drawn, next_thumb) {
+                    ((None, _), None) => true,
+                    ((Some((drawn_from, drawn_len)), base_x), Some((new_from, new_len)))
+                        if (new_len - drawn_len).abs() <= 0.25 =>
+                    {
+                        let dx = (new_from - drawn_from) as f32;
+                        step(&self.time_thumb_handle, point(px(base_x + dx), px(0.)), window, cx)
+                    }
+                    _ => false,
+                };
+            }
+        }
+        if stepped && moved_y {
+            stepped = step(&self.rows_handle, point(px(0.), px(-y)), window, cx)
+                && self.outline.step(
+                    y,
+                    self.visible_rows(),
+                    (f32::from(self.bounds.size.height) - self.tokens.metrics.ruler) as f64,
+                    window,
+                    cx,
+                );
+            if stepped {
+                let next_thumb = bar.rows_thumb();
+                stepped = match (self.rows_thumb_drawn, next_thumb) {
+                    ((None, _), None) => true,
+                    ((Some((drawn_from, drawn_len)), base_y), Some((new_from, new_len)))
+                        if (new_len - drawn_len).abs() <= 0.25 =>
+                    {
+                        let dy = (new_from - drawn_from) as f32;
+                        step(&self.rows_thumb_handle, point(px(0.), px(base_y + dy)), window, cx)
+                    }
+                    _ => false,
+                };
+            }
+        }
+        if !stepped {
+            return false;
+        }
+        self.frame = None;
+        let bounds = self.bounds;
+        self.outline_geometry = Some((y, self.view.layer_column as f32, self.visible_rows()));
+        self.prepared(bounds, false, cx);
+        true
+    }
+    /// Writes the view once the gesture rests, drawing it again too unless
+    /// its scroll layers do (`draw`).
+    fn persist_when_idle(&mut self, draw: bool, cx: &mut Context<Self>) {
+        self.idle_persist = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::gizmo::NAVIGATION_IDLE)
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.idle_persist = None;
+                if std::mem::take(&mut s.zooming)
+                    && let Some(pointer) = s.pointer
+                {
+                    s.reskim(s.local(pointer).0, cx);
+                }
+                if draw {
+                    s.changed(true, cx);
+                } else {
+                    s.persist(cx);
+                }
+            });
+        }));
+    }
+    fn persist(&mut self, cx: &mut Context<Self>) {
+        self.queue.retain(|j| !matches!(j, Job::Persist(_)));
+        self.queue.push_back(Job::Persist(self.view));
+        self.pump(cx);
+    }
+    /// The disk render cache changed: the scene takes its bars, and the
+    /// panel draws again only when they would draw other points.
+    pub(crate) fn render_bars_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(scene) = &self.scene else { return };
+        let bars = crate::render_frames::bars(self.model.index.comp_id.as_deref());
+        let seen = self.drawn_bars(&bars) != self.drawn_bars(&scene.bars);
+        let mut next = Scene::clone(scene);
+        next.bars = bars;
+        let next = Arc::new(next);
+        self.scene = Some(next.clone());
+        self.outline.set_scene(Some(next));
+        if seen {
+            self.frame = None;
+            self.changed(false, cx);
+        }
+    }
+    /// The render bars as the ruler draws them now: state and whole points.
+    fn drawn_bars(&self, bars: &[pm_panel_timeline::render::Bar]) -> Vec<(BarState, i64, i64)> {
+        let x = |t: f64| {
+            (self.view.layer_column + (t - self.view.scroll_time) * self.view.pps).round() as i64
+        };
+        bars.iter().map(|b| (b.state, x(b.from), x(b.to))).collect()
+    }
+    fn changed(&mut self, persist: bool, cx: &mut Context<Self>) {
+        self.frame = None;
+        if let Some((y, column, rows)) = self.changed_outline_geometry() {
+            self.outline.scrolled(y, column, rows, cx);
+        }
+        if persist {
+            self.persist(cx);
+        }
+        cx.notify();
+    }
+    fn changed_outline_geometry(&mut self) -> Option<(f32, f32, Option<(usize, usize)>)> {
+        let geometry = (
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+        );
+        (self.outline_geometry.replace(geometry) != Some(geometry)).then_some(geometry)
+    }
+    fn record_scroll_layers(&self) -> bool {
+        !self.zooming
+            && self.key_preview.is_none()
+            && !matches!(
+                self.gesture,
+                Gesture::Dragging { .. }
+                    | Gesture::Marquee { .. }
+                    | Gesture::Pan { .. }
+                    | Gesture::Column
+                    | Gesture::Zoom
+                    | Gesture::Navigate { .. }
+                    | Gesture::Rows { .. }
+            )
+    }
+    fn visible_rows(&self) -> Option<(usize, usize)> {
+        let height = f32::from(self.bounds.size.height) as f64 - self.tokens.metrics.ruler as f64;
+        let range = self
+            .scene
+            .as_ref()?
+            .mount_range(self.view.scroll_y, height.max(0.));
+        Some((range.start, range.end))
+    }
+    #[cfg(test)]
+    pub(crate) fn agent_drag_holding(&self) -> bool {
+        self.agent_drag_touch.is_some()
+    }
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.gesture, Gesture::Idle) && !self.busy && self.queue.is_empty() {
+            if let Some(id) = self.agent_drag_touch.take() {
+                pm_mcp::coedit::touch_field(&self.project, &id, false);
+            }
+        }
+        if self.sample_scheduled && matches!(self.queue.front(), Some(Job::Sample(_))) {
+            return;
+        }
+        if self.busy {
+            return;
+        }
+        let Some(mut job) = self.queue.pop_front() else {
+            return;
+        };
+        let Some(mut client) = self.client.take() else {
+            self.queue.push_front(job);
+            return;
+        };
+        // Latest pointer sample wins while the kernel is busy.
+        while matches!(job, Job::Sample(_)) && matches!(self.queue.front(), Some(Job::Sample(_))) {
+            job = self.queue.pop_front().unwrap();
+        }
+        let marquee_commit = match &job {
+            Job::FinishMarquee { selection, .. } => selection.clone(),
+            _ => None,
+        };
+        let gain_commit = match &job {
+            Job::CommitGain(_, gesture) => Some(*gesture),
+            _ => None,
+        };
+        let work_update = client.active_drag().is_some_and(|drag| drag.is_work_area());
+        self.busy = true;
+        let previous_scene = self
+            .scene
+            .as_ref()
+            .map(|scene| (scene.clone(), self.model.clone()));
+        let previous_mode = self.model.mode;
+        let can_reuse_scene = self.pending_scene.is_none() && !self.viewer_previewing
+            && self.key_preview.is_none() && !matches!(self.gesture, Gesture::Transition(_));
+        let sync = matches!(&job, Job::Sync);
+        let persist = matches!(&job, Job::Persist(_));
+        let disclosure = matches!(&job, Job::Disclosure(_));
+        let selection_job = match &job {
+            Job::Sync | Job::SelectLayer(..) | Job::SelectKey { .. } | Job::SelectAll(..) => true,
+            Job::FinishMarquee { .. } => true,
+            Job::Apply(plan) => plan.calls.iter().all(|call| matches!(call, Call::Selection(_))),
+            _ => false,
+        };
+        let previous_graph = self.graph_fitted.clone();
+        let outline = self.outline_runtime.upgrade();
+        let preview_update = matches!(&job, Job::Sample(_));
+        let can_preview_keys = matches!(&job, Job::Begin(..) | Job::Sample(_));
+        let finish_gain = matches!(&job, Job::Finish(true));
+        let (tokens, offline, sources) = (
+            self.tokens.clone(),
+            self.offline.clone(),
+            self.sources.clone(),
+        );
+        crate::interaction_work::timeline!(cx, job, Job, async move |this, cx| {
+            let (client, effects, built, preview, keys) = cx
+                .background_executor()
+                .spawn(async move {
+                    let effects = run(&mut client, job).await;
+                    let preview = effects
+                        .as_ref()
+                        .ok()
+                        .and_then(|_| client.layer_preview().cloned());
+                    let keys = client.key_preview().cloned();
+                    let built = if persist {
+                        // This view was already drawn; storing its position has no
+                        // effect on the scene or the outline.
+                        None
+                    } else if can_preview_keys
+                        && effects.is_ok()
+                        && keys.is_some()
+                        && previous_scene.as_ref().is_some_and(|(_, model)| {
+                            Arc::ptr_eq(&model.index, &client.model.index)
+                                && model.mode == client.model.mode
+                                && model.rebuilds == client.model.rebuilds
+                                && model.selection == client.model.selection
+                        }) {
+                        None
+                    } else if let Some(frame) = preview
+                        .as_ref()
+                        .filter(|p| p.gain_commands.is_some() || p.trimmed)
+                    {
+                        build_with(
+                            &client,
+                            &tokens,
+                            offline,
+                            sources,
+                            Some(&frame.snapshot),
+                            None,
+                            None,
+                        )
+                    } else if preview_update
+                        && preview.is_some()
+                        && let Some((scene, model)) = previous_scene.as_ref()
+                        && Arc::ptr_eq(&model.index, &client.model.index)
+                        && model.mode == client.model.mode
+                        && model.rebuilds == client.model.rebuilds
+                    {
+                        let mut scene = Scene::clone(scene);
+                        scene.preview_times(&client.model, &preview.as_ref().unwrap().starts);
+                        Some(Built {
+                            scene: Arc::new(scene),
+                            graph: None,
+                            model: Arc::new(client.model.clone()),
+                            outline_requested: false,
+                            selection_only: false,
+                            wanted: vec![],
+                        })
+                    } else if selection_job && can_reuse_scene && preview.is_none()
+                        && let Some((scene, old)) = previous_scene.as_ref()
+                        && same_timeline_layout(old, &client.model)
+                    {
+                        let changed = old.selection != client.model.selection;
+                        if sync && !changed && old.key_selection_active == client.model.key_selection_active
+                            && old.transition == client.model.transition
+                        {
+                            None
+                        } else {
+                            let mut scene = Scene::clone(scene);
+                            if changed {
+                                let model = &client.model;
+                                let selection = SceneSelection::new(
+                                    model.selection.layers(), &model.selected_key_pairs(),
+                                );
+                                scene.preview_selection(Arc::new(selection));
+                            }
+                            let graph = if changed {
+                                client.kernel.published(&client.project)
+                                    .and_then(|published| build_graph(&client.model, &published, &tokens))
+                            } else {
+                                previous_graph
+                            };
+                            Some(Built {
+                                scene: Arc::new(scene),
+                                graph,
+                                model: Arc::new(client.model.clone()),
+                                outline_requested: false,
+                                selection_only: true,
+                                wanted: vec![],
+                            })
+                        }
+                    } else {
+                        let outline = outline.as_deref().map(|runtime| (runtime, previous_mode, disclosure));
+                        let previous = previous_scene.as_ref()
+                            .filter(|(_, old)| disclosure && can_reuse_scene
+                                && old.mode == TimelineMode::Layers
+                                && client.model.mode == TimelineMode::Layers
+                                && Arc::ptr_eq(&old.index, &client.model.index))
+                            .map(|(scene, _)| scene.as_ref());
+                        let mut built = build_with(&client, &tokens, offline, sources, None, outline, previous);
+                        if let (Some(built), Some(preview)) = (&mut built, &preview) {
+                            Arc::make_mut(&mut built.scene)
+                                .preview_times(&client.model, &preview.starts);
+                        }
+                        built
+                    };
+                    remember_shown(&mut client, &built);
+                    (client, effects, built, preview, keys)
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                let shown_index = built.as_ref().map_or(&client.model.index, |b| &b.model.index);
+                s.snap_guide = client
+                    .active_drag()
+                    .and_then(|d| d.snap_target_in(shown_index));
+                // A canceled in-flight sample must not put the preview back.
+                let canceled = s.queue.iter().any(|job| matches!(job, Job::Finish(false)));
+                let keys = keys.filter(|_| !canceled && s.current_composition(&client.model));
+                let keys_changed = match (&s.key_preview, &keys) {
+                    (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+                    (None, None) => false,
+                    _ => true,
+                };
+                if keys_changed {
+                    s.key_preview = keys;
+                    s.frame = None;
+                    cx.notify();
+                }
+                let gain_revision = client.model.index.revision;
+                s.client = Some(client);
+                s.busy = false;
+                let had_preview = preview.is_some();
+                let preview = preview.filter(|_| !canceled);
+                let gain_preview = preview.as_ref().is_some_and(|p| p.gain_commands.is_some());
+                match preview {
+                    Some(preview) if preview.gain_commands.is_some() => {
+                        if !matches!(s.gesture, Gesture::Idle)
+                            || s.queue.iter().any(|job| matches!(job, Job::Finish(true)))
+                        {
+                            let gesture =
+                                *s.gain_previewing.get_or_insert_with(GainPreview::gesture);
+                            s.delegate.audio_gain_preview(
+                                GainPreview::Sample {
+                                    gesture,
+                                    base_revision: Some(gain_revision),
+                                    commands: preview.gain_commands.unwrap().to_vec(),
+                                },
+                                cx,
+                            );
+                            s.gain_picture = Some(preview.snapshot);
+                        }
+                    }
+                    Some(preview) => {
+                        s.delegate.timing_preview(Some(preview.snapshot), cx);
+                        s.viewer_previewing = true;
+                    }
+                    None if s.viewer_previewing => {
+                        s.delegate.timing_preview(None, cx);
+                        s.viewer_previewing = false;
+                    }
+                    None => (),
+                }
+                if let Some(selection) = marquee_commit
+                    && s.marquee_selection.as_ref().is_some_and(|current| Arc::ptr_eq(current, &selection))
+                {
+                    s.marquee_selection = None;
+                    s.frame = None;
+                    cx.notify();
+                }
+                if !canceled || !had_preview {
+                    s.install(built, work_update, cx);
+                }
+                if !gain_preview && s.gain_previewing.is_some() {
+                    let revision =
+                        (finish_gain && effects.is_ok()).then_some(s.model.index.revision);
+                    s.finish_key_gain(revision, cx);
+                }
+                if let Some(gesture) = gain_commit {
+                    if s.audio.pending_gain == Some(gesture) {
+                        s.audio.pending_gain = None;
+                    }
+                    let revision = effects.as_ref().ok().map(|_| s.model.index.revision);
+                    s.delegate
+                        .audio_gain_preview(GainPreview::Finish { gesture, revision }, cx);
+                }
+                match effects {
+                    Ok(effects) => {
+                        for effect in effects {
+                            match effect {
+                                HostEffect::Seek(time) => s.delegate.seek(time, cx),
+                                HostEffect::FitCurves(first, last) => s.fit_span(first, last, cx),
+                                other => s.delegate.effect(other, cx),
+                            }
+                        }
+                    }
+                    Err(error) => s.delegate.report(error, cx),
+                }
+                s.pump(cx);
+            });
+        })
+        .detach();
+    }
+    fn install(&mut self, built: Option<Built>, hold_time_mapping: bool, cx: &mut Context<Self>) {
+        let Some(built) = built else {
+            return;
+        };
+        if !self.current_composition(&built.model) {
+            return;
+        }
+        let model = built.model.clone();
+        if built.selection_only {
+            self.model = model.clone();
+            self.expanded_properties
+                .set(self.has_expanded_properties());
+            self.scene = Some(self.with_focus(built.scene));
+            self.outline.set_scene(self.scene.clone());
+            self.install_graph(built.graph);
+            self.frame = None;
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| {
+                delegate.tracks_view(model.clone(), cx);
+                delegate.timeline_outline(model, false, cx);
+            });
+            cx.notify();
+            return;
+        }
+        let outline_requested = built.outline_requested;
+        // Graph drags (keys, handles, transform box) never change timeline rows:
+        // update the displayed graph immediately instead of waiting on async
+        // outline reconciliation (up to 150ms fallback lag).
+        if built.graph.is_some() && same_timeline_layout(&self.model, &built.model) {
+            self.install_graph(built.graph.clone());
+            cx.notify();
+        }
+        self.pending_scene = Some((built, hold_time_mapping));
+        self.show_pending_scene(cx);
+        let refresh = self.pending_scene.is_some();
+        if !outline_requested {
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.timeline_outline(model, refresh, cx));
+        }
+        if refresh {
+            self.outline.reconcile_timeline(cx);
+            // Never let a stale/mismatched outline publication hold `pending_scene`
+            // indefinitely and freeze timeline clicks while hovers keep running.
+            self.pending_scene_fallback = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                let _ = this.update(cx, |s, cx| {
+                    s.pending_scene_fallback = None;
+                    if let Some((built, hold_time_mapping)) = s.pending_scene.take()
+                        && s.current_composition(&built.model)
+                    {
+                        s.install_scene(built, hold_time_mapping, cx);
+                    }
+                });
+            }));
+        } else {
+            self.pending_scene_fallback = None;
+        }
+    }
+
+    fn current_composition(&self, model: &TimelineModel) -> bool {
+        self.kernel.published(&self.project).is_some_and(|p| {
+            p.snapshot.doc_id == model.index.doc_id && p.snapshot.open_comp() == model.index.comp_id
+        })
+    }
+
+    pub(crate) fn pending_outline_range(&self) -> Option<(usize, usize)> {
+        let (built, _) = self.pending_scene.as_ref()?;
+        let range = self.scene_range(&built.model, &built.scene);
+        Some((range.start, range.end))
+    }
+
+    fn row_viewport_height(&self) -> f64 {
+        (f32::from(self.bounds.size.height) as f64 - self.tokens.metrics.ruler as f64).max(0.)
+    }
+
+    /// Keep a project timeline usable while its richer outline mounts, or if
+    /// that worker was retired. The names use the very same scene as the bars.
+    fn fallback_outline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.outline.has_view() {
+            return None;
+        }
+        let scene = self.scene.as_ref()?;
+        let height = self.row_viewport_height();
+        let metrics = &self.tokens.metrics;
+        let scroll = self.view.scroll_y;
+        let rows = scene
+            .visible_range(scroll, height)
+            .filter_map(|ordinal| {
+                let (row, top, bottom) = scene.span(ordinal)?;
+                let name = match &row.content {
+                    pm_panel_timeline::render::RowContent::Layer {
+                        clip: Some(clip), ..
+                    } => &clip.name,
+                    _ => &row.accessibility_label,
+                };
+                let id = SharedString::from(format!("timeline:fallback:{}", row.id));
+                let tag = id.clone();
+                let row_view = div()
+                    .id(id)
+                    .debug_selector(move || tag.to_string())
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px((top - scroll) as f32))
+                    .h(px((bottom - top) as f32))
+                    .flex()
+                    .items_center()
+                    .pl(px(
+                        metrics.inset + metrics.timeline_indent * row.depth.min(4) as f32
+                    ))
+                    .overflow_hidden()
+                    .child(SharedString::from(name.clone()));
+                Some(match pm_panel_timeline::v4::parse_row(&row.id) {
+                    Ok(RowId::Layer(layer)) => {
+                        row_view.on_click(cx.listener(move |s, event: &ClickEvent, _, cx| {
+                            s.queue.push_back(Job::SelectLayer(
+                                layer.clone(),
+                                Self::mods(event.modifiers()),
+                            ));
+                            s.pump(cx);
+                        }))
+                    }
+                    _ => row_view,
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(metrics.ruler))
+                .w(px(self.view.layer_column as f32))
+                .h(px(height as f32))
+                .overflow_hidden()
+                .text_color(rgb(self.tokens.colors.text))
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn scene_range(&self, model: &TimelineModel, scene: &Scene) -> std::ops::Range<usize> {
+        let height = self.row_viewport_height();
+        scene.mount_range(self.scroll_for_scene(model, scene, height), height)
+    }
+
+    pub(crate) fn can_show_outline(&self, outline: &TimelineOutline) -> bool {
+        if !self
+            .kernel
+            .published(&self.project)
+            .is_some_and(|p| outline.is_for(&p.snapshot))
+        {
+            return false;
+        }
+        let covers = |model, scene| outline.covers(model, scene, self.scene_range(model, scene));
+        self.pending_scene
+            .as_ref()
+            .is_some_and(|(built, _)| covers(&built.model, &built.scene))
+            || self
+                .scene
+                .as_ref()
+                .is_some_and(|scene| covers(&self.model, scene))
+            || (self.pending_scene.is_none() && self.scene.is_none())
+    }
+
+    pub(crate) fn show_pending_scene(&mut self, cx: &mut Context<Self>) {
+        let Some((built, _)) = &self.pending_scene else {
+            self.pending_scene_fallback = None;
+            return;
+        };
+        if !self.current_composition(&built.model) {
+            self.pending_scene = None;
+            self.pending_scene_fallback = None;
+            return;
+        }
+        if self.outline.covers(
+            &built.model,
+            &built.scene,
+            self.scene_range(&built.model, &built.scene),
+        ) {
+            self.pending_scene_fallback = None;
+            let (built, hold_time_mapping) = self.pending_scene.take().unwrap();
+            self.install_scene(built, hold_time_mapping, cx);
+        }
+    }
+
+    fn install_graph(&mut self, graph: Option<Arc<Graph>>) {
+        let pending_graph_job = self.queue.iter().any(|job| {
+            matches!(
+                job,
+                Job::Sample(_)
+                    | Job::Finish(_)
+                    | Job::Begin(
+                        Spec::GraphKeys | Spec::Handle { .. } | Spec::Transform { .. },
+                        _
+                    )
+            )
+        });
+        self.graph = steady_graph(
+            &self.gesture,
+            pending_graph_job,
+            self.graph.as_deref(),
+            graph.clone(),
+        );
+        // A range the wheel panned to stays for its view.
+        let panned = match (&self.graph, &self.graph_view) {
+            (Some(g), Some((view, min, max))) if g.view == *view => {
+                Some(Some(Arc::new((**g).clone().with_range(*min, *max))))
+            }
+            (_, Some(_)) => Some(None),
+            _ => None,
+        };
+        match panned {
+            Some(Some(graph)) => self.graph = Some(graph),
+            Some(None) => self.graph_view = None,
+            None => {}
+        }
+        self.graph_fitted = graph;
+    }
+
+    fn install_scene(&mut self, built: Built, hold_time_mapping: bool, cx: &mut Context<Self>) {
+        for key in built.wanted {
+            if self.reading.insert(key.clone()) {
+                // Peaks are a full decode: a background task, then one rebuild.
+                cx.spawn(async move |this, cx| {
+                    let read = key.clone();
+                    let wait = cx
+                        .background_executor()
+                        .spawn(async move { crate::waveforms::read(&read) })
+                        .await;
+                    let _ = wait.recv().await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.reading.remove(&key);
+                        s.rebuild_presentation(cx);
+                    });
+                })
+                .detach();
+            }
+        }
+        let height = self.row_viewport_height();
+        self.view.scroll_y = self.scroll_for_scene(&built.model, &built.scene, height);
+        if height > 0. {
+            self.seen_reveal_serial = built.model.reveal_serial;
+        }
+        self.model = built.model;
+        self.expanded_properties
+            .set(self.has_expanded_properties());
+        let delegate = self.delegate.clone();
+        let view = self.model.clone();
+        cx.defer(move |cx| delegate.tracks_view(view, cx));
+        self.scene = Some(self.with_focus(built.scene.clone()));
+        self.install_graph(built.graph);
+        self.outline.set_scene(self.scene.clone());
+        self.frame = None;
+        self.clamp_scroll();
+        // The names follow the new scene at once: a switch between Layers and
+        // Tracks at the same offset kept the outline's old window and offset,
+        // and the header column drew nothing beside the tracks until a scroll
+        // (PM-477).
+        self.outline_geometry = None;
+        // The writer may still be applying the last queued sample after the
+        // mouse was released. Test the kernel gesture, not just the UI gesture.
+        let work_editing = hold_time_mapping
+            || self
+                .client
+                .as_ref()
+                .and_then(|c| c.active_drag())
+                .is_some_and(|drag| drag.is_work_area());
+        let duration = self.model.index.duration;
+        if duration > 0. && self.bounds.size.width > px(0.) {
+            let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
+            let fit = ((width - FIT_ROOM).max(1.) / duration).clamp(PPS.0, PPS.1);
+            // The view started at 0 and showed all of the old length.
+            let whole = |d: f64| {
+                d > 0. && self.view.scroll_time.abs() < 1e-9 && width / self.view.pps >= d * 0.99
+            };
+            if !self.fitted {
+                self.fitted = true;
+                self.view.pps = fit;
+            } else if !work_editing
+                && self.fit_duration > 0.
+                && (self.fit_duration - duration).abs() > 1e-9
+                && whole(self.fit_duration)
+            {
+                // A shorter or longer composition: a view that showed the
+                // whole old length shows the whole new one (the ruler and bars
+                // refit); a view the user zoomed into or scrolled stays.
+                self.view.pps = fit;
+            }
+            // Consume live extension updates even while keeping the mapping:
+            // mouse-up must not apply a delayed fit either.
+            self.fit_duration = duration;
+        }
+        self.changed(false, cx);
+    }
+
+    fn scroll_for_scene(&self, model: &TimelineModel, scene: &Scene, height: f64) -> f64 {
+        use pm_panel_timeline::RevealTarget;
+
+        let scroll = self.view.scroll_y;
+        if height > 0. && model.reveal_serial != self.seen_reveal_serial {
+            let target = match &model.reveal_target {
+                Some(RevealTarget::Layer(layer)) => Some(RowId::Layer(layer.clone())),
+                Some(RevealTarget::Property { layer, path }) => {
+                    model.rows().iter().find_map(|row| match &row.id {
+                        RowId::Property { layer_id, channel } if layer_id == layer => model
+                            .track_channels(layer, channel)
+                            .iter()
+                            .any(|c| &c.path == path)
+                            .then(|| row.id.clone()),
+                        _ => None,
+                    })
+                }
+                None => None,
+            };
+            if let Some(target) = target {
+                return scene.reveal_scroll(&pm_panel_timeline::v4::row_id(&target), scroll, height);
+            }
+        }
+        scene.clamp_scroll(scroll, height)
+    }
+    fn clamp_scroll(&mut self) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let height = self.row_viewport_height();
+        self.view.scroll_y = self.scroll_for_scene(&self.model, scene, height);
+        if height > 0. {
+            self.seen_reveal_serial = self.model.reveal_serial;
+        }
+    }
+    fn viewport(&self) -> Option<Viewport> {
+        let (w, h) = (
+            f32::from(self.bounds.size.width) as f64,
+            f32::from(self.bounds.size.height) as f64,
+        );
+        (w > self.view.layer_column && h > 0.).then_some(Viewport {
+            width: w,
+            height: h,
+            scroll_y: self.view.scroll_y,
+            scroll_time: self.view.scroll_time,
+            pps: self.view.pps,
+            layer_column: self.view.layer_column,
+        })
+    }
+    /// Input can arrive before the paint that follows a selection or view change.
+    fn ensure_frame(&mut self, cx: &mut Context<Self>) {
+        if self.frame.is_none() && self.scene.is_some() && self.viewport().is_some() {
+            self.prepared(self.bounds, false, cx);
+        }
+    }
+    fn prepared(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        record: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Frame>> {
+        let mut moved = self.bounds != bounds;
+        if moved {
+            self.bounds = bounds;
+            self.frame = None;
+            if !self.fitted && self.model.index.duration > 0. {
+                self.fit_time(cx);
+            }
+            self.clamp_scroll();
+            // A view restored or resized past the timeline's end comes back
+            // onto its time.
+            self.clamp_time();
+            // The viewport can clamp vertical scroll without a wheel event.
+            // Publish its native geometry after this render releases the view.
+            if let Some((y, column, rows)) = self.changed_outline_geometry() {
+                let outline = self.outline.clone();
+                cx.defer(move |cx| outline.scrolled(y, column, rows, cx));
+            }
+        }
+        let reach = if record && !self.sideways && self.graph_region().is_none() {
+            self.row_viewport_height()
+        } else {
+            0.
+        };
+        let rebuild_frame = self.frame.is_none() || self.frame_reach != reach;
+        if rebuild_frame {
+            let shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
+            moved |= shown != self.shown || self.shown_bounds != self.bounds;
+            self.shown = shown;
+            self.shown_bounds = self.bounds;
+            let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
+            let preview = self.marquee_selection.as_ref().map(|selection| {
+                let mut scene = Scene::clone(scene);
+                scene.preview_selection(selection.clone());
+                scene
+            });
+            let scene = preview.as_ref().unwrap_or(scene);
+            let _span = crate::diag::span("timeline.prepare");
+            let mut frame = scene
+                .prepare_native(
+                    viewport,
+                    &self.tokens,
+                    reach,
+                    0.,
+                    &mut self.waveforms,
+                    self.key_preview.as_deref(),
+                )
+                .ok()?;
+            self.audio_rows(&mut frame);
+            self.frame = Some(Arc::new(frame));
+            self.frame_reach = reach;
+            self.service_dirty = true;
+        }
+        if self.service_dirty && self.record_scroll_layers() {
+            self.service_dirty = false;
+            self.tell_service(cx);
+        }
+        if moved {
+            // Paused, nothing else moves the playhead layer: it stayed put
+            // on screen while the ruler and clips scrolled under it.
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.view_moved(cx));
+        }
+        let frame = self.frame.clone()?;
+        if rebuild_frame || !matches!(self.gesture, Gesture::Marquee { .. }) {
+            self.update_audio(&frame, cx);
+        }
+        Some(frame)
+    }
+    /// What the scroll layers record: the rows a viewport past each edge
+    /// (none under a graph, where the rows do not scroll as a layer) and the
+    /// tracks and the ruler the tracks' width past each side, prepared again
+    /// only when the view's frame was. Clip painters are asked for these
+    /// clips, so rows and strips a step brings in arrive decorated.
+    fn rows_frame(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(Arc<Frame>, f64, Vec<pm_panel_timeline::agent_ink::DotGroup>, f64)> {
+        let base = self.frame.clone()?;
+        let v = base.viewport;
+        let record = self.record_scroll_layers();
+        let reach_x = if record && self.sideways {
+            (v.width - v.layer_column).max(0.)
+        } else {
+            0.
+        };
+        if let Some((of, rows, reach)) = &self.rows
+            && *reach == reach_x
+            && Arc::ptr_eq(of, &base)
+        {
+            let started = std::time::Instant::now();
+            let groups = self.row_dot_groups(rows);
+            return Some((
+                rows.clone(),
+                *reach,
+                groups,
+                started.elapsed().as_secs_f64() * 1000.,
+            ));
+        }
+        let rows = if reach_x > 0. {
+            let reach = if self.graph_region().is_none() {
+                self.row_viewport_height()
+            } else {
+                0.
+            };
+            let mut rows = self
+                .scene
+                .as_ref()?
+                .prepare_native(
+                    v,
+                    &self.tokens,
+                    reach,
+                    reach_x,
+                    &mut self.waveforms,
+                    self.key_preview.as_deref(),
+                )
+                .ok()?;
+            self.audio_rows(&mut rows);
+            Arc::new(rows)
+        } else {
+            base.clone()
+        };
+        self.waveforms.retain(&rows);
+        if record {
+            self.ask_painters(&rows, cx);
+        }
+        // What the layers record shows this time at their left edge.
+        self.drawn.1 = v.scroll_time;
+        self.rows = Some((base, rows.clone(), reach_x));
+        let started = std::time::Instant::now();
+        let groups = self.row_dot_groups(&rows);
+        Some((
+            rows,
+            reach_x,
+            groups,
+            started.elapsed().as_secs_f64() * 1000.,
+        ))
+    }
+    fn row_dot_groups(&self, frame: &Frame) -> Vec<pm_panel_timeline::agent_ink::DotGroup> {
+        if self.agent_ink.empty() || !matches!(self.gesture, Gesture::Idle) { return Vec::new(); }
+        self.scene.as_ref().map(|scene| self.agent_ink.groups(frame, scene, &self.tokens,
+            self.agent_ink_clock.elapsed().as_millis() as u64)).unwrap_or_default()
+    }
+    fn service_facts(&self) -> serde_json::Value {
+        use pm_panel_timeline::{RowId, v4::parse_row};
+        let b = self.bounds;
+        let (x, y) = (f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64);
+        let (w, h) = (
+            f32::from(b.size.width) as f64,
+            f32::from(b.size.height) as f64,
+        );
+        let ruler = self.tokens.metrics.ruler as f64;
+        let mut rows = vec![];
+        if let (Some(scene), Some((start, end))) = (&self.scene, self.visible_rows()) {
+            for i in start..end {
+                let Some((row, top, bottom)) = scene.span(i) else {
+                    break;
+                };
+                let layer = match parse_row(&row.id) {
+                    Ok(RowId::Layer(id)) => id,
+                    Ok(
+                        RowId::Property { layer_id, .. }
+                        | RowId::Effect { layer_id, .. }
+                        | RowId::Path { layer_id, .. },
+                    ) => layer_id,
+                    Err(_) => continue,
+                };
+                let at = |v: f64| ((y + ruler + v - self.view.scroll_y) * 100.).round() / 100.;
+                rows.push(serde_json::json!([layer, at(top), at(bottom)]));
+            }
+        }
+        serde_json::json!({
+            "graph": self.model.graph_display != pm_panel_timeline::GraphDisplay::DopeSheet,
+            "pps": self.view.pps,
+            "scrollT": self.view.scroll_time,
+            "scrollY": self.view.scroll_y,
+            "keySelectionActive": self.model.key_selection_active,
+            "rect": [x, y, w, h],
+            "ruler": ruler,
+            "column": self.view.layer_column,
+            "rows": rows,
+        })
+    }
+    fn tell_service(&mut self, cx: &mut Context<Self>) {
+        let facts = self.service_facts();
+        if self.told.as_ref() != Some(&facts) {
+            self.told = Some(facts.clone());
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.view_facts(facts, cx));
+        }
+    }
+    /// The v1 `timeline` service's writes from the window's realm: its view
+    /// (`pps`, `scrollT`, `scrollY`), `frameView` and `reveal`. `graph` is the
+    /// timeline panel's view (`Builtins::timeline_action`).
+    pub fn service_request(&mut self, request: &serde_json::Value, cx: &mut Context<Self>) {
+        let number = |key: &str| request[key].as_f64();
+        if ["pps", "scrollT", "scrollY"]
+            .iter()
+            .any(|k| number(k).is_some())
+        {
+            self.set_view(number("pps"), number("scrollT"), number("scrollY"), cx);
+        }
+        if request["frameView"] == true {
+            self.fit_time(cx);
+        }
+        if let Some(layer) = request["reveal"]["layer"].as_str() {
+            let keys = request["reveal"]["keys"].as_array().map_or(vec![], |keys| {
+                keys.iter()
+                    .filter_map(|k| k.as_str().map(str::to_owned))
+                    .collect()
+            });
+            self.reveal(layer.to_owned(), keys, cx);
+        }
+    }
+    /// The service's writable `pps`, `scrollT` and `scrollY`, as main's fields.
+    pub fn set_view(
+        &mut self,
+        pps: Option<f64>,
+        scroll_time: Option<f64>,
+        scroll_y: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pps) = pps.filter(|p| p.is_finite()) {
+            self.view.pps = pps.clamp(PPS.0, PPS.1);
+            self.fitted = true;
+        }
+        if let Some(time) = scroll_time.filter(|t| t.is_finite()) {
+            self.view.scroll_time = time.max(0.);
+        }
+        if let Some(y) = scroll_y.filter(|y| y.is_finite()) {
+            self.view.scroll_y = y.max(0.);
+            self.clamp_scroll();
+        }
+        if self.scene.is_some() {
+            self.clamp_time();
+        }
+        self.changed(true, cx);
+    }
+    /// `TimelineService.reveal`: open `layer` and show `keys` too.
+    pub fn reveal(&mut self, layer: String, keys: Vec<String>, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::Reveal { layer, keys });
+        self.pump(cx);
+    }
+    /// The bottom bar's height: what the body keeps under the tracks.
+    /// The graph's values at the playhead `time` (v1's dots and readouts on
+    /// the head), in window points; none while the graph is not shown.
+    pub fn graph_marks(&self, time: f64) -> Vec<graph_render::Mark> {
+        let (Some(area), Some(v), Some(graph)) =
+            (self.graph_area(), self.viewport(), self.graph.as_ref())
+        else {
+            return vec![];
+        };
+        let (dx, dy) = (
+            f32::from(self.bounds.origin.x) as f64,
+            f32::from(self.bounds.origin.y) as f64,
+        );
+        let mut marks = graph.playhead_marks(v, area, time, &self.tokens);
+        for m in &mut marks {
+            (m.x, m.y) = (m.x + dx, m.y + dy);
+            m.label = m.label.map(|l| l + dy);
+        }
+        marks
+    }
+    pub fn bar_height(&self) -> f64 {
+        f32::from(self.body.size.height - self.bounds.size.height).max(0.) as f64
+    }
+    /// Properties' Show in Graph Editor: the graph view, on `channel`.
+    pub fn show_graph(
+        &mut self,
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        });
+        self.pump(cx);
+    }
+    /// A property keyed from Properties (its diamond): the graph plots its
+    /// track, as a press on its row there did in v1 (`focusGraph`), without
+    /// opening the graph.
+    pub fn focus_graph(&mut self, layer: String, channel: String, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::FocusGraph { layer, channel });
+        self.pump(cx);
+    }
+    /// Playing, the view turns a page to keep the head in sight, as v1: once
+    /// the head is within 50 points (or a tenth of the tracks) of the right
+    /// edge it comes back a fifth of the way in; behind the left edge (a
+    /// loop, or playing backwards) it goes to four fifths. Paging rather than
+    /// pinning the head keeps everything else still between pages.
+    pub fn follow_playhead(&mut self, time: f64, cx: &mut Context<Self>) {
+        // A scrub or drag of the person's own leads the view.
+        if !matches!(self.gesture, Gesture::Idle) {
+            return;
+        }
+        let Some(width) = self.time_width() else {
+            return;
+        };
+        let pps = self.view.pps;
+        let Some(at) = follow_page((time - self.view.scroll_time) * pps, width) else {
+            return;
+        };
+        let before = self.view.scroll_time;
+        self.view.scroll_time = time - at / pps;
+        self.clamp_time();
+        if self.view.scroll_time != before {
+            self.changed_while_hot(cx);
+        }
+    }
+    pub fn time_mapping(&self) -> (f64, f64, f64) {
+        self.shown
+    }
+    /// A clip painter arrived or left: ask again on the next frame.
+    pub fn repaint_decorations(&mut self, cx: &mut Context<Self>) {
+        self.painted = None;
+        self.frame = None;
+        cx.notify();
+    }
+    /// Extension painters run when the visible clips change (scroll, zoom,
+    /// edits), never per playback frame; their shapes land asynchronously.
+    fn ask_painters(&mut self, frame: &Frame, cx: &mut Context<Self>) {
+        let revision = self.delegate.painters_revision(cx);
+        if revision == 0 {
+            if !self.decorations.is_empty() {
+                self.decorations = Default::default();
+            }
+            return;
+        }
+        let clips: Vec<serde_json::Value> = frame
+            .ops
+            .iter()
+            .filter_map(|op| {
+                let id = op.id.strip_prefix("clip:")?;
+                Some(serde_json::json!({"id":id,"layerId":id,
+                    "width":(op.bounds.width * 10.).round() / 10.,"height":(op.bounds.height * 10.).round() / 10.,
+                    "from":op.detail["from"],"duration":op.detail["duration"]}))
+            })
+            .collect();
+        let key = (
+            revision,
+            serde_json::Value::Array(clips.clone()).to_string(),
+        );
+        // A painter that missed the deadline (a cold realm) is asked again on
+        // a later frame, at most every half second.
+        let retry = self
+            .late
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(500));
+        if self.painting || (self.painted.as_ref() == Some(&key) && !retry) {
+            return;
+        }
+        let asked = std::time::Instant::now();
+        self.painting = true;
+        self.painted = Some(key);
+        let weak = cx.entity().downgrade();
+        self.delegate.clone().paint_clips(
+            serde_json::Value::Array(clips),
+            Box::new(move |shapes, complete, cx| {
+                let _ = weak.update(cx, |s, cx| {
+                    s.painting = false;
+                    s.late = (!complete).then_some(asked);
+                    s.decorations = Arc::new(shapes);
+                    s.frame = None;
+                    cx.notify();
+                });
+            }),
+            cx,
+        );
+    }
+    fn local(&self, position: Point<Pixels>) -> (f64, f64) {
+        let at = position - self.bounds.origin;
+        (f32::from(at.x) as f64, f32::from(at.y) as f64)
+    }
+    /// Where media dropped at `position` lands: the frame under the pointer
+    /// (the layer column counts as the first time shown), and its place in
+    /// the stack ([`Scene::drop_before`], v1.2.0's rule).
+    fn media_slot(&self, position: Point<Pixels>) -> (f64, Option<usize>, f64) {
+        let (x, y) = self.local(position);
+        let at = frame_time(
+            &self.model,
+            self.time_at(x.max(self.view.layer_column)).max(0.),
+        );
+        let ruler = self.tokens.metrics.ruler as f64;
+        let content = y.max(ruler) - ruler + self.view.scroll_y;
+        let layers = self.model.index.layers.len();
+        let (index, top) = match self.scene.as_ref().map(|s| (s.drop_before(content), s)) {
+            Some((pm_panel_timeline::render::DropSlot::Top, _)) | None => (Some(0), 0.),
+            Some((pm_panel_timeline::render::DropSlot::Before(Some(id)), scene)) => (
+                self.model.index.layer_ordinal(&id),
+                scene
+                    .scroll_for(&pm_panel_timeline::v4::row_id(
+                        &pm_panel_timeline::RowId::Layer(id),
+                    ))
+                    .unwrap_or(0.),
+            ),
+            Some((pm_panel_timeline::render::DropSlot::Before(None), scene)) => {
+                (Some(layers), scene.content_height())
+            }
+        };
+        (at, index, ruler + top - self.view.scroll_y)
+    }
+    fn media_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let over = bounds.contains(&at).then_some(at);
+        if over != self.media_over {
+            self.media_over = over;
+            cx.notify();
+        }
+    }
+    /// The layer whose row is under `position` (a property row's layer) and
+    /// that row's top in the view: where a dropped effect goes.
+    fn layer_under(&self, position: Point<Pixels>) -> Option<(String, f64)> {
+        use pm_panel_timeline::{RowId, v4};
+        let (_, y) = self.local(position);
+        let ruler = self.tokens.metrics.ruler as f64;
+        if y < ruler {
+            return None;
+        }
+        let scene = self.scene.as_ref()?;
+        let row = scene.row_at(y - ruler + self.view.scroll_y)?;
+        let layer = match v4::parse_row(&row.id).ok()? {
+            RowId::Layer(id) => id,
+            RowId::Property { layer_id, .. }
+            | RowId::Effect { layer_id, .. }
+            | RowId::Path { layer_id, .. } => layer_id,
+        };
+        let top = scene.scroll_for(&v4::row_id(&RowId::Layer(layer.clone())))?;
+        Some((layer, ruler + top - self.view.scroll_y))
+    }
+    /// Where a transition dropped at `position` goes: the clip under it (a
+    /// layer bar, or a clip on a track) and its nearer edge; the layer row's
+    /// clip when the pointer is beside the bar.
+    fn transition_target(
+        &self,
+        position: Point<Pixels>,
+    ) -> (
+        Option<String>,
+        Option<pm_kernel::commands::effects::Edge>,
+        Option<String>,
+    ) {
+        use pm_kernel::commands::effects::Edge as Side;
+        let (x, y) = self.local(position);
+        // Tracks: a drop within a few points either side of a cut on the
+        // track under the pointer goes across it (the gap between the two
+        // strips is no clip's, and a point just inside one is still the cut).
+        if self.model.mode == TimelineMode::Tracks
+            && let Some((left, right)) = self.cut_near(x, y, CUT_REACH)
+        {
+            return (Some(right), Some(Side::In), Some(left));
+        }
+        let layer = self
+            .clip_at(x, y)
+            .map(|(id, _)| id)
+            .or_else(|| self.layer_under(position).map(|(id, _)| id));
+        let edge = layer.as_deref().and_then(|id| self.model.index.layer(id)).map(|l| {
+            if self.time_at(x) < l.from + l.duration / 2. {
+                Side::In
+            } else {
+                Side::Out
+            }
+        });
+        let across = match (&layer, edge) {
+            (Some(layer), Some(edge)) if self.model.mode == TimelineMode::Tracks => {
+                crate::transitions::neighbour(&self.model.index, &self.model.reveal, layer, edge)
+            }
+            _ => None,
+        };
+        (layer, edge, across)
+    }
+    /// The cut nearest `x` within `reach` points on the track at `y`: the
+    /// clip ending there and the clip starting there, by their drawn layer
+    /// edges (a transition across the cut lets them overlap by its length).
+    fn cut_near(&self, x: f64, y: f64, reach: f64) -> Option<(String, String)> {
+        let frame = self.frame.as_ref()?;
+        let row: Vec<(&str, f64, f64)> = frame
+            .ops
+            .iter()
+            .filter(|o| o.shape == "clip" && o.bounds.y <= y && y < o.bounds.y + o.bounds.height)
+            .filter_map(|o| {
+                let id = o.id.strip_prefix("clip:")?;
+                let edges = o.detail["sourceEdges"].as_array()?;
+                Some((id, edges[0].as_f64()?, edges[1].as_f64()?))
+            })
+            .collect();
+        let mut best: Option<(f64, String, String)> = None;
+        for &(left, _, end) in &row {
+            for &(right, start, stop) in &row {
+                if left == right || start >= end + 1. || stop <= end {
+                    continue;
+                }
+                let index = &self.model.index;
+                let fade = index
+                    .layer(right)
+                    .and_then(|l| l.transitions[0].as_ref().map(|t| t.duration))
+                    .unwrap_or(0.)
+                    .max(
+                        index
+                            .layer(left)
+                            .and_then(|l| l.transitions[1].as_ref().map(|t| t.duration))
+                            .unwrap_or(0.),
+                    )
+                    * self.view.pps;
+                // Butted, or overlapping by no more than a transition.
+                if end - start > fade + 1. {
+                    continue;
+                }
+                let cut = (start + end) / 2.;
+                let distance = (x - cut).abs();
+                if distance <= reach && best.as_ref().is_none_or(|(d, ..)| distance < *d) {
+                    best = Some((distance, left.to_owned(), right.to_owned()));
+                }
+            }
+        }
+        best.map(|(_, left, right)| (left, right))
+    }
+    fn effect_moved(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        at: Point<Pixels>,
+        definition: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_kernel::commands::transition_edges::CUT_RETIMING_REASON;
+        let over = bounds.contains(&at).then_some(at);
+        let reason =
+            over.and_then(|at| definition.and_then(|id| self.transition_drop_refusal(id, at)));
+        if let Some(reason) = reason {
+            let changed = self
+                .tip
+                .as_ref()
+                .is_none_or(|(text, _)| text.as_ref() != reason.as_str());
+            let (x, y) = self.local(at);
+            self.effect_over = None;
+            self.tip_wait = None;
+            self.tip = Some((reason.clone().into(), (x, y)));
+            self.cursor = CursorStyle::OperationNotAllowed;
+            if changed {
+                self.delegate.report(reason, cx);
+            }
+            cx.notify();
+            return;
+        }
+        if self
+            .tip
+            .as_ref()
+            .is_some_and(|(text, _)| text.as_ref() == CUT_RETIMING_REASON)
+        {
+            self.tip = None;
+            self.cursor = CursorStyle::Arrow;
+            cx.notify();
+        }
+        if over != self.effect_over {
+            self.effect_over = over;
+            cx.notify();
+        }
+    }
+    fn drop_media(&mut self, what: Dropped, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.media_over = None;
+        let (at, index, _) = self.media_slot(position);
+        self.delegate.drop_media(MediaDrop { at, index, what }, cx);
+        cx.notify();
+    }
+    fn time_at(&self, x: f64) -> f64 {
+        self.view.scroll_time + (x - self.view.layer_column) / self.view.pps
+    }
+    /// The plot: under the graph's legend strip, clear of its foot (v1's
+    /// `top + 42`, `H - 16`), so keys at the value range's ends never clip.
+    /// Values map into this rect.
+    fn graph_area(&self) -> Option<Rect> {
+        self.graph_region().map(graph_render::plot)
+    }
+    /// The graph's whole region under the ruler (lower half in Dope Sheet and Graph).
+    fn graph_region(&self) -> Option<Rect> {
+        let m = self.tokens.metrics;
+        let (w, h) = (
+            f32::from(self.bounds.size.width) as f64,
+            f32::from(self.bounds.size.height) as f64,
+        );
+        let ruler = m.ruler as f64;
+        let body = (h - ruler).max(1.);
+        let x = self.view.layer_column;
+        match self.model.graph_display {
+            GraphDisplay::DopeSheet => None,
+            GraphDisplay::Graph => Some(Rect::new(x, ruler, w - x, body)),
+            GraphDisplay::Combined => {
+                // The lower half, from the first row edge there: the graph
+                // never cuts a strip or a row of keys in two.
+                let half = ruler + body / 2.;
+                let scroll = self.view.scroll_y;
+                let top = self
+                    .scene
+                    .as_ref()
+                    .and_then(|scene| scene.edge_from(half - ruler + scroll))
+                    .map(|edge| edge - scroll + ruler)
+                    .filter(|top| *top - half <= m.track_row as f64)
+                    .unwrap_or(half);
+                Some(Rect::new(x, top, w - x, (h - top).max(1.)))
+            }
+        }
+    }
+    /// The work-area handle under a point of the ruler (panel space): its
+    /// grab zone is `WORK_HANDLE_REACH` either side of the edge, the ruler's
+    /// full height; when both edges are that close, the nearer one (v1's
+    /// workAreaHit).
+    fn work_handle_at(&self, x: f64, y: f64) -> Option<Spec> {
+        let frame = self.frame.as_ref()?;
+        if y < 0. || y >= self.tokens.metrics.ruler as f64 || x < self.view.layer_column {
+            return None;
+        }
+        let edge = |id: &str| {
+            frame
+                .ops
+                .iter()
+                .find(|o| o.id == id)
+                .map(|o| (x - (o.bounds.x + o.bounds.width / 2.)).abs())
+        };
+        let near = |d: Option<f64>| d.filter(|d| *d <= WORK_HANDLE_REACH);
+        match (near(edge("work-in")), near(edge("work-out"))) {
+            (Some(a), Some(b)) => Some(if a <= b { Spec::WorkIn } else { Spec::WorkOut }),
+            (Some(_), None) => Some(Spec::WorkIn),
+            (None, Some(_)) => Some(Spec::WorkOut),
+            (None, None) => None,
+        }
+    }
+    fn mods(modifiers: Modifiers) -> Mods {
+        Mods {
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            meta: modifiers.platform,
+            control: modifiers.control,
+        }
+    }
+    fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let (x, _) = self.local(event.position);
+        // The outline can arm a gesture before this same press bubbles to
+        // the canvas. Only the divider owns presses on the name side here.
+        if x < self.view.layer_column
+            && matches!(
+                self.gesture,
+                Gesture::LayerPress { .. }
+                    | Gesture::ParentPick { .. }
+                    | Gesture::SwitchPaint { .. }
+                    | Gesture::Pressed(Press {
+                        spec: Some(Spec::Property { .. }),
+                        ..
+                    })
+            )
+        {
+            return;
+        }
+        self.start_pointer_gesture(cx);
+        self.ensure_frame(cx);
+        if self.audio_down(event, cx) { return; }
+        self.pointer = Some(event.position);
+        self.sideways = false;
+        let (x, y) = self.local(event.position);
+        let capsule = self
+            .frame
+            .as_ref()
+            .filter(|frame| {
+                frame
+                    .hit_key_across(x, y, KEY_REACH, self.tokens.metrics.row as f64)
+                    .is_none()
+            })
+            .and_then(|frame| frame.transition_at(x, y))
+            .and_then(|op| {
+                Some((
+                    op.detail["layer"].as_str()?.to_owned(),
+                    op.detail["edge"].as_str()?.to_owned(),
+                ))
+            });
+        if self.transition_selected != capsule {
+            // Finish hit-testing against the frame that received this press.
+            // Changing transition selection invalidates that frame.
+            let target = capsule.clone();
+            let timeline = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = timeline.update(cx, |surface, cx| {
+                    let selected = target.as_ref().map(|(id, edge)| {
+                        use pm_panel_timeline::render::Edge;
+                        let edge = if edge == "in" { Edge::In } else { Edge::Out };
+                        (id.clone(), edge)
+                    });
+                    surface.set_transition_selection(target, cx);
+                    surface.queue.push_back(Job::SelectTransition(selected));
+                    surface.pump(cx);
+                });
+            });
+        }
+        if let Some((layer, edge)) = capsule {
+            if let Some(clip) = self.model.index.layer(&layer) {
+                if clip.effectively_locked {
+                    self.notify_locked(&layer, "edit transition", false, cx);
+                    return;
+                }
+            } else {
+                return;
+            }
+            let facts = (|| {
+                let root = self.model.index.root()?;
+                let loc = pm_kernel::model::find_layer(root, &layer)?;
+                let clip = pm_kernel::model::layer_at(root, &loc)?.to_value();
+                let field = if edge == "in" {
+                    "transitionIn"
+                } else {
+                    "transitionOut"
+                };
+                let transition = clip.get(field)?;
+                let duration = transition.get("dur")?.as_f64()?;
+                let offset = transition
+                    .get("offset")
+                    .and_then(pm_model::Value::as_f64)
+                    .unwrap_or(if edge == "in" { 0. } else { -duration });
+                let cut = clip.get("from")?.as_f64()?
+                    + if edge == "out" {
+                        clip.get("dur")?.as_f64()?
+                    } else {
+                        0.
+                    };
+                let bounds = self.frame.as_ref()?.transition_at(x, y)?.bounds;
+                if self.frame.as_ref()?.transition_at(x, y)?.detail["disabled"] == true
+                {
+                    return None;
+                }
+                let part = if x - bounds.x <= 5. {
+                    -1
+                } else if bounds.x + bounds.width - x <= 5. {
+                    1
+                } else {
+                    0
+                };
+                if part == 0
+                    && transition
+                        .get("paired")
+                        .and_then(pm_model::Value::as_str)
+                        .is_none()
+                {
+                    return None;
+                }
+                let intent = (duration, offset);
+                let op = self.frame.as_ref()?.transition_at(x, y)?;
+                let duration = op.detail["effectiveDuration"].as_f64().unwrap_or(duration);
+                let start = op.detail["effectiveFrom"].as_f64().unwrap_or(cut + offset);
+                Some((duration, start - cut, start, part, intent))
+            })();
+            if let Some((duration, offset, start, part, intent)) = facts {
+                self.gesture = Gesture::Transition(TransitionDrag {
+                    layer: layer.clone(),
+                    edge: edge.clone(),
+                    origin_x: x,
+                    part,
+                    start,
+                    duration,
+                    offset,
+                    current: intent,
+                    intent,
+                    scene: self.scene.clone(),
+                    document: self.model.index.doc_id,
+                    revision: self.model.index.revision,
+                });
+            }
+            self.queue
+                .push_back(Job::SelectLayer(layer, Mods::default()));
+            self.pump(cx);
+            cx.notify();
+            return;
+        }
+        // A new press starts with no graph drag state.
+        self.transform = None;
+        self.graph_axis = false;
+        self.graph_active_handle = None;
+        self.readout = None;
+        if let Some(bar) = self.bar()
+            && let Some(part) = self.bar_part(x, y)
+        {
+            self.set_skimmer(None, cx);
+            self.press_bar(part, bar, x, y, event.click_count, cx);
+            return;
+        }
+        if y >= f32::from(self.bounds.size.height) as f64 {
+            return;
+        }
+        // A work-area handle takes the press before anything else (no seek,
+        // no scrub): the nearer one when both are close.
+        if let Some(spec) = self.work_handle_at(x, y) {
+            self.set_skimmer(None, cx);
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(spec),
+                release: None,
+            });
+            return;
+        }
+        // Final Cut: a click moves the playhead to the skimmer; the gesture
+        // (selection, a drag) goes on from there, without a skimmer. A key, a
+        // direction handle or a transform grip under the pointer takes the
+        // press as it stands: the playhead stays where it is.
+        let row = self.tokens.metrics.row as f64;
+        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key_across(x, y, KEY_REACH, row).is_some())
+            || self.graph_point_at(x, y);
+        // A press on the ruler scrubs from the time under it, so the
+        // playhead goes there with the scrub (whose time is written once
+        // it ends): a seek first wrote the time now, and every panel took
+        // that write as the drag began.
+        let scrubs = y < self.tokens.metrics.ruler as f64
+            && x >= self.view.layer_column
+            && !self.frame.as_ref().is_some_and(|f| {
+                f.hit_op("work-area", x, y, 0.).is_some()
+                    && (event.modifiers.alt || y <= WORK_BAR_STRIP)
+            });
+        // Final Cut's skimming: a press in Tracks mode moves the playhead to
+        // the skimmer. In the Layers timeline a press selects and never moves
+        // the playhead (v1 and After Effects: only the ruler does).
+        if let Some(at) = self.skimmer
+            && !grabs
+            && !scrubs
+            && self.model.mode == TimelineMode::Tracks
+        {
+            self.delegate.seek(at, cx);
+        }
+        self.set_skimmer(None, cx);
+        // Clearing the hovered clip's audio controls can invalidate the frame.
+        self.ensure_frame(cx);
+        let (x, y) = self.local(event.position);
+        let Some(frame) = self.frame.clone() else {
+            return;
+        };
+        let m = self.tokens.metrics;
+        let column = self.view.layer_column;
+        // Preserve the divider on its line and on the name side. A strip
+        // starting at the viewport edge still needs a usable trim grip.
+        if self.column_splitter_at(x, y) {
+            if event.click_count == 2 {
+                self.view.layer_column = default_layer_column(&m);
+                self.view.column_chosen = false;
+                self.changed(true, cx);
+            } else {
+                self.gesture = Gesture::Column;
+            }
+            return;
+        }
+        if x < column {
+            return;
+        }
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split
+            && y >= self.tokens.metrics.ruler as f64 {
+            self.split_preview_hidden = true;
+            cx.notify();
+            if let Some(id) = self.split_clip_at(x, y) {
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let all = event.modifiers.shift;
+                let locked_id = self
+                    .model
+                    .index
+                    .layers
+                    .iter()
+                    .find(|l| (all || l.id == id) && l.effectively_locked && at > l.from && at < l.from + l.duration)
+                    .map(|l| l.id.clone());
+                if let Some(locked_id) = locked_id {
+                    self.notify_locked(&locked_id, "split", false, cx);
+                }
+                match self.model.split_at(&id, at, all) {
+                    Ok(plan) if !plan.calls.is_empty() => { self.queue.push_back(Job::Apply(plan)); self.pump(cx); }
+                    Err(e) => self.delegate.report(e.to_string(), cx),
+                    _ => (),
+                }
+            }
+            return;
+        }
+        let mods = Self::mods(event.modifiers);
+        let additive = !(mods.alt && mods.command()) && (mods.shift || mods.command());
+        if y < m.ruler as f64 {
+            // v1: the work area's bar (its thin strip at the top of the
+            // ruler) moves it on a plain drag; ⌥ moves it from anywhere on
+            // the ruler; the rest of the ruler scrubs.
+            if frame.hit_op("work-area", x, y, 0.).is_some() && (mods.alt || y <= WORK_BAR_STRIP) {
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::WorkMove),
+                    release: None,
+                });
+                return;
+            }
+            let time = self.time_at(x).clamp(0., self.model.index.duration);
+            if let Ok(mut scrub) = Scrub::begin(self.model.index.clone(), time)
+                && let Ok(HostEffect::Seek(time)) =
+                    scrub.update(time, event.modifiers.shift, self.snap_radius())
+            {
+                let time = frame_time(&self.model, time);
+                let before = self.delegate.time(cx);
+                self.delegate.scrubbing(true, cx);
+                self.delegate.seek(time, cx);
+                self.gesture = Gesture::Scrub { scrub, sought: time, before };
+            }
+            return;
+        }
+        if let Some(region) = self.graph_region()
+            && y >= region.y
+        {
+            self.press_graph(event, x, y, additive, cx);
+            return;
+        }
+        // A caption cue: selected (and edited on double-click) by itself,
+        // in step with the Captions panel; the clip isn't dragged.
+        if let Some((layer, cue)) = frame
+            .hit_op("cue:", x, y, 0.)
+            .and_then(|o| pm_panel_timeline::render::parse_cue_op(&o.id))
+        {
+            let mode = if event.modifiers.shift {
+                "extend"
+            } else if event.modifiers.platform {
+                "toggle"
+            } else {
+                "replace"
+            };
+            let verb = if event.click_count >= 2 { "edit" } else { mode };
+            self.delegate
+                .command(&format!("captions.cue:{verb}:{layer}\u{1f}{cue}"), cx);
+            return;
+        }
+        if let Some((on, key)) = frame.hit_layer_key_across(x, y, KEY_REACH, m.row as f64)
+            && let Some((layer, channel, hit)) = self.model.index.key_on(&on, &key)
+        {
+            // v1: a double-click on a key opens its value editor, for the
+            // whole selection when the key is part of it (the first click
+            // selected it).
+            if event.click_count == 2 {
+                if layer.effectively_locked {
+                    let layer_id = layer.id.clone();
+                    self.notify_locked(&layer_id, "edit keyframes", false, cx);
+                    return;
+                }
+                self.delegate.command("keyframeValue", cx);
+                return;
+            }
+            let selected = self.model.selection.key_selected(&on, &key);
+            let grabbed = layer.from + hit.time;
+            let (layer, channel) = (layer.id.clone(), channel.path.clone());
+            self.queue.push_back(Job::SelectKey {
+                layer: layer.clone(),
+                channel: channel.clone(),
+                key: key.clone(),
+                additive,
+                dragging: true,
+            });
+            // v1: ⌥ stretches the selected keys' timing from the far end
+            // when the first or last of them is grabbed.
+            let spec = if mods.alt && mods.command() {
+                Spec::QuickOffsetKeys
+            } else if mods.alt && !additive && !mods.command() {
+                Spec::StretchKeys { grabbed }
+            } else {
+                Spec::Keys
+            };
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(spec),
+                release: (additive && selected).then_some(Job::SelectKey {
+                    layer,
+                    channel,
+                    key,
+                    additive,
+                    dragging: false,
+                }),
+            });
+            self.pump(cx);
+            return;
+        }
+        // v1 textStagger.hit runs before a clip body's slide.
+        let clip_hit = frame.hit_clip(x, y);
+        if clip_hit.is_none_or(|(_, edge)| edge.is_none())
+            && let Some(op) = frame.ops.iter().rev().find(|op| {
+                let right = op.bounds.x + op.bounds.width;
+                op.shape == "stagger"
+                    && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
+                    && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
+                    && ((x - right).abs() < 5. || (op.bounds.x - 2. ..=right).contains(&x))
+            })
+        {
+            if let Ok(band) = serde_json::from_value::<pm_panel_timeline::stagger::Band>(
+                op.detail["band"].clone(),
+            ) {
+                if op.detail["locked"] == true {
+                    let owner = self
+                        .model
+                        .index
+                        .locking_layer(&band.layer)
+                        .map(|o| o.id.clone())
+                        .unwrap_or_else(|| band.layer.clone());
+                    self.queue
+                        .push_back(Job::SelectLayer(band.layer.clone(), mods));
+                    self.gesture = Gesture::Pressed(Press {
+                        origin: event.position,
+                        spec: Some(Spec::Locked {
+                            layer: owner,
+                            source: band.layer,
+                            trim: false,
+                            action: "edit text stagger",
+                        }),
+                        release: None,
+                    });
+                    self.pump(cx);
+                    return;
+                }
+                let end = (x - (op.bounds.x + op.bounds.width)).abs() < 5.;
+                self.queue
+                    .push_back(Job::SelectLayer(band.layer.clone(), mods));
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::TextStagger { band, end }),
+                    release: None,
+                });
+                self.pump(cx);
+                return;
+            }
+        }
+        if let Some((layer, edge)) = clip_hit {
+            let layer = layer.to_owned();
+            let focus = (
+                self.model.index.doc_id,
+                self.model.index.comp_id.clone(),
+                layer.clone(),
+            );
+            let same_layer = self.focused_layer.as_ref() == Some(&focus);
+            self.focused_layer = Some(focus);
+            let lock = self
+                .model
+                .index
+                .locking_layer(&layer)
+                .map(|owner| owner.id.clone());
+            // Two close presses can straddle a row boundary.
+            if event.click_count == 2 && same_layer {
+                if let Some(l) = self.model.index.layer(&layer) {
+                    if l.kind == "precomp" {
+                        if lock.is_some() {
+                            self.notify_locked(&layer, "open", false, cx);
+                            return;
+                        }
+                        if let Some(id) = l.comp.clone() {
+                            self.delegate.effect(HostEffect::OpenComposition(id), cx);
+                        }
+                        return;
+                    } else if l.kind == "group" {
+                        if lock.is_some() {
+                            self.notify_locked(&layer, "open", false, cx);
+                            return;
+                        }
+                        self.delegate
+                            .effect(HostEffect::FocusGroup(Some(layer)), cx);
+                        return;
+                    }
+                }
+                if lock.is_none() {
+                    return;
+                }
+            }
+            let tracks = self.model.mode == TimelineMode::Tracks;
+            // A chosen edit tool works in both modes; in Tracks the
+            // modifiers reach the same edits with the Selection tool.
+            let tool = self.model.edit_tool;
+            let spec = match edge {
+                _ if tool == EditTool::Slip => Spec::Slip,
+                _ if tool == EditTool::Slide => Spec::Slide,
+                Some(edge) => {
+                    let edge = match edge {
+                        pm_panel_timeline::render::Edge::In => Edge::In,
+                        pm_panel_timeline::render::Edge::Out => Edge::Out,
+                    };
+                    if tool == EditTool::Roll || mods.alt {
+                        Spec::Roll(edge)
+                    } else if tool == EditTool::Ripple || tracks && mods.control {
+                        Spec::Ripple(edge)
+                    } else {
+                        Spec::Trim(edge)
+                    }
+                }
+                None if mods.command() && mods.alt => Spec::Offset,
+                None if tracks && mods.control => Spec::Slip,
+                None if tracks && mods.alt && mods.shift => Spec::Slide,
+                // Option-drag duplicates, as in Premiere, Final Cut and
+                // Resolve (Slide took Option alone before; it has Shift now).
+                None if mods.alt => Spec::Duplicate,
+                None => Spec::Layers,
+            };
+            let selected = self.model.selection.contains(&layer);
+            if let Some(owner) = lock {
+                let index = &self.model.index;
+                let can_edit_selection = selected
+                    && !additive
+                    && matches!(spec, Spec::Layers | Spec::Trim(_))
+                    && index
+                        .expanded_ids(self.model.selection.layers())
+                        .iter()
+                        .any(|id| index.layer(id).is_some_and(|l| !l.effectively_locked));
+                if !can_edit_selection {
+                    let action = match &spec {
+                        Spec::Trim(_) => "trim",
+                        Spec::Ripple(_) => "ripple trim",
+                        Spec::Roll(_) => "roll",
+                        Spec::Slip => "slip",
+                        Spec::Slide => "slide",
+                        Spec::Duplicate => "duplicate",
+                        Spec::Offset => "offset",
+                        _ => "move",
+                    };
+                    self.queue.push_back(Job::SelectLayer(layer.clone(), mods));
+                    self.gesture = Gesture::Pressed(Press {
+                        origin: event.position,
+                        spec: Some(Spec::Locked {
+                            layer: owner,
+                            source: layer,
+                            trim: edge.is_some(),
+                            action,
+                        }),
+                        release: None,
+                    });
+                    self.pump(cx);
+                    return;
+                }
+            }
+            // Pro-edit modifiers choose the tool; they must not toggle selection.
+            let picking = if matches!(
+                spec,
+                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide | Spec::Duplicate
+            ) {
+                Mods::default()
+            } else {
+                mods
+            };
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), picking));
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(spec),
+                release: (selected && !additive && self.model.selection.layers().len() > 1).then(
+                    || {
+                        Job::Apply(Plan {
+                            calls: vec![
+                                SelectionCall::Layers {
+                                    ids: vec![layer],
+                                    add: false,
+                                }
+                                .user()
+                                .into(),
+                            ],
+                            ..Default::default()
+                        })
+                    },
+                ),
+            });
+            self.pump(cx);
+            return;
+        }
+        if event.click_count == 2 && self.model.mode == TimelineMode::Layers {
+            let ruler = self.tokens.metrics.ruler as f64;
+            let row_at = self.view.scroll_y + (y - ruler);
+            if y >= ruler && row_at >= 0. {
+                let mut cursor = 0.;
+                for row in self.model.rows() {
+                    let h = if matches!(row.id, RowId::Property { .. } | RowId::Effect { .. } | RowId::Path { .. }) {
+                        self.tokens.metrics.property_row as f64
+                    } else {
+                        self.tokens.metrics.track_row as f64
+                    };
+                    if row_at < cursor + h {
+                        if let RowId::Layer(id) = &row.id
+                            && let Some(l) = self.model.index.layer(id)
+                        {
+                            if l.kind == "precomp" {
+                                if self.model.index.locking_layer(id).is_some() {
+                                    let id = id.clone();
+                                    self.notify_locked(&id, "open", false, cx);
+                                    return;
+                                }
+                                if let Some(comp) = l.comp.clone() {
+                                    self.delegate.effect(HostEffect::OpenComposition(comp), cx);
+                                    return;
+                                }
+                            } else if l.kind == "group" {
+                                if self.model.index.locking_layer(id).is_some() {
+                                    let id = id.clone();
+                                    self.notify_locked(&id, "open", false, cx);
+                                    return;
+                                }
+                                self.delegate
+                                    .effect(HostEffect::FocusGroup(Some(id.clone())), cx);
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                    cursor += h;
+                }
+            }
+        }
+        self.gesture = Gesture::Marquee {
+            session: MarqueeSession::begin(&self.model, additive, false),
+            origin: event.position,
+            at: event.position,
+        };
+    }
+    /// The layer header was pressed (the JSX outline): a reorder
+    /// starts here if the pointer travels.
+    pub fn press_layer_row(
+        &mut self,
+        layer: String,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_pointer_gesture(cx);
+        self.focused_layer = Some((
+            self.model.index.doc_id,
+            self.model.index.comp_id.clone(),
+            layer.clone(),
+        ));
+        self.gesture = Gesture::LayerPress { layer, origin };
+    }
+    /// The outline captures its own pointer. Accept that stream here as well
+    /// as the native canvas listener, without ever taking a bar/key gesture.
+    pub fn move_layer_row(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            self.gesture,
+            Gesture::LayerPress { .. } | Gesture::Reorder { .. }
+        ) {
+            self.on_move(event, window, cx);
+        }
+    }
+    pub fn release_layer_row(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.gesture,
+            Gesture::LayerPress { .. } | Gesture::Reorder { .. }
+        ) {
+            self.on_up(cx);
+        }
+    }
+    #[cfg(test)]
+    pub fn row_drag_active(&self) -> bool {
+        matches!(
+            self.gesture,
+            Gesture::LayerPress { .. } | Gesture::Reorder { .. }
+        )
+    }
+    #[cfg(test)]
+    pub fn invalidate_row_frame_for_test(&mut self) {
+        self.frame = None;
+    }
+    /// v1's `layerDrop` over the scene: the target layer, before / after /
+    /// into a group (its middle half, past the disclosure), and the cue.
+    fn layer_drop(&self, position: Point<Pixels>) -> Option<LayerDrop> {
+        use pm_panel_timeline::DropMode;
+        let Gesture::Reorder { moving, .. } = &self.gesture else {
+            return None;
+        };
+        let (x, y) = self.local(position);
+        // Hit testing needs current geometry, not a cached paint frame:
+        // edge scrolling deliberately invalidates that frame before we get here.
+        let scene = self.scene.as_ref()?;
+        let at = scene.layer_row_at(self.viewport()?, &self.tokens, y)?;
+        let pm_panel_timeline::RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&at.id).ok()?
+        else {
+            return None;
+        };
+        let index = &self.model.index;
+        let layer = index.layer(&id)?;
+        if layer.effectively_locked || index.expanded_ids(moving).contains(&id) {
+            return None;
+        }
+        let m = self.tokens.metrics;
+        let inside =
+            layer.kind == "group" && (0.25..=0.75).contains(&at.fraction) && x >= 2. * m.hit as f64;
+        let mode = if inside {
+            DropMode::Inside
+        } else if at.fraction < 0.5 {
+            DropMode::Before
+        } else {
+            DropMode::After
+        };
+        Some(LayerDrop {
+            target: id,
+            mode,
+            line: if mode == DropMode::Inside {
+                at.top + at.height
+            } else if mode == DropMode::After {
+                at.end
+            } else {
+                at.top
+            },
+            left: m.inset as f64 + (at.depth + inside as usize) as f64 * m.tree_indent as f64,
+            name: layer.name.to_string_lossy(),
+        })
+    }
+    /// A reorder held past the list's top or bottom scrolls the rows.
+    fn autoscroll_rows(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let (_, y) = self.local(position);
+        let top = self.tokens.metrics.ruler as f64 + 24.;
+        let bottom = f32::from(self.bounds.size.height) as f64 - self.bar_height() - 24.;
+        let over = if y < top {
+            y - top
+        } else if y > bottom {
+            y - bottom
+        } else {
+            return;
+        };
+        let before = self.view.scroll_y;
+        self.view.scroll_y = (before + over.clamp(-48., 48.) * 0.25).max(0.);
+        self.clamp_scroll();
+        if self.view.scroll_y != before {
+            self.changed(false, cx);
+        }
+    }
+    pub fn press_switch(
+        &mut self,
+        switch: pm_panel_timeline::LayerSwitch,
+        layer: String,
+        _origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::LayerSwitch;
+        // Commit any prior switch-paint gesture that missed mouse-up instead of
+        // cancelling (reverting) it when starting the next switch click.
+        if matches!(self.gesture, Gesture::SwitchPaint { .. }) {
+            self.on_up(cx);
+        }
+        self.start_pointer_gesture(cx);
+        if let Some(p) = self.kernel.published(&self.project) {
+            Arc::make_mut(&mut self.model).sync(&p);
+        }
+        let pressed = if switch == LayerSwitch::Locked
+            && self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked && !l.locked)
+        {
+            self.model
+                .index
+                .locking_layer(&layer)
+                .map(|owner| owner.id.clone())
+                .unwrap_or_else(|| layer.clone())
+        } else {
+            layer.clone()
+        };
+        let Some(current) = self.model.switch_value(&pressed, switch) else {
+            return;
+        };
+        let target = !current;
+        let selected = self.model.selection.layers();
+        let initial_ids: Vec<String> =
+            if selected.len() > 1 && selected.iter().any(|id| id == &pressed) {
+                selected.to_vec()
+            } else {
+                vec![pressed.clone()]
+            };
+        let multi = initial_ids.len() > 1;
+        let patch = TimelineModel::switch_patch(switch, target);
+        let mut applied = BTreeSet::new();
+        applied.insert(layer.clone());
+        applied.insert(pressed.clone());
+        let mut commands = Vec::new();
+        for id in initial_ids {
+            if multi && !self.model.switch_eligible(&id, switch) {
+                continue;
+            }
+            if !multi && !self.model.switch_eligible(&id, switch) {
+                continue;
+            }
+            if multi && self.model.switch_value(&id, switch) == Some(target) {
+                applied.insert(id);
+                continue;
+            }
+            applied.insert(id.clone());
+            commands.push(
+                pm_kernel::LayerCommand::Set {
+                    layer_id: id,
+                    patch: patch.clone(),
+                }
+                .into(),
+            );
+        }
+        if commands.is_empty()
+            && switch != LayerSwitch::Locked
+            && self
+                .model
+                .index
+                .layer(&pressed)
+                .is_some_and(|l| l.effectively_locked)
+        {
+            self.notify_locked(&pressed, "change switches", false, cx);
+            return;
+        }
+        let last_row = self
+            .model
+            .rows()
+            .iter()
+            .position(|row| matches!(&row.id, RowId::Layer(id) if id.as_str() == layer.as_str()));
+        let label = match switch {
+            LayerSwitch::ThreeD => if target { "Enable 3D" } else { "Disable 3D" },
+            LayerSwitch::Visible => if target { "Show Layers" } else { "Hide Layers" },
+            LayerSwitch::Locked => if target { "Lock Layers" } else { "Unlock Layers" },
+            LayerSwitch::Solo => if target { "Solo Layers" } else { "Unsolo Layers" },
+            LayerSwitch::Shy => if target { "Shy Layers" } else { "Unshy Layers" },
+        }
+        .to_owned();
+        self.gesture = Gesture::SwitchPaint {
+            switch,
+            target,
+            applied,
+            last_row,
+        };
+        self.queue.push_back(Job::SwitchBegin { label, commands });
+        self.pump(cx);
+    }
+
+    pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>, cx: &mut Context<Self>) {
+        self.start_pointer_gesture(cx);
+        let pressed_layer = layer.clone();
+        let selected = self.model.selection.layers();
+        let ids = if selected.contains(&layer) {
+            selected.to_vec()
+        } else {
+            vec![layer]
+        };
+        let ids: Vec<_> = ids
+            .into_iter()
+            .filter(|id| {
+                self.model
+                    .index
+                    .layer(id)
+                    .is_some_and(|l| !l.effectively_locked && l.kind != "audio")
+            })
+            .collect();
+        if !ids.is_empty() {
+            self.gesture = Gesture::ParentPick {
+                ids,
+                origin,
+                at: origin,
+                target: None,
+                moved: false,
+            };
+        } else if self
+            .model
+            .index
+            .layer(&pressed_layer)
+            .is_some_and(|l| l.effectively_locked)
+        {
+            self.notify_locked(&pressed_layer, "change parent", false, cx);
+        }
+    }
+    fn parent_target(&self, ids: &[String], position: Point<Pixels>) -> Option<String> {
+        if !self.bounds.contains(&position) {
+            return None;
+        }
+        let (_, y) = self.local(position);
+        // Use the live scroll position (`self.viewport()`) rather than `self.frame` so
+        // driven-scroll offsets and in-flight frame rebuilds never miss a drop.
+        let viewport = self.viewport()?;
+        let row = self
+            .scene
+            .as_ref()?
+            .layer_row_at(viewport, &self.tokens, y)?;
+        let RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&row.id).ok()? else {
+            return None;
+        };
+        // v1 wouldCycle also rejects an ancestor group, and a group's descendants.
+        let ancestors = |start: &str| {
+            let mut result = BTreeSet::new();
+            let mut at = self
+                .model
+                .index
+                .layer(start)
+                .and_then(|l| l.group.as_deref());
+            while let Some(group) = at {
+                if !result.insert(group.to_owned()) {
+                    break;
+                }
+                at = self
+                    .model
+                    .index
+                    .layer(group)
+                    .and_then(|l| l.group.as_deref());
+            }
+            result
+        };
+        if ids.iter().any(|child| ancestors(child).contains(&id)) {
+            return None;
+        }
+        let mut candidate = Some(id.as_str());
+        let mut seen = BTreeSet::new();
+        if self.model.index.layer(&id)?.kind == "audio" {
+            return None;
+        }
+        while let Some(parent) = candidate {
+            if ids.iter().any(|child| child == parent) || !seen.insert(parent) {
+                return None;
+            }
+            if ids.iter().any(|child| {
+                self.model
+                    .index
+                    .layer(child)
+                    .is_some_and(|l| l.kind == "group")
+                    && ancestors(parent).contains(child)
+            }) {
+                return None;
+            }
+            candidate = self
+                .model
+                .index
+                .layer(parent)
+                .and_then(|l| l.parent.as_deref());
+        }
+        Some(id)
+    }
+    pub fn press_property(
+        &mut self,
+        layer: String,
+        path: String,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_pointer_gesture(cx);
+        if self
+            .model
+            .index
+            .layer(&layer)
+            .is_some_and(|l| l.effectively_locked)
+        {
+            let selected = self.model.selection.layers();
+            let has_unlocked = selected.iter().any(|id| id == &layer)
+                && selected.iter().any(|id| {
+                    self.model
+                        .index
+                        .layer(id)
+                        .is_some_and(|l| !l.effectively_locked)
+                });
+            if !has_unlocked {
+                self.notify_locked(&layer, "edit properties", false, cx);
+                return;
+            }
+        }
+        self.gesture = Gesture::Pressed(Press {
+            origin,
+            spec: Some(Spec::Property {
+                layer,
+                path,
+                motion: pm_surface::kit::NumericMotion::new(f64::from(origin.x), 0.),
+            }),
+            release: None,
+        });
+    }
+    /// A press in the graph using the single authoritative `Graph::hit_test`:
+    /// legend pills (Value/Speed, Fit), transform grips, Bézier handles,
+    /// keyframe vertices, selection box, or marquee.
+    fn press_graph(
+        &mut self,
+        event: &MouseDownEvent,
+        x: f64,
+        y: f64,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(region) = self.graph_region() else {
+            return;
+        };
+        let (Some(graph), Some(viewport)) = (self.graph.clone(), self.viewport()) else {
+            return;
+        };
+        if y < region.y + graph_render::LEGEND {
+            match graph.hit_test(viewport, region, x, y) {
+                Some(graph_render::GraphHit::LegendMode) => {
+                    let cmd = if graph.speed { "graph.value" } else { "graph.speed" };
+                    self.command(cmd, self.delegate.time(cx), None, false, cx);
+                }
+                Some(graph_render::GraphHit::LegendFit) => {
+                    self.command("graph.fit", self.delegate.time(cx), None, false, cx);
+                }
+                _ => {}
+            }
+            return;
+        }
+        let hit = graph.hit_test(viewport, region, x, y);
+        match hit {
+            Some(graph_render::GraphHit::Grip(grip)) => {
+                if let Some((t0, t1, v0, v1)) = graph.selected_span() {
+                    let b = TransformBox {
+                        t0,
+                        t1,
+                        v0,
+                        v1,
+                        grip,
+                        centred: event.modifiers.platform || event.modifiers.control,
+                    };
+                    let (anchor_time, anchor_value) = b.anchor();
+                    self.transform = Some(b);
+                    self.gesture = Gesture::Pressed(Press {
+                        origin: event.position,
+                        spec: Some(Spec::Transform {
+                            anchor_time,
+                            anchor_value,
+                        }),
+                        release: None,
+                    });
+                }
+            }
+            Some(graph_render::GraphHit::Handle { key, side, .. }) => {
+                self.graph_active_handle = Some((key.clone(), side));
+                self.cursor = CursorStyle::ClosedHand;
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::Handle { key, side }),
+                    release: None,
+                });
+                cx.notify();
+            }
+            Some(graph_render::GraphHit::Key { layer: hit_layer, key }) => {
+                let Some((layer, channel, _)) = self
+                    .model
+                    .index
+                    .key_on(&hit_layer, &key)
+                    .or_else(|| self.model.index.key(&key))
+                else {
+                    return;
+                };
+                let (layer, channel) = (layer.id.clone(), channel.path.clone());
+                let selected = self.model.selection.key_selected(&layer, &key);
+                self.queue.push_back(Job::SelectKey {
+                    layer: layer.clone(),
+                    channel: channel.clone(),
+                    key: key.clone(),
+                    additive,
+                    dragging: true,
+                });
+                if event.click_count >= 2 {
+                    self.queue.push_back(Job::Menu {
+                        context: MenuContext::Keys { ids: vec![key] },
+                        action: "keys.value".into(),
+                        time: self.delegate.time(cx),
+                    });
+                    self.pump(cx);
+                    return;
+                }
+                self.graph_axis = true;
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::GraphKeys),
+                    release: (additive && selected).then_some(Job::SelectKey {
+                        layer,
+                        channel,
+                        key,
+                        additive,
+                        dragging: false,
+                    }),
+                });
+                self.pump(cx);
+            }
+            Some(graph_render::GraphHit::SelectionBox) => {
+                self.graph_axis = true;
+                self.cursor = CursorStyle::ClosedHand;
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::GraphKeys),
+                    release: None,
+                });
+            }
+            _ => {
+                self.gesture = Gesture::Marquee {
+                    session: MarqueeSession::begin(&self.model, additive, true),
+                    origin: event.position,
+                    at: event.position,
+                };
+            }
+        }
+    }
+    /// Whether `(x, y)` hits an interactive graph element (not empty background).
+    fn graph_point_at(&self, x: f64, y: f64) -> bool {
+        let (Some(region), Some(graph), Some(viewport)) =
+            (self.graph_region(), self.graph.as_ref(), self.viewport())
+        else {
+            return false;
+        };
+        if y < region.y + graph_render::LEGEND {
+            return false;
+        }
+        matches!(
+            graph.hit_test(viewport, region, x, y),
+            Some(
+                graph_render::GraphHit::Grip(_)
+                    | graph_render::GraphHit::Handle { .. }
+                    | graph_render::GraphHit::Key { .. }
+            )
+        )
+    }
+    fn graph_ops(&self, playhead: Option<f64>) -> Option<Vec<Op>> {
+        let decor = graph_render::GraphDecor {
+            hover: self.graph_hover.clone(),
+            active_handle: self.graph_active_handle.clone(),
+        };
+        self.graph
+            .as_ref()?
+            .prepare_with_state(
+                self.viewport()?,
+                self.graph_region()?,
+                &self.tokens,
+                playhead,
+                self.marquee_selection.as_deref(),
+                Some(&decor),
+            )
+            .ok()
+    }
+    fn sample(
+        &self,
+        origin: Point<Pixels>,
+        at: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &App,
+    ) -> DragSample {
+        let delta = at - origin;
+        let radius = self.snap_radius();
+        let value_scale = self
+            .graph_area()
+            .zip(self.graph.as_ref())
+            .map_or(0., |(area, graph)| graph.value_per_point(area.height));
+        DragSample {
+            time_delta: f32::from(delta.x) as f64 / self.view.pps,
+            value_delta: -(f32::from(delta.y) as f64) * value_scale,
+            time_scale: 1.,
+            value_scale: 1.,
+            anchor: None,
+            handle_time: 0.,
+            handle_value: 0.,
+            modifiers: Self::mods(modifiers),
+            acquire_tolerance: radius,
+            release_tolerance: radius,
+            playhead: self.delegate.time(cx),
+        }
+    }
+    /// Electron strip/scrub crossing radius in seconds, at any zoom.
+    fn snap_radius(&self) -> f64 {
+        pm_panel_timeline::snap::tolerances(false, self.view.pps).1
+    }
+    fn on_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.suppress_left_up && event.pressed_button.is_some() {
+            return true;
+        }
+        let button_up = event.pressed_button.is_none()
+            || (!cfg!(test)
+                && !matches!(self.gesture, Gesture::Idle | Gesture::Pan { .. })
+                && !pm_shell::left_button_held());
+        if button_up {
+            if !matches!(self.gesture, Gesture::Idle) {
+                // Button release must commit the gesture (`on_up`), never
+                // cancel/revert it! (Escape / Right-click handle cancel.)
+                self.on_up(cx);
+            }
+            return false;
+        } else {
+            self.last_pointer_activity = std::time::Instant::now();
+        }
+        if self.audio_move(event, cx) { return true; }
+        let stale_transition = matches!(&self.gesture, Gesture::Transition(drag) if drag.document != self.model.index.doc_id || drag.revision != self.model.index.revision);
+        if stale_transition {
+            self.gesture = Gesture::Idle;
+            self.transition_selected = None;
+            self.frame = None;
+            self.rows = None;
+            self.queue.push_back(Job::Sync);
+            self.delegate.report(
+                "Timeline changed during the transition drag; try again".into(),
+                cx,
+            );
+            self.pump(cx);
+            cx.notify();
+            return true;
+        }
+        let (pointer_x, _) = self.local(event.position);
+        if let Gesture::Transition(drag) = &mut self.gesture {
+            let delta = (pointer_x - drag.origin_x) / self.view.pps;
+            if delta.abs() < 1e-6 {
+                drag.current = drag.intent;
+                self.scene = drag.scene.clone();
+                self.frame = None;
+                self.rows = None;
+                cx.notify();
+                return true;
+            }
+            let requested_duration = if drag.part == 0 {
+                drag.intent.0
+            } else {
+                (drag.duration + if drag.part < 0 { -delta } else { delta }).clamp(0.02, 600.)
+            };
+            let fraction = if drag.part == 0 {
+                -(drag.offset + delta) / drag.duration
+            } else {
+                -drag.offset / drag.duration
+            };
+            let requested_offset = -fraction.clamp(0., 1.) * requested_duration;
+            let fitted = (|| {
+                let root = self.model.index.root()?;
+                let loc = pm_kernel::model::find_layer(root, &drag.layer)?;
+                let clip = pm_kernel::model::layer_at(root, &loc)?;
+                let transition = clip.get(if drag.edge == "in" {
+                    "transitionIn"
+                } else {
+                    "transitionOut"
+                })?;
+                let peer = transition.get("paired").map(pm_model::Node::to_value);
+                if let Some(peer) = peer.as_ref().and_then(pm_model::Value::as_str) {
+                    let loc = pm_kernel::model::find_layer(root, peer)?;
+                    let peer = pm_kernel::model::layer_at(root, &loc)?;
+                    let (left, right) = if drag.edge == "in" {
+                        (peer, clip)
+                    } else {
+                        (clip, peer)
+                    };
+                    pm_kernel::commands::transition_edges::fit_nodes(
+                        root,
+                        left,
+                        right,
+                        requested_duration,
+                        requested_offset.clamp(-requested_duration, 0.),
+                    )
+                    .ok()
+                    .map(|f| (f.duration, f.offset))
+                } else {
+                    let length = clip.get("dur")?.to_value().as_f64()?;
+                    let duration = if drag.part == 0 {
+                        drag.duration
+                    } else {
+                        requested_duration.min(length)
+                    };
+                    Some((duration, if drag.edge == "in" { 0. } else { -duration }))
+                }
+            })();
+            if let Some((duration, offset)) = fitted {
+                drag.current = (
+                    requested_duration,
+                    requested_offset.clamp(-requested_duration, 0.),
+                );
+                if let Some(scene) = &drag.scene {
+                    let mut scene = (**scene).clone();
+                    scene.preview_transition(
+                        &drag.layer,
+                        &drag.edge,
+                        drag.start - drag.offset + offset,
+                        duration,
+                    );
+                    self.scene = Some(Arc::new(scene));
+                    self.frame = None;
+                    self.rows = None;
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        if let Gesture::SwitchPaint {
+            switch,
+            target,
+            last_row,
+            ..
+        } = self.gesture
+        {
+            self.autoscroll_rows(event.position, cx);
+            let (_, y) = self.local(event.position);
+            let hit = self
+                .scene
+                .as_ref()
+                .zip(self.viewport())
+                .and_then(|(scene, vp)| scene.layer_row_at(vp, &self.tokens, y))
+                .and_then(|row| match pm_panel_timeline::v4::parse_row(&row.id).ok()? {
+                    RowId::Layer(id) => Some(id),
+                    _ => None,
+                });
+            if let Some(hit_id) = hit
+                && let Some(cur_idx) = self
+                    .model
+                    .row_position(&RowId::Layer(hit_id))
+            {
+                let start = last_row.unwrap_or(cur_idx);
+                let (lo, hi) = if start <= cur_idx {
+                    (start, cur_idx)
+                } else {
+                    (cur_idx, start)
+                };
+                let mut swept = Vec::new();
+                if let Gesture::SwitchPaint {
+                    applied,
+                    last_row: prev,
+                    ..
+                } = &mut self.gesture
+                {
+                    *prev = Some(cur_idx);
+                    for row in &self.model.rows()[lo..=hi] {
+                        if let RowId::Layer(id) = &row.id
+                            && applied.insert(id.clone())
+                        {
+                            swept.push(id.clone());
+                        }
+                    }
+                }
+                let patch = TimelineModel::switch_patch(switch, target);
+                let mut commands = Vec::new();
+                for id in swept {
+                    if self.model.switch_eligible(&id, switch)
+                        && self.model.switch_value(&id, switch) != Some(target)
+                    {
+                        commands.push(
+                            pm_kernel::LayerCommand::Set {
+                                layer_id: id,
+                                patch: patch.clone(),
+                            }
+                            .into(),
+                        );
+                    }
+                }
+                if !commands.is_empty() {
+                    self.queue.push_back(Job::SwitchStep(commands));
+                    self.pump(cx);
+                }
+            }
+            return true;
+        }
+        if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
+            let target = self.parent_target(ids, event.position);
+            let delta = event.position - *origin;
+            let travel = f32::from(delta.x).hypot(f32::from(delta.y));
+            if let Gesture::ParentPick {
+                at,
+                target: next,
+                moved,
+                ..
+            } = &mut self.gesture
+            {
+                *at = event.position;
+                *next = target;
+                *moved |= travel >= self.tokens.metrics.panel_drag_threshold;
+            }
+            cx.notify();
+            return true;
+        }
+        let held = match self.gesture {
+            Gesture::Zoom => Some((Part::Zoom, 0.)),
+            Gesture::Navigate { grab } => Some((Part::Time, grab)),
+            Gesture::Rows { grab } => Some((Part::Rows, grab)),
+            _ => None,
+        };
+        if let Some((part, grab)) = held {
+            let (x, y) = self.local(event.position);
+            self.drag_bar(part, x, y, grab, cx);
+            return true;
+        }
+        if let Gesture::LayerPress { layer, origin } = &self.gesture {
+            let delta = event.position - *origin;
+            if f32::from(delta.x).hypot(f32::from(delta.y)) < 4. {
+                return false;
+            }
+            // v1: the pressed layer joins the selection it moves with, or
+            // becomes it; a locked layer (or group) is not reordered.
+            let layer = layer.clone();
+            let selected = self.model.selection.layers().to_vec();
+            // A click reaches the row's normal selection path on release.
+            // A drag selects only after its successful Move layers transaction.
+            let moving = if selected.contains(&layer) {
+                selected
+            } else {
+                vec![layer]
+            };
+            let index = &self.model.index;
+            let locked_id = index
+                .expanded_ids(&moving)
+                .into_iter()
+                .find(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
+            let locked = locked_id.is_some();
+            if !locked {
+                self.cursor = CursorStyle::ClosedHand;
+                self.outline.layer_dragged.set(true);
+            }
+            self.gesture = if locked {
+                Gesture::Idle
+            } else {
+                Gesture::Reorder {
+                    moving,
+                    at: event.position,
+                    drop: None,
+                }
+            };
+            if let Some(id) = locked_id {
+                self.notify_locked(&id, "reorder", false, cx);
+            }
+            self.pump(cx);
+            if matches!(self.gesture, Gesture::Reorder { .. }) {
+                self.row_scroll = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(16))
+                            .await;
+                        let active = this
+                            .update(cx, |s, cx| {
+                                let Gesture::Reorder { at, .. } = s.gesture else {
+                                    return false;
+                                };
+                                s.autoscroll_rows(at, cx);
+                                let next = s.layer_drop(at);
+                                if let Gesture::Reorder { drop, .. } = &mut s.gesture {
+                                    *drop = next;
+                                }
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !active {
+                            break;
+                        }
+                    }
+                }));
+            }
+        }
+        if matches!(self.gesture, Gesture::Reorder { .. }) {
+            self.autoscroll_rows(event.position, cx);
+            let next = self.layer_drop(event.position);
+            if let Gesture::Reorder { drop, at, .. } = &mut self.gesture {
+                *at = event.position;
+                *drop = next;
+            }
+            cx.notify();
+            return true;
+        }
+        let mut just_began_property = false;
+        match &mut self.gesture {
+            Gesture::Transition(_) => return true,
+            Gesture::Idle => return false,
+            Gesture::Pressed(press) => {
+                let delta = event.position - press.origin;
+                let threshold = self.tokens.metrics.drag_threshold;
+                match &mut press.spec {
+                    Some(Spec::Property { motion, .. }) => {
+                        if motion.sample(f64::from(event.position.x), f64::from(threshold), 1., 0.5,
+                            event.modifiers.shift, event.modifiers.alt, (-f64::MAX, f64::MAX)).is_none() {
+                            return true;
+                        }
+                    }
+                    Some(Spec::TextStagger { .. }) => {}
+                    _ if f32::from(delta.x).hypot(f32::from(delta.y)) < threshold => return true,
+                    _ => {}
+                }
+                let origin = press.origin;
+                let Some(spec) = press.spec.take() else {
+                    self.gesture = Gesture::Idle;
+                    return true;
+                };
+                if let Spec::Locked {
+                    layer,
+                    source,
+                    trim,
+                    action,
+                } = spec
+                {
+                    self.gesture = Gesture::Idle;
+                    self.delegate.effect(
+                        locked_strip_effect_for(&self.model.index, &layer, &source, action, trim),
+                        cx,
+                    );
+                    return true;
+                }
+                let proedit = matches!(
+                    spec,
+                    Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
+                );
+                let property_motion = match &spec {
+                    Spec::Property { motion, .. } => Some(motion.clone()),
+                    _ => None,
+                };
+                let quick_count = match spec {
+                    Spec::QuickOffsetKeys => self
+                        .model
+                        .index
+                        .layers
+                        .iter()
+                        .filter(|l| {
+                            l.channels.iter().any(|c| {
+                                c.keys
+                                    .iter()
+                                    .any(|k| self.model.selection.keys().contains(&k.id))
+                            })
+                        })
+                        .count(),
+                    Spec::Offset => self.model.selection.layers().len(),
+                    _ => 0,
+                };
+                let quick = (quick_count > 1).then_some((event.position, 0., quick_count));
+                let mut quick_limits = Vec::new();
+                if quick_count > 1 && matches!(spec, Spec::QuickOffsetKeys) {
+                    let mut rank = 0;
+                    for layer in &self.model.index.layers {
+                        let times: Vec<_> = layer
+                            .channels
+                            .iter()
+                            .flat_map(|c| &c.keys)
+                            .filter(|k| self.model.selection.keys().contains(&k.id))
+                            .map(|k| layer.from + k.time)
+                            .collect();
+                        if times.is_empty() {
+                            continue;
+                        }
+                        let factor = rank as f64 / (quick_count - 1) as f64;
+                        quick_limits.extend(times.into_iter().map(|time| (time, factor)));
+                        rank += 1;
+                    }
+                }
+                let handle = match &spec {
+                    Spec::Handle { key, side } => self
+                        .graph
+                        .as_ref()
+                        .and_then(|g| g.key_layer(key))
+                        .and_then(|on| self.model.index.key_on(on, key))
+                        .map(|(l, _, _)| (l.from, key.clone(), *side)),
+                    _ => None,
+                };
+                let time = self.delegate.time(cx);
+                // v1: a clip being moved is held (grabbing).
+                if matches!(spec, Spec::Layers | Spec::Duplicate) {
+                    self.cursor = CursorStyle::ClosedHand;
+                }
+                let mut property_infinite = crate::infinite_drag::InfiniteDrag::new();
+                if property_motion.is_some() {
+                    self.cursor = CursorStyle::ResizeLeftRight;
+                    property_infinite.engage();
+                    just_began_property = true;
+                    cx.notify();
+                }
+                let keys = matches!(spec, Spec::Keys | Spec::GraphKeys);
+                let work =
+                    matches!(spec, Spec::WorkIn | Spec::WorkOut | Spec::WorkMove).then(|| {
+                        WorkDragMapping {
+                            edge: match spec {
+                                Spec::WorkIn => Some(self.model.index.work[0]),
+                                Spec::WorkOut => Some(self.model.index.work[1]),
+                                _ => None,
+                            },
+                            pps: self.view.pps,
+                            scroll_time: self.view.scroll_time,
+                            column: self.view.layer_column,
+                        }
+                    });
+                // Local bar previews intentionally have no kernel lease. Still
+                // keep bound agent writes outside this live user interaction.
+                if self.agent_drag_touch.is_none() {
+                    let id = pm_kernel::new_id("timeline-touch");
+                    pm_mcp::coedit::touch_field(&self.project, &id, true);
+                    self.agent_drag_touch = Some(id);
+                }
+                self.queue.push_back(Job::Begin(spec, time));
+                self.drag_scene = self.scene.clone().map(|scene| (scene, self.model.index.clone()));
+                self.gesture = Gesture::Dragging {
+                    origin,
+                    proedit,
+                    keys,
+                    work,
+                    property_motion,
+                    property_infinite,
+                    quick,
+                    quick_limits,
+                    handle,
+                };
+            }
+            _ => {}
+        }
+        match &mut self.gesture {
+            Gesture::Dragging {
+                origin,
+                proedit,
+                keys,
+                work,
+                property_motion,
+                property_infinite,
+                quick,
+                quick_limits,
+                handle,
+            } => {
+                if let Some((at, total, _)) = quick {
+                    *at = event.position;
+                    *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
+                    // v1 drawQuickOffset reads the planner's bounded total.
+                    for &(time, factor) in quick_limits.iter().filter(|(_, factor)| *factor > 0.) {
+                        *total = total
+                            .max((time.min(0.) - time) / factor)
+                            .min((time.max(self.model.index.duration) - time) / factor);
+                    }
+                    cx.notify();
+                }
+                let property_delta = property_motion.as_mut().and_then(|motion| {
+                    let threshold = f64::from(self.tokens.metrics.drag_threshold);
+                    if !just_began_property
+                        && let Some(dx) = property_infinite.take_delta_x()
+                    {
+                        motion.sample_delta(
+                            dx,
+                            threshold,
+                            1.,
+                            0.5,
+                            event.modifiers.shift,
+                            event.modifiers.alt,
+                            (-f64::MAX, f64::MAX),
+                        )
+                    } else {
+                        motion.sample(
+                            f64::from(event.position.x),
+                            threshold,
+                            1.,
+                            0.5,
+                            event.modifiers.shift,
+                            event.modifiers.alt,
+                            (-f64::MAX, f64::MAX),
+                        )
+                    }
+                });
+                let (origin, proedit, keys, work, handle) =
+                    (*origin, *proedit, *keys, *work, handle.clone());
+                let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if let Some(work) = work {
+                    let (x, _) = self.local(event.position);
+                    sample.time_delta =
+                        work.delta(x, f32::from(event.position.x - origin.x) as f64);
+                }
+                (sample.acquire_tolerance, sample.release_tolerance) =
+                    pm_panel_timeline::snap::tolerances(keys, self.view.pps);
+                let (lx, ly) = self.local(event.position);
+                if let (Some((layer_from, handle_key, handle_side)), Some(area), Some(graph)) =
+                    (handle.as_ref(), self.graph_area(), self.graph.as_ref())
+                {
+                    let layer_from = *layer_from;
+                    let handle_side = *handle_side;
+                    sample.handle_time = self.time_at(lx) - layer_from;
+                    let mut raw_v = graph.value_at(area, ly);
+                    // In Speed Graph, magnetically snap within 5px of 0 px/s
+                    // (unless Cmd/Ctrl is held) so horizontal influence drags
+                    // along the bottom zero line stay razor-flat at 0.
+                    if graph.speed && !event.modifiers.platform && !event.modifiers.control {
+                        let zero_band = 5. * graph.value_per_point(area.height);
+                        if raw_v.abs() <= zero_band {
+                            raw_v = 0.;
+                        }
+                    }
+                    sample.handle_value = raw_v;
+                    // Live handle readout pill (influence % + speed/value + modifier cue).
+                    let inf_text = self
+                        .model
+                        .index
+                        .key(handle_key)
+                        .and_then(|(_, ch, k)| {
+                            let idx = ch.keys.iter().position(|x| x.id == k.id)?;
+                            let n = match handle_side {
+                                pm_kernel::commands::keyframes::EaseSide::In => {
+                                    idx.checked_sub(1).map(|i| &ch.keys[i])
+                                }
+                                _ => ch.keys.get(idx + 1),
+                            }?;
+                            let dt = (n.time - k.time).abs();
+                            (dt > 1e-6).then(|| {
+                                let reach = match handle_side {
+                                    pm_kernel::commands::keyframes::EaseSide::In => {
+                                        k.time - sample.handle_time
+                                    }
+                                    _ => sample.handle_time - k.time,
+                                };
+                                let inf = (reach.max(0.) / dt * 100.).clamp(0.1, 100.);
+                                format!("{}%", graph_render::value_text(inf, 1))
+                            })
+                        });
+                    let mut parts = Vec::new();
+                    if let Some(inf) = inf_text {
+                        parts.push(inf);
+                    }
+                    if graph.speed {
+                        let shown_spd = if event.modifiers.shift {
+                            0.
+                        } else if raw_v < 0. && graph.curves().iter().any(|c| c.id.ends_with(":position")) {
+                            0.
+                        } else {
+                            raw_v
+                        };
+                        parts.push(format!("{}/s", graph_render::value_text(shown_spd, 1)));
+                    } else if event.modifiers.shift {
+                        parts.push("Flat".into());
+                    } else {
+                        parts.push(graph_render::value_text(raw_v, 1));
+                    }
+                    if event.modifiers.alt {
+                        parts.push("Split".into());
+                    }
+                    if !parts.is_empty() {
+                        self.readout = Some((parts.join("  ·  "), lx, ly));
+                    }
+                }
+                if let Some(value) = property_delta {
+                    sample.value_delta = value;
+                }
+                if proedit {
+                    // Pro timing takes exact frames: the kernel never snaps subframes.
+                    sample.time_delta = frame(sample.time_delta, self.model.index.fps);
+                }
+                if let (Some(b), Some(area), Some(graph)) =
+                    (self.transform, self.graph_area(), self.graph.as_ref())
+                {
+                    let d = event.position - origin;
+                    let (ts, vs) = b.scales(
+                        f32::from(d.x) as f64 / self.view.pps,
+                        -(f32::from(d.y) as f64) * graph.value_per_point(area.height),
+                    );
+                    (sample.time_scale, sample.value_scale) = (ts, vs);
+                    let (east, west, north, south) = b.sides();
+                    let percent = |s: f64| format!("{}%", graph_render::value_text(s * 100., 1));
+                    let mut parts = vec![];
+                    if east || west {
+                        parts.push(format!("T {}", percent(ts)));
+                    }
+                    if north || south {
+                        parts.push(format!("V {}", percent(vs)));
+                    }
+                    self.readout = Some((parts.join("  ·  "), lx, ly));
+                } else if self.graph_axis {
+                    let d = event.position - origin;
+                    let (adx, ady) = (f32::from(d.x).abs(), f32::from(d.y).abs());
+                    let is_speed = self.graph.as_ref().is_some_and(|g| g.speed);
+                    if is_speed {
+                        // In Speed Graph, keep time moves completely isolated from
+                        // speed edits: only a deliberate vertical drag changes speed.
+                        if ady > adx * 2. && ady >= 8. {
+                            sample.time_delta = 0.;
+                        } else {
+                            sample.value_delta = 0.;
+                        }
+                    } else if event.modifiers.shift {
+                        // ⇧ snaps (above) and keeps the drag on its main axis.
+                        if adx >= ady {
+                            sample.value_delta = 0.;
+                        } else {
+                            sample.time_delta = 0.;
+                        }
+                    }
+                    self.readout = Some((self.graph_readout(&sample), lx, ly));
+                }
+                // Work-area drags extrapolate beyond the ruler in Electron.
+                // Autoscroll would move its mapping under the held handle.
+                if work.is_none() && property_delta.is_none() {
+                    self.autoscroll(event.position, cx);
+                }
+                // Keep one sample for the next display refresh. A mouse-up
+                // remains behind that sample, so the last position commits.
+                if matches!(self.queue.back(), Some(Job::Sample(_))) {
+                    self.queue.pop_back();
+                }
+                self.queue.push_back(Job::Sample(sample));
+                if !self.sample_scheduled {
+                    self.sample_scheduled = true;
+                    cx.on_next_frame(window, |s, _, cx| {
+                        s.sample_scheduled = false;
+                        s.pump(cx);
+                    });
+                    // on_next_frame already wakes the platform; pointer input is outside paint.
+                }
+            }
+            Gesture::Scrub { scrub, sought, .. } => {
+                let (x, _) = {
+                    let at = event.position - self.bounds.origin;
+                    (f32::from(at.x) as f64, 0.)
+                };
+                let time = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
+                let radius = pm_panel_timeline::snap::tolerances(false, self.view.pps).1;
+                // Only a move to another frame seeks: zoomed in, many moves
+                // land in one frame, and each seek is the viewer's command,
+                // the app's tick and the extensions' time.
+                if let Ok(HostEffect::Seek(time)) =
+                    scrub.update(time, event.modifiers.shift, radius)
+                    && frame_time(&self.model, time) != *sought
+                {
+                    *sought = frame_time(&self.model, time);
+                    self.delegate.seek(*sought, cx);
+                }
+            }
+            Gesture::Marquee { at, .. } => {
+                *at = event.position;
+                self.marquee();
+                cx.notify();
+            }
+            Gesture::Pan { at } => {
+                let delta = event.position - *at;
+                *at = event.position;
+                self.view.scroll_time -= f32::from(delta.x) as f64 / self.view.pps;
+                self.clamp_time();
+                self.changed(false, cx);
+            }
+            Gesture::Column => {
+                let m = self.tokens.metrics;
+                let width = f32::from(self.bounds.size.width) as f64;
+                let x = f32::from(event.position.x - self.bounds.origin.x) as f64;
+                // Never past the row's least width (its switches always fit);
+                // never past the panel's edge, unless the panel is narrower.
+                self.view.layer_column = x
+                    .min((width - m.hit as f64).max(1.))
+                    .max(least_layer_column(&m));
+                self.view.column_chosen = true;
+                self.changed(false, cx);
+            }
+            _ => {}
+        }
+        true
+    }
+    fn autoscroll(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let left = self.bounds.origin.x + px(self.view.layer_column as f32);
+        let right = self.bounds.origin.x + self.bounds.size.width;
+        let over = edge_overflow(f32::from(position.x), f32::from(left), f32::from(right));
+        if over == 0. {
+            return;
+        }
+        self.view.scroll_time = (self.view.scroll_time + over as f64 * 0.1 / self.view.pps)
+            .max(0.);
+        self.changed(false, cx);
+    }
+    fn marquee(&mut self) {
+        let Gesture::Marquee { session, origin, at } = &mut self.gesture else {
+            return;
+        };
+        let (a, b) = (*origin - self.bounds.origin, *at - self.bounds.origin);
+        let area = Rect::new(
+            f64::from(a.x.min(b.x)),
+            f64::from(a.y.min(b.y)),
+            f64::from((a.x - b.x).abs()),
+            f64::from((a.y - b.y).abs()),
+        );
+        let in_graph = session.in_graph();
+        if area.width.max(area.height) < f64::from(self.tokens.metrics.drag_threshold) {
+            if self.marquee_selection.take().is_some() {
+                self.frame = None;
+            }
+            // If the next sample moves out again, recompute against the original pick.
+            session.reset();
+            return;
+        }
+        let Some(viewport) = self.viewport() else {
+            return;
+        };
+        let (keys, layers) = if in_graph {
+            let keys = self.graph.as_ref().zip(self.graph_region()).map_or_else(Vec::new, |(graph, region)| {
+                graph.marquee_keys(viewport, region, area)
+            });
+            (keys, Vec::new())
+        } else {
+            let Some(scene) = &self.scene else { return };
+            let covered = scene.marquee(viewport, &self.tokens, area);
+            (covered.keys, covered.clips)
+        };
+        let Gesture::Marquee { session, .. } = &mut self.gesture else {
+            return;
+        };
+        if session.preview(keys, layers) {
+            let (layers, keys) = session.current();
+            self.marquee_selection = Some(Arc::new(SceneSelection::new(layers, keys)));
+            self.frame = None;
+        }
+    }
+    fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pointer_timeout = None;
+        self.row_scroll = None;
+        self.gesture_view = None;
+        self.drag_scene = None;
+        if self.audio_up(cx) { return true; }
+        self.transform = None;
+        self.graph_active_handle = None;
+        self.readout = None;
+        match std::mem::replace(&mut self.gesture, Gesture::Idle) {
+            Gesture::Idle => return false,
+            Gesture::Transition(drag) => {
+                self.frame = None;
+                self.rows = None;
+                if self.model.index.doc_id != drag.document
+                    || self.model.index.revision != drag.revision
+                {
+                    self.transition_selected = None;
+                    self.delegate.report(
+                        "Timeline changed during the transition drag; try again".into(),
+                        cx,
+                    );
+                } else if (drag.current.0 - drag.intent.0).abs() > 1e-6
+                    || (drag.current.1 - drag.intent.1).abs() > 1e-6
+                {
+                    self.delegate.run(
+                        "editTransition",
+                        vec![
+                            serde_json::json!(drag.layer),
+                            serde_json::json!(drag.edge),
+                            serde_json::json!(drag.current.0),
+                            serde_json::json!(drag.current.1),
+                        ],
+                        cx,
+                    );
+                }
+                self.queue.push_back(Job::Sync);
+            }
+            Gesture::SwitchPaint { .. } => {
+                self.queue.push_back(Job::SwitchFinish(true));
+            }
+            Gesture::ParentPick {
+                ids, target, moved, ..
+            } => {
+                if moved {
+                    if let Some(target) = target {
+                        self.queue.push_back(Job::Apply(self.model.parent(
+                            &ids,
+                            Some(target),
+                            self.delegate.time(cx),
+                        )));
+                    }
+                } else {
+                    self.delegate
+                        .run("timeline.parentMenu", vec![serde_json::json!(ids)], cx);
+                }
+            }
+            // A click on a name stays the row's own (it selects).
+            Gesture::LayerPress { .. } => return false,
+            // One undo step ("Move layers"), through the model's drop.
+            Gesture::Reorder { moving, drop, at } => {
+                if let Some(drop) = drop {
+                    let time = self.delegate.time(cx);
+                    match self.model.drop_layers(
+                        &moving,
+                        &drop.target,
+                        drop.mode,
+                        time,
+                        pm_kernel::Origin::Interface,
+                    ) {
+                        Ok(mut plan) => {
+                            // Keep plain Selection adjacent: the selection-history
+                            // client's TransactWithSelection fold can absorb it later.
+                            plan.calls.push(
+                                SelectionCall::Layers {
+                                    ids: moving,
+                                    add: false,
+                                }
+                                .into(),
+                            );
+                            self.queue.push_back(Job::Apply(plan));
+                        }
+                        Err(pm_panel_timeline::ModelError::Locked(id)) => {
+                            self.notify_locked(&id, "reorder", false, cx);
+                        }
+                        Err(error) => self.delegate.report(error.to_string(), cx),
+                    }
+                } else {
+                    let (_, y) = self.local(at);
+                    let target = self
+                        .scene
+                        .as_ref()
+                        .zip(self.viewport())
+                        .and_then(|(scene, vp)| scene.layer_row_at(vp, &self.tokens, y))
+                        .and_then(|row| pm_panel_timeline::v4::parse_row(&row.id).ok())
+                        .and_then(|row| match row {
+                            pm_panel_timeline::RowId::Layer(id) => Some(id),
+                            _ => None,
+                        });
+                    if let Some(target_id) = target
+                        && !self.model.index.expanded_ids(&moving).contains(&target_id)
+                        && self
+                            .model
+                            .index
+                            .layer(&target_id)
+                            .is_some_and(|l| l.effectively_locked)
+                    {
+                        self.notify_locked(&target_id, "reorder here", false, cx);
+                    }
+                }
+            }
+            Gesture::Pressed(press) => {
+                if let Some(Spec::Property { layer, path, .. }) = press.spec {
+                    // The value opens as a field: ⌘A, digits and Return typed
+                    // from now on are its, never shortcuts on the layers.
+                    pm_shell::typing::expect();
+                    self.delegate.run(
+                        "timeline.propertyEdit",
+                        vec![serde_json::json!({"type":"propertyEdit","layer":layer,"path":path})],
+                        cx,
+                    );
+                }
+                if let Some(job) = press.release {
+                    self.queue.push_back(job);
+                }
+            }
+            Gesture::Dragging { property_motion, handle, .. } => {
+                if property_motion.is_some() || handle.is_some() {
+                    self.cursor = CursorStyle::Arrow;
+                }
+                self.transform = None;
+                self.graph_axis = false;
+                self.graph_active_handle = None;
+                self.readout = None;
+                self.queue.push_back(Job::Finish(true))
+            }
+            Gesture::Scrub { .. } => self.delegate.scrubbing(false, cx),
+            Gesture::Marquee {
+                session,
+                origin,
+                at,
+            } => {
+                let delta = at - origin;
+                let moved = f32::from(delta.x).abs().max(f32::from(delta.y).abs())
+                    >= self.tokens.metrics.drag_threshold;
+                if moved {
+                    let plan = session.finish_local();
+                    if plan.calls.is_empty() {
+                        if self.marquee_selection.take().is_some() {
+                            self.frame = None;
+                        }
+                    } else {
+                        self.queue.push_back(Job::FinishMarquee {
+                            plan,
+                            composition: self.model.index.comp_id.clone(),
+                            selection: self.marquee_selection.clone(),
+                        });
+                    }
+                } else {
+                    self.queue.push_back(Job::Apply(Plan {
+                        calls: vec![SelectionCall::Clear.user().into()],
+                        ..Default::default()
+                    }));
+                }
+            }
+            Gesture::Column
+            | Gesture::Pan { .. }
+            | Gesture::Zoom
+            | Gesture::Navigate { .. }
+            | Gesture::Rows { .. } => {
+                self.lit = None;
+                self.changed(true, cx)
+            }
+        }
+        cx.notify();
+        self.pump(cx);
+        true
+    }
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(window.line_height());
+        let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
+        let (x, y) = self.local(event.position);
+        // A scroll starts no skim (the pointer did not move); a skim showing
+        // stays under the pointer as the time moves beneath it.
+        if window.is_window_active() {
+            self.pointer = Some(event.position);
+        } else {
+            self.pointer = None;
+            self.set_skimmer(None, cx);
+        }
+        // ⌘, ⌥ or Control with the wheel zooms the time (v1, as a trackpad
+        // pinch reads).
+        if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
+            if x >= self.view.layer_column {
+                self.zoom_at(x, (dy * WHEEL_ZOOM).exp(), cx);
+            }
+            return;
+        }
+        // v1: over the graph the wheel pans its values, and sideways travel
+        // still scrolls time.
+        if !event.modifiers.shift
+            && dy.abs() >= dx.abs()
+            && self.covered(x, y)
+            && matches!(self.gesture, Gesture::Idle)
+            && let (Some(g), Some(area)) = (self.graph.clone(), self.graph_area())
+        {
+            let shift = dy * g.value_per_point(area.height);
+            let (min, max) = (g.min + shift, g.max + shift);
+            self.graph_view = Some((g.view.clone(), min, max));
+            self.graph = Some(Arc::new((*g).clone().with_range(min, max)));
+            self.view.scroll_time -= dx / self.view.pps;
+            self.clamp_time();
+            self.changed_while_hot(cx);
+            return;
+        }
+        let old_time = self.view.scroll_time;
+        let old_y = self.view.scroll_y;
+        let (dx, dy) = if event.modifiers.shift {
+            // Some mice report Shift+wheel as a vertical delta. A trackpad
+            // can already give us horizontal travel.
+            (if dx == 0. { dy } else { dx }, 0.)
+        } else {
+            (dx, dy)
+        };
+        if dx != 0. {
+            self.view.scroll_time -= dx / self.view.pps;
+            self.clamp_time();
+        }
+        if dy != 0. {
+            self.view.scroll_y = (self.view.scroll_y - dy).max(0.);
+            self.clamp_scroll();
+        }
+        let moved_x = self.view.scroll_time != old_time;
+        let moved_y = self.view.scroll_y != old_y;
+        if moved_x {
+            self.sideways = true;
+        }
+        if moved_x || moved_y {
+            self.scrolled_while_hot(moved_x, moved_y, x, window, cx);
+        } else if dx != 0. {
+            self.reskim(x, cx);
+        }
+    }
+    fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_frame(cx);
+        let (x, y) = self.local(event.position);
+        let Some(frame) = self.frame.clone() else {
+            return;
+        };
+        let ruler = self.tokens.metrics.ruler as f64;
+        // v1: a property row's name offers its lane's menu (Add Keyframe at
+        // the playhead, Paste, Remove All, Separate Dimensions).
+        let mut column_track = None;
+        if x < self.view.layer_column {
+            let row = self
+                .scene
+                .as_ref()
+                .and_then(|s| s.row_at(y - ruler + self.view.scroll_y))
+                .and_then(|r| pm_panel_timeline::v4::parse_row(&r.id).ok());
+            match row {
+                Some(RowId::Layer(id)) => {
+                    self.layer_menu(id, window, cx);
+                    return;
+                }
+                Some(RowId::Property { layer_id, channel }) => {
+                    column_track = Some(MenuContext::Track {
+                        layer: layer_id,
+                        channel,
+                    });
+                }
+                _ => return,
+            }
+        }
+        let time = if column_track.is_some() {
+            self.delegate.time(cx)
+        } else {
+            self.time_at(x)
+        };
+        let at = |kind: &str, layer: Option<&str>| {
+            vec![(
+                "timeline:context",
+                serde_json::json!({"kind":kind,"layerId":layer,"time":time}),
+            )]
+        };
+        let context = if let Some(track) = column_track {
+            track
+        } else if y < ruler {
+            match frame.hit_op("marker:", x, y, 2.) {
+                Some(op) => MenuContext::Marker {
+                    id: op.id["marker:".len()..].to_owned(),
+                },
+                None => MenuContext::Ruler {
+                    time: self.time_at(x),
+                },
+            }
+        } else if self.graph_region().is_some_and(|a| y >= a.y) {
+            let key = self.graph_ops(None).and_then(|ops| {
+                ops.iter()
+                    .filter_map(|o| {
+                        let id = o.id.strip_prefix("graph-key:")?;
+                        let (cx, cy) = (
+                            o.bounds.x + o.bounds.width / 2.,
+                            o.bounds.y + o.bounds.height / 2.,
+                        );
+                        Some(((cx - x).hypot(cy - y), id.to_owned()))
+                    })
+                    .filter(|(d, _)| *d < graph_render::POINT_HIT)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, id)| id)
+            });
+            match key {
+                Some(id) => MenuContext::Keys { ids: vec![id] },
+                None => MenuContext::Graph {
+                    series: self.graph.as_ref().map_or(0, |_| 1),
+                },
+            }
+        } else if let Some((_, key)) = frame.hit_key_across(x, y, KEY_REACH, self.tokens.metrics.row as f64) {
+            MenuContext::Keys { ids: vec![key] }
+        } else if let Some((layer, edge)) = frame.hit_clip(x, y) {
+            let layer = layer.to_owned();
+            if let Some(edge) = edge {
+                self.cut_transition_menu(layer, edge, window, cx);
+                return;
+            }
+            self.layer_menu(layer, window, cx);
+            return;
+        } else {
+            let row = self
+                .scene
+                .as_ref()
+                .and_then(|s| s.row_at(y - ruler + self.view.scroll_y))
+                .and_then(|r| pm_panel_timeline::v4::parse_row(&r.id).ok());
+            match row {
+                Some(RowId::Property { layer_id, channel }) => MenuContext::Track {
+                    layer: layer_id,
+                    channel,
+                },
+                _ => MenuContext::Empty,
+            }
+        };
+        // Main's contexts: a row's kind, `layerId` only on a layer row (with
+        // `layer:context` too), `empty` on the ruler and between rows.
+        let key_row = frame
+            .hit_key_across(x, y, KEY_REACH, self.tokens.metrics.row as f64)
+            .and_then(|(row, _)| pm_panel_timeline::v4::parse_row(&row).ok());
+        let locations = match (&context, key_row) {
+            (MenuContext::Keys { .. }, Some(RowId::Layer(id))) => {
+                let mut locations = vec![("layer:context", serde_json::json!({ "layerId": id }))];
+                locations.extend(at("layer", Some(&id)));
+                locations
+            }
+            (MenuContext::Keys { .. } | MenuContext::Track { .. }, _) => at("prop", None),
+            (MenuContext::Graph { .. }, _) => at("graph", None),
+            _ => at("empty", None),
+        };
+        let items = self.model.menu(&context);
+        let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
+        let mut rows: Vec<serde_json::Value> = items
+            .iter()
+            .map(|i| match i.id {
+                pm_panel_timeline::MenuItem::SEPARATOR => serde_json::json!({"separator":true}),
+                pm_panel_timeline::MenuItem::HEADER => serde_json::json!({"header":true,"label":i.label}),
+                id => serde_json::json!({"id":id,"label":i.label,"disabled":!i.enabled,"checked":i.checked}),
+            })
+            .collect();
+        // Host commands after the timeline's own rows, by the index the menu
+        // numbers them with (submenu rows counted, in order).
+        let mut commands: std::collections::HashMap<usize, String> = Default::default();
+        let mut next = rows.len();
+        let mut host_row = |rows: &mut Vec<serde_json::Value>, row: serde_json::Value| {
+            let at = next;
+            next += 1;
+            if let Some(command) = row["command"].as_str() {
+                commands.insert(at, command.to_owned());
+            }
+            for child in row["children"].as_array().into_iter().flatten() {
+                if let Some(command) = child["command"].as_str() {
+                    commands.insert(next, command.to_owned());
+                }
+                next += 1;
+            }
+            rows.push(row);
+        };
+        let preset_index = matches!(context, MenuContext::Track { .. }).then_some(ids.len());
+        if preset_index.is_some() {
+            host_row(&mut rows, serde_json::json!({"id":"saveAnimationPreset","label":"Save Animation Preset…"}));
+        }
+        if matches!(context, MenuContext::Empty) {
+            host_row(&mut rows, empty_new_menu());
+            host_row(&mut rows, serde_json::json!({
+                "command":"pasteLayers", "label":"Paste",
+                "disabled": !crate::layer_commands::can_paste(),
+            }));
+        }
+        // What v1's extensions added under the ruler and between rows: New
+        // Composition…, Import Captions…, Add 3D Layer.
+        if matches!(context, MenuContext::Empty | MenuContext::Ruler { .. }) {
+            host_row(&mut rows, serde_json::json!({"separator":true}));
+            for row in creation_rows() {
+                host_row(&mut rows, row);
+            }
+        }
+        let weak = cx.entity().downgrade();
+        self.delegate.clone().extension_menu(
+            locations,
+            rows,
+            window,
+            cx,
+            Box::new(move |index, cx| {
+                if index.is_some() && index == preset_index && matches!(context, MenuContext::Track { .. }) {
+                    let _ = weak.update(cx, |s, cx| {
+                        s.delegate.run(
+                            "saveAnimationPreset",
+                            match &context {
+                                MenuContext::Track { layer, channel } => {
+                                    vec![serde_json::json!({"layer":layer,"properties":[channel]})]
+                                }
+                                _ => vec![],
+                            },
+                            cx,
+                        )
+                    });
+                    return;
+                }
+                if let Some(command) = index.and_then(|i| commands.get(&i)).cloned() {
+                    let _ = weak.update(cx, |s, cx| s.delegate.run(&command, vec![], cx));
+                    return;
+                }
+                let Some(action) = index.and_then(|i| ids.get(i)) else {
+                    return;
+                };
+                let _ = weak.update(cx, |s, cx| s.choose_menu(context, action, cx));
+            }),
+        );
+    }
+    /// The shared layer menu runs ordinary commands on the row's selection.
+    fn cut_transition_refusal(&self, layer: &str, edge: Edge) -> Option<String> {
+        use pm_kernel::commands::{effects::Edge as KernelEdge, transition_edges};
+        if self.model.mode != TimelineMode::Tracks {
+            return None;
+        }
+        let root = self.model.index.root()?;
+        let commands = transition_edges::plan(
+            root,
+            layer,
+            if edge == Edge::In {
+                KernelEdge::In
+            } else {
+                KernelEdge::Out
+            },
+            transition_edges::builtin_spec("crossfade"),
+            true,
+        )
+        .ok()?;
+        transition_edges::refusal_for_commands(root, &commands).map(str::to_owned)
+    }
+    pub(crate) fn transition_drop_refusal(
+        &self,
+        definition: &str,
+        position: Point<Pixels>,
+    ) -> Option<String> {
+        if !definition.starts_with("transition:") {
+            return None;
+        }
+        let (x, y) = self.local(position);
+        let (layer, _) = self.clip_at(x, y)?;
+        let clip = self.model.index.layer(&layer)?;
+        let time = self.time_at(x);
+        let edge = if (time - clip.from).abs() <= (time - clip.from - clip.duration).abs() {
+            Edge::In
+        } else {
+            Edge::Out
+        };
+        self.cut_transition_refusal(&layer, edge)
+    }
+    fn cut_transition_menu(
+        &mut self,
+        layer: String,
+        edge: Edge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use serde_json::json;
+        if !self.model.selection.contains(&layer) {
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
+            self.pump(cx);
+        }
+
+        let refusal = self.cut_transition_refusal(&layer, edge);
+        let edge = if edge == Edge::In { "in" } else { "out" };
+        let children: Vec<_> = [
+            ("crossfade", "Crossfade"),
+            ("wipe", "Wipe"),
+            ("slide", "Slide"),
+            ("zoom", "Zoom"),
+        ]
+        .into_iter()
+        .map(|(kind, label)| json!({"id":"addTransition","label":label,"args":[kind,layer,edge],"disabled":refusal.is_some(),"tooltip":refusal}))
+        .collect();
+        let mut rows = vec![
+            json!({"label":"Add Transition","children":children,"disabled":refusal.is_some(),"tooltip":refusal}),
+            json!({"id":"removeTransition","label":"Remove Transition","args":["crossfade",layer,edge]}),
+        ];
+        if refusal.is_some() {
+            rows.insert(1,json!({"id":"addEdgeFade","label":if edge == "in" {"Add Fade In"} else {"Add Fade Out"},"args":["crossfade",layer,edge]}));
+        }
+        let delegate = self.delegate.clone();
+        self.delegate.menu(
+            rows.clone(),
+            window,
+            cx,
+            Box::new(move |index, cx| {
+                if let Some((command, args)) =
+                    index.and_then(|i| crate::layer_commands::layer_menu_choice(&rows, i))
+                {
+                    delegate.run(&command, args, cx);
+                }
+            }),
+        );
+    }
+    fn layer_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.selection.contains(&id) {
+            self.queue
+                .push_back(Job::SelectLayer(id.clone(), Mods::default()));
+            self.pump(cx);
+        }
+        let delegate = self.delegate.clone();
+        let mut layers: Vec<String> = self.model.selection.layers().to_vec();
+        if !layers.contains(&id) {
+            layers = vec![id.clone()];
+        }
+        let time = self.delegate.time(cx);
+        let locations = vec![
+            (
+                "layer:context",
+                serde_json::json!({"layerId": id, "layerIds": layers}),
+            ),
+            (
+                "timeline:context",
+                serde_json::json!({"kind":"layer","layerId":id,"time":time}),
+            ),
+        ];
+        let mut rows = delegate.layer_menu_rows(&id, cx);
+        // v1's layer menu: headed by the layer's name, the creation items
+        // its extensions added after it.
+        if !rows.is_empty() {
+            if let Some(layer) = self.model.index.layer(&id) {
+                rows.insert(0, serde_json::json!({"header": true, "label": layer.name.to_string()}));
+            }
+            rows.push(serde_json::json!({"separator": true}));
+            fn as_ids(row: serde_json::Value) -> serde_json::Value {
+                let mut row = row;
+                if let Some(command) = row.get("command").cloned() {
+                    row["id"] = command;
+                }
+                if let Some(children) = row.get_mut("children").and_then(|c| c.as_array_mut()) {
+                    for child in children.iter_mut() {
+                        *child = as_ids(child.take());
+                    }
+                }
+                row
+            }
+            rows.extend(creation_rows().into_iter().map(as_ids));
+        }
+        self.delegate.clone().extension_menu(
+            locations,
+            rows.clone(),
+            window,
+            cx,
+            Box::new(move |index, cx| {
+                if let Some((command, args)) =
+                    index.and_then(|i| crate::layer_commands::layer_menu_choice(&rows, i))
+                {
+                    delegate.run(&command, args, cx);
+                }
+            }),
+        );
+    }
+    /// The skimmer follows the pointer over the time area (ruler, tracks
+    /// and clips); over the layer column or with skimming off it hides.
+    fn skim_to(&mut self, x: f64, cx: &mut Context<Self>) {
+        let width = f32::from(self.bounds.size.width) as f64;
+        let at = (self.delegate.skimming(cx) && x >= self.view.layer_column && x <= width)
+            .then(|| frame_time(&self.model, self.time_at(x)).clamp(0., self.model.index.duration));
+        self.set_skimmer(at, cx);
+    }
+    /// A skim showing moves to the time now under the pointer (`x`).
+    fn reskim(&mut self, x: f64, cx: &mut Context<Self>) {
+        if self.skim_live(cx) {
+            self.skim_to(x, cx);
+        }
+    }
+    /// Whether the skim the pointer last moved is still what the viewer
+    /// shows (see `skim_playhead`).
+    fn skim_live(&self, cx: &App) -> bool {
+        self.skimmer.is_some()
+            && self.delegate.skimmer_shown(cx)
+            && self.skim_playhead == Some(self.delegate.time(cx))
+    }
+    fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
+        if at.is_none() && self.hover_clip.take().is_some() {
+            self.invalidate_audio();
+            cx.notify();
+        }
+        if at != self.skimmer {
+            self.skimmer = at;
+            self.delegate.skim(at, cx);
+            // The ruler leaves out the label under its timecode: drawn again,
+            // but not for a wheel step (the layers' settle draws it).
+            if !self.quiet_skim {
+                cx.notify();
+            }
+        }
+    }
+    /// Development builds' review sweep: the pointer over `seconds` on the
+    /// ruler (`None`: it left), through the hover handler.
+    #[cfg(debug_assertions)]
+    pub fn review_hover(&mut self, seconds: Option<f64>, cx: &mut Context<Self>) {
+        match seconds {
+            Some(t) => {
+                let x = self.view.layer_column + (t - self.view.scroll_time) * self.view.pps;
+                let at =
+                    self.bounds.origin + point(px(x as f32), px(self.tokens.metrics.ruler / 2.));
+                self.pointer = None;
+                self.hover(at, cx);
+            }
+            None => self.set_skimmer(None, cx),
+        }
+    }
+    /// View ▸ Skimming changed, or the controller dropped the skimmer
+    /// (Space with the pointer elsewhere): hide it unless the pointer still
+    /// skims here.
+    pub fn skimming_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.delegate.skimming(cx) || !self.delegate.skimmer_shown(cx) {
+            self.set_skimmer(None, cx);
+        }
+    }
+    #[cfg(test)]
+    pub fn skimmer(&self) -> Option<f64> {
+        self.skimmer
+    }
+    /// Whether the pointer is over the time area right now (Space plays
+    /// from the skimmer only then): the window is active and the pointer's
+    /// last position in it is inside this element.
+    pub fn pointer_over(&self, window: &Window) -> bool {
+        self.skimmer.is_some()
+            && window.is_window_active()
+            && window.is_window_hovered()
+            && self.bounds.contains(&window.mouse_position())
+    }
+    /// v1's drag readout: one key reads where it is (value and time); a
+    /// group how far it travelled. The Speed Graph reads time alone.
+    fn graph_readout(&self, sample: &DragSample) -> String {
+        let fps = self.model.index.fps;
+        let speed = self.graph.as_ref().is_some_and(|g| g.speed);
+        let keys = self.model.selection.keys();
+        if let [id] = keys
+            && let Some((layer, _, key)) = self.model.index.key(id)
+        {
+            let time = layer.from + key.time + frame(sample.time_delta, fps);
+            let tc = crate::captions_panel::timecode(time, fps);
+            return match key.value.as_f64().filter(|_| !speed) {
+                Some(v) => format!(
+                    "{}  ·  {tc}",
+                    graph_render::value_text(v + sample.value_delta, 2)
+                ),
+                None => tc,
+            };
+        }
+        let d = frame(sample.time_delta, fps);
+        let time = format!(
+            "{}{}",
+            if d >= 0. { "+" } else { "\u{2212}" },
+            crate::captions_panel::timecode(d.abs(), fps)
+        );
+        if speed {
+            time
+        } else {
+            format!(
+                "\u{394} {}  ·  {time}",
+                graph_render::value_text(sample.value_delta, 2)
+            )
+        }
+    }
+    /// Whether the graph covers `(x, y)` (surface points): the layer bars
+    /// under it are hidden there, so nothing may hover, trim or press them.
+    fn covered(&self, x: f64, y: f64) -> bool {
+        self.graph_region()
+            .is_some_and(|r| x >= r.x && y >= r.y && y <= r.y + r.height)
+    }
+    /// The divider keeps its line and name side while a visible strip edge
+    /// owns its trim grip to the right.
+    fn column_splitter_at(&self, x: f64, y: f64) -> bool {
+        let m = self.tokens.metrics;
+        let offset = x - self.view.layer_column;
+        offset.abs() <= m.hit as f64 / 4.
+            && y >= m.ruler as f64
+            && (offset <= 0.
+                || self.clip_at(x, y).is_none_or(|(_, edge)| edge.is_none()))
+    }
+
+    /// The layer bar at `(x, y)` and the edge under it, where a bar shows.
+    fn clip_at(&self, x: f64, y: f64) -> Option<(String, Option<Edge>)> {
+        if self.covered(x, y) {
+            return None;
+        }
+        self.frame
+            .as_ref()
+            .and_then(|f| f.hit_clip(x, y))
+            .map(|(id, edge)| (id.to_owned(), edge))
+    }
+    /// A razor targets only the visible bar, without a trim handle's reach
+    /// into the neighbouring empty space.
+    fn split_clip_at(&self, x: f64, y: f64) -> Option<String> {
+        let (id, _) = self.clip_at(x, y)?;
+        self.frame.as_ref()?.ops.iter()
+            .find(|op| {
+                let b = op.bounds;
+                op.id.strip_prefix("clip:") == Some(id.as_str())
+                    && x >= b.x && x < b.x + b.width
+                    && y >= b.y && y < b.y + b.height
+            })
+            .map(|_| id)
+    }
+    /// The layer bar hovered now (tests).
+    pub fn hovered_clip(&self) -> Option<String> {
+        self.hover_clip.as_ref().map(|(id, _)| id.clone())
+    }
+    /// The pointer over the tracks: hover, cursor and tooltip follow it; the
+    /// skimmer follows it once it shows, and starts only when the pointer
+    /// moved from where the timeline last saw it (a scroll under a resting
+    /// pointer starts none: the viewer keeps the playhead's picture). The
+    /// first sight of it, when it comes back over the tracks (a sheet that
+    /// covered them closes over a resting pointer), only notes where it is.
+    fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let moved = self.pointer.is_some_and(|seen| seen != position);
+        if self.pointer != Some(position) { self.split_preview_hidden = false; }
+        self.pointer = Some(position);
+        let (x, y) = self.local(position);
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split {
+            self.set_skimmer(None, cx);
+            cx.notify();
+        } else if moved {
+            self.skim_to(x, cx);
+            self.skim_playhead = Some(self.delegate.time(cx));
+        } else if self.skim_live(cx) {
+            self.skim_to(x, cx);
+        }
+        self.ensure_frame(cx);
+        let clip = self.clip_at(x, y);
+        let hovered = clip.as_ref().map(|(id, _)| (id.clone(), x));
+        // The grip only changes side at the strip's middle: repaint when the
+        // clip or the side changes, not on every pointer move.
+        let side = |h: &Option<(String, f64)>| {
+            h.as_ref().map(|(id, x)| {
+                let mid = self.frame.as_ref().and_then(|f| {
+                    f.ops
+                        .iter()
+                        .find(|o| o.id.strip_prefix("clip:") == Some(id))
+                        .map(|o| o.bounds.x + o.bounds.width / 2.)
+                });
+                (id.clone(), mid.is_some_and(|mid| *x < mid))
+            })
+        };
+        let hover_clip_changed = hovered.as_ref().map(|(id, _)| id)
+            != self.hover_clip.as_ref().map(|(id, _)| id);
+        if side(&hovered) != side(&self.hover_clip) {
+            cx.notify();
+        }
+        self.hover_clip = hovered;
+        let next_graph_hover = self
+            .graph_region()
+            .filter(|r| x >= self.view.layer_column && y >= r.y)
+            .and_then(|r| {
+                self.graph
+                    .as_ref()
+                    .zip(self.viewport())
+                    .and_then(|(g, v)| g.hit_test(v, r, x, y))
+            });
+        if next_graph_hover != self.graph_hover {
+            self.graph_hover = next_graph_hover;
+            cx.notify();
+        }
+        let m = self.tokens.metrics;
+        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.split_clip_at(x, y).is_some()
+            && (x - self.view.layer_column).abs() > m.hit as f64 / 4. {
+            CursorStyle::Split
+        } else if let Some(cursor) = self.graph_cursor(x, y) {
+            cursor
+        } else if self.column_splitter_at(x, y) {
+            CursorStyle::ResizeColumn
+        } else if self.work_handle_at(x, y).is_some() {
+            CursorStyle::ResizeLeftRight
+        } else if x >= self.view.layer_column
+            && y <= WORK_BAR_STRIP
+            && self.frame.as_ref().is_some_and(|f| f.hit_op("work-area", x, y, 0.).is_some())
+        {
+            // v1: the work area's bar moves it; a hand to grab it by.
+            CursorStyle::OpenHand
+        } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
+            CursorStyle::ResizeLeftRight
+        } else if self.audio_hit(x, y).is_some_and(|op| op.id.starts_with("audio-level:")) {
+            // The level line moves up and down.
+            CursorStyle::ResizeUpDown
+        } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
+            // The owner's rule: no pointing hand; a key keeps the arrow.
+            CursorStyle::Arrow
+        } else if let Some(capsule) = self
+            .frame
+            .as_ref()
+            .and_then(|f| f.transition_at(x, y))
+            && capsule.detail["layer"].as_str().is_some_and(|id| {
+                self.model
+                    .index
+                    .layer(id)
+                    .is_some_and(|l| !l.effectively_locked)
+            })
+        {
+            if x - capsule.bounds.x <= 5. || capsule.bounds.x + capsule.bounds.width - x <= 5. {
+                CursorStyle::ResizeLeftRight
+            } else {
+                CursorStyle::OpenHand
+            }
+        } else if let Some((id, Some(_))) = &clip
+                // A locked layer's ends offer no trim.
+                && !self.frame.as_ref().is_some_and(|f| {
+                    f.ops.iter().any(|o| {
+                        o.id.strip_prefix("clip:") == Some(id.as_str()) && o.detail["cursor"] == "notAllowed"
+                    })
+                })
+        {
+            CursorStyle::ResizeLeftRight
+        } else if clip.as_ref().is_some_and(|(id, _)| {
+            !self
+                .model
+                .index
+                .layer(id)
+                .is_some_and(|l| l.effectively_locked)
+        }) {
+            CursorStyle::OpenHand
+        } else {
+            CursorStyle::Arrow
+        };
+        if cursor != self.cursor {
+            self.cursor = cursor;
+            cx.notify();
+        }
+        let text = self
+            .marker_tip(x, y)
+            .or_else(|| self.frame.as_ref().and_then(|f| f.tooltip_at(x, y)));
+        let shown = self.tip.as_ref().map(|(t, _)| t.to_string());
+        if text != shown {
+            if self.tip.take().is_some() {
+                cx.notify();
+            }
+            self.tip_wait = text.map(|text| {
+                let delay = std::time::Duration::from_secs_f64(self.tokens.motion.tooltip_delay);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.tip = Some((text.into(), (x, y)));
+                        cx.notify();
+                    });
+                })
+            });
+        }
+        if hover_clip_changed {
+            self.invalidate_audio();
+        }
+    }
+    /// v1's graph cursors (timeline.ts onMove), in the order a press takes
+    /// them (`press_graph`): a transform grip's resize, a crosshair on a
+    /// handle, an open hand inside the selection's box (it moves the keys),
+    /// the arrow on a point (no pointing hand), a crosshair elsewhere (a
+    /// marquee). `None` outside the graph.
+    fn graph_cursor(&self, x: f64, y: f64) -> Option<CursorStyle> {
+        let region = self.graph_region()?;
+        if y < region.y || x < self.view.layer_column {
+            return None;
+        }
+        let graph = self.graph.as_ref()?;
+        let viewport = self.viewport()?;
+        let hit = graph.hit_test(viewport, region, x, y);
+        if y < region.y + graph_render::LEGEND {
+            return Some(match hit {
+                Some(graph_render::GraphHit::LegendMode | graph_render::GraphHit::LegendFit) => {
+                    CursorStyle::PointingHand
+                }
+                _ => CursorStyle::Arrow,
+            });
+        }
+        Some(match hit {
+            Some(graph_render::GraphHit::Grip(grip)) => match graph_render::GRIPS[grip] {
+                "n" | "s" => CursorStyle::ResizeUpDown,
+                "e" | "w" => CursorStyle::ResizeLeftRight,
+                "nw" | "se" => CursorStyle::ResizeUpLeftDownRight,
+                _ => CursorStyle::ResizeUpRightDownLeft,
+            },
+            Some(graph_render::GraphHit::Handle { .. } | graph_render::GraphHit::SelectionBox) => {
+                CursorStyle::OpenHand
+            }
+            Some(graph_render::GraphHit::Key { .. }) => CursorStyle::Arrow,
+            _ => CursorStyle::Crosshair,
+        })
+    }
+    /// v1's marker tooltip (timeline.ts onMove): its name, its time and how
+    /// to remove it, over a marker in the ruler.
+    fn marker_tip(&self, x: f64, y: f64) -> Option<String> {
+        if y >= self.tokens.metrics.ruler as f64 {
+            return None;
+        }
+        let op = self.frame.as_ref()?.hit_op("marker:", x, y, 2.)?;
+        let id = &op.id["marker:".len()..];
+        let marker = self.model.index.markers.iter().find(|m| m.id.as_deref() == Some(id))?;
+        let name = marker.name.to_string();
+        let name = if name.trim().is_empty() { "Marker".to_owned() } else { name };
+        Some(format!(
+            "{name} · {} · Right-click to remove",
+            crate::captions_panel::timecode(marker.time, self.model.index.fps)
+        ))
+    }
+    #[cfg(test)]
+    pub fn marker_tip_for_test(&self, at: Point<Pixels>) -> Option<String> {
+        let (x, y) = self.local(at);
+        self.marker_tip(x, y)
+    }
+    #[cfg(test)]
+    pub fn graph_ops_for_test(&self) -> Vec<Op> {
+        self.graph_ops(None).unwrap_or_default()
+    }
+    /// Points a second, the time at the time area's left edge, and the
+    /// time area's width less the room Fit Selected Curves leaves.
+    #[cfg(test)]
+    pub fn time_view(&self) -> (f64, f64, f64) {
+        (
+            self.view.pps,
+            self.view.scroll_time,
+            f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 48.,
+        )
+    }
+    #[cfg(test)]
+    pub fn graph(&self) -> Option<Arc<Graph>> {
+        self.graph.clone()
+    }
+    /// The shell says whether the timeline panel holds the keyboard; the
+    /// selected rows' tint follows it (PM-367).
+    /// True when it changed.
+    pub fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) -> bool {
+        if self.focused == focused {
+            return false;
+        }
+        self.focused = focused;
+        if let Some(scene) = self.scene.take() {
+            let scene = self.with_focus(scene);
+            self.outline.set_scene(Some(scene.clone()));
+            self.scene = Some(scene);
+            self.frame = None;
+            cx.notify();
+        }
+        true
+    }
+    pub(crate) fn set_transition_selection(
+        &mut self,
+        target: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.transition_selected = target;
+        if let Some(scene) = self.scene.take() {
+            self.scene = Some(self.with_focus(scene));
+        }
+        self.frame = None;
+        cx.notify();
+    }
+    fn with_focus(&self, scene: Arc<Scene>) -> Arc<Scene> {
+        let mut next = Scene::clone(&scene);
+        next.focused = self.focused;
+        next.select_transition(
+            self.transition_selected
+                .as_ref()
+                .filter(|(layer, _)| self.model.selection.layers().contains(layer))
+                .map(|(layer, edge)| (layer.as_str(), edge.as_str())),
+        );
+        Arc::new(next)
+    }
+    #[cfg(test)]
+    pub fn scene(&self) -> Option<Arc<Scene>> {
+        self.scene.clone()
+    }
+    #[cfg(test)]
+    pub fn frame(&self) -> Option<Arc<Frame>> {
+        self.frame.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn painted_rows_for_test(&self) -> Option<&Arc<Frame>> {
+        self.rows.as_ref().map(|(_, rows, _)| rows)
+    }
+    #[cfg(test)]
+    pub(crate) fn audio_query_builds_for_test(&self) -> usize {
+        self.audio.query_builds.get()
+    }
+    #[cfg(test)]
+    pub fn idle(&self) -> bool {
+        !self.busy && self.queue.is_empty() && self.client.is_some()
+    }
+    #[cfg(test)]
+    pub(crate) fn outline_settled(&self) -> bool {
+        self.pending_scene.is_none()
+    }
+    #[cfg(test)]
+    pub(crate) fn gesture_state(&self) -> String {
+        match &self.gesture {
+            Gesture::Idle => "idle".into(),
+            Gesture::Column => "column divider".into(),
+            Gesture::Marquee { .. } => "marquee".into(),
+            Gesture::Scrub { .. } => "scrub".into(),
+            Gesture::Pressed(press) => format!("pressed {:?}", press.spec),
+            Gesture::Dragging { .. } => "dragging".into(),
+            _ => "other gesture".into(),
+        }
+    }
+    #[cfg(test)]
+    pub fn pps(&self) -> f64 {
+        self.view.pps
+    }
+    #[cfg(test)]
+    pub fn scroll_time(&self) -> f64 {
+        self.view.scroll_time
+    }
+    #[cfg(test)]
+    pub fn scroll_y(&self) -> f64 {
+        self.view.scroll_y
+    }
+    #[cfg(test)]
+    pub fn layer_column(&self) -> f64 {
+        self.view.layer_column
+    }
+    #[cfg(test)]
+    /// The pointer the timeline shows (tests).
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor
+    }
+    pub(super) fn notify_locked(
+        &self,
+        layer_id: &str,
+        action: &str,
+        trim: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.delegate
+            .effect(locked_strip_effect(&self.model.index, layer_id, action, trim), cx);
+    }
+    pub fn model(&self) -> Arc<TimelineModel> {
+        self.model.clone()
+    }
+    /// Whether any layer currently exposes expanded property rows whose
+    /// evaluated readouts and at-playhead keyframe state depend on playhead time.
+    pub fn has_expanded_properties(&self) -> bool {
+        self.model
+            .rows()
+            .iter()
+            .any(|row| matches!(row.id, pm_panel_timeline::RowId::Property { .. }))
+    }
+    /// Shared flag kept in sync with [`Self::has_expanded_properties`] so
+    /// re-entrant callers (such as ruler scrub seeks) can read it without
+    /// borrowing this entity.
+    pub fn expanded_properties_flag(&self) -> Rc<std::cell::Cell<bool>> {
+        self.expanded_properties.clone()
+    }
+}
+/// The graph to show after a rebuild. A key or handle drag maps the pointer
+/// through the value range, so from the press until release the range on
+/// screen is held: selecting the key, its handles appearing and every step
+/// of the drag leave the curve under the pointer. Between gestures the range
+/// on screen is also kept while the rebuilt curve still fits it well
+/// (`Graph::fits_in`), so a release, an undo or a nudge doesn't rescale the
+/// graph; a curve that leaves the range, or shrinks to under half of it, or
+/// another property or graph mode, refits.
+fn steady_graph(
+    gesture: &Gesture,
+    pending_graph_job: bool,
+    shown: Option<&Graph>,
+    next: Option<Arc<Graph>>,
+) -> Option<Arc<Graph>> {
+    let (Some(shown), Some(next)) = (shown, next.as_deref()) else {
+        return next;
+    };
+    if shown.view != next.view {
+        return Some(Arc::new(next.clone()));
+    }
+    let held = pending_graph_job
+        || matches!(
+            gesture,
+            Gesture::Dragging { .. }
+                | Gesture::Pressed(Press {
+                    spec: Some(Spec::GraphKeys | Spec::Handle { .. } | Spec::Transform { .. }),
+                    ..
+                })
+        );
+    if held || next.fits_in(shown.min, shown.max) {
+        Some(Arc::new(next.clone().with_range(shown.min, shown.max)))
+    } else {
+        Some(Arc::new(next.clone()))
+    }
+}
+fn locked_strip_effect(
+    index: &pm_panel_timeline::TimelineIndex,
+    layer_id: &str,
+    action: &str,
+    trim: bool,
+) -> HostEffect {
+    let owner = index
+        .locking_layer(layer_id)
+        .map(|o| o.id.clone())
+        .unwrap_or_else(|| layer_id.to_owned());
+    locked_strip_effect_for(index, &owner, layer_id, action, trim)
+}
+
+fn locked_strip_effect_for(
+    index: &pm_panel_timeline::TimelineIndex,
+    owner: &str,
+    source: &str,
+    action: &str,
+    trim: bool,
+) -> HostEffect {
+    let message = match (index.layer(source), index.layer(owner)) {
+        (Some(layer), Some(group)) if group.id != layer.id => format!(
+            "“{}” is inside locked group “{}”",
+            layer.name.to_string_lossy(),
+            group.name.to_string_lossy()
+        ),
+        (Some(layer), _) => format!("“{}” is locked — can't {action}", layer.name.to_string_lossy()),
+        _ => format!("That layer is locked — can't {action}"),
+    };
+    HostEffect::LockedStrip {
+        layer: owner.to_owned(),
+        document: index.doc_id,
+        composition: index.comp_id.clone(),
+        trim,
+        message: Some(message),
+    }
+}
+
+fn frame_time(model: &TimelineModel, time: f64) -> f64 {
+    frame(time, model.index.fps)
+}
+async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, String> {
+    let text = |e: pm_panel_timeline::ClientError| e.to_string();
+    match job {
+        Job::Sync | Job::RebuildPresentation => {
+            client.sync().map_err(text)?;
+            client.adopt_view().map_err(text)?;
+            Ok(vec![])
+        }
+        Job::Disclosure(layer) => {
+            client.sync().map_err(text)?;
+            client
+                .model
+                .toggle_disclosure(&layer)
+                .map_err(|error| error.to_string())?;
+            client.publish_view_if_changed().await.map_err(text)?;
+            Ok(vec![])
+        }
+        Job::SelectAll(focused) => {
+            client.sync().map_err(text)?;
+            client.adopt_view().map_err(text)?;
+            let focused = focused
+                .as_ref()
+                .filter(|(doc, comp, _)| {
+                    *doc == client.model.index.doc_id && comp == &client.model.index.comp_id
+                })
+                .map(|(_, _, layer)| layer.as_str());
+            let select = client.model.select_all(focused);
+            client
+                .dispatch(Plan {
+                    calls: vec![select],
+                    ..Default::default()
+                })
+                .await
+                .map_err(text)
+        }
+        Job::SelectLayer(id, mods) => {
+            let calls = if client.model.mode == TimelineMode::Tracks {
+                client.model.select_track_layer(&id, mods).map(|r| r.0)
+            } else {
+                client.model.select_layer(&id, mods)
+            }
+            .map_err(|e| e.to_string())?;
+            client
+                .dispatch(Plan {
+                    calls,
+                    ..Default::default()
+                })
+                .await
+                .map_err(text)
+        }
+        Job::PaletteSelectLayer { layer, document, composition } => {
+            client.sync().map_err(text)?;
+            client.adopt_view().map_err(text)?;
+            if client.model.index.doc_id != document || client.model.index.comp_id != composition {
+                return Ok(vec![]);
+            }
+            if client.model.index.layer(&layer).is_none() {
+                return Err("Unknown layer".into());
+            }
+            let selection = SelectionCall::Layers { ids: vec![layer.clone()], add: false };
+            let effects = client.dispatch(Plan {
+                calls: vec![SelectionCall::User(Box::new(selection)).into()],
+                expected_document: Some(document),
+                ..Default::default()
+            }).await.map_err(text)?;
+            if client.model.index.comp_id == composition {
+                client.model.reveal_layer(layer);
+                client.publish_view_if_changed().await.map_err(text)?;
+            }
+            Ok(effects)
+        }
+        Job::SelectKey {
+            layer,
+            channel,
+            key,
+            additive,
+            dragging,
+        } => {
+            let calls = client
+                .model
+                .select_keys(&layer, &channel, &[key], additive, dragging)
+                .map_err(|e| e.to_string())?;
+            client
+                .dispatch(Plan {
+                    calls,
+                    ..Default::default()
+                })
+                .await
+                .map_err(text)
+        }
+        Job::Begin(spec, time) => {
+            let drag_action = match &spec {
+                Spec::Trim(_) => "trim",
+                Spec::Ripple(_) => "ripple trim",
+                Spec::Roll(_) => "roll",
+                Spec::Slip => "slip",
+                Spec::Slide => "slide",
+                Spec::Duplicate => "duplicate",
+                Spec::Offset => "offset",
+                Spec::Keys
+                | Spec::GraphKeys
+                | Spec::StretchKeys { .. }
+                | Spec::QuickOffsetKeys
+                | Spec::Transform { .. }
+                | Spec::Handle { .. } => "edit keyframes",
+                Spec::Property { .. } => "edit properties",
+                Spec::TextStagger { .. } => "edit text stagger",
+                _ => "move",
+            };
+            let is_trim = matches!(&spec, Spec::Trim(_) | Spec::Ripple(_));
+            let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
+            let result = if client.is_gain_drag(&kind)
+                || kind.is_strip_trim()
+                || matches!(&kind, DragKind::Keys { .. })
+                || (matches!(&kind, DragKind::Layers { .. })
+                    && client.model.mode == TimelineMode::Layers
+                    && client.model.graph_display == GraphDisplay::DopeSheet)
+            {
+                client.begin_preview_drag(kind)
+            } else {
+                client.begin_drag(kind).await
+            };
+            if let Err(pm_panel_timeline::ClientError::Model(
+                pm_panel_timeline::ModelError::Locked(layer_id),
+            )) = result
+            {
+                return Ok(vec![locked_strip_effect(
+                    &client.model.index,
+                    &layer_id,
+                    drag_action,
+                    is_trim,
+                )]);
+            }
+            result.map_err(text)?;
+            Ok(client
+                .active_drag()
+                .and_then(|d| d.locked_note())
+                .into_iter()
+                .collect())
+        }
+        Job::Sample(sample) => {
+            if client.active_drag().is_some() {
+                let result = client.drag(sample).await;
+                if let Err(pm_panel_timeline::ClientError::Model(
+                    pm_panel_timeline::ModelError::Locked(layer_id),
+                )) = result
+                {
+                    return Ok(vec![locked_strip_effect(
+                        &client.model.index,
+                        &layer_id,
+                        "edit",
+                        false,
+                    )]);
+                }
+                result.map_err(text)?;
+            }
+            Ok(vec![])
+        }
+        Job::Finish(commit) => {
+            if let Some(drag) = client.active_drag() {
+                let copies = drag.copies().map(<[String]>::to_vec);
+                // An Option-drag leaves its copies selected.
+                if let (true, Some(ids)) = (commit, copies) {
+                    client
+                        .dispatch(Plan {
+                            calls: vec![SelectionCall::Layers { ids, add: false }.into()],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(text)?;
+                }
+                client.finish_drag(commit).await.map_err(text)?;
+            }
+            Ok(vec![])
+        }
+        Job::SwitchBegin { label, commands } => {
+            client
+                .begin_switch_paint(label, commands)
+                .await
+                .map_err(text)?;
+            Ok(vec![])
+        }
+        Job::SwitchStep(commands) => {
+            client.step_switch_paint(commands).await.map_err(text)?;
+            Ok(vec![])
+        }
+        Job::SwitchFinish(commit) => {
+            client.finish_switch_paint(commit).await.map_err(text)?;
+            Ok(vec![])
+        }
+        Job::FinishMarquee { plan, composition, .. } => {
+            client.sync().map_err(text)?;
+            if client.model.index.comp_id != composition {
+                return Ok(vec![]);
+            }
+            client.dispatch(plan).await.map_err(text)
+        }
+        Job::Apply(plan) | Job::CommitGain(plan, _) => client.dispatch(plan).await.map_err(text),
+        Job::PasteKeys(tracks, time) => {
+            let mut effects = vec![];
+            for track in tracks {
+                let plan = client
+                    .model
+                    .paste_keys(&track.layer_id, &track.channel, time, &track.keys)
+                    .map_err(|e| e.to_string())?;
+                effects.extend(client.dispatch(plan).await.map_err(text)?);
+            }
+            Ok(effects)
+        }
+        Job::Command {
+            id,
+            time,
+            frames,
+            shift,
+        } => {
+            let plan = client
+                .model
+                .command(
+                    &id,
+                    time,
+                    frames,
+                    shift,
+                    millis(),
+                    &PropertyFacts::default(),
+                )
+                .map_err(|e| e.to_string())?;
+            let effects = client.dispatch(plan).await.map_err(text)?;
+            client.publish_view_if_changed().await.map_err(text)?;
+            Ok(effects)
+        }
+        Job::Menu {
+            context,
+            action,
+            time,
+        } => {
+            let plan = client
+                .model
+                .menu_action(&context, &action, time)
+                .map_err(|e| e.to_string())?;
+            let effects = client.dispatch(plan).await.map_err(text)?;
+            // The menu and the Layers | Tracks control drive one state: a
+            // mode chosen here reaches the header and the layer column.
+            client.publish_view_if_changed().await.map_err(text)?;
+            Ok(effects)
+        }
+        Job::Reveal { layer, keys } => {
+            client
+                .model
+                .reveal_paths(&layer, &keys)
+                .map_err(|e| e.to_string())?;
+            client.publish_view().await.map_err(text)?;
+            Ok(vec![])
+        }
+        Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        } => {
+            let plan = client
+                .model
+                .show_graph(&layer, &channel, &keys)
+                .map_err(|e| e.to_string())?;
+            let effects = client.dispatch(plan).await.map_err(text)?;
+            client.publish_view().await.map_err(text)?;
+            Ok(effects)
+        }
+        Job::SelectTransition(transition) => {
+            client.model.transition = transition;
+            Ok(vec![])
+        }
+        Job::FocusGraph { layer, channel } => {
+            client.model.graph_focus = Some((layer, channel));
+            Ok(vec![])
+        }
+        Job::Persist(view) => {
+            use pm_kernel::state::{StateOp, StateTransaction};
+            let state = client.kernel.state();
+            let mut ui = state.ui.get(&client.project).cloned().unwrap_or_default();
+            let mut timeline = ui.timeline.as_object().cloned().unwrap_or_default();
+            timeline.insert("nativePps", pm_model::Value::from(view.pps));
+            timeline.insert("nativeScrollTime", pm_model::Value::from(view.scroll_time));
+            timeline.insert("nativeScrollY", pm_model::Value::from(view.scroll_y));
+            if view.column_chosen {
+                timeline.insert(
+                    "nativeLayerColumn",
+                    pm_model::Value::from(view.layer_column),
+                );
+            } else {
+                timeline.remove("nativeLayerColumn");
+            }
+            ui.timeline = pm_model::Value::Object(timeline);
+            let pending = client.kernel.state_transaction(StateTransaction {
+                ops: vec![StateOp::Ui {
+                    project: client.project.clone(),
+                    next: ui,
+                }],
+                ..Default::default()
+            });
+            pending
+                .await
+                .ok_or("Kernel closed")?
+                .map_err(|e| e.to_string())?;
+            Ok(vec![])
+        }
+    }
+}
+fn millis() -> u64 {
+    static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    CLOCK
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, String> {
+    use pm_kernel::commands::pro_edit::{Edge as ProEdge, ProEditCommand as Pro, TrackTarget};
+    let ids = model.selection.layers().to_vec();
+    let keys = model.expand_scale_keys(model.selection.keys());
+    let primary = || ids.first().cloned().ok_or("Select a clip first");
+    let pro_edge = |edge: Edge| match edge {
+        Edge::In => ProEdge::In,
+        Edge::Out => ProEdge::Out,
+    };
+    let lanes = std::cell::OnceCell::new();
+    let neighbours = |id: &str| {
+        let lanes =
+            lanes.get_or_init(|| pm_panel_timeline::tracks::layout(&model.index, &model.reveal));
+        let item = lanes.item(id).ok_or("Clip is not on a track")?;
+        let same = |other: &&pm_panel_timeline::tracks::Item| {
+            other.id != id && other.area == item.area && other.lane == item.lane
+        };
+        let before = lanes
+            .items
+            .iter()
+            .filter(same)
+            .find(|o| (o.from + o.duration - item.from).abs() < 1e-6)
+            .map(|o| o.id.clone());
+        let after = lanes
+            .items
+            .iter()
+            .filter(same)
+            .find(|o| (item.from + item.duration - o.from).abs() < 1e-6)
+            .map(|o| o.id.clone());
+        Ok::<_, &str>((before, after))
+    };
+    // In Layers mode every layer is its own row: the tools run the
+    // layer-level edits (all layer kinds; what overlaps stays), as the keys do.
+    let layered = model.mode == TimelineMode::Layers;
+    let edge_time = |id: &str, edge: Edge| {
+        model.index.layer(id).map(|l| match edge {
+            Edge::In => l.from,
+            Edge::Out => l.from + l.duration,
+        })
+    };
+    let timing_edge = |edge: Edge| match edge {
+        Edge::In => pm_kernel::commands::timing::TimeEdge::In,
+        Edge::Out => pm_kernel::commands::timing::TimeEdge::Out,
+    };
+    use pm_kernel::TimingCommand as Timing;
+    // Roll and slide run the layer-level edits in both modes (any clip kind,
+    // neighbours on its own track; in Tracks the shown lanes are pinned
+    // first), as their keys do: the media-only edits refused a still or a
+    // clip with no neighbour on one side, so the drag did nothing.
+    if matches!(spec, Spec::Roll(_) | Spec::Slide) || layered && matches!(spec, Spec::Ripple(_)) {
+        let id = primary()?;
+        return Ok(DragKind::Timing(match spec {
+            Spec::Ripple(edge) => Timing::RippleTrim {
+                layer_ids: vec![id.clone()],
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            Spec::Roll(edge) => Timing::Roll {
+                layer_id: id.clone(),
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            _ => Timing::Slide {
+                layer_id: id,
+                delta: 0.,
+            },
+        }));
+    }
+    Ok(match spec {
+        Spec::Locked { .. } => return Err("That layer is locked.".into()),
+        Spec::Layers => DragKind::Layers { ids },
+        Spec::Duplicate => {
+            // A selected group brings its members: only the tops are copied.
+            let inside = |id: &str| {
+                let mut at = model.index.layer(id).and_then(|l| l.group.clone());
+                for _ in 0..256 {
+                    let Some(group) = at else { return false };
+                    if ids.contains(&group) {
+                        return true;
+                    }
+                    at = model.index.layer(&group).and_then(|l| l.group.clone());
+                }
+                false
+            };
+            let tops: Vec<String> = ids.iter().filter(|id| !inside(id)).cloned().collect();
+            if tops.is_empty() {
+                return Err("Select a layer first".into());
+            }
+            DragKind::DuplicateLayers {
+                new_ids: tops.iter().map(|_| pm_kernel::new_id("L")).collect(),
+                ids: tops,
+            }
+        }
+        Spec::Trim(Edge::In) => DragKind::TrimIn { ids },
+        Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
+        Spec::Offset => DragKind::QuickOffsetLayers { ids },
+        Spec::Keys => DragKind::Keys { ids: keys },
+        Spec::TextStagger { band, end } => DragKind::TextStagger { band, end, time },
+        Spec::QuickOffsetKeys => {
+            let groups: Vec<Vec<String>> = model
+                .index
+                .layers
+                .iter()
+                .filter_map(|layer| {
+                    let ids: Vec<_> = keys
+                        .iter()
+                        .filter(|id| {
+                            model
+                                .index
+                                .key(id)
+                                .is_some_and(|(l, _, _)| l.id == layer.id)
+                        })
+                        .cloned()
+                        .collect();
+                    (!ids.is_empty()).then_some(ids)
+                })
+                .collect();
+            if groups.len() < 2 {
+                DragKind::Keys { ids: keys }
+            } else {
+                DragKind::QuickOffsetKeys { groups, time }
+            }
+        }
+        Spec::StretchKeys { grabbed } => {
+            // v1's keyframeStretchAnchor: two or more keys apart, grabbed at
+            // the first or last; anything else moves them.
+            let times: Vec<f64> = keys
+                .iter()
+                .filter_map(|id| model.index.key(id).map(|(l, _, k)| l.from + k.time))
+                .collect();
+            let first = times.iter().copied().fold(f64::INFINITY, f64::min);
+            let last = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let anchor = (times.len() >= 2 && last - first >= 1e-9)
+                .then(|| {
+                    if (grabbed - last).abs() < 1e-6 {
+                        Some(first)
+                    } else if (grabbed - first).abs() < 1e-6 {
+                        Some(last)
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+            match anchor {
+                Some(anchor_time) => DragKind::StretchKeys {
+                    ids: keys,
+                    anchor_time,
+                    grabbed_time: grabbed,
+                },
+                None => DragKind::Keys { ids: keys },
+            }
+        }
+        Spec::GraphKeys => DragKind::GraphKeys {
+            ids: model.expand_graph_keys(&keys),
+        },
+        Spec::Transform {
+            anchor_time,
+            anchor_value,
+        } => DragKind::TransformKeys {
+            ids: model.expand_graph_keys(&keys),
+            anchor_time,
+            anchor_value,
+        },
+        Spec::Handle { key, side } => DragKind::Handle { id: key, side },
+        Spec::Property { layer, path, .. } => {
+            let paths: Vec<_> = model
+                .track_channels(&layer, &path)
+                .iter()
+                .map(|c| c.path.clone())
+                .collect();
+            DragKind::Property {
+                targets: model
+                    .property_targets(&layer, &paths)
+                    .map_err(|e| e.to_string())?,
+                time,
+            }
+        }
+        Spec::WorkIn => DragKind::WorkIn,
+        Spec::WorkOut => DragKind::WorkOut,
+        Spec::WorkMove => DragKind::WorkMove,
+        Spec::Slip => DragKind::ProEdit(Pro::Slip {
+            layer_ids: ids,
+            delta: 0.,
+            linked: true,
+        }),
+        Spec::Ripple(edge) => {
+            let id = primary()?;
+            let layer = model.index.layer(&id).ok_or("Unknown clip")?;
+            // The track it shows on (its lane is written as its track ahead
+            // of the edit), in its own area: V1 is not A1.
+            let lane = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal)
+                .into_iter()
+                .find(|(l, _)| *l == id)
+                .map_or(layer.preferred_track as i32, |(_, lane)| lane as i32);
+            DragKind::ProEdit(Pro::RippleTrim {
+                layer_id: id.clone(),
+                edge: pro_edge(edge),
+                delta: 0.,
+                tracks: vec![TrackTarget {
+                    track: lane,
+                    group_id: layer.group.clone(),
+                    area: Some(
+                        if layer.kind == "audio" {
+                            "audio"
+                        } else {
+                            "video"
+                        }
+                        .into(),
+                    ),
+                }],
+                linked: true,
+            })
+        }
+        Spec::Roll(edge) => {
+            let id = primary()?;
+            let (before, after) = neighbours(&id)?;
+            let (left, right) = match edge {
+                Edge::In => (before.ok_or("No clip before this edit")?, id),
+                Edge::Out => (id, after.ok_or("No clip after this edit")?),
+            };
+            DragKind::ProEdit(Pro::Roll {
+                left_id: left,
+                right_id: right,
+                delta: 0.,
+                linked: true,
+            })
+        }
+        Spec::Slide => {
+            let id = primary()?;
+            let (before, after) = neighbours(&id)?;
+            DragKind::ProEdit(Pro::Slide {
+                previous_id: before.ok_or("No clip before this one")?,
+                layer_id: id,
+                next_id: after.ok_or("No clip after this one")?,
+                delta: 0.,
+                linked: true,
+            })
+        }
+    })
+}
+struct Presenter<'a> {
+    offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+    wanted: RefCell<Vec<crate::waveforms::Key>>,
+    published: &'a Published,
+    layers: std::collections::HashMap<String, &'a pm_model::Node>,
+    composition: Option<&'a str>,
+}
+impl ModelPresenter for Presenter<'_> {
+    fn accessibility_label(&self, row: &RowId) -> String {
+        match row {
+            RowId::Layer(id) => id.clone(),
+            RowId::Property { channel, .. } => channel.clone(),
+            RowId::Effect { effect, .. } => effect.clone(),
+            RowId::Path { path, .. } => path.clone(),
+        }
+    }
+    fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {
+        Label::for_layer(&layer.kind, layer.definition.as_deref())
+    }
+    fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
+        if layer
+            .asset
+            .as_ref()
+            .is_some_and(|asset| self.offline.contains(asset))
+        {
+            Media::Offline
+        } else {
+            Media::Ready
+        }
+    }
+    fn waveform(
+        &self,
+        layer: &pm_panel_timeline::Layer,
+    ) -> Option<Option<pm_panel_timeline::render::Waveform>> {
+        if layer.kind != "audio" {
+            return None;
+        }
+        let asset = layer.asset.as_ref()?;
+        let path = self.sources.get(asset)?;
+        // The clip as its asset plays it: the streams heard, its timing.
+        let record = self
+            .published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets")?.get(asset));
+        let node = self.layers.get(&layer.id)?;
+        let trim = node.get("d").and_then(|d| d.get("trim"))
+            .and_then(|trim| trim.get("v").unwrap_or(trim).to_value().as_f64())
+            .filter(|trim| trim.is_finite())
+            .map_or(layer.trim, |trim| trim.max(0.));
+        let key = crate::waveforms::Key::of(path.clone(), record);
+        Some(match crate::waveforms::lookup(&key)? {
+            Some(levels) => Some(pm_panel_timeline::render::Waveform {
+                levels,
+                trim,
+                map: time_map(self.published, node, self.composition, layer.from, layer.duration),
+            }),
+            None => {
+                self.wanted.borrow_mut().push(key);
+                None
+            }
+        })
+    }
+    fn cues(&self, layer: &pm_panel_timeline::Layer) -> Vec<pm_panel_timeline::render::CueMark> {
+        if layer.kind != "captions" {
+            return vec![];
+        }
+        let Some(node) = self.layers.get(&layer.id) else {
+            return vec![];
+        };
+        let Some(cues) = node.get("d").and_then(|d| d.get("cues")) else {
+            return vec![];
+        };
+        let cues: Vec<pm_captions::CaptionCue> =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&cues.to_value()))
+                .unwrap_or_default();
+        cues.into_iter()
+            .map(|c| pm_panel_timeline::render::CueMark {
+                id: c.id,
+                start: layer.from + c.start,
+                end: layer.from + c.end,
+                text: c.text,
+            })
+            .collect()
+    }
+    fn stagger_bands(
+        &self,
+        layer: &pm_panel_timeline::Layer,
+        time: f64,
+    ) -> Vec<pm_panel_timeline::stagger::Band> {
+        if layer.kind != "text" {
+            return vec![];
+        }
+        let Some(node) = self.layers.get(&layer.id) else {
+            return vec![];
+        };
+        let Some(animators) = node.get("d").and_then(|d| d.get("animators")) else {
+            return vec![];
+        };
+        let raw: serde_json::Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&animators.to_value()))
+                .unwrap_or_default();
+        if !raw.as_array().into_iter().flatten().any(|animator| {
+            animator["enabled"] != false
+                && animator["mode"] == "stagger"
+                && animator["p"].get("duration").is_some()
+        }) {
+            return vec![];
+        }
+        crate::text_host::query(self.published, |q| {
+            let layout = q.text_layout(None, &layer.id, time)?;
+            let lines: Vec<pm_model::JsString> = layout
+                .get("lines")
+                .and_then(pm_model::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|l| {
+                    l.get("text")
+                        .and_then(pm_model::Value::as_str)
+                        .map(Into::into)
+                })
+                .collect();
+            let mut bands = Vec::new();
+            for animator in raw.as_array().into_iter().flatten() {
+                if animator["enabled"] == false
+                    || animator["mode"] != "stagger"
+                    || animator["p"].get("duration").is_none()
+                {
+                    continue;
+                }
+                let Some(id) = animator["id"].as_str() else {
+                    continue;
+                };
+                let unit = match animator["unit"].as_str() {
+                    Some("words") => pm_eval::text_anim::UnitKind::Words,
+                    Some("lines") => pm_eval::text_anim::UnitKind::Lines,
+                    _ => pm_eval::text_anim::UnitKind::Characters,
+                };
+                let count = (pm_eval::text_anim::count_text_units(&lines, unit).max(1) as f64
+                    + animator["unitOffset"].as_f64().unwrap_or(0.))
+                .max(animator["unitTotal"].as_f64().unwrap_or(0.))
+                .max(1.);
+                let mut value = |key: &str| -> Result<f64, pm_kernel::QueryError> {
+                    if animator["p"].get(key).is_none() {
+                        return Ok(0.);
+                    }
+                    Ok(
+                        q.evaluate(None, &layer.id, &format!("ta.{id}.{key}"), time)?
+                            .as_f64()
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(0.),
+                    )
+                };
+                let (delay, duration_value, stagger) =
+                    (value("delay")?, value("duration")?, value("stagger")?);
+                let duration = duration_value.max(0.);
+                let rank = (count - 1.).max(0.)
+                    / if matches!(animator["order"].as_str(), Some("center" | "edges")) {
+                        2.
+                    } else {
+                        1.
+                    };
+                let cascade = stagger.max(0.) * rank;
+                let out = match animator["anchor"].as_str() {
+                    Some("in") => false,
+                    Some("out") => true,
+                    _ => animator["direction"] == "out",
+                };
+                let legacy_duration = animator["legacyStartDuration"]
+                    .as_f64()
+                    .filter(|v| v.is_finite());
+                let start = if out {
+                    let offset = legacy_duration
+                        .map(|duration| duration - delay - duration_value.max(0.) - cascade)
+                        .unwrap_or(delay);
+                    layer.duration - offset - duration - cascade
+                } else {
+                    delay
+                };
+                bands.push(pm_panel_timeline::stagger::Band {
+                    layer: layer.id.clone(),
+                    animator: id.into(),
+                    delay,
+                    duration_value,
+                    stagger,
+                    start,
+                    duration,
+                    cascade,
+                    end: start + duration + cascade,
+                    out,
+                    legacy: legacy_duration.is_some(),
+                });
+            }
+            Ok(bands)
+        })
+        .unwrap_or_default()
+    }
+    /// v1's marks (timeline.ts drawPropKeys): a hold key is a square, every
+    /// other key a diamond, read from what the file stores.
+    fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
+        if key.held() {
+            Interpolation::Hold
+        } else {
+            Interpolation::Linear
+        }
+    }
+    fn track_accessibility_label(
+        &self,
+        area: pm_panel_timeline::tracks::Area,
+        lane: usize,
+    ) -> Option<String> {
+        Some(format!("{area:?} {}", lane + 1))
+    }
+}
+/// The curves a key selection put in the graph stay there once every key is
+/// deselected (v1's `graphShown`).
+fn remember_shown(client: &mut TimelineClient, built: &Option<Built>) {
+    if let Some(graph) = built
+        .as_ref()
+        .and_then(|b| b.graph.as_ref())
+        .filter(|g| g.picked)
+    {
+        client.model.graph_shown = graph.series.clone();
+    }
+}
+fn build(
+    client: &TimelineClient,
+    tokens: &Tokens,
+    offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+) -> Option<Built> {
+    build_with(client, tokens, offline, sources, None, None, None)
+}
+fn build_with(
+    client: &TimelineClient,
+    tokens: &Tokens,
+    offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+    preview: Option<&pm_kernel::Snapshot>,
+    outline: Option<(&pm_builtins::Builtins, TimelineMode, bool)>,
+    previous: Option<&Scene>,
+) -> Option<Built> {
+    let mut published = client.kernel.published(&client.project)?;
+    let mut model = client.model.clone();
+    if let Some(snapshot) = preview {
+        Arc::make_mut(&mut published).snapshot = snapshot.clone();
+    }
+    model.sync(&published);
+    let model = Arc::new(model);
+    // Disclosure and mode switches change the row window. Start fetching
+    // its outline while the scene is built, then swap after checking row IDs.
+    let outline_requested = outline.is_some_and(|(runtime, previous_mode, disclosure)| {
+        (disclosure || model.mode != previous_mode)
+            && runtime.update_timeline_outline(model.clone(), true)
+    });
+    let layers = published.snapshot.root()
+        .and_then(|root| pm_kernel::model::comp_node(root, model.index.comp_id.as_deref()))
+        .into_iter()
+        .flat_map(pm_kernel::model::layers_of)
+        .filter_map(|node| {
+            let id = node.get("id")?.to_value().as_str()?.to_owned();
+            Some((id, node))
+        })
+        .collect();
+    let presenter = Presenter {
+        offline,
+        sources,
+        wanted: Default::default(),
+        published: &published,
+        layers,
+        composition: model.index.comp_id.as_deref(),
+    };
+    let mut scene = match Scene::from_model_reusing(&model, &presenter, tokens, 0., previous) {
+        Ok(scene) => scene,
+        Err(error) => {
+            eprintln!(
+                "Timeline scene rejected at revision {}: {error:?}",
+                model.index.revision
+            );
+            return None;
+        }
+    };
+    scene.bars = crate::render_frames::bars(model.index.comp_id.as_deref());
+    let graph = build_graph(&model, &published, tokens);
+    let wanted = presenter.wanted.into_inner();
+    Some(Built {
+        scene: Arc::new(scene),
+        graph,
+        model,
+        outline_requested,
+        selection_only: false,
+        wanted,
+    })
+}
+fn same_timeline_layout(old: &TimelineModel, next: &TimelineModel) -> bool {
+    Arc::ptr_eq(&old.index, &next.index)
+        && std::ptr::eq(old.rows(), next.rows())
+        && old.mode == next.mode
+        && old.graph_display == next.graph_display
+        && old.graph_mode == next.graph_mode
+        && old.graph_focus == next.graph_focus
+        && old.graph_merge == next.graph_merge
+        && old.focused_group == next.focused_group
+        && old.reveal_serial == next.reveal_serial
+}
+
+fn build_graph(model: &TimelineModel, published: &Published, tokens: &Tokens) -> Option<Arc<Graph>> {
+    (model.graph_display != GraphDisplay::DopeSheet)
+        .then(|| {
+            let mut mirror = QueryMirror::new(published);
+            let comp = model.index.comp_id.clone();
+            graph_render::sample(model, tokens, |layer, path, time| {
+                mirror
+                    .queries()
+                    .evaluate(comp.as_deref(), layer, path, time)
+                    .ok()?
+                    .as_f64()
+            })
+        })
+        .flatten()
+        .map(Arc::new)
+}
+
+/// The frame the canvas prepared, and where, for the clips' accessible elements.
+type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
+impl Render for TimelineSurface {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.activation.is_none() {
+            self.activation = Some(cx.observe_window_activation(window, |s, window, cx| {
+                if !window.is_window_active() {
+                    s.cancel_pointer_gesture(cx);
+                    s.pointer = None;
+                    s.set_skimmer(None, cx);
+                }
+            }));
+        }
+        if self.split_modifiers.is_none() {
+            self.split_modifiers = Some(cx.observe_window_modifiers(window, |s, _, cx| {
+                if s.model.edit_tool == EditTool::Split && s.pointer.is_some() { cx.notify(); }
+            }));
+        }
+        let this = cx.entity().downgrade();
+        let drops_weak = this.clone();
+        let tokens = self.tokens.clone();
+        let graph = self.graph_ops(Some(self.delegate.time(cx))).map(|mut ops| {
+            if let (Some((text, x, y)), Some(region)) = (&self.readout, self.graph_region()) {
+                ops.extend(graph_render::readout(text, *x, *y, region, &self.tokens));
+            }
+            ops
+        });
+        let snap_target = match &self.gesture {
+            Gesture::Scrub { scrub, .. } => scrub.snap_target(),
+            Gesture::Dragging { .. } => self.snap_guide,
+            _ => None,
+        };
+        let snap_ops = self
+            .viewport()
+            .map(|v| {
+                pm_panel_timeline::render::snap_guide(
+                    v,
+                    self.tokens.metrics.ruler as f64,
+                    snap_target,
+                )
+            })
+            .unwrap_or_default();
+        let region = self.graph_region();
+        let column = self.view.layer_column;
+        let decorations = self.decorations.clone();
+        let hover_clip = (self.model.edit_tool != EditTool::Split).then(|| self.hover_clip.clone()).flatten();
+        let skimmer = self.skimmer_at();
+        // The readout can stand in the ruler. As for the skimmer, omit a
+        // tick label it would partially cover instead of cutting its text.
+        let split_ruler_chip = (self.model.edit_tool == EditTool::Split && !self.split_preview_hidden)
+            .then_some(self.pointer).flatten().and_then(|pointer| {
+                let (x, y) = self.local(pointer);
+                let id = self.split_clip_at(x, y)?;
+                let clip = self.frame.as_ref()?.ops.iter().find(|op| op.id.strip_prefix("clip:") == Some(id.as_str()))?;
+                if (clip.bounds.y as f32 - 24.).max(2.) >= self.tokens.metrics.ruler { return None; }
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let cut_x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+                let left = (cut_x as f32 + 12.).min(f32::from(self.bounds.size.width) - 100.) as f64;
+                Some((left - 4., left + 90.))
+            });
+        let marquee = match &self.gesture {
+            Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
+                point(origin.x.min(at.x), origin.y.min(at.y)),
+                point(origin.x.max(at.x), origin.y.max(at.y)),
+            )),
+            _ => None,
+        };
+        let weak = this.clone();
+        if let Some(pointer) = self.pointer {
+            let (x, y) = self.local(pointer);
+            if self.model.edit_tool == EditTool::Split
+                && (x - self.view.layer_column).abs() > self.tokens.metrics.hit as f64 / 4.
+                && (self.split_clip_at(x, y).is_some() || self.frame.is_none() && self.hover_clip.is_some()) {
+                self.cursor = CursorStyle::Split;
+            } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
+        } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
+        let t = &self.tokens;
+        // Media dragged over the timeline: where it would land, an
+        // insertion line between layers and the frame under the pointer.
+        if !cx.has_active_drag() {
+            self.media_over = None;
+            self.effect_over = None;
+            if self.tip.as_ref().is_some_and(|(text, _)| {
+                text.as_ref() == pm_kernel::commands::transition_edges::CUT_RETIMING_REASON
+            }) {
+                self.tip = None;
+                self.cursor = CursorStyle::Arrow;
+            }
+        }
+        // An effect over a layer's row: the row it would join, outlined.
+        let effect_row = self
+            .effect_over
+            .and_then(|position| self.layer_under(position))
+            .map(|(_, y)| {
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(y as f32))
+                    .w(self.bounds.size.width)
+                    .h(px(self.tokens.metrics.track_row))
+                    .border(px(self.tokens.metrics.border * 2.))
+                    .border_color(rgb(self.tokens.colors.accent))
+            });
+        // An empty composition has no row to put a line between: the whole
+        // layer area takes the drop, washed and outlined as a group a layer
+        // moves into is (PM-471).
+        let empty = self.scene.as_ref().is_none_or(|s| s.total() == 0);
+        let empty_landing = self.media_over.filter(|_| empty).map(|_| {
+            let accent = self.tokens.colors.accent;
+            div()
+                .absolute()
+                .left(px(0.))
+                .top(px(self.tokens.metrics.ruler))
+                .w(self.bounds.size.width)
+                .h(self.bounds.size.height - px(self.tokens.metrics.ruler))
+                .bg(rgba((accent << 8) | 0x29))
+                .border(px(self.tokens.metrics.drop_stroke))
+                .border_color(rgb(accent))
+        });
+        let landing = self.media_over.filter(|_| !empty).map(|position| {
+            let (at, _, y) = self.media_slot(position);
+            let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+            let (width, height) = (self.bounds.size.width, self.bounds.size.height);
+            let accent = rgb(self.tokens.colors.accent);
+            [
+                div()
+                    .absolute()
+                    .left(px(self.view.layer_column as f32))
+                    .top(px(y as f32 - 1.))
+                    .w(width - px(self.view.layer_column as f32))
+                    .h(px(2.))
+                    .bg(accent),
+                div()
+                    .absolute()
+                    .left(px(x as f32))
+                    .top(px(self.tokens.metrics.ruler))
+                    .w(px(1.))
+                    .h(height - px(self.tokens.metrics.ruler))
+                    .bg(accent),
+            ]
+        });
+        // v1's reorder cue: an accent line with a dot at its depth, or a
+        // insertion line for a group, and what the drop will do.
+        let reorder = match &self.gesture {
+            Gesture::Reorder { drop: Some(d), .. } => Some(d.clone()),
+            _ => None,
+        }
+        .map(|d| {
+            use pm_panel_timeline::DropMode;
+            let t = &self.tokens;
+            let accent = t.colors.accent;
+            let width = self.bounds.size.width;
+            let left = px(d.left as f32);
+            let cue = div()
+                .absolute()
+                .left(left)
+                .top(px(d.line as f32 - 1.))
+                .w(width - left)
+                .h(px(2.))
+                .bg(rgb(accent));
+            let dot = Some(
+                div()
+                    .absolute()
+                    .left(left - px(3.))
+                    .top(px(d.line as f32 - 3.))
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(accent)),
+            );
+            let verb = match d.mode {
+                DropMode::Inside => "Move into",
+                DropMode::Before => "Move before",
+                DropMode::After => "Move after",
+            };
+            let label_top = (d.line as f32 - 24.)
+                .max(t.metrics.ruler + 2.)
+                .min(f32::from(self.bounds.size.height) - 24.);
+            let label = div()
+                .absolute()
+                .left(px(self.view.layer_column as f32 + t.metrics.inset))
+                .top(px(label_top))
+                .px(px(t.metrics.gap))
+                .py(px(t.metrics.border * 2.))
+                .rounded(px(t.metrics.control_radius))
+                .bg(rgb(accent))
+                .text_size(px(t.typography.minimum))
+                .text_color(rgb(0xffffff))
+                .whitespace_nowrap()
+                .child(format!("{verb} {}", d.name));
+            [Some(cue), dot, Some(label)]
+        });
+        let tip = self.tip.clone().map(|(text, (x, y))| {
+            // The shell's tooltip look: floating fill, separator edge, minimum type.
+            div()
+                .absolute()
+                .left(px(x as f32 + t.metrics.inset))
+                .top(px(y as f32 + t.metrics.inset))
+                .px(px(t.metrics.gap))
+                .py(px(t.metrics.border * 2.))
+                .rounded(px(t.metrics.control_radius))
+                .bg(rgb(t.colors.floating))
+                .border(px(t.metrics.border))
+                .border_color(rgb(t.colors.separator))
+                .text_size(px(t.typography.minimum))
+                .text_color(rgb(t.colors.text))
+                .whitespace_nowrap()
+                .child(text)
+        });
+        // The canvas prepaints before the list's children are written: it
+        // leaves the frame it prepared here for the clips' accessible elements.
+        let shown: Shown = Rc::default();
+        let prepared = shown.clone();
+        let ruler = self.tokens.metrics.ruler;
+        let rows_ruler = ruler;
+        let layout_bar = Self::bar_of(self.body, &self.tokens);
+        let fixed_tokens = self.tokens.clone();
+        let content = self.scene.as_ref().map_or(0., |s| s.content_height()) as f32;
+        let scroll_y = self.view.scroll_y as f32;
+        self.rows_handle.set_offset(point(px(0.), px(-scroll_y)));
+        // A sideways scroll leaves room for the recorded tracks and ruler
+        // to replay either side of the viewport.
+        let track_w = (f32::from(self.body.size.width) - column as f32).max(0.);
+        let rows_h = (f32::from(self.body.size.height) - ruler - layout_bar).max(0.);
+        let record = self.record_scroll_layers();
+        let horizontal_reach = record && self.sideways;
+        let tracks_x = if horizontal_reach {
+            -(SIDEWAYS as f32) * track_w
+        } else {
+            0.
+        };
+        self.drawn = (tracks_x, self.view.scroll_time);
+        let wide = track_w - 2. * tracks_x;
+        self.tracks_handle
+            .set_offset(point(px(tracks_x), px(-scroll_y)));
+        self.ruler_handle.set_offset(point(px(tracks_x), px(0.)));
+        let time_thumb_reach = record && track_w > 0. && layout_bar > 0.;
+        let rows_thumb_reach = record && rows_h > 0.;
+        let time_thumb_base = if time_thumb_reach { -track_w } else { 0. };
+        let rows_thumb_base = if rows_thumb_reach { -rows_h } else { 0. };
+        self.time_thumb_handle
+            .set_offset(point(px(time_thumb_base), px(0.)));
+        self.rows_thumb_handle
+            .set_offset(point(px(0.), px(rows_thumb_base)));
+        let bar_layout = self.bar();
+        self.time_thumb_drawn = (
+            bar_layout.and_then(|b| b.time_thumb(&self.tokens)),
+            time_thumb_base,
+        );
+        self.rows_thumb_drawn = (bar_layout.and_then(|b| b.rows_thumb()), rows_thumb_base);
+        let rows_weak = this.clone();
+        let tracks_weak = this.clone();
+        let tracks_metrics = this.clone();
+        let ruler_weak = this.clone();
+        let time_thumb_weak = this.clone();
+        let rows_thumb_weak = this.clone();
+        let rows_tokens = self.tokens.clone();
+        let tracks_tokens = self.tokens.clone();
+        let ruler_tokens = self.tokens.clone();
+        let time_thumb_tokens = self.tokens.clone();
+        let rows_thumb_tokens = self.tokens.clone();
+        let tracks_handle = self.tracks_handle.clone();
+        let ruler_handle = self.ruler_handle.clone();
+        let time_thumb_handle = self.time_thumb_handle.clone();
+        let rows_thumb_handle = self.rows_thumb_handle.clone();
+        div()
+            .id("native-timeline")
+            .relative()
+            .size_full()
+            .cursor(self.cursor)
+            .role(Role::ListBox)
+            .aria_label(if region.is_some() && graph.is_none() {
+                format!("Timeline tracks. {}", graph_render::EMPTY)
+            } else {
+                "Timeline tracks".into()
+            })
+            // Each clip is a selectable option VoiceOver and agents can find and
+            // press (macOS: static text in a list, which AX walkers that skip
+            // groups still report); a Press clicks its centre, the same path as
+            // the pointer.
+            .a11y_synthetic_children(move |children| {
+                children.parent_node().set_multiselectable();
+                let Some((origin, frame)) = shown.borrow_mut().take() else {
+                    return;
+                };
+                for clip in frame.clip_nodes() {
+                    // A bar the graph covers is hidden: no one can find or
+                    // press it there.
+                    if region.is_some_and(|r| clip.bounds.y >= r.y) {
+                        continue;
+                    }
+                    let mut node = gpui::accesskit::Node::new(Role::ListBoxOption);
+                    node.set_label(clip.label());
+                    node.set_selected(clip.selected);
+                    node.add_action(gpui::AccessibleAction::Click);
+                    let b = clip.bounds;
+                    let bounds = Bounds::new(
+                        origin + point(px(b.x as f32), px(b.y as f32)),
+                        size(px(b.width as f32), px(b.height as f32)),
+                    );
+                    let id = children.synthetic_node_id(&clip.id);
+                    children.push_child_at(id, node, bounds);
+                }
+            })
+            .on_modifiers_changed(cx.listener(|s, event: &ModifiersChangedEvent, _, cx| {
+                let radius = s.snap_radius();
+                if let Gesture::Scrub { scrub, .. } = &mut s.gesture {
+                    if let Ok(HostEffect::Seek(time)) = scrub.modifiers(event.modifiers.shift, radius) {
+                        s.delegate.seek(frame_time(&s.model, time), cx);
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
+            )
+            // Finder files and Project items dropped here land at the time
+            // and place in the stack under the pointer (v1.2.0's timeline).
+            // GPUI tells every listener of a drag's moves: the line shows
+            // only while the pointer is over the timeline.
+            .on_drag_move(cx.listener(|s, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                s.media_moved(event.bounds, event.event.position, cx);
+            }))
+            .on_drag_move(cx.listener(
+                |s, event: &DragMoveEvent<crate::v4_view::PanelDrag>, _, cx| {
+                    let panel = event.drag(cx).panel.clone();
+                    let definition = event.drag(cx).item.clone();
+                    if panel == pm_builtins::PROJECT_PANEL {
+                        s.media_moved(event.bounds, event.event.position, cx);
+                    } else if panel == EFFECTS_PANEL {
+                        s.effect_moved(event.bounds, event.event.position, definition.as_deref(), cx);
+                    }
+                },
+            ))
+            .can_drop(move |value, window, cx| {
+                let Some(drag) = value.downcast_ref::<crate::v4_view::PanelDrag>() else { return true; };
+                if drag.panel != EFFECTS_PANEL { return true; }
+                let Some(definition) = &drag.item else { return true; };
+                drops_weak.upgrade().is_some_and(|surface|surface.read(cx).transition_drop_refusal(definition,window.mouse_position()).is_none())
+            })
+            .on_drop(cx.listener(|s, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                let what = Dropped::Files {
+                    paths: paths.paths().to_vec(),
+                    alt: window.modifiers().alt,
+                };
+                s.drop_media(what, window.mouse_position(), cx);
+            }))
+            .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, window, cx| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    cx.stop_propagation();
+                    s.drop_media(Dropped::ProjectItems, window.mouse_position(), cx);
+                } else if drag.panel == EFFECTS_PANEL
+                    && let Some(definition) = &drag.item
+                {
+                    cx.stop_propagation();
+                    s.effect_over = None;
+                    if let Some(reason) = s.transition_drop_refusal(definition,window.mouse_position()) { s.delegate.report(reason,cx); return; }
+                    let (x, y) = s.local(window.mouse_position());
+                    let transition = definition.starts_with("transition:");
+                    let (layer, edge, across) = if definition.starts_with("transition:") {
+                        s.transition_target(window.mouse_position())
+                    } else {
+                        (s.layer_under(window.mouse_position()).map(|(id, _)| id), None, None)
+                    };
+                    s.delegate.drop_effect(
+                        EffectDrop {
+                            panel: drag.panel.clone(),
+                            at: transition.then(|| s.time_at(x)),
+                            definition: definition.to_string(),
+                            label: drag.label.to_string(),
+                            layer,
+                            edge,
+                            across,
+                        },
+                        cx,
+                    );
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                    s.on_context(event, window, cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    s.start_pointer_gesture(cx);
+                    s.gesture = Gesture::Pan { at: event.position };
+                }),
+            )
+            .on_scroll_wheel(
+                cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
+                    s.on_wheel(event, window, cx)
+                }),
+            )
+            .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
+                let (x, _) = s.local(event.position);
+                s.zoom_at(x.max(s.view.layer_column), 1. + event.delta as f64, cx);
+            }))
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let frame = weak
+                            .update(cx, |s, cx| {
+                                let resized = s.body.size != bounds.size;
+                                s.body = bounds;
+                                if Self::bar_of(bounds, &s.tokens) != layout_bar
+                                    || (record && resized)
+                                {
+                                    // The scroll layers stood over another viewport size.
+                                    let again = cx.entity().downgrade();
+                                    cx.defer(move |cx| {
+                                        let _ = again.update(cx, |_, cx| cx.notify());
+                                    });
+                                }
+                                s.prepared(Self::above_bar(bounds, &s.tokens), record, cx)
+                            })
+                            .ok()
+                            .flatten();
+                        *prepared.borrow_mut() = frame.clone().map(|f| (bounds.origin, f));
+                        frame
+                    },
+                    move |bounds, frame, window, cx| {
+                        let Some(frame) = frame else {
+                            return;
+                        };
+                        // Under a graph, the tracks stop at its top: the graph
+                        // gets the plain material with a hairline over it.
+                        let above = region.map(|r| {
+                            Bounds::from_corners(
+                                bounds.origin,
+                                point(bounds.right(), bounds.origin.y + px(r.y as f32)),
+                            )
+                        });
+                        // The ground and the ruler's foot; the layers draw
+                        // the rows, the tracks and the ruler over them.
+                        let cull = Cull::new(bounds.size);
+                        paint_ops_where(
+                            &frame.ops[..frame.fixed],
+                            |o| matches!(o.id.as_str(), "ground" | "gutter" | "ruler-border"),
+                            bounds.origin,
+                            column,
+                            above,
+                            &cull,
+                            None,
+                            &fixed_tokens,
+                            window,
+                            cx,
+                        );
+                        // The column's edge through the ruler's band (the
+                        // rows' layer draws the rest of it).
+                        if let Some(edge) = frame.ops.last().filter(|o| o.id == "column-edge") {
+                            let band = Bounds::new(
+                                bounds.origin,
+                                size(bounds.size.width, px(fixed_tokens.metrics.ruler)),
+                            );
+                            window.with_content_mask(
+                                Some(ContentMask {
+                                    bounds: band,
+                                    ..Default::default()
+                                }),
+                                |w| paint(edge, bounds.origin, &fixed_tokens, w, cx),
+                            );
+                        }
+                    },
+                )
+                .size_full(),
+            )
+            // The outline column's fills and the column's edge in a layer
+            // the wheel moves up and down; a step inside what it recorded
+            // replays it shifted, with no render (P-SCROLL-LAYER).
+            .child(
+                div()
+                    .id("timeline-rows")
+                    .absolute()
+                    .top(px(ruler))
+                    .left_0()
+                    .w(px(column as f32))
+                    .bottom(px(layout_bar))
+                    .overflow_hidden()
+                    .when(record, |layer| {
+                        layer
+                            .overflow_y_scroll()
+                            .track_scroll(&self.rows_handle)
+                            .scroll_layer_driven()
+                    })
+                    .child(
+                        canvas(
+                            move |_, _, cx| {
+                                rows_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
+                            },
+                            move |bounds, frame, window, cx| {
+                                let Some((frame, _, _, _)) = frame else {
+                                    return;
+                                };
+                                // The rows were prepared for their view: its
+                                // top is the ruler's above the content's
+                                // scroll; the column does not move sideways.
+                                let v = frame.viewport;
+                                let origin = point(
+                                    bounds.origin.x,
+                                    bounds.origin.y
+                                        + px(if record { v.scroll_y as f32 } else { 0. } - rows_ruler),
+                                );
+                                let cull = Cull::reaching(column, v.height, v.height);
+                                let ops = &frame.ops[frame.fixed..];
+                                paint_ops(ops, origin, column, None, &cull, None, &rows_tokens, window, cx);
+                            },
+                        )
+                        .w_full()
+                        .when(record, |canvas| canvas.h(px(content)))
+                        .when(!record, |canvas| canvas.h_full()),
+                    ),
+            )
+            // The tracks (strips, keys, lanes, the time grid) in a layer the
+            // wheel moves both ways, recorded the tracks' width past each side.
+            .child(
+                div()
+                    .id("timeline-tracks")
+                    .absolute()
+                    .top(px(ruler))
+                    .left(px(column as f32))
+                    .right_0()
+                    .bottom(px(layout_bar))
+                    .overflow_hidden()
+                    .when(record, |layer| {
+                        layer
+                            .overflow_scroll()
+                            .track_scroll(&self.tracks_handle)
+                            .scroll_layer_driven()
+                    })
+                    .child(
+                        canvas(
+                            move |_, _, cx| {
+                                tracks_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
+                            },
+                            move |bounds, frame, window, cx| {
+                                let Some((frame, reach, groups, plan_ms)) = frame else {
+                                    return;
+                                };
+                                // The frame's x starts the reach before the
+                                // tracks' left edge (where the content is
+                                // offset from), less the layer column.
+                                let v = frame.viewport;
+                                let left = bounds.origin.x
+                                    - if horizontal_reach {
+                                        tracks_handle.offset().x
+                                    } else {
+                                        px(0.)
+                                    };
+                                let origin = point(
+                                    left - px((column + reach) as f32),
+                                    bounds.origin.y
+                                        + px(if record { v.scroll_y as f32 } else { 0. } - rows_ruler),
+                                );
+                                let above = region.map(|r| {
+                                    Bounds::from_corners(
+                                        origin,
+                                        point(origin.x + px(v.width as f32), origin.y + px(r.y as f32)),
+                                    )
+                                });
+                                let started = crate::diag::enabled().then(std::time::Instant::now);
+                                let reach_y = if record && region.is_none() {
+                                    (v.height - rows_ruler as f64).max(0.)
+                                } else {
+                                    0.
+                                };
+                                let cull = Cull::tracks(column, v.width, v.height, reach_y.max(v.height));
+                                // The grid and the markers' lines run the
+                                // rows' reach up and down too.
+                                if reach_y > 0. {
+                                    let lines: Vec<Op> = frame.ops[..frame.fixed]
+                                        .iter()
+                                        .filter(|o| {
+                                            o.id.starts_with("grid:")
+                                                || o.id.starts_with("marker-guide:")
+                                        })
+                                        .map(|o| {
+                                            let mut o = o.clone();
+                                            o.bounds.y -= reach_y;
+                                            o.bounds.height += 2. * reach_y;
+                                            o
+                                        })
+                                        .collect();
+                                    paint_ops(&lines, origin, column, above, &cull, None, &tracks_tokens, window, cx);
+                                } else {
+                                    paint_ops_where(
+                                        &frame.ops[..frame.fixed],
+                                        |o| {
+                                            o.id.starts_with("grid:")
+                                                || o.id.starts_with("marker-guide:")
+                                        },
+                                        origin,
+                                        column,
+                                        above,
+                                        &cull,
+                                        None,
+                                        &tracks_tokens,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                                let ops = &frame.ops[frame.fixed..];
+                                let dot_started = std::time::Instant::now();
+                                paint_agent_tracks(&frame, &groups, origin, column, above, &cull, &tracks_tokens, window, cx);
+                                if !groups.is_empty() {
+                                    let elapsed = plan_ms + dot_started.elapsed().as_secs_f64() * 1000.;
+                                    let _ = tracks_metrics.update(cx, |s, _| {
+                                        s.agent_ink_samples[s.agent_ink_sample_count % 64] = elapsed;
+                                        s.agent_ink_sample_count += 1;
+                                    });
+                                }
+                                if let Some(started) = started {
+                                    let ms = started.elapsed().as_secs_f64() * 1000.;
+                                    crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":ops.len()}));
+                                }
+                                if let Some((id, x)) = &hover_clip
+                                    && let Some(op) = frame
+                                        .ops
+                                        .iter()
+                                        .find(|o| o.id.strip_prefix("clip:") == Some(id.as_str()))
+                                {
+                                    // Its rim and grip stay inside the tracks (a strip
+                                    // may run on out of view) and above a graph; the
+                                    // pointer's x is the panel's.
+                                    let clip = op.clip.map(|c| {
+                                        Bounds::new(
+                                            origin + point(px(c.x as f32), px(c.y as f32)),
+                                            size(px(c.width as f32), px(c.height as f32)),
+                                        )
+                                    });
+                                    let mask = match (clip, above) {
+                                        (Some(c), Some(a)) => Some(c.intersect(&a)),
+                                        (c, a) => c.or(a),
+                                    };
+                                    window.with_content_mask(
+                                        mask.map(|bounds| ContentMask {
+                                            bounds,
+                                            ..Default::default()
+                                        }),
+                                        |w| {
+                                            strip_hover(op, *x + reach, origin, &tracks_tokens, w);
+                                        },
+                                    );
+                                }
+                                for op in
+                                    pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
+                                {
+                                    paint(&op, origin, &tracks_tokens, window, cx);
+                                }
+                            },
+                        )
+                        .w_full()
+                        .when(horizontal_reach, |canvas| canvas.w(px(wide)))
+                        .when(record, |canvas| canvas.h(px(content)))
+                        .when(!record, |canvas| canvas.h_full()),
+                    ),
+            )
+            // The ruler in a layer the wheel moves sideways, as the tracks.
+            .child(
+                div()
+                    .id("timeline-ruler")
+                    .absolute()
+                    .top_0()
+                    .left(px(column as f32))
+                    .right_0()
+                    .h(px(ruler))
+                    .overflow_hidden()
+                    .when(record, |layer| {
+                        layer
+                            .overflow_x_scroll()
+                            .track_scroll(&self.ruler_handle)
+                            .scroll_layer_driven()
+                    })
+                    .child(
+                        canvas(
+                            move |_, _, cx| {
+                                ruler_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
+                            },
+                            move |bounds, frame, window, cx| {
+                                let Some((frame, reach, _, _)) = frame else {
+                                    return;
+                                };
+                                let v = frame.viewport;
+                                let left = bounds.origin.x
+                                    - if horizontal_reach {
+                                        ruler_handle.offset().x
+                                    } else {
+                                        px(0.)
+                                    };
+                                let origin = point(left - px((column + reach) as f32), bounds.origin.y);
+                                // The skimmer's timecode stands in the ruler: a
+                                // time label it would cut through is left out,
+                                // not half-covered (it is the time under the
+                                // pointer).
+                                let chip = skimmer.as_ref().map(|(x, code)| {
+                                    let m = ruler_tokens.metrics;
+                                    let run = TextRun {
+                                        len: code.len(),
+                                        font: window.text_style().font(),
+                                        color: rgb_to_hsla(rgba((ruler_tokens.colors.text << 8) | 0xff)),
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                        letter_spacing: None,
+                                    };
+                                    let text = window.text_system().shape_line(
+                                        code.clone().into(),
+                                        px(ruler_tokens.typography.minimum),
+                                        &[run],
+                                    );
+                                    let left = x + reach + (m.border * 2.) as f64;
+                                    let gutter = (m.gap + m.border * 2.) as f64;
+                                    (left, left + f32::from(text.width) as f64 + gutter)
+                                }).or_else(|| split_ruler_chip.map(|(left, right)| (left + reach, right + reach)));
+                                let cull = Cull::tracks(column, v.width, ruler as f64, 0.);
+                                paint_ops_where(
+                                    &frame.ops[..frame.fixed],
+                                    |o| {
+                                        !matches!(o.id.as_str(), "ground" | "gutter" | "ruler-border")
+                                            && !o.id.starts_with("grid:")
+                                            && !o.id.starts_with("marker-guide:")
+                                    },
+                                    origin,
+                                    column,
+                                    None,
+                                    &cull,
+                                    chip,
+                                    &ruler_tokens,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )
+                        .w_full()
+                        .when(horizontal_reach, |canvas| canvas.w(px(wide)))
+                        .h(px(ruler)),
+                    ),
+            )
+            // The graph, the bottom bar and the marquee, over the rows.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        if let Some(r) = region {
+                            let (edge, alpha) = tokens.line();
+                            window.paint_quad(
+                                PaintQuad::new(Bounds::new(
+                                    bounds.origin + point(px(r.x as f32), px(r.y as f32)),
+                                    size(px(r.width as f32), px(tokens.metrics.border)),
+                                ))
+                                .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
+                            );
+                        }
+                        for op in graph.iter().flatten() {
+                            paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        for op in &snap_ops {
+                            paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        // A graph with no curve says how to get one.
+                        if let (Some(r), None) = (region, &graph) {
+                            let note = graph_render::empty_note(r, &tokens);
+                            paint(&note, bounds.origin, &tokens, window, cx);
+                        }
+                        // The bottom bar (thumbs paint in their own driven scroll layers below).
+                        let started = crate::diag::enabled().then(std::time::Instant::now);
+                        let bar = this
+                            .upgrade()
+                            .map(|s| s.read(cx).bar_ops())
+                            .unwrap_or_default();
+                        for op in &bar {
+                            if op.id != "time-thumb" && op.id != "rows-thumb" {
+                                paint(op, bounds.origin, &tokens, window, cx);
+                            }
+                        }
+                        if let Some(started) = started {
+                            crate::diag::line(serde_json::json!({"span":"timeline.bar","ms":started.elapsed().as_secs_f64() * 1000.,"ops":bar.len()}));
+                        }
+                        if let Some(area) = marquee {
+                            window.paint_quad(
+                                PaintQuad::new(area)
+                                    .border_widths(1f32)
+                                    .border_color(rgb(tokens.colors.secondary)),
+                            );
+                        }
+                        if let Some(surface) = this.upgrade() {
+                            let surface = surface.read(cx);
+                            if surface.model.edit_tool == pm_panel_timeline::EditTool::Split && !surface.split_preview_hidden {
+                                if let Some(pointer) = surface.pointer {
+                                    let (x, y) = surface.local(pointer);
+                                    if let Some(id) = surface.split_clip_at(x, y)
+                                        && (x - surface.view.layer_column).abs() > tokens.metrics.hit as f64 / 4. {
+                                        let at = surface.model.split_time(surface.time_at(x), surface.delegate.time(cx), surface.snap_radius());
+                                        let cut_x = surface.view.layer_column + (at - surface.view.scroll_time) * surface.view.pps;
+                                        // An explicit foreground paint layer keeps these hairlines
+                                        // above the independently composited clip fills.
+                                        window.paint_layer(bounds, |window| {
+                                        for op in surface.frame.iter().flat_map(|f| &f.ops).filter(|o| o.id.starts_with("clip:")) {
+                                            let layer = &op.id[5..];
+                                            if (window.modifiers().shift || layer == id) && surface.model.index.layer(layer).is_some_and(|l| at > l.from && at < l.from + l.duration) {
+                                                let top = op.bounds.y.max(tokens.metrics.ruler as f64);
+                                                let bottom = (op.bounds.y + op.bounds.height).min(f32::from(surface.bounds.size.height) as f64);
+                                                if bottom > top && cut_x >= surface.view.layer_column && cut_x < f32::from(surface.bounds.size.width) as f64 {
+                                                    let line = Bounds::new(bounds.origin + point(px(cut_x.floor() as f32), px(top as f32)), size(px(1.), px((bottom - top) as f32)));
+                                                    // A narrow contrast edge keeps the 1 pt orange line
+                                                    // legible against bright video and clip fills at 1×.
+                                                    window.paint_quad(PaintQuad::new(Bounds::new(line.origin - point(px(1.), px(0.)), size(px(3.), line.size.height))).background(rgb(tokens.colors.panel)));
+                                                    window.paint_quad(PaintQuad::new(line).background(rgb(tokens.colors.accent)));
+                                                }
+                                            }
+                                        }
+                                        });
+                                        let label = format!("{}{}", if at < 0. { "−" } else { "" }, crate::captions_panel::timecode(at.abs(), surface.model.index.fps));
+                                        let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
+                                        let text = window.text_system().shape_line(label.into(), px(tokens.typography.minimum), &runs);
+                                        let top = surface.frame.iter().flat_map(|f| &f.ops).find(|o| o.id.strip_prefix("clip:") == Some(id.as_str())).map_or(tokens.metrics.ruler, |o| o.bounds.y as f32);
+                                        let pos = bounds.origin + point(px((cut_x as f32 + 12.).min(f32::from(bounds.size.width) - 100.)), px((top - 24.).max(2.)));
+                                        window.paint_quad(PaintQuad::new(Bounds::new(pos - point(px(4.), px(2.)), size(px(94.), px(20.)))).background(rgb(tokens.colors.floating)).corner_radii(px(tokens.metrics.control_radius)));
+                                        let _ = text.paint(pos, px(16.), TextAlign::Left, None, window, cx);
+                                    }
+                                }
+                            }
+                        }
+                        let moved = this.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = moved.update(cx, |s, cx| {
+                                    if s.on_move(e, window, cx) {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    if !window.is_window_active() {
+                                        s.pointer = None;
+                                        s.set_skimmer(None, cx);
+                                    } else if s.bounds.contains(&e.position) && !s.over_bar(e.position, cx) {
+                                        s.hover(e.position, cx);
+                                    } else {
+                                        if s.model.edit_tool == EditTool::Split { s.pointer = None; cx.notify(); }
+                                        s.set_skimmer(None, cx);
+                                    }
+                                });
+                            }
+                        });
+                        let exited = this.clone();
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = exited.update(cx, |s, cx| {
+                                    s.pointer = None;
+                                    if s.model.edit_tool == EditTool::Split { cx.notify(); }
+                                    s.set_skimmer(None, cx);
+                                });
+                            }
+                        });
+                        let pressed = this.clone();
+                        window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = pressed.update(cx, |s, cx| match event.button {
+                                    MouseButton::Left => s.suppress_left_up = false,
+                                    MouseButton::Right if s.cancel_pointer_gesture(cx) => {
+                                        s.suppress_left_up = true;
+                                        cx.stop_propagation();
+                                    }
+                                    _ => {}
+                                });
+                            }
+                        });
+                        let released = this.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = released.update(cx, |s, cx| {
+                                    if event.button == MouseButton::Left
+                                        && std::mem::take(&mut s.suppress_left_up)
+                                    {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    let pan = matches!(s.gesture, Gesture::Pan { .. });
+                                    if (event.button != MouseButton::Left || pan)
+                                        && (event.button != MouseButton::Middle || !pan)
+                                    {
+                                        return;
+                                    }
+                                    if let Gesture::Marquee { at, .. } = &mut s.gesture
+                                        && *at != event.position
+                                    {
+                                        *at = event.position;
+                                        s.marquee();
+                                    }
+                                    if let Gesture::ParentPick { ids, origin, .. } = &s.gesture {
+                                        let next = s.parent_target(ids, event.position);
+                                        let delta = event.position - *origin;
+                                        let travel = f32::from(delta.x).hypot(f32::from(delta.y));
+                                        let threshold = s.tokens.metrics.panel_drag_threshold;
+                                        if let Gesture::ParentPick { target, at, moved, .. } = &mut s.gesture {
+                                            *target = next;
+                                            *at = event.position;
+                                            *moved |= travel >= threshold || target.is_some();
+                                        }
+                                    }
+                                    s.on_up(cx);
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            // The horizontal navigator thumb in its own driven scroll layer so
+            // wheel steps shift it in lockstep with the tracks without a render.
+            .when(layout_bar > 0., |panel| {
+                panel.child(
+                    div()
+                        .id("timeline-time-thumb")
+                        .absolute()
+                        .left(px(column as f32))
+                        .right_0()
+                        .bottom_0()
+                        .h(px(layout_bar))
+                        .overflow_hidden()
+                        .when(time_thumb_reach, |layer| {
+                            layer
+                                .overflow_x_scroll()
+                                .track_scroll(&self.time_thumb_handle)
+                                .scroll_layer_driven()
+                        })
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, window, cx| {
+                                    let Some(surface) = time_thumb_weak.upgrade() else {
+                                        return;
+                                    };
+                                    let (bar_top, ops) = surface.update(cx, |s, _| {
+                                        let bar = s.bar();
+                                        s.time_thumb_drawn = (
+                                            bar.and_then(|b| b.time_thumb(&s.tokens)),
+                                            time_thumb_base,
+                                        );
+                                        let top = bar.map_or(0., |b| b.top);
+                                        (top, s.bar_ops())
+                                    });
+                                    let offset_x = if time_thumb_reach {
+                                        time_thumb_handle.offset().x
+                                    } else {
+                                        px(0.)
+                                    };
+                                    let origin = point(
+                                        bounds.origin.x - px(column as f32) - offset_x,
+                                        bounds.origin.y - px(bar_top as f32),
+                                    );
+                                    for op in &ops {
+                                        if op.id == "time-thumb" {
+                                            paint(op, origin, &time_thumb_tokens, window, cx);
+                                        }
+                                    }
+                                },
+                            )
+                            .w_full()
+                            .when(time_thumb_reach, |canvas| canvas.w(px(3. * track_w)))
+                            .h(px(layout_bar)),
+                        ),
+                )
+            })
+            // The vertical row scrollbar thumb in its own driven scroll layer.
+            .child(
+                div()
+                    .id("timeline-rows-thumb")
+                    .absolute()
+                    .top(px(ruler))
+                    .right_0()
+                    .bottom(px(layout_bar))
+                    .w(px(16.))
+                    .overflow_hidden()
+                    .when(rows_thumb_reach, |layer| {
+                        layer
+                            .overflow_y_scroll()
+                            .track_scroll(&self.rows_thumb_handle)
+                            .scroll_layer_driven()
+                    })
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                let Some(surface) = rows_thumb_weak.upgrade() else {
+                                    return;
+                                };
+                                let (panel_w, ops) = surface.update(cx, |s, _| {
+                                    let bar = s.bar();
+                                    s.rows_thumb_drawn = (
+                                        bar.and_then(|b| b.rows_thumb()),
+                                        rows_thumb_base,
+                                    );
+                                    let w = bar.map_or(0., |b| b.width);
+                                    (w, s.bar_ops())
+                                });
+                                let offset_y = if rows_thumb_reach {
+                                    rows_thumb_handle.offset().y
+                                } else {
+                                    px(0.)
+                                };
+                                let origin = point(
+                                    bounds.origin.x - px((panel_w - 16.) as f32),
+                                    bounds.origin.y - px(ruler) - offset_y,
+                                );
+                                for op in &ops {
+                                    if op.id == "rows-thumb" {
+                                        paint(op, origin, &rows_thumb_tokens, window, cx);
+                                    }
+                                }
+                            },
+                        )
+                        .w(px(16.))
+                        .when(rows_thumb_reach, |canvas| canvas.h(px(3. * rows_h)))
+                        .when(!rows_thumb_reach, |canvas| canvas.h_full()),
+                    ),
+            )
+            // Over the canvas.
+            .children(landing.into_iter().flatten())
+            .children(empty_landing)
+            .children(reorder.into_iter().flatten().flatten())
+            .children(effect_row)
+            .children(tip)
+            .children(self.fallback_outline(cx))
+            .children(self.graph_readout_element())
+            .children(self.parent_pick_overlay(cx))
+            .child(self.audio_overlay(cx))
+    }
+}
+impl TimelineSurface {
+    /// Deferred foreground overlay for the parent pickwhip so its target row
+    /// highlight, cubic connector, and floating pill badge always paint above
+    /// both the composited tracks and the JSX layer strip.
+    fn parent_pick_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Gesture::ParentPick {
+            origin,
+            at,
+            target,
+            moved: true,
+            ..
+        } = &self.gesture
+        else {
+            return None;
+        };
+        let origin = *origin;
+        let at = *at;
+        let target = target.clone();
+        let label = target
+            .as_ref()
+            .and_then(|id| self.model.index.layer(id))
+            .map(|l| format!("Parent to {}", l.name.to_string_lossy()))
+            .unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
+        let highlight_row = target.as_ref().and_then(|_| {
+            let (_, y) = self.local(at);
+            let viewport = self.viewport()?;
+            self.scene
+                .as_ref()?
+                .layer_row_at(viewport, &self.tokens, y)
+                .map(|r| (r.top as f32, r.height as f32))
+        });
+        let tokens = self.tokens.clone();
+        let surface_bounds = self.bounds;
+        let _ = cx;
+        Some(
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                let paint_bounds = if f32::from(surface_bounds.size.width) > 0. {
+                                    surface_bounds
+                                } else {
+                                    bounds
+                                };
+                                window.paint_layer(paint_bounds, |window| {
+                                    if let Some((top, height)) = highlight_row {
+                                        window.paint_quad(
+                                            PaintQuad::new(Bounds::new(
+                                                paint_bounds.origin + point(px(0.), px(top)),
+                                                size(paint_bounds.size.width, px(height)),
+                                            ))
+                                            .background(rgba((tokens.colors.accent << 8) | 0x29)),
+                                        );
+                                    }
+                                    let mut line = PathBuilder::stroke(px(2.));
+                                    line.move_to(origin);
+                                    line.cubic_bezier_to(
+                                        at,
+                                        origin + point(px(60.), px(0.)),
+                                        at - point(px(60.), px(0.)),
+                                    );
+                                    if let Ok(line) = line.build() {
+                                        window.paint_path(line, rgb(tokens.colors.accent));
+                                    }
+                                    for pt in [origin, at] {
+                                        window.paint_quad(
+                                            PaintQuad::new(Bounds::new(
+                                                pt - point(px(3.5), px(3.5)),
+                                                size(px(7.), px(7.)),
+                                            ))
+                                            .background(rgb(tokens.colors.accent))
+                                            .corner_radii(px(3.5)),
+                                        );
+                                    }
+                                    let runs = [TextRun {
+                                        len: label.len(),
+                                        font: window.text_style().font(),
+                                        color: rgb_to_hsla(rgb(tokens.colors.text)),
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                        letter_spacing: None,
+                                    }];
+                                    let text = window.text_system().shape_line(
+                                        label.clone().into(),
+                                        px(12.),
+                                        &runs,
+                                    );
+                                    let pad_x = px(8.);
+                                    let pill_w = text.width + pad_x * 2.;
+                                    let pill_h = px(22.);
+                                    let min_x = paint_bounds.origin.x + px(6.);
+                                    let max_x = (paint_bounds.right() - pill_w - px(6.)).max(min_x);
+                                    let min_y = paint_bounds.origin.y + px(4.);
+                                    let max_y = (paint_bounds.bottom() - pill_h - px(4.)).max(min_y);
+                                    let pill_x = (at.x + px(12.)).clamp(min_x, max_x);
+                                    let pill_y = (at.y - pill_h - px(6.)).clamp(min_y, max_y);
+                                    let pill = Bounds::new(point(pill_x, pill_y), size(pill_w, pill_h));
+                                    window.paint_quad(
+                                        PaintQuad::new(pill)
+                                            .background(rgb(tokens.colors.floating))
+                                            .border_widths(px(tokens.metrics.border))
+                                            .border_color(rgb(tokens.colors.separator))
+                                            .corner_radii(px(tokens.metrics.control_radius)),
+                                    );
+                                    let _ = text.paint(
+                                        point(pill_x + pad_x, pill_y + px(3.)),
+                                        px(16.),
+                                        TextAlign::Left,
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
+            .priority(10)
+            .into_any_element(),
+        )
+    }
+
+    /// The graph's readout while keys are dragged (v1): one key reads where
+    /// it is, value and time; several read the offset the whole group moved
+    /// by. The Speed Graph's axis is a rate, so it reads the time alone.
+    fn graph_readout_element(&self) -> Option<AnyElement> {
+        if !matches!(self.gesture, Gesture::Dragging { .. }) {
+            return None;
+        }
+        let quick = match &self.gesture {
+            Gesture::Dragging {
+                quick: Some(quick), ..
+            } => Some(*quick),
+            _ => None,
+        };
+        if let Some((at, total, count)) = quick {
+            let local = at - self.bounds.origin;
+            let t = &self.tokens;
+            let left = (f32::from(local.x) + 14.)
+                .max(self.view.layer_column as f32 + 8.)
+                .min(
+                    (f32::from(self.bounds.size.width) - 222.)
+                        .max(self.view.layer_column as f32 + 8.),
+                );
+            let top = (f32::from(local.y) + 14.)
+                .max(t.metrics.ruler + 8.)
+                .min((f32::from(self.bounds.size.height) - 53.).max(t.metrics.ruler + 8.));
+            let column = |left, label: &'static str, value: f64| {
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(6.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(t.colors.muted))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(t.colors.text))
+                            .child(format!(
+                                "{}{}",
+                                if value < 0. { "−" } else { "+" },
+                                crate::captions_panel::timecode(value.abs(), self.model.index.fps)
+                            )),
+                    )
+            };
+            return Some(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(214.))
+                    .h(px(45.))
+                    .rounded(px(7.))
+                    .bg(rgb(t.colors.floating))
+                    .border(px(t.metrics.border))
+                    .border_color(rgb(t.colors.separator))
+                    .child(column(10., "TOTAL OFFSET", total))
+                    .child(column(112., "PER LAYER", total / (count - 1) as f64))
+                    .into_any_element(),
+            );
+        }
+        let (text, x, y) = self.readout.as_ref()?;
+        Some(
+            div()
+                .absolute()
+                .left(px(*x as f32 + 14.))
+                .top(px(*y as f32 - 26.))
+                .px(px(self.tokens.metrics.gap))
+                .py(px(2.))
+                .rounded(px(3.))
+                .bg(rgb(self.tokens.colors.accent))
+                .text_color(rgb(0xffffff))
+                .child(text.clone())
+                .into_any_element(),
+        )
+    }
+    /// The skimmer: a hairline of text ink across the ruler and tracks
+    /// (the playhead is the accent), with its timecode on the ruler, drawn
+    /// with the playhead (`crate::playhead::Skimmer`). Its x in the panel
+    /// and its timecode, while it shows.
+    fn skimmer_at(&self) -> Option<(f64, String)> {
+        let at = self.skimmer?;
+        let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+        let width = f32::from(self.bounds.size.width) as f64;
+        if x < self.view.layer_column || x > width {
+            return None;
+        }
+        let fps = self.model.index.fps.max(1.);
+        let frames = (at * fps).round().max(0.) as u64;
+        let nominal = fps.round().max(1.) as u64;
+        let sec = frames / nominal;
+        let code = format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        );
+        Some((x, code))
+    }
+    /// Where the skimmer stands (panel points) and its timecode, while it
+    /// shows: the playback loop draws it with the playhead.
+    pub fn skimmer_mark(&self) -> Option<(f64, String)> {
+        self.skimmer_at()
+    }
+}
+/// Where a playing head at `x` (points into a time area `width` wide)
+/// should stand after a page turn, or `None` while it is in sight (v1).
+fn follow_page(x: f64, width: f64) -> Option<f64> {
+    if x > width - 50f64.min(width * 0.1) {
+        Some(width * 0.2)
+    } else if x < 0. {
+        Some(width * 0.8)
+    } else {
+        None
+    }
+}
+/// Ops as the timeline's canvas paints them: the keyframe toggles are left
+/// to the outline rows, a ruler label the skimmer's timecode (`chip`, its
+/// span) would cut through is left out, and under a graph a track op is
+/// masked to the tracks `above` it.
+#[allow(clippy::too_many_arguments)]
+fn paint_ops(
+    ops: &[Op],
+    origin: Point<Pixels>,
+    column: f64,
+    above: Option<Bounds<Pixels>>,
+    cull: &Cull,
+    chip: Option<(f64, f64)>,
+    tokens: &Tokens,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    paint_ops_where(ops, |_| true, origin, column, above, cull, chip, tokens, window, cx);
+}
+#[allow(clippy::too_many_arguments)]
+fn paint_ops_where(
+    ops: &[Op],
+    mut include: impl FnMut(&Op) -> bool,
+    origin: Point<Pixels>,
+    column: f64,
+    above: Option<Bounds<Pixels>>,
+    cull: &Cull,
+    chip: Option<(f64, f64)>,
+    tokens: &Tokens,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for op in ops.iter().filter(|op| !op.id.starts_with("toggle:") && include(op)) {
+        if cull.skip(op) {
+            continue;
+        }
+        if let Some((left, right)) = chip
+            && op.id.starts_with("time:")
+            && op.bounds.x < right
+            && op.bounds.x + op.bounds.width > left
+        {
+            // The label is centred in its step: its
+            // text, not its box, decides.
+            let text = op.text.clone().unwrap_or_default();
+            let run = TextRun {
+                len: text.len(),
+                font: window.text_style().font(),
+                color: rgb_to_hsla(rgba((tokens.colors.muted << 8) | 0xff)),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+                letter_spacing: None,
+            };
+            let half = f32::from(
+                window
+                    .text_system()
+                    .shape_line(text.into(), px(op.font_size as f32), &[run])
+                    .width,
+            ) as f64
+                / 2.;
+            let centre = op.bounds.x + op.bounds.width / 2.;
+            if centre - half < right && centre + half > left {
+                continue;
+            }
+        }
+        // The time grid and the markers' lines run
+        // on through the graph: it reads the same time.
+        let through = op.id.starts_with("grid:")
+            || op.id.starts_with("marker-guide:");
+        // A track op (a strip may start before the
+        // view) is placed by its clip, which starts
+        // at the layer column.
+        let left = op.clip.map_or(op.bounds.x, |c| c.x.max(op.bounds.x));
+        match above.filter(|_| !through) {
+            // Wholly under the graph: not painted.
+            Some(mask)
+                if left >= column - 1.
+                    && origin.y + px(op.bounds.y as f32)
+                        >= mask.bottom() => {}
+            Some(mask) if left >= column - 1. => window
+                .with_content_mask(
+                    Some(ContentMask {
+                        bounds: mask,
+                        ..Default::default()
+                    }),
+                    |w| paint(op, origin, tokens, w, cx),
+                ),
+            _ => paint(op, origin, tokens, window, cx),
+        }
+    }
+}
+/// Co-edit reveal uses the same wide frame and origin as the driven tracks.
+/// Unowned tracks keep their existing retained paint and clipping.
+#[allow(clippy::too_many_arguments)]
+fn paint_agent_tracks(
+    frame: &Frame, groups: &[pm_panel_timeline::agent_ink::DotGroup],
+    origin: Point<Pixels>, column: f64, above: Option<Bounds<Pixels>>, cull: &Cull,
+    tokens: &Tokens, window: &mut Window, cx: &mut App,
+) {
+    if groups.is_empty() {
+        paint_ops(&frame.ops[frame.fixed..], origin, column, above, cull, None, tokens, window, cx);
+        return;
+    }
+    let indices: BTreeSet<usize> = groups.iter().flat_map(|g| g.indices.iter().copied()).collect();
+    let ordinary: Vec<Op> = frame.ops.iter().enumerate().skip(frame.fixed)
+        .filter(|(index, _)| !indices.contains(index)).map(|(_, op)| op.clone()).collect();
+    paint_ops(&ordinary, origin, column, above, cull, None, tokens, window, cx);
+    for group in groups {
+        let b = group.bounds;
+        let area = Bounds::new(origin + point(px(b.x as f32), px(b.y as f32)), size(px(b.width as f32), px(b.height as f32)));
+        if above.is_some_and(|mask| area.origin.y >= mask.bottom()) { continue; }
+        let mask = above.map_or(area, |m| Bounds::from_corners(area.origin, point(area.right(), area.bottom().min(m.bottom()))));
+        window.with_content_mask(Some(ContentMask { bounds: mask, ..Default::default() }), |window| {
+            if group.pending {
+                window.paint_quad(PaintQuad::new(area).background(rgb(tokens.colors.accent)).corner_radii(px(1.35)));
+                return;
+            }
+            let draw = |window: &mut Window, cx: &mut App| {
+                for &index in &group.indices {
+                    let op = &frame.ops[index];
+                    if group.reduced {
+                        let mut op = op.clone(); op.opacity *= group.resolve as f64;
+                        for key in ["ringAlpha", "lightAlpha", "shadowAlpha", "gridAlpha"] {
+                            if let Some(alpha) = op.detail[key].as_f64() { op.detail[key] = serde_json::json!(alpha * group.resolve as f64); }
+                        }
+                        paint(&op, origin, tokens, window, cx);
+                    } else { paint(op, origin, tokens, window, cx); }
+                }
+            };
+            if group.reduced { draw(window, cx); } else {
+                window.with_filter_layer(area, Corners::all(px(0.)), 0., &[gpui::Filter::DotMatrix {
+                    detail: group.detail, resolve: group.resolve, accent: tokens.colors.accent,
+                }], |window| draw(window, cx));
+            }
+        });
+    }
+}
+/// What the timeline's paint can leave out without changing a pixel: ops
+/// wholly off the canvas, and keyframe glyphs the scene marked covered by an
+/// identical one on the same device pixel (`Op::covered`). Dense keys (a
+/// baked animation, a long clip zoomed out) put tens of thousands of them on
+/// a few hundred columns. Hit-testing keeps every op.
+struct Cull {
+    left: f64,
+    width: f64,
+    top: f64,
+    bottom: f64,
+}
+impl Cull {
+    fn new(size: Size<Pixels>) -> Self {
+        let (width, height) = (
+            f64::from(f32::from(size.width)),
+            f64::from(f32::from(size.height)),
+        );
+        Self::reaching(width, height, 0.)
+    }
+    /// The canvas and `reach` above and below it (rows a scroll layer
+    /// records past its edges).
+    fn reaching(width: f64, height: f64, reach: f64) -> Self {
+        Self::tracks(0., width, height, reach)
+    }
+    /// [`Self::reaching`] right of `left` (the tracks' layer leaves the
+    /// layer column's ops out).
+    fn tracks(left: f64, width: f64, height: f64, reach: f64) -> Self {
+        Self {
+            left,
+            width,
+            top: -reach,
+            bottom: height + reach,
+        }
+    }
+    fn skip(&self, op: &Op) -> bool {
+        // Keylines and strokes reach a little past an op's box.
+        const MARGIN: f64 = 4.;
+        let b = op.bounds;
+        op.covered
+            || b.x >= self.width + MARGIN
+            || b.y >= self.bottom + MARGIN
+            || b.x + b.width <= self.left - MARGIN
+            || b.y + b.height <= self.top - MARGIN
+    }
+}
+/// A strip's rim (pm-design `Strip`): a ring of light inside the edge,
+/// `width` wide and even all round, and light on the top edge: the strip's
+/// own shape lowered by a point, shading what it leaves uncovered inside the
+/// edge, so the line is full along the top, thins round the top corners and
+/// is gone by the straight sides. Both are inset shadows: nothing outside the
+/// edge, nothing over the body's middle, no band that starts or stops.
+fn strip_rim(
+    area: Bounds<Pixels>,
+    radius: Pixels,
+    smoothing: f32,
+    ring: (u32, f32),
+    width: Pixels,
+    light: (u32, f32),
+    glow: (u32, f32),
+    window: &mut Window,
+) {
+    let ink = |(rgb, alpha): (u32, f32)| -> Background {
+        rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32).into()
+    };
+    let corners = Corners::all(radius);
+    if ring.1 > 0. {
+        let shadow = BoxShadow {
+            color: ink(ring),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: width,
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
+    }
+    // The light pooled at the foot: a soft band inside the bottom edge that
+    // follows the strip's corners, full at the edge and gone `GLOW_REACH`
+    // of the way up (the shadow's shape reaches past the sides, so none of
+    // it falls there or along the top).
+    if glow.1 > 0. {
+        let soft = area.size.height * pm_design::GLOW_REACH / 3.3;
+        let shadow = BoxShadow {
+            color: ink(glow),
+            offset: point(px(0.), -soft * 3.),
+            blur_radius: soft,
+            spread_radius: -soft * 2.,
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
+    }
+    // Light falls from above: a line inside the top edge, brightest there
+    // and round the top corners (the reference's rim).
+    if light.1 > 0. {
+        let shadow = BoxShadow {
+            color: ink(light),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(0.5),
+            spread_radius: px(0.),
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
+    }
+}
+/// The strip under the pointer: its rim in the hover state (lighter on the
+/// dark canvas, deeper on the light one; nothing else changes) and the trim grip stands inside the nearer edge.
+fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, window: &mut Window) {
+    let b = op.bounds;
+    let area = Bounds::new(
+        origin + point(px(b.x as f32), px(b.y as f32)),
+        size(px(b.width as f32), px(b.height as f32)),
+    );
+    let hover = t.strip(op.color, pm_design::StripState::Hover);
+    let radius = px(op.radius as f32).min(area.size.height / 2.);
+    strip_rim(
+        area,
+        radius,
+        t.radius.smoothing,
+        hover.ring,
+        px(hover.ring_width),
+        hover.light,
+        // The glow is the body's, painted with it: the hover adds the rim.
+        (0, 0.),
+        window,
+    );
+    let grip = t.trim_grip();
+    // A locked layer cannot be trimmed: no grip offers it.
+    let locked = op.detail["cursor"] == "notAllowed";
+    if locked || b.width < f64::from(grip.inset * 4. + grip.width) {
+        return;
+    }
+    let height = (b.height as f32 * grip.height).round();
+    let x = if pointer_x < b.x + b.width / 2. {
+        area.origin.x + px(grip.inset)
+    } else {
+        area.right() - px(grip.inset + grip.width)
+    };
+    window.paint_quad(
+        PaintQuad::new(Bounds::new(
+            point(x, area.origin.y + (area.size.height - px(height)) / 2.),
+            size(px(grip.width), px(height)),
+        ))
+        .background(rgb(grip.color))
+        .corner_radii(px(grip.width / 2.)),
+    );
+}
+/// The level line of the audio clip under the pointer: a 1 pt hairline in
+/// the clip's light tone and, under the pointer, a short rounded pill on
+/// it (the trim grip's language) to show it can be dragged.
+fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
+    let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
+    let b = op.bounds;
+    let area = Bounds::new(at(b.x, b.y), size(px(b.width as f32), px(b.height as f32)));
+    let alpha = (op.opacity.clamp(0., 1.) * 255.).round() as u32;
+    let color = rgba((op.color << 8) | alpha);
+    let clip = op
+        .clip
+        .map(|c| Bounds::new(at(c.x, c.y), size(px(c.width as f32), px(c.height as f32))));
+    let draw = |window: &mut Window, cx: &mut App| match op.shape {
+        "stagger" => {
+            let mut path = PathBuilder::fill();
+            for (i, p) in op.detail["points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let point = at(p[0].as_f64().unwrap_or(0.), p[1].as_f64().unwrap_or(0.));
+                if i == 0 {
+                    path.move_to(point);
+                } else {
+                    path.line_to(point);
+                }
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        // A transition's wedge inside a clip's end (v1): full height at the
+        // edge, tapering to its tip. Its corner follows the strip's rounding.
+        "wedge" => {
+            let (x0, y0, w, h) = (b.x, b.y, b.width, b.height);
+            let r = op.radius.min(w).min(h / 2.).max(0.);
+            let k = 0.45 * r;
+            // Mirrored for an Out edge: x measured in from the right.
+            let out = op.detail["edge"] == "out";
+            let p = |dx: f64, dy: f64| at(if out { x0 + w - dx } else { x0 + dx }, y0 + dy);
+            let mut path = if op.stroke > 0. {
+                PathBuilder::stroke(px(op.stroke as f32))
+            } else {
+                PathBuilder::fill()
+            };
+            path.move_to(p(0., r));
+            path.cubic_bezier_to(p(r, 0.), p(0., r - k), p(r - k, 0.));
+            path.line_to(p(w, 0.));
+            path.line_to(p(w * r / h, h - r));
+            path.line_to(p(0., h - r));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        // 45° stripes clipped to the op's rounded box (offline clips, the
+        // render bar while rendering).
+        "stripes-45" => {
+            let period = op.detail["period"].as_f64().unwrap_or(6.).max(2.) as f32;
+            let stripe = op.detail["stripe"].as_f64().unwrap_or(2.).max(0.5) as f32;
+            let (x0, y0) = (f32::from(area.origin.x), f32::from(area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: area,
+                    ..Default::default()
+                }),
+                |window| {
+                    let mut x = x0 - h;
+                    while x < x0 + w {
+                        let mut path = PathBuilder::stroke(px(stripe));
+                        path.move_to(point(px(x), px(y0 + h)));
+                        path.line_to(point(px(x + h), px(y0)));
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
+                        }
+                        x += period;
+                    }
+                },
+            );
+        }
+        // A layer or clip strip (pm-design `strip`): a slab of tinted glass.
+        // A deep top opening into a luminous lower half, the ruler's grid
+        // reading through the body, and a rim of light inside the edge that
+        // is brightest along the top and round its corners.
+        "clip" => {
+            let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
+            let number = |key: &str| op.detail[key].as_f64().unwrap_or(0.);
+            let tint =
+                |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
+            let radius = px(op.radius as f32).min(area.size.height / 2.);
+            let smoothing = t.radius.smoothing;
+            let ring = px(number("ringWidth").max(1.) as f32);
+            if number("shadowAlpha") > 0. {
+                window.paint_drop_shadows(
+                    area,
+                    Corners::all(radius),
+                    smoothing,
+                    &[BoxShadow {
+                        color: tint(hex("shadow"), number("shadowAlpha")).into(),
+                        offset: point(px(0.), px(number("shadowY") as f32)),
+                        blur_radius: px(number("shadowBlur") as f32),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }],
+                );
+            }
+            // The body: one ramp from the deep top to the luminous foot.
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(linear_gradient(
+                        180.,
+                        linear_color_stop(tint(hex("top"), op.opacity), 0.),
+                        linear_color_stop(tint(hex("bottom"), op.opacity), 1.),
+                    ))
+                    .corner_radii(radius)
+                    .corner_smoothing(smoothing),
+            );
+            let (step, grid) = (number("gridStep") as f32, number("gridAlpha"));
+            if step >= 8. && grid > 0. {
+                let mut x = origin.x + px(number("gridFrom") as f32);
+                let (left, right) = (area.origin.x + radius, area.right() - radius);
+                while x < right {
+                    if x > left {
+                        // A highlight lit from the strip's top edge, gone
+                        // by the middle of its height.
+                        window.paint_quad(
+                            PaintQuad::new(Bounds::new(
+                                point(x, area.origin.y + ring),
+                                size(
+                                    px(1.),
+                                    (area.size.height - ring * 2.) * pm_design::GRID_FADE,
+                                ),
+                            ))
+                            .background(linear_gradient(
+                                180.,
+                                linear_color_stop(tint(hex("grid"), grid), 0.),
+                                linear_color_stop(tint(hex("grid"), 0.), 1.),
+                            )),
+                        );
+                    }
+                    x += px(step);
+                }
+            }
+            strip_rim(
+                area,
+                radius,
+                smoothing,
+                (hex("ring"), number("ringAlpha") as f32),
+                ring,
+                (hex("light"), number("lightAlpha") as f32),
+                (hex("glow"), number("glowAlpha") as f32),
+                window,
+            );
+        }
+        "square" => {
+            if let Some(keyline) = op.detail["keyline"].as_u64() {
+                let w = px(op.detail["keylineWidth"].as_f64().unwrap_or(1.) as f32);
+                window.paint_quad(
+                    PaintQuad::new(area.dilate(w))
+                        .background(rgb(keyline as u32))
+                        .corner_radii(px(1.)),
+                );
+            }
+            window.paint_quad(PaintQuad::new(area).background(color).corner_radii(px(1.)));
+        }
+        "rect" | "rounded-rect" | "work-area-handle" => {
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(color)
+                    .corner_radii(px(op.radius as f32)),
+            );
+        }
+        // v1's transform box: a dashed edge.
+        "ring" if op.detail["dash"].is_array() => {
+            let (on, off) = (
+                op.detail["dash"][0].as_f64().unwrap_or(3.).max(0.5),
+                op.detail["dash"][1].as_f64().unwrap_or(3.).max(0.),
+            );
+            let (x0, y0) = (b.x.round() + 0.5, b.y.round() + 0.5);
+            let (x1, y1) = (x0 + b.width.round(), y0 + b.height.round());
+            let mut path = PathBuilder::stroke(px(op.stroke.max(1.) as f32));
+            for (from, to) in [
+                ((x0, y0), (x1, y0)),
+                ((x1, y0), (x1, y1)),
+                ((x1, y1), (x0, y1)),
+                ((x0, y1), (x0, y0)),
+            ] {
+                let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                let length = dx.hypot(dy);
+                let mut d = 0.;
+                while d < length {
+                    let e = (d + on).min(length);
+                    let p = |f: f64| at(from.0 + dx * f / length, from.1 + dy * f / length);
+                    path.move_to(p(d));
+                    path.line_to(p(e));
+                    d = e + off;
+                }
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        "ring" | "outside-ring" => {
+            let grown = if op.shape == "ring" {
+                area
+            } else {
+                area.dilate(px(op.stroke as f32))
+            };
+            window.paint_quad(
+                PaintQuad::new(grown)
+                    .border_color(color)
+                    .border_widths(px(op.stroke as f32))
+                    .corner_radii(px(op.radius as f32)),
+            );
+        }
+        "circle" => {
+            if let Some(keyline) = op.detail["keyline"].as_u64() {
+                let grown =
+                    area.dilate(px(op.detail["keylineWidth"].as_f64().unwrap_or(1.) as f32));
+                window.paint_quad(
+                    PaintQuad::new(grown)
+                        .background(rgb(keyline as u32))
+                        .corner_radii(grown.size.width / 2.),
+                );
+            }
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(color)
+                    .corner_radii(area.size.width / 2.),
+            );
+        }
+        "diamond" | "diamond.fill" | "diamond.lefthalf.filled" | "keyframe.hold" => {
+            if let Some(keyline) = op.detail["keyline"].as_u64() {
+                let w = px(op.detail["keylineWidth"].as_f64().unwrap_or(1.) as f32 * 1.5);
+                diamond(area.dilate(w), rgb(keyline as u32), window);
+            }
+            match op.detail["half"].as_str() {
+                // The end of a span: an outline with the half toward the span filled.
+                Some(side) => {
+                    diamond_outline(area, color, window);
+                    half_diamond(area, side == "right", color, window);
+                }
+                None => diamond(area, color, window),
+            }
+        }
+        // A marker pin: flat top, pointed foot (v1's marker).
+        "marker" => {
+            let (l, r) = (area.origin.x, area.origin.x + area.size.width);
+            let (top, bottom) = (area.origin.y, area.origin.y + area.size.height);
+            let mid = area.center().x;
+            let shoulder = bottom - area.size.width / 2.;
+            let mut path = PathBuilder::fill();
+            path.move_to(point(l, top));
+            path.line_to(point(r, top));
+            path.line_to(point(r, shoulder));
+            path.line_to(point(mid, bottom));
+            path.line_to(point(l, shoulder));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        // The playhead pin (v1's): a flat top, straight sides and a point
+        // resting on the foot of the ruler.
+        "ph-head" => {
+            if let Ok(path) = playhead_pin(area).build() {
+                window.paint_path(path, color);
+            }
+        }
+        "line" => {
+            if let (Some(from), Some(to)) =
+                (point_of(&op.detail["from"]), point_of(&op.detail["to"]))
+            {
+                let mut path = PathBuilder::stroke(px(op.stroke as f32));
+                // `dash: [on, off]`: v1's dashed tangents.
+                let dash = op.detail["dash"]
+                    .as_array()
+                    .and_then(|d| Some((d.first()?.as_f64()?, d.get(1)?.as_f64()?)))
+                    .filter(|(on, off)| *on > 0. && *off >= 0.);
+                match dash {
+                    Some((on, off)) => {
+                        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                        let length = dx.hypot(dy);
+                        let mut d = 0.;
+                        while d < length {
+                            let e = (d + on).min(length);
+                            let p = |f: f64| at(from.0 + dx * f / length, from.1 + dy * f / length);
+                            path.move_to(p(d));
+                            path.line_to(p(e));
+                            d = e + off;
+                        }
+                    }
+                    None => {
+                        path.move_to(at(from.0, from.1));
+                        path.line_to(at(to.0, to.1));
+                    }
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, color);
+                }
+            }
+        }
+        // A key in the graph (v1's `drawGraphVertex`): its interpolation's
+        // shape in the curve's colour, ringed in green when selected.
+        "graph-vertex" => {
+            let centre = area.center();
+            let r = f32::from(area.size.width) / 2.;
+            let kind = op.detail["kind"].as_str().unwrap_or("linear");
+            let outline = |radius: f32| {
+                let p = |x: f32, y: f32| centre + point(px(x), px(y));
+                match kind {
+                    "hold" => vec![
+                        p(-radius, -radius),
+                        p(radius, -radius),
+                        p(radius, radius),
+                        p(-radius, radius),
+                    ],
+                    "bezier" => vec![
+                        p(-radius, -radius),
+                        p(radius, -radius),
+                        p(-radius, radius),
+                        p(radius, radius),
+                    ],
+                    _ => vec![
+                        p(0., -radius - 1.),
+                        p(radius + 1., 0.),
+                        p(0., radius + 1.),
+                        p(-radius - 1., 0.),
+                    ],
+                }
+            };
+            if let Some(ring) = op.detail["ring"].as_u64() {
+                let corners = outline(r + 2.);
+                let mut path = PathBuilder::stroke(px(1.3));
+                path.move_to(corners[0]);
+                for c in &corners[1..] {
+                    path.line_to(*c);
+                }
+                path.close();
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, rgb(ring as u32));
+                }
+            }
+            let corners = outline(r);
+            let mut path = PathBuilder::fill();
+            path.move_to(corners[0]);
+            for c in &corners[1..] {
+                path.line_to(*c);
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        "curve" => {
+            let mut path = PathBuilder::stroke(px(op.stroke as f32));
+            let mut started = false;
+            for segment in op.detail["segments"].as_array().into_iter().flatten() {
+                if let (Some(from), Some(to)) =
+                    (point_of(&segment["from"]), point_of(&segment["to"]))
+                {
+                    if !started {
+                        path.move_to(at(from.0, from.1));
+                        started = true;
+                    }
+                    // Eased segments are the Bézier they evaluate, not a chord.
+                    match segment["controls"]
+                        .as_array()
+                        .and_then(|c| Some((point_of(c.first()?)?, point_of(c.get(1)?)?)))
+                    {
+                        Some((a, b)) => {
+                            path.cubic_bezier_to(at(to.0, to.1), at(a.0, a.1), at(b.0, b.1))
+                        }
+                        None => path.line_to(at(to.0, to.1)),
+                    }
+                }
+            }
+            if started && let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        // Light caught inside the glass (pm-design `Strip::wave`): one soft
+        // shape standing on the strip's floor just inside its rim, cut by
+        // its rounded corners, with a thin haze along the whole floor so a
+        // silent stretch never reads as empty. While the levels are read a
+        // hairline marks the middle (v1).
+        #[cfg(test)]
+        "waveform-baseline" => {
+            let bars = op.detail["bars"].as_array();
+            let inset = op.detail["inset"].as_f64().unwrap_or(2.) as f32;
+            let min_bar = op.detail["minBar"].as_f64().unwrap_or(1.) as f32;
+            let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            let room = (h - 2. * inset).max(0.);
+            match bars.filter(|b| !b.is_empty()) {
+                None => window.paint_quad(
+                    PaintQuad::new(Bounds::new(
+                        point(px(x0), px(top + (h / 2.).floor())),
+                        size(px(w), px(1.)),
+                    ))
+                    .background(color),
+                ),
+                Some(bars) => {
+                    let floor = top + h - inset;
+                    let mut path = PathBuilder::fill();
+                    path.move_to(point(px(x0), px(floor)));
+                    // Silence draws nothing: a bar shorter than `minBar`
+                    // would run along the foot as an underline.
+                    for (i, peak) in bars.iter().enumerate() {
+                        let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
+                        let bar = if bar < min_bar { 0. } else { bar };
+                        let x = x0 + i as f32;
+                        path.line_to(point(px(x), px(floor - bar)));
+                        path.line_to(point(px(x + 1.), px(floor - bar)));
+                    }
+                    path.line_to(point(px(x0 + bars.len() as f32), px(floor)));
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            }
+        }
+        "waveform" => {
+            use pm_panel_timeline::waveform::{LOUDEST, decode, soften};
+            let d = &op.detail;
+            let per = d["columns"].as_f64().unwrap_or(2.).max(1.) as f32;
+            let tone = d["wave"].as_u64().unwrap_or(0xffffff) as u32;
+            let strength = d["waveAlpha"].as_f64().unwrap_or(0.5) * op.opacity;
+            let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            let rim = d["rim"].as_f64().unwrap_or(1.) as f32;
+            let radius = (d["radius"].as_f64().unwrap_or(0.) as f32 - rim).max(0.);
+            let ends = |i: usize| d["ends"][i].as_f64().map(|e| f32::from(origin.x) + e as f32);
+            let (start, end) = (ends(0).unwrap_or(x0), ends(1).unwrap_or(x0 + w));
+            if let Some(peaks) = &op.waveform {
+                let (inner_top, floor) = (top + rim, top + h - rim);
+                let inside = |x: f32| -> (f32, f32) {
+                    if x < start || x > end {
+                        return (floor, floor);
+                    }
+                    let from_end = (x - start).min(end - x);
+                    let lift = if from_end < radius {
+                        let d = radius - from_end;
+                        radius - (radius * radius - d * d).max(0.).sqrt()
+                    } else {
+                        0.
+                    };
+                    (inner_top + lift, floor - lift)
+                };
+                let lane_h = (floor - inner_top) / peaks.len().max(1) as f32;
+                let mask = window.content_mask().bounds;
+                let first = (((f32::from(mask.left()) - x0) * per).floor().max(0.) as usize)
+                    .saturating_sub(1);
+                let last = (((f32::from(mask.right()) - x0) * per).ceil().max(0.) as usize) + 2;
+                let x = |i: usize| x0 + (first + i) as f32 / per;
+                for (lane, values) in peaks.iter().enumerate() {
+                    let lane_floor = inner_top + (lane + 1) as f32 * lane_h;
+                    let end_at = last.min(values.len());
+                    if first >= end_at {
+                        continue;
+                    }
+                    let values = &values[first..end_at];
+                    if let Some(path) =
+                        glass_fill(values.len(), |_| WAVE_HAZE, &x, lane_floor, &inside)
+                    {
+                        window.paint_path(path, shade(tone, strength * 0.55));
+                    }
+                    if let Some(path) = glass_fill(
+                        values.len(),
+                        |i| values[i] * LOUDEST * lane_h,
+                        &x,
+                        lane_floor,
+                        &inside,
+                    ) {
+                        window.paint_path(
+                            path,
+                            linear_gradient(
+                                180.,
+                                linear_color_stop(shade(tone, strength * 0.78), 0.),
+                                linear_color_stop(shade(tone, strength), 1.),
+                            ),
+                        );
+                    }
+                }
+                return;
+            }
+            let Some(peak) = d["peak"].as_str() else {
+                window.paint_quad(
+                    PaintQuad::new(Bounds::new(
+                        point(px(x0), px(top + (h / 2.).floor())),
+                        size(px(w), px(1.)),
+                    ))
+                    .background(shade(tone, strength)),
+                );
+                return;
+            };
+            // Only the columns the window shows (a frame is prepared wider
+            // than the view): the path's work stays the screen's width.
+            let shown = f32::from(window.viewport_size().width);
+            let peak2 = d["peak2"].as_str();
+            let key = WaveKey {
+                peaks: {
+                    use std::hash::{Hash, Hasher};
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    (peak, peak2).hash(&mut hash);
+                    hash.finish()
+                },
+                geometry: [x0, top, w, h, per, rim, radius, start, end, shown].map(f32::to_bits),
+            };
+            let paths = waveform_paths(key, peak, peak2, || {
+                let (inner_top, floor) = (top + rim, top + h - rim);
+                // The strip's inside at `x`: its ceiling and floor, lifted
+                // round the rounded corners.
+                let inside = |x: f32| -> (f32, f32) {
+                    if x < start || x > end {
+                        return (floor, floor);
+                    }
+                    let from_end = (x - start).min(end - x);
+                    let lift = if from_end < radius {
+                        let d = radius - from_end;
+                        radius - (radius * radius - d * d).max(0.).sqrt()
+                    } else {
+                        0.
+                    };
+                    (inner_top + lift, floor - lift)
+                };
+                let lanes: Vec<(Vec<f32>, f32, f32)> = match peak2 {
+                    // A tall stereo row: the left above, the right below.
+                    Some(peak2) => {
+                        let half = (floor - inner_top) / 2.;
+                        vec![
+                            (soften(&decode(peak)), inner_top + half, half),
+                            (soften(&decode(peak2)), floor, half),
+                        ]
+                    }
+                    None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
+                };
+                let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+                let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+                let x = |i: usize| x0 + (first + i) as f32 / per;
+                let mut paths = vec![];
+                for (values, lane_floor, lane_h) in lanes {
+                    let end_at = last.min(values.len());
+                    if first >= end_at {
+                        continue;
+                    }
+                    let values = &values[first..end_at];
+                    // The haze along the floor, then the shape over it.
+                    paths.push((
+                        glass_fill(values.len(), |_| WAVE_HAZE, &x, lane_floor, &inside),
+                        glass_fill(
+                            values.len(),
+                            |i| values[i] * LOUDEST * lane_h,
+                            &x,
+                            lane_floor,
+                            &inside,
+                        ),
+                    ));
+                }
+                paths
+            });
+            // More opaque at its base than at its tips.
+            for (haze, shape) in paths.iter() {
+                if let Some(path) = haze {
+                    window.paint_path(path.clone(), shade(tone, strength * 0.55));
+                }
+                if let Some(path) = shape {
+                    window.paint_path(
+                        path.clone(),
+                        linear_gradient(
+                            180.,
+                            linear_color_stop(shade(tone, strength * 0.78), 0.),
+                            linear_color_stop(shade(tone, strength), 1.),
+                        ),
+                    );
+                }
+            }
+        }
+        "text" => {
+            let Some(text) = &op.text else {
+                return;
+            };
+            if text.is_empty() {
+                return;
+            }
+            let mut font = Font {
+                family: pm_design::TEXT_FONT.into(),
+                features: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+                ..window.text_style().font()
+            };
+            if let Some(weight) = op.detail["weight"].as_f64() {
+                font.weight = FontWeight(weight as f32);
+            }
+            let run = TextRun {
+                len: text.len(),
+                font,
+                color: rgb_to_hsla(color),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+                letter_spacing: None,
+            };
+            let font_size = px(op.font_size as f32);
+            let shape = |text: String, window: &mut Window| {
+                let run = TextRun {
+                    len: text.len(),
+                    ..run.clone()
+                };
+                window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &[run])
+            };
+            let mut line = shape(text.clone(), window);
+            // A clip's name ends in an ellipsis inside the clip, as in every NLE,
+            // keeping the same padding on the right as on the left.
+            if op.detail["truncate"] == "tail" {
+                let room = px(
+                    (b.width - (t.metrics.inset - t.metrics.inner_radius) as f64).max(0.) as f32,
+                );
+                if line.width > room {
+                    let Some(fitted) = fit_tail(text, |s| shape(s.into(), window).width <= room)
+                    else {
+                        return;
+                    };
+                    // A strip too short for three letters of its name shows
+                    // its colour alone: one letter and an ellipsis names
+                    // nothing.
+                    if fitted.chars().count() < NAME_LEAST + 1 {
+                        return;
+                    }
+                    line = shape(fitted, window);
+                }
+            }
+            let height = font_size * t.typography.dense_leading;
+            let y = b.y + (b.height - f32::from(height) as f64) / 2.;
+            // Centred labels (the ruler's) keep clear of `minX`.
+            let x = if op.detail["align"] == "center" {
+                let x = b.x + (b.width - f32::from(line.width) as f64) / 2.;
+                x.max(op.detail["minX"].as_f64().unwrap_or(f64::MIN))
+            } else if op.detail["align"] == "right" {
+                b.x + b.width - f32::from(line.width) as f64
+            } else {
+                b.x
+            };
+            let _ = line.paint(at(x, y.max(b.y)), height, TextAlign::Left, None, window, cx);
+        }
+        _ => {}
+    };
+    match clip {
+        Some(bounds) => window.with_content_mask(
+            Some(ContentMask {
+                bounds,
+                ..Default::default()
+            }),
+            |w| draw(w, cx),
+        ),
+        None => draw(window, cx),
+    }
+}
+/// The longest start of `text` that, with a trailing ellipsis, `fits`; none when
+/// not even one character does.
+pub(crate) fn fit_tail(text: &str, mut fits: impl FnMut(&str) -> bool) -> Option<String> {
+    let ends: Vec<usize> = text.char_indices().map(|(i, c)| i + c.len_utf8()).collect();
+    let candidate = |n: usize| format!("{}…", text[..ends[n - 1]].trim_end());
+    let (mut keep, mut over) = (0, ends.len());
+    while keep + 1 < over {
+        let mid = (keep + over) / 2;
+        if fits(&candidate(mid)) {
+            keep = mid;
+        } else {
+            over = mid;
+        }
+    }
+    (keep > 0).then(|| candidate(keep))
+}
+fn point_of(value: &serde_json::Value) -> Option<(f64, f64)> {
+    Some((value.get(0)?.as_f64()?, value.get(1)?.as_f64()?))
+}
+fn diamond(area: Bounds<Pixels>, color: Rgba, window: &mut Window) {
+    let c = area.center();
+    let (w, h) = (area.size.width / 2., area.size.height / 2.);
+    convex(
+        &[
+            point(c.x, c.y - h),
+            point(c.x + w, c.y),
+            point(c.x, c.y + h),
+            point(c.x - w, c.y),
+        ],
+        color,
+        window,
+    );
+}
+/// A convex polygon filled as a fan of triangles: the same coverage a
+/// tessellator gives it, without one per keyframe glyph (a dense timeline
+/// paints tens of thousands of them a frame).
+fn convex(corners: &[Point<Pixels>], color: Rgba, window: &mut Window) {
+    let mut path = gpui::Path::new(corners[0]);
+    for pair in corners[1..].windows(2) {
+        path.push_triangle(
+            (corners[0], pair[0], pair[1]),
+            (point(0., 1.), point(0., 1.), point(0., 1.)),
+        );
+    }
+    window.paint_path(path, color);
+}
+fn diamond_outline(area: Bounds<Pixels>, color: Rgba, window: &mut Window) {
+    let c = area.center();
+    let (w, h) = (area.size.width / 2., area.size.height / 2.);
+    let mut path = PathBuilder::stroke(px(1.));
+    path.move_to(point(c.x, c.y - h));
+    path.line_to(point(c.x + w, c.y));
+    path.line_to(point(c.x, c.y + h));
+    path.line_to(point(c.x - w, c.y));
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+/// The right (`toward_right`) or left half of a diamond, filled.
+fn half_diamond(area: Bounds<Pixels>, toward_right: bool, color: Rgba, window: &mut Window) {
+    let c = area.center();
+    let (w, h) = (area.size.width / 2., area.size.height / 2.);
+    let tip = if toward_right { c.x + w } else { c.x - w };
+    convex(
+        &[point(c.x, c.y - h), point(tip, c.y), point(c.x, c.y + h)],
+        color,
+        window,
+    );
+}
+
+#[cfg(test)]
+mod cull_tests {
+    use super::Cull;
+    use gpui::{px, size};
+    use pm_panel_timeline::render::{Op, Rect};
+
+    fn op(id: &str, x: f64, y: f64, covered: bool) -> Op {
+        Op {
+            id: id.into(),
+            shape: "diamond",
+            bounds: Rect::new(x, y, 9., 9.),
+            color: 0xffffff,
+            opacity: 0.85,
+            radius: 0.,
+            stroke: 0.,
+            text: None,
+            font_size: 0.,
+            detail: serde_json::json!({"half": null}),
+            waveform: None,
+            clip: None,
+            covered,
+            decorative: false,
+        }
+    }
+
+    #[test]
+    fn a_playing_head_turns_the_page_at_the_edges_as_v1() {
+        // In sight: no page turn.
+        assert_eq!(super::follow_page(0., 1000.), None);
+        assert_eq!(super::follow_page(949., 1000.), None);
+        // Within 50 points of the right edge: back to a fifth of the way in.
+        assert_eq!(super::follow_page(951., 1000.), Some(200.));
+        // A narrow area turns a tenth from its edge.
+        assert_eq!(super::follow_page(181., 200.), Some(40.));
+        assert_eq!(super::follow_page(179., 200.), None);
+        // Behind the left edge (a loop, or backwards): four fifths in.
+        assert_eq!(super::follow_page(-1., 1000.), Some(800.));
+    }
+    #[test]
+    fn only_covered_and_off_canvas_ops_are_left_out() {
+        let cull = Cull::new(size(px(400.), px(100.)));
+        assert!(!cull.skip(&op("key:[1,a]", 50., 10., false)));
+        assert!(cull.skip(&op("key:[1,b]", 50.2, 10., true)));
+        // Wholly off the canvas: nothing to draw, key or not.
+        assert!(cull.skip(&op("key:[9,a]", 50., 140., false)));
+        assert!(cull.skip(&op("clip:y", 500., 10., false)));
+        // Partly on the canvas draws.
+        assert!(!cull.skip(&op("clip:z", 395., 10., false)));
+    }
+}
+
+/// The playhead pin in `area` (v1's 11 pt pentagon: the shoulders sit at
+/// six elevenths of its height, then the sides meet in a point).
+fn playhead_pin(area: Bounds<Pixels>) -> PathBuilder {
+    let (l, r) = (area.origin.x, area.origin.x + area.size.width);
+    let (top, bottom) = (area.origin.y, area.origin.y + area.size.height);
+    let shoulder = top + area.size.height * (6. / 11.);
+    let mut path = PathBuilder::fill();
+    path.move_to(point(l, top));
+    path.line_to(point(r, top));
+    path.line_to(point(r, shoulder));
+    path.line_to(point(area.center().x, bottom));
+    path.line_to(point(l, shoulder));
+    path.close();
+    path
+}
+
+/// The layer column a timeline opens with: the theme's, at least the least.
+pub fn default_layer_column(m: &pm_design::Metrics) -> f64 {
+    (m.layer_column as f64).max(least_layer_column(m))
+}
+/// v1's least layer column (`GUTTER_MIN`, 320 pt).
+const V1_LEAST_LAYER_COLUMN: f64 = 320.;
+/// The narrowest the layer column goes: a layer row's number, disclosure,
+/// kind badge, three slots of name and its four switches (parent link, 3D,
+/// Lock, Visibility), with its insets and gaps, and never narrower
+/// than v1's. The name truncates first; the switches always fit.
+pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
+    let (gap, hit) = (m.gap as f64, m.hit as f64);
+    // Insets and the gaps between number, disclosure, badge and name.
+    let room = 2. * gap + 4. * gap;
+    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 4. * hit;
+    row.max(V1_LEAST_LAYER_COLUMN).ceil()
+}
+
+/// How far either side of a work-area edge its handle takes hold (pt): a
+/// 12 pt zone over the ruler's height, as v1's (WORK_BAR.hit).
+const WORK_HANDLE_REACH: f64 = 6.;
+/// v1's work-area bar: the top strip of the ruler a plain drag moves it by
+/// (WORK_BAR.height with a point of grace).
+const WORK_BAR_STRIP: f64 = 6.;
+
+// Scrolling follows the pointer crossing the visible time area, never a
+// composition/work-area endpoint or the dragged object's bounds.
+fn edge_overflow(pointer: f32, left: f32, right: f32) -> f32 {
+    if pointer < left {
+        pointer - left
+    } else if pointer > right {
+        pointer - right
+    } else {
+        0.
+    }
+}
+#[cfg(test)]
+mod edge_scroll_regression {
+    use super::edge_overflow;
+    #[test]
+    fn only_the_visible_edge_starts_scrolling() {
+        for pointer in [200., 400., 700., 1000.] {
+            assert_eq!(edge_overflow(pointer, 200., 1000.), 0.);
+        }
+        assert_eq!(edge_overflow(199., 200., 1000.), -1.);
+        assert_eq!(edge_overflow(1001., 200., 1000.), 1.);
+    }
+}
+
+/// How far across from a key's centre a press still takes it (v1's
+/// keyDown: 6 points); beyond it a press on the row starts a marquee.
+pub(crate) const KEY_REACH: f64 = 6.;
+pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
+/// v1's creation items in the timeline's menus (its Composition, Captions
+/// and 3D extensions added them): New Composition…, Import Captions…, and
+/// Add 3D Layer with its kinds, as the viewer's menu offers them.
+pub(crate) fn creation_rows() -> Vec<serde_json::Value> {
+    let kinds: Vec<serde_json::Value> = pm_shell::menu::new3d()
+        .into_iter()
+        .map(|i| match i.args.first().and_then(|a| a.as_str()) {
+            Some(kind) => serde_json::json!({"label": i.label, "command": format!("new3d:{kind}")}),
+            None => serde_json::json!({"separator": true}),
+        })
+        .collect();
+    vec![
+        serde_json::json!({"label": "New Composition…", "command": "newComposition"}),
+        serde_json::json!({"label": "Import Captions…", "command": "importCaptions"}),
+        serde_json::json!({"label": "Add 3D Layer", "children": kinds}),
+    ]
+}
+pub(crate) fn empty_new_menu() -> serde_json::Value {
+    serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
+}
+
+/// v1's `dragGraphTransform`: a grip scales the selected keys about the
+/// opposite edge or corner, or about the centre with ⌘; the grabbed edge
+/// follows the pointer from where it was.
+#[cfg(test)]
+mod transform_box_tests {
+    use super::TransformBox;
+    use pm_panel_timeline::graph_render::GRIPS;
+    fn grip(name: &str) -> usize {
+        GRIPS.iter().position(|g| *g == name).unwrap()
+    }
+    /// Keys from 1 s to 3 s, valued 0 to 1.
+    fn on(name: &str, centred: bool) -> TransformBox {
+        TransformBox {
+            t0: 1.,
+            t1: 3.,
+            v0: 0.,
+            v1: 1.,
+            grip: grip(name),
+            centred,
+        }
+    }
+    #[test]
+    fn the_transform_box_scales_about_the_opposite_edge_or_the_centre() {
+        // East: time about the west edge; values stay.
+        assert_eq!(on("e", false).anchor().0, 1.);
+        assert_eq!(on("e", false).scales(2., 9.), (2., 1.));
+        // North-west: both, about the south-east corner (north holds the
+        // highest value).
+        assert_eq!(on("nw", false).anchor(), (3., 0.));
+        assert_eq!(on("nw", false).scales(1., -0.5), (0.5, 0.5));
+        // ⌘: about the centre.
+        assert_eq!(on("e", true).anchor(), (2., 0.5));
+        assert_eq!(on("e", true).scales(1., 0.), (2., 1.));
+        // A side grip leaves the other axis alone.
+        assert_eq!(on("n", false).scales(5., 1.).0, 1.);
+    }
+}
+
+impl Drop for TimelineSurface {
+    fn drop(&mut self) {
+        timeline_closed();
+        if let Some(id) = self.agent_drag_touch.take() {
+            pm_mcp::coedit::touch_field(&self.project, &id, false);
+        }
+    }
+}
+
+/// Samples of a retimed or reversed audio clip's media time over its length
+/// (a time remap, or a speed other than a static 1), as its sound plays them
+/// (`pm_eval`'s `sourceTime`, which the mix follows): its waveform is read
+/// through them (`waveform::mapped`). `None` for a clip at speed 1.
+fn time_map(
+    published: &pm_kernel::Published,
+    layer: &pm_model::Node,
+    composition: Option<&str>,
+    from: f64,
+    duration: f64,
+) -> Option<std::sync::Arc<[f64]>> {
+    const SAMPLES: usize = 256;
+    let root = published.snapshot.root()?;
+    let d = layer.get("d")?;
+    let remapped = d
+        .get("timeRemap")
+        .map(|n| n.to_value())
+        .is_some_and(|v| v.as_bool() == Some(true) || v.get("v").and_then(pm_model::Value::as_bool) == Some(true));
+    let speed = d.get("speed").map(|n| n.to_value());
+    let unit = match &speed {
+        None => true,
+        Some(v) => match v.as_f64() {
+            Some(s) => s == 1.,
+            None => v.get("v").and_then(pm_model::Value::as_f64) == Some(1.)
+                && v.get("kf").and_then(pm_model::Value::as_array).is_none_or(|k| k.is_empty())
+                && v.get("expr").and_then(pm_model::Value::as_str).is_none_or(str::is_empty),
+        },
+    };
+    if !remapped && unit || duration <= 0. {
+        return None;
+    }
+    let root_id = root.get("id").map(pm_model::Node::to_value);
+    let comp_id = composition.or_else(|| root_id.as_ref().and_then(pm_model::Value::as_str))?;
+    let comp = pm_eval::Comp::in_root(root, comp_id, published.revision()).ok()?;
+    let mut ev = pm_eval::Evaluator::new();
+    let mut cache = pm_eval::retime::RetimeCache::new();
+    let mut map = Vec::with_capacity(SAMPLES + 1);
+    for i in 0..=SAMPLES {
+        let t = from + duration * i as f64 / SAMPLES as f64;
+        let at = pm_eval::Scope::new(&mut ev, &comp, &comp)
+            .source_time(layer, t, Some(&mut cache))
+            .ok()?;
+        map.push(at);
+    }
+    Some(map.into())
+}
+
+/// `rgb` at `alpha` (0–1).
+fn shade(rgb: u32, alpha: f64) -> Rgba {
+    gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
+}
+
+/// The waveform's haze along the floor, in points: about two device pixels.
+const WAVE_HAZE: f32 = 0.9;
+
+/// What a waveform's paths are made of: its peaks (hashed for lookup, then
+/// compared whole) and the strip's place, size, corners and the window's
+/// width, to the bit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct WaveKey {
+    peaks: u64,
+    geometry: [u32; 10],
+}
+
+type WavePaths = Rc<Vec<(Option<Path<Pixels>>, Option<Path<Pixels>>)>>;
+
+/// What the waveform paths may keep: their vertex buffers and peaks, well
+/// under PM-604's footprint (a wide stereo strip's meshes are 6-12 MiB).
+const WAVE_CACHE_BYTES: usize = 16 << 20;
+
+struct WaveEntry {
+    peak: Box<str>,
+    peak2: Option<Box<str>>,
+    paths: WavePaths,
+    bytes: usize,
+    drawn: u64,
+}
+
+/// The waveform paths last drawn, least recently drawn out first, within
+/// `WAVE_CACHE_BYTES`. One per UI thread (GPUI's), emptied when the last
+/// timeline closes.
+#[derive(Default)]
+struct WaveCache {
+    entries: std::collections::HashMap<WaveKey, WaveEntry>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl WaveCache {
+    fn path_bytes(path: &Path<Pixels>) -> usize {
+        std::mem::size_of::<Path<Pixels>>()
+            + path.vertices.capacity() * std::mem::size_of::<gpui::PathVertex<Pixels>>()
+    }
+    fn get(&mut self, key: &WaveKey, peak: &str, peak2: Option<&str>) -> Option<WavePaths> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(key)?;
+        // The digest found it; the peaks themselves decide.
+        if &*entry.peak != peak || entry.peak2.as_deref() != peak2 {
+            return None;
+        }
+        entry.drawn = self.clock;
+        Some(entry.paths.clone())
+    }
+    /// Keeps `paths` unless they alone exceed the budget (they are drawn,
+    /// not kept); makes room by dropping the least recently drawn.
+    fn insert(&mut self, key: WaveKey, peak: &str, peak2: Option<&str>, paths: WavePaths) {
+        let bytes = std::mem::size_of::<WaveEntry>()
+            + peak.len()
+            + peak2.map_or(0, str::len)
+            + paths
+                .iter()
+                .flat_map(|(haze, shape)| [haze, shape])
+                .flatten()
+                .map(Self::path_bytes)
+                .sum::<usize>();
+        if let Some(old) = self.entries.remove(&key) {
+            self.bytes -= old.bytes;
+        }
+        if bytes > WAVE_CACHE_BYTES {
+            return;
+        }
+        while self.bytes + bytes > WAVE_CACHE_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.drawn)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&oldest) {
+                self.bytes -= old.bytes;
+            }
+        }
+        self.clock += 1;
+        self.bytes += bytes;
+        self.entries.insert(
+            key,
+            WaveEntry {
+                peak: peak.into(),
+                peak2: peak2.map(Into::into),
+                paths,
+                bytes,
+                drawn: self.clock,
+            },
+        );
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+thread_local! {
+    static WAVE_CACHE: RefCell<WaveCache> = RefCell::default();
+    /// Timelines open on this thread: the last one closing empties the cache.
+    static TIMELINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn timeline_opened() {
+    TIMELINES.with(|n| n.set(n.get() + 1));
+}
+
+fn timeline_closed() {
+    let left = TIMELINES.with(|n| {
+        n.set(n.get().saturating_sub(1));
+        n.get()
+    });
+    if left == 0 {
+        WAVE_CACHE.with(|c| c.borrow_mut().clear());
+    }
+}
+
+/// A waveform's paths (per channel: its haze and its shape), kept by what
+/// they are made of: a frame that only moved something else (a hover, the
+/// playhead, a panel) paints the same paths without decoding the peaks and
+/// tessellating their curves again.
+fn waveform_paths(
+    key: WaveKey,
+    peak: &str,
+    peak2: Option<&str>,
+    make: impl FnOnce() -> Vec<(Option<Path<Pixels>>, Option<Path<Pixels>>)>,
+) -> WavePaths {
+    if let Some(paths) = WAVE_CACHE.with(|c| c.borrow_mut().get(&key, peak, peak2)) {
+        return paths;
+    }
+    let paths = Rc::new(make());
+    WAVE_CACHE.with(|c| c.borrow_mut().insert(key, peak, peak2, paths.clone()));
+    paths
+}
+
+#[cfg(test)]
+mod wave_cache_tests {
+    use super::*;
+
+    /// A mesh whose vertex buffer holds `mib` MiB, as a wide strip's does.
+    fn mesh(mib: usize) -> WavePaths {
+        let mut path = Path::new(point(px(0.), px(0.)));
+        let vertex = std::mem::size_of::<gpui::PathVertex<Pixels>>();
+        path.vertices.reserve_exact((mib << 20) / vertex);
+        Rc::new(vec![(Some(path), None)])
+    }
+    fn key(n: u32) -> WaveKey {
+        WaveKey {
+            peaks: 7,
+            geometry: [n; 10],
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn panning_a_wide_stereo_strip_stays_within_the_byte_budget() {
+        let mut cache = WaveCache::default();
+        // Every pan step makes a new key; each strip's meshes are ~6 MiB.
+        for step in 0..200 {
+            cache.insert(key(step), "peaks", Some("right"), mesh(6));
+            assert!(cache.bytes <= WAVE_CACHE_BYTES, "{} bytes", cache.bytes);
+        }
+        assert!(cache.entries.len() <= 2);
+        // The newest is the one kept.
+        assert!(cache.get(&key(199), "peaks", Some("right")).is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_least_recently_drawn_goes_first() {
+        let mut cache = WaveCache::default();
+        cache.insert(key(1), "a", None, mesh(5));
+        cache.insert(key(2), "b", None, mesh(5));
+        cache.insert(key(3), "c", None, mesh(5));
+        // 1 is drawn again: 2 is now the oldest.
+        assert!(cache.get(&key(1), "a", None).is_some());
+        cache.insert(key(4), "d", None, mesh(5));
+        assert!(cache.get(&key(2), "b", None).is_none());
+        assert!(cache.get(&key(1), "a", None).is_some());
+        assert!(cache.get(&key(4), "d", None).is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_mesh_over_the_budget_is_drawn_not_kept() {
+        let mut cache = WaveCache::default();
+        cache.insert(key(1), "a", None, mesh(2));
+        cache.insert(key(9), "huge", None, mesh(17));
+        assert!(cache.get(&key(9), "huge", None).is_none());
+        // What was kept stays.
+        assert!(cache.get(&key(1), "a", None).is_some());
+        // Through the painter's path: the paths are still drawn.
+        let paths = waveform_paths(key(9), "huge", None, || Rc::try_unwrap(mesh(17)).unwrap());
+        assert!(paths[0].0.is_some());
+        WAVE_CACHE.with(|c| assert_eq!(c.borrow().bytes, 0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_same_digest_with_other_peaks_is_a_miss() {
+        let mut cache = WaveCache::default();
+        cache.insert(key(1), "left", Some("right"), mesh(1));
+        assert!(cache.get(&key(1), "left", Some("right")).is_some());
+        assert!(cache.get(&key(1), "other", Some("right")).is_none());
+        assert!(cache.get(&key(1), "left", None).is_none());
+        // Replaced under the same key, counted once.
+        cache.insert(key(1), "other", None, mesh(1));
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.bytes < (2 << 20));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_last_timeline_closing_releases_the_meshes() {
+        timeline_opened();
+        timeline_opened();
+        WAVE_CACHE.with(|c| c.borrow_mut().insert(key(1), "a", None, mesh(1)));
+        timeline_closed();
+        WAVE_CACHE.with(|c| assert_eq!(c.borrow().entries.len(), 1));
+        timeline_closed();
+        WAVE_CACHE.with(|c| assert_eq!((c.borrow().entries.len(), c.borrow().bytes), (0, 0)));
+    }
+}
+
+/// Fill between the rounded strip floor and the softened heights. The
+/// samples are already spaced at device-pixel pitch on Retina, so connecting
+/// adjacent samples directly preserves the envelope without CPU tessellation.
+fn glass_fill(
+    count: usize,
+    height: impl Fn(usize) -> f32,
+    x: &dyn Fn(usize) -> f32,
+    base: f32,
+    inside: &dyn Fn(f32) -> (f32, f32),
+) -> Option<Path<Pixels>> {
+    if count < 2 {
+        return None;
+    }
+    let column = |i| {
+        let x = x(i);
+        let (ceiling, floor) = inside(x);
+        let floor = floor.min(base);
+        let top = (base - height(i)).max(ceiling).min(floor);
+        (point(px(x), px(top)), point(px(x), px(floor)))
+    };
+    let mut path = Path::new(column(0).0);
+    let mut previous = column(0);
+    let mut next = column(1);
+    let fill = (point(0., 1.), point(0., 1.), point(0., 1.));
+    for i in 1..count {
+        let after = (i + 1 < count).then(|| column(i + 1));
+        // One trapezoid suffices across a flat run, including the haze.
+        let flat = |a: (Point<Pixels>, Point<Pixels>), b: (Point<Pixels>, Point<Pixels>)| {
+            a.0.y == b.0.y && a.1.y == b.1.y
+        };
+        if !after.is_some_and(|after| flat(previous, next) && flat(next, after)) {
+            let (top, floor) = previous;
+            let (new_top, new_floor) = next;
+            if top.y < floor.y {
+                path.push_triangle((top, floor, new_top), fill);
+            }
+            if new_top.y < new_floor.y {
+                path.push_triangle((new_top, floor, new_floor), fill);
+            }
+            previous = next;
+        }
+        if let Some(after) = after {
+            next = after;
+        }
+    }
+    (!path.vertices.is_empty()).then_some(path)
+}

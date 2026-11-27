@@ -1,0 +1,269 @@
+{
+  "baseline": "v1.2.0",
+  "source": "apps/desktop/src/main/codex/app-server-runner.test.ts; unmodified runner, FakeAppServer test pattern",
+  "frames": [
+    {
+      "kind": "run",
+      "value": {
+        "id": "oracle-run",
+        "cwd": "/workspace/agent",
+        "prompt": "Make a progressive blur effect",
+        "schema": {
+          "type": "object"
+        },
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "ultra",
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialize",
+        "id": 1,
+        "params": {
+          "clientInfo": {
+            "name": "powermove_agent",
+            "title": "Powermove Agent",
+            "version": "1.0.0"
+          },
+          "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialized",
+        "params": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "thread/start",
+        "id": 2,
+        "params": {
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+          "ephemeral": true,
+          "config": {
+            "mcp_servers": {}
+          },
+          "model": "gpt-6.1-sol",
+          "serviceName": "powermove"
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "thr_123"
+          }
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/start",
+        "id": 3,
+        "params": {
+          "threadId": "thr_123",
+          "input": [
+            {
+              "type": "text",
+              "text": "Make a progressive blur effect"
+            }
+          ],
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandboxPolicy": {
+            "type": "readOnly"
+          },
+          "model": "gpt-6.1-sol",
+          "effort": "ultra",
+          "outputSchema": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 3,
+        "result": {
+          "turn": {
+            "id": "turn_456",
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "async-q",
+            "type": "agentMessage",
+            "delivery": "async",
+            "text": "Choose one",
+            "questions": [
+              {
+                "title": "Choose a colour",
+                "options": [
+                  "Blue",
+                  "Red"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "question",
+        "itemId": "async-q",
+        "questions": [
+          {
+            "id": "async-q-0",
+            "header": "",
+            "question": "Choose a colour",
+            "options": [
+              {
+                "label": "Blue",
+                "description": ""
+              },
+              {
+                "label": "Red",
+                "description": ""
+              }
+            ],
+            "allowOther": true,
+            "secret": false
+          }
+        ],
+        "transport": "message",
+        "blocking": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/agentMessage/delta",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "itemId": "async-q",
+          "delta": "Choose one"
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "async-q",
+            "type": "agentMessage",
+            "delivery": "async",
+            "text": "Choose one",
+            "questions": [
+              {
+                "title": "Choose a colour",
+                "options": [
+                  "Blue",
+                  "Red"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/agentMessage/delta",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "itemId": "answer",
+          "delta": "{\"kind\":\"scene\"}"
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "answer",
+        "text": "{\"kind\":\"scene\"}"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "answer",
+            "type": "agentMessage",
+            "text": "{\"kind\":\"scene\"}"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turn": {
+            "id": "turn_456",
+            "status": "completed",
+            "error": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "result",
+      "value": {
+        "ok": true,
+        "text": "{\"kind\":\"scene\"}",
+        "access": "editor"
+      }
+    }
+  ]
+}

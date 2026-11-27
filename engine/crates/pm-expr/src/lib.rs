@@ -1,0 +1,514 @@
+//! The project expression language (docs/rust-engine.md, sections 3, 5, and 7).
+//!
+//! A port of `legacy/core/expression.ts`, the bounded parser and interpreter
+//! that evaluates channel expressions without running JavaScript. Everything a
+//! project can observe is reproduced: the grammar and its limits (2,000 UTF-16
+//! code units, 160 nodes, depth 24, 12 call arguments), every error message,
+//! `expressionDiagnostic` and `EXPRESSION_NAMES`, the identifiers and helpers,
+//! member and index access into raw project values, loose equality and string
+//! coercion, and `Math` results bit for bit with the V8 in Powermove's Electron
+//! (see [`jsmath`]). The quirks of the original that projects can reach are
+//! kept too (see [`parser`](mod@parser)'s notes and `docs/engine/expressions.md`).
+//!
+//! # Use
+//!
+//! ```
+//! use pm_expr::{Context, Dialect, Expression, JsonHost, Value};
+//!
+//! let layer = pm_model::json::parse(r#"{"name":"Title","p":{"x":{"v":4}}}"#).unwrap();
+//! let comp = pm_model::json::parse(r#"{"layers":[],"params":{"gain":{"value":3}}}"#).unwrap();
+//! let expr = Expression::compile("layer.p.x.v * param('gain') + t", Dialect::Native).unwrap();
+//! let ctx = Context {
+//!     t: 0.5,
+//!     time: 2.0,
+//!     fps: 30.0,
+//!     frame: 60.0,
+//!     value: Value::Number(10.0),
+//!     layer: JsonHost::value(&layer),
+//!     comp: JsonHost::value(&comp),
+//!     channel: "position.x".into(),
+//!     idx: 0.0,
+//! };
+//! let out = expr.evaluate(&JsonHost::new(), &ctx);
+//! assert_eq!(out.result.unwrap().as_number(), Some(12.5));
+//! assert!(out.deps.depends_on_time());
+//! ```
+//!
+//! # Dependencies
+//!
+//! Every evaluation returns the context inputs and document fields it read
+//! ([`Dependencies`]). Reads are recorded as they happen, so they describe the
+//! branch taken: if none of them changes, the result cannot change.
+
+// The only unsafe code is the optional wasm import of `Math.pow` (feature
+// `js-pow`), a declaration of a pure function.
+#![deny(unsafe_code)]
+
+mod bytecode;
+mod deps;
+mod diagnostic;
+mod eval;
+mod general;
+mod host;
+pub mod jsmath;
+mod lexer;
+mod numeric;
+mod parser;
+mod string;
+mod value;
+
+pub use deps::{ContextReads, Dependencies, FieldRead, Reach, Root, Step};
+pub use diagnostic::{
+    LENGTH_MESSAGE, expression_diagnostic, expression_diagnostic_utf16, expression_names,
+};
+pub use eval::EvalError;
+pub use general::GeneralBinding;
+pub use host::{Host, JsonHost, JsonRef, Shape};
+pub use lexer::{Location, SyntaxError};
+pub use parser::{MAX_CALL_ARGS, MAX_DEPTH, MAX_NODES, MAX_SOURCE_CHARS};
+pub use string::JsStr;
+pub use value::{
+    Callable, Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string,
+    string_to_number,
+};
+
+use bytecode::Program;
+use eval::Evaluator;
+use std::sync::Arc;
+
+/// Which names exist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Dialect {
+    /// Exactly `expression.ts`: `frame` is an unknown name (`undefined`).
+    Legacy,
+    /// The engine's language: `Legacy` plus the integer `frame` (section 5,
+    /// rule 9). Expressions that do not mention `frame` behave identically.
+    #[default]
+    Native,
+}
+
+/// The inputs of one evaluation (`ExpressionContext` in `expression.ts`).
+#[derive(Clone, Debug)]
+pub struct Context<O> {
+    /// `t`: layer-local time in seconds.
+    pub t: f64,
+    /// `time` and `T`: composition time in seconds.
+    pub time: f64,
+    /// `fps`: the composition's frame rate as stored.
+    pub fps: f64,
+    /// `frame` (native dialect): the composition frame index at `time`,
+    /// computed by the caller with `pm_time` frame math (an integer).
+    pub frame: f64,
+    /// `value`: the channel's keyframed (or static) value.
+    pub value: Value<O>,
+    /// `layer`: the raw layer object.
+    pub layer: Value<O>,
+    /// `comp`: the raw composition object; `param(name)` reads
+    /// `comp.params[name].value`.
+    pub comp: Value<O>,
+    /// `ch`: the channel key.
+    pub channel: JsStr,
+    /// `idx`: the layer's index in the composition. `expression.ts` computes it
+    /// only when [`Expression::needs_idx`] and passes 0 otherwise.
+    pub idx: f64,
+}
+
+/// A parsed expression (`compileExpression`). Immutable, `Send + Sync`, and
+/// cheap to evaluate many times.
+#[derive(Clone, Debug)]
+pub struct Expression {
+    program: Arc<Program>,
+    numeric: Option<Arc<numeric::Numeric>>,
+    /// Partial evaluation for sources the numeric plan does not cover.
+    general: Option<Arc<general::General>>,
+    needs_idx: bool,
+    dialect: Dialect,
+}
+
+/// Why a source does not compile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompileError {
+    /// Empty, or longer than [`MAX_SOURCE_CHARS`] UTF-16 code units.
+    Length,
+    Syntax(SyntaxError),
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileError::Length => f.write_str("Expression is empty or too long"),
+            CompileError::Syntax(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CompileError {}
+
+impl CompileError {
+    /// Where the source fails to parse, when the reason names a place (the
+    /// message is unchanged: it still ends "at <offset>").
+    pub fn location(&self) -> Option<Location> {
+        match self {
+            CompileError::Syntax(e) => e.location(),
+            CompileError::Length => None,
+        }
+    }
+}
+
+/// The result of an evaluation and what it read.
+#[derive(Clone, Debug)]
+pub struct Evaluation<O> {
+    pub result: Result<Value<O>, EvalError>,
+    pub deps: Dependencies,
+}
+
+/// A channel's expression result after the checks `evalProp` applies.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChannelValue {
+    Number(f64),
+    String(JsStr),
+    Bool(bool),
+}
+
+/// What `evalProp` does with an expression: replace the keyframed value, or
+/// keep it and record an error for `expressionErrors`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelEvaluation {
+    /// `Some` when the expression's result replaces the keyframed value.
+    pub value: Option<ChannelValue>,
+    /// The `expressionErrors` entry, `None` when the result was used.
+    pub error: Option<String>,
+    pub deps: Dependencies,
+}
+
+/// `PM.expressionErrors` message when the source does not compile.
+pub const SYNTAX_INVALID_MESSAGE: &str = "Expression syntax is invalid.";
+/// `PM.expressionErrors` message when the result is not a finite number,
+/// string, or boolean.
+pub const NOT_FINITE_MESSAGE: &str = "Expression did not return a finite value.";
+
+fn needs_idx(source: &[u16]) -> bool {
+    // `/\bidx\b/`: word characters are [A-Za-z0-9_].
+    let word = |u: u16| matches!(u, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x5f);
+    let pattern = [u16::from(b'i'), u16::from(b'd'), u16::from(b'x')];
+    source.windows(3).enumerate().any(|(i, w)| {
+        w == pattern
+            && (i == 0 || !word(source[i - 1]))
+            && source.get(i + 3).is_none_or(|&u| !word(u))
+    })
+}
+
+impl Expression {
+    /// `compileExpression(source)`: `None` for an empty or too long source or
+    /// a syntax error.
+    pub fn compile(source: &str, dialect: Dialect) -> Option<Expression> {
+        Expression::parse(source, dialect).ok()
+    }
+
+    /// Like [`compile`](Expression::compile), with the reason for a failure.
+    pub fn parse(source: &str, dialect: Dialect) -> Result<Expression, CompileError> {
+        let units: Vec<u16> = source.encode_utf16().collect();
+        Expression::parse_utf16(&units, dialect)
+    }
+
+    /// [`parse`](Expression::parse) for a JavaScript string given as UTF-16
+    /// code units (project JSON may hold lone surrogates).
+    pub fn parse_utf16(units: &[u16], dialect: Dialect) -> Result<Expression, CompileError> {
+        if units.is_empty() || units.len() > MAX_SOURCE_CHARS {
+            return Err(CompileError::Length);
+        }
+        let tree = parser::parse(units).map_err(|e| CompileError::Syntax(e.locate(units)))?;
+        let numeric = numeric::Numeric::compile(&tree, dialect).map(Arc::new);
+        Ok(Expression {
+            program: Arc::new(Program::compile(&tree)),
+            general: numeric
+                .is_none()
+                .then(|| general::General::compile(&tree, dialect).map(Arc::new))
+                .flatten(),
+            numeric,
+            needs_idx: needs_idx(units),
+            dialect,
+        })
+    }
+
+    /// [`compile`](Expression::compile) for UTF-16 code units.
+    pub fn compile_utf16(units: &[u16], dialect: Dialect) -> Option<Expression> {
+        Expression::parse_utf16(units, dialect).ok()
+    }
+
+    /// Whether the source mentions `idx` as a word (the caller computes the
+    /// layer index only then, as `anim.ts` does).
+    pub fn needs_idx(&self) -> bool {
+        self.needs_idx
+    }
+
+    /// What the program can read of the document ([`Reach`]): every input
+    /// identifier and host call in its code, taken or not. A call's callee
+    /// is syntactic, so no other path reaches the host.
+    pub fn reach(&self) -> Reach {
+        use bytecode::{Call, Input, Op};
+        use value::Helper;
+        let mut reach = Reach {
+            index: self.needs_idx,
+            ..Reach::default()
+        };
+        for op in &self.program.code {
+            match op {
+                Op::Identifier(Input::Layer) => reach.layer = true,
+                Op::Identifier(Input::Comp) => reach.comp = true,
+                Op::Identifier(Input::Index) => reach.index = true,
+                Op::Call(Call::Helper(Helper::Param), _) => reach.params = true,
+                Op::Call(Call::Helper(Helper::Sample | Helper::MotionPath), _) => {
+                    reach.document = true;
+                }
+                _ => {}
+            }
+        }
+        reach
+    }
+
+    /// Whether a caller needs to prepare the channel string at evaluation.
+    pub fn needs_channel(&self) -> bool {
+        self.program
+            .code
+            .iter()
+            .any(|op| matches!(op, bytecode::Op::Identifier(bytecode::Input::Channel)))
+    }
+
+    /// Literal property/parameter names for embedders that intern host keys.
+    /// Dynamic keys still go through the host's ordinary conversion.
+    pub fn literal_strings(&self) -> impl Iterator<Item = &JsStr> {
+        self.program.code.iter().filter_map(|op| match op {
+            bytecode::Op::Literal(parser::Literal::String(s)) => Some(s),
+            bytecode::Op::MemberKey(key) => Some(&key.string),
+            _ => None,
+        })
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    /// Binds only document/fps/index inputs of the typed numeric plan. The
+    /// embedding must discard this binding on every document revision. Time,
+    /// local time, frame and the keyframed value remain dynamic. The complete
+    /// bytecode remains available for any runtime type requiring coercion.
+    pub fn bind_numeric<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Self> {
+        let mut out = self.clone();
+        out.numeric = Some(Arc::new(self.numeric.as_ref()?.bind(host, ctx)));
+        Some(out)
+    }
+
+    /// Whether [`bind_general`](Expression::bind_general) applies: the source
+    /// has no numeric plan but has subexpressions that read no time, value or
+    /// channel input.
+    pub fn has_general_binding(&self) -> bool {
+        self.general.is_some()
+    }
+
+    /// Evaluates each subexpression that reads only `layer`, `comp`, `fps`,
+    /// `idx` and literals once and substitutes its primitive answer (see
+    /// `general.rs`). The result answers [`evaluate_untracked`] and
+    /// [`evaluate_scalars`] exactly as this expression does for every input
+    /// with which [`general_binding_matches`] holds. The embedding must check
+    /// that on every document revision. It is not for tracked evaluation (its
+    /// reads are the remaining ones only).
+    ///
+    /// [`evaluate_untracked`]: Expression::evaluate_untracked
+    /// [`evaluate_scalars`]: Expression::evaluate_scalars
+    /// [`general_binding_matches`]: Expression::general_binding_matches
+    pub fn bind_general<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+    ) -> Option<(Self, GeneralBinding)> {
+        let (tree, binding) = self.general.as_ref()?.bind(host, ctx, self.dialect)?;
+        Some((
+            Expression {
+                program: Arc::new(Program::compile(&tree)),
+                numeric: numeric::Numeric::compile(&tree, self.dialect).map(Arc::new),
+                general: None,
+                needs_idx: self.needs_idx,
+                dialect: self.dialect,
+            },
+            binding,
+        ))
+    }
+
+    /// Whether a binding from [`bind_general`](Expression::bind_general) on
+    /// this (source) expression still holds: every substituted subexpression
+    /// answers the same primitive (numbers by bits).
+    pub fn general_binding_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        binding: &GeneralBinding,
+    ) -> bool {
+        self.general
+            .as_ref()
+            .is_some_and(|general| binding.matches(general, host, ctx, self.dialect))
+    }
+
+    /// Whether the general binding's subexpressions read the layer object.
+    pub fn general_uses_layer(&self) -> bool {
+        self.general.as_ref().is_some_and(|g| g.uses_layer())
+    }
+
+    /// Whether they read only the layer and its index (not `comp`, `fps` or
+    /// parameters).
+    pub fn general_is_layer_local(&self) -> bool {
+        self.general.as_ref().is_some_and(|g| g.layer_local())
+    }
+
+    /// Whether the fixed numeric inputs read the current layer object.
+    pub fn numeric_fixed_uses_layer(&self) -> bool {
+        self.numeric.as_ref().is_some_and(|n| n.fixed_uses_layer())
+    }
+
+    /// Fixed inputs depend only on the layer and its index, not composition
+    /// fields, fps or project parameters. Dynamic inputs are still evaluated.
+    pub fn numeric_fixed_is_layer_local(&self) -> bool {
+        self.numeric
+            .as_ref()
+            .is_some_and(|n| n.fixed_is_layer_local())
+    }
+
+    /// Exact bits of every fixed numeric input in the original typed plan.
+    /// `None` means a field or parameter is not numeric, so a document-bound
+    /// plan cannot be safely reused. Dynamic time, frame and value are omitted.
+    pub fn numeric_fixed_bits<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Vec<u64>> {
+        let mut bits = Vec::new();
+        self.numeric.as_ref()?.fixed_bits(host, ctx, &mut bits)?;
+        Some(bits)
+    }
+
+    /// Allocation-free comparison with the original plan's fixed inputs.
+    /// This must be called on the source expression, never on a folded binding.
+    pub fn numeric_fixed_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        bits: &[u64],
+    ) -> bool {
+        let Some(numeric) = &self.numeric else {
+            return false;
+        };
+        let mut position = 0;
+        numeric.fixed_matches(host, ctx, bits, &mut position) && position == bits.len()
+    }
+
+    /// A revision-bound numeric plan with no remaining document/context reads.
+    /// `None` retains the complete evaluator, including all coercion and errors.
+    pub fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {
+        self.numeric.as_ref()?.scalars(t, time, value)
+    }
+
+    /// Runs without allocating a dependency trace. Callers must invalidate on
+    /// every document revision (or track reads in the host itself).
+    pub fn evaluate_untracked<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+    ) -> Result<Value<H::Obj>, EvalError> {
+        if let Some(plan) = &self.numeric
+            && let Some(n) = plan.evaluate(host, ctx)
+        {
+            return Ok(Value::Number(n));
+        }
+        Evaluator::untracked(host, ctx, self.dialect)
+            .run(&self.program)
+            .map(|v| v.map_doc(|t| t.into_obj()))
+    }
+
+    /// Evaluates against raw project values supplied by `host`.
+    pub fn evaluate<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Evaluation<H::Obj> {
+        let mut evaluator = Evaluator::new(host, ctx, self.dialect);
+        let result = evaluator
+            .run(&self.program)
+            .map(|v| v.map_doc(|t| t.into_obj()));
+        Evaluation {
+            result,
+            deps: evaluator.dependencies(),
+        }
+    }
+}
+
+/// `String(value)` as V8 computes it, reading document objects through
+/// `host` (for showing a result, or comparing one with JavaScript's).
+pub fn to_js_string<H: Host>(host: &H, value: &Value<H::Obj>) -> Result<JsStr, EvalError> {
+    let ctx = Context {
+        t: 0.0,
+        time: 0.0,
+        fps: 0.0,
+        frame: 0.0,
+        value: Value::Undefined,
+        layer: Value::Undefined,
+        comp: Value::Undefined,
+        channel: JsStr::default(),
+        idx: 0.0,
+    };
+    Evaluator::new(host, &ctx, Dialect::Native).string_of(value)
+}
+
+/// `evalProp`'s handling of an expression: `compiled` is `None` when the
+/// source did not compile.
+pub fn evaluate_channel<H: Host>(
+    compiled: Option<&Expression>,
+    host: &H,
+    ctx: &Context<H::Obj>,
+) -> ChannelEvaluation {
+    let Some(expr) = compiled else {
+        return ChannelEvaluation {
+            value: None,
+            error: Some(SYNTAX_INVALID_MESSAGE.into()),
+            deps: Dependencies::default(),
+        };
+    };
+    let Evaluation { result, deps } = expr.evaluate(host, ctx);
+    let (value, error) = match result {
+        Ok(Value::Number(n)) if n.is_finite() => (Some(ChannelValue::Number(n)), None),
+        Ok(Value::String(s)) => (Some(ChannelValue::String(s)), None),
+        Ok(Value::Bool(b)) => (Some(ChannelValue::Bool(b)), None),
+        Ok(_) => (None, Some(NOT_FINITE_MESSAGE.into())),
+        Err(e) => (None, Some(e.message())),
+    };
+    ChannelEvaluation { value, error, deps }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reach is what the code can touch on any path, taken or not.
+    #[test]
+    fn reach_names_every_document_input_in_the_code() {
+        let reach = |s: &str| Expression::compile(s, Dialect::Legacy).unwrap().reach();
+        assert_eq!(reach("value + wiggle(2, 10) * t"), Reach::default());
+        assert!(reach("sample('B', 'position.x', 0)").document);
+        assert!(reach("t > 1 ? 0 : motionPath('B', 'position.x', 0.5, 0, 1)").document);
+        assert!(reach("idx * 100").index);
+        assert!(reach("param('speed') * t").params);
+        assert!(reach("comp.layers[0].p.opacity.v").comp);
+        let own = reach("layer.from + t");
+        assert!(own.layer && !own.comp && !own.document && !own.index);
+        // A helper named but never called reads nothing.
+        assert!(!reach("sample ? 1 : 2").document);
+    }
+
+    #[test]
+    fn needs_idx_is_a_word_match() {
+        let n = |s: &str| needs_idx(&s.encode_utf16().collect::<Vec<_>>());
+        assert!(n("idx"));
+        assert!(n("idx*2"));
+        assert!(n("$idx"));
+        assert!(!n("idx2"));
+        assert!(!n("_idx"));
+        assert!(!n("Idx"));
+    }
+
+    #[test]
+    fn expression_is_send_and_sync() {
+        fn check<T: Send + Sync>() {}
+        check::<Expression>();
+    }
+}

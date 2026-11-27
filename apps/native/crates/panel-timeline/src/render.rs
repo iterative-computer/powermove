@@ -1,0 +1,3993 @@
+//! Native timeline paint plan. Preparation is worker-only; playback changes only
+//! the overlay. Coordinates are points; authored seconds are never frame-rounded.
+//! Spec: docs/native/design/panels/timeline.md §2–3. No platform/JS dependency.
+use pm_design::Tokens;
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+impl Rect {
+    pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+    fn wire(self) -> Value {
+        json!([self.x, self.y, self.width, self.height])
+    }
+    fn contains(self, x: f64, y: f64) -> bool {
+        x >= self.x && x <= self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct Op {
+    pub id: String,
+    /// Shape names are spec/host symbols, never browser/CSS paint commands.
+    pub shape: &'static str,
+    pub bounds: Rect,
+    pub color: u32,
+    pub opacity: f64,
+    pub radius: f64,
+    pub stroke: f64,
+    pub text: Option<String>,
+    pub font_size: f64,
+    pub detail: Value,
+    /// Sampled, softened channels for the native painter, which needs no wire encoding.
+    pub waveform: Option<std::sync::Arc<[Vec<f32>]>>,
+    pub clip: Option<Rect>,
+    /// A keyframe glyph identical to the key op before it at the same device
+    /// half-pixel: painting it changes nothing. It stays for hit testing and
+    /// marquee selection.
+    pub covered: bool,
+    /// Summary markers are visible but never take pointer input.
+    pub decorative: bool,
+}
+impl Op {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        shape: &'static str,
+        bounds: Rect,
+        color: u32,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            shape,
+            bounds,
+            color,
+            opacity: 1.,
+            radius: 0.,
+            stroke: 0.,
+            text: None,
+            font_size: 0.,
+            detail: Value::Null,
+            waveform: None,
+            clip: None,
+            covered: false,
+            decorative: false,
+        }
+    }
+    pub fn wire(&self) -> Value {
+        json!({"id":self.id,"shape":self.shape,"bounds":self.bounds.wire(),"color":self.color,"opacity":self.opacity,"radius":self.radius,"stroke":self.stroke,"text":self.text,"fontSize":self.font_size,"detail":self.detail,"clip":self.clip.map(Rect::wire)})
+    }
+}
+/// GPUI/macOS implements this; Linux's recorder is an exact inspectable double.
+/// DESIGN-TODO(opus): supply native marker/keyframe.hold paths and Rendering
+/// stripe pitch/period. Named requests below do not invent art or cadence.
+/// The host clips all operations to the supplied viewport before rasterisation.
+pub trait Painter {
+    fn paint(&mut self, viewport: Rect, ops: &[Op]);
+}
+#[derive(Default)]
+pub struct Recorder {
+    pub frames: Vec<Value>,
+}
+impl Painter for Recorder {
+    fn paint(&mut self, viewport: Rect, ops: &[Op]) {
+        self.frames.push(
+            json!({"clip":viewport.wire(),"ops":ops.iter().map(Op::wire).collect::<Vec<_>>()}),
+        );
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyState {
+    Static,
+    Animated,
+    AtPlayhead,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interpolation {
+    Linear,
+    Ease,
+    Hold,
+}
+#[derive(Clone, Debug)]
+pub struct Key {
+    pub id: String,
+    pub seconds: f64,
+    pub selected: bool,
+    pub focused: bool,
+    pub interpolation: Interpolation,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Media {
+    Ready,
+    Loading,
+    Offline,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Label {
+    Blue,
+    Violet,
+    Orange,
+    Red,
+    Yellow,
+    Green,
+    Teal,
+    Gray,
+}
+impl Label {
+    /// A clip's material by layer kind, not by the layer's own swatch, so every
+    /// text clip is the same slate and every audio clip the same green (v1's
+    /// type-keyed clip palette). The outline's kind badge shares it.
+    pub fn for_kind(kind: &str) -> Self {
+        match kind {
+            "text" => Self::Blue,
+            "shape" => Self::Red,
+            "video" | "sequence" => Self::Teal,
+            "image" | "captions" => Self::Yellow,
+            "audio" => Self::Green,
+            "solid" | "adjustment" | "effect" | "shader" | "extension" => Self::Violet,
+            _ => Self::Gray,
+        }
+    }
+    /// Studio 3D layers are `extension` layers told apart by their definition
+    /// (3d-studio.md §1): models on blue, lights and cameras on gray.
+    pub fn for_layer(kind: &str, definition: Option<&str>) -> Self {
+        match display_kind(kind, definition) {
+            "model3d" => Self::Blue,
+            "light3d" | "camera3d" => Self::Gray,
+            other => Self::for_kind(other),
+        }
+    }
+    /// The `colors.labels.*` field name.
+    pub fn name(self) -> &'static str {
+        pm_design::Labels::NAMES[self as usize]
+    }
+    fn color(self, t: &Tokens) -> u32 {
+        let l = t.colors.labels;
+        match self {
+            Self::Blue => l.blue,
+            Self::Violet => l.violet,
+            Self::Orange => l.orange,
+            Self::Red => l.red,
+            Self::Yellow => l.yellow,
+            Self::Green => l.green,
+            Self::Teal => l.teal,
+            Self::Gray => l.gray,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Clip {
+    pub id: String,
+    pub name: String,
+    pub from: f64,
+    pub duration: f64,
+    pub label: Label,
+    pub selected: bool,
+    pub locked: bool,
+    /// The layer is switched off: the clip draws at half strength.
+    pub hidden: bool,
+    pub media: Media,
+    /// An audio clip draws its waveform instead of a name; `None` while the
+    /// peaks are still being read (a hairline then marks the clip's middle).
+    pub audio: Option<Option<Waveform>>,
+    /// Its audio is muted: the waveform dims.
+    pub muted: bool,
+    /// An audio clip's level line: its gain and fades.
+    pub level: Option<Level>,
+    pub trim: Option<Edge>,
+    /// The first missing extension effect: the clip carries a quiet badge.
+    pub missing_effect: Option<String>,
+    /// A captions clip's cues (S089), drawn in place of its name.
+    pub cues: Vec<CueMark>,
+    /// Seconds of its In and Out transitions (an audio clip's fades), drawn
+    /// as v1's wedges inside its ends.
+    pub transitions: [Option<f64>; 2],
+    /// The transition selected on it.
+    pub transition_selected: Option<Edge>,
+}
+/// One caption cue on its clip, in composition seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CueMark {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+/// The op id of a cue: `cue:` then the layer and cue ids, unit-separated.
+pub fn cue_op(layer: &str, cue: &str) -> String {
+    format!("cue:{layer}\u{1f}{cue}")
+}
+/// The layer and cue an op id names.
+pub fn parse_cue_op(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("cue:")?.split_once('\u{1f}')
+}
+/// An audio file's peak envelope, read once per file off the main thread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Waveform {
+    /// What the clip's media sounds like, at every zoom.
+    pub levels: std::sync::Arc<crate::waveform::Levels>,
+    /// Media seconds skipped before the clip starts.
+    pub trim: f64,
+    /// A retimed or reversed clip's media time, sampled evenly over the
+    /// clip (`crate::waveform::mapped`); `None`: the trim, at speed 1.
+    pub map: Option<std::sync::Arc<[f64]>>,
+}
+/// The last sampled region of each native clip. Zoom resamples at the
+/// current zoom, while key drags and other redraws reuse the same peaks.
+#[derive(Default)]
+pub struct WaveformCache {
+    clips: HashMap<String, CachedWaveform>,
+}
+struct CachedWaveform {
+    source: Waveform,
+    duration: f64,
+    left: f64,
+    step: f64,
+    count: usize,
+    stereo: bool,
+    peaks: std::sync::Arc<[Vec<f32>]>,
+}
+impl WaveformCache {
+    pub fn retain(&mut self, visible: &Frame) {
+        self.clips.retain(|id, _| {
+            visible.ops.iter().any(|op| {
+                op.shape == "waveform" && op.id.strip_prefix("clip-content:") == Some(id.as_str())
+            })
+        });
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn sample(
+        &mut self,
+        clip: &Clip,
+        w: &Waveform,
+        left: f64,
+        step: f64,
+        count: usize,
+        stereo: bool,
+        read: impl FnOnce() -> std::sync::Arc<[Vec<f32>]>,
+    ) -> std::sync::Arc<[Vec<f32>]> {
+        if let Some(cached) = self.clips.get(&clip.id)
+            && std::sync::Arc::ptr_eq(&cached.source.levels, &w.levels)
+            && cached.source.trim == w.trim
+            && match (&cached.source.map, &w.map) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && cached.duration == clip.duration
+            && cached.left == left
+            && cached.step == step
+            && cached.count == count
+            && cached.stereo == stereo
+        {
+            return cached.peaks.clone();
+        }
+        let peaks = read();
+        self.clips.insert(
+            clip.id.clone(),
+            CachedWaveform {
+                source: w.clone(),
+                duration: clip.duration,
+                left,
+                step,
+                count,
+                stereo,
+                peaks: peaks.clone(),
+            },
+        );
+        peaks
+    }
+}
+
+/// An audio clip's level as its line draws it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    /// 1 = 0 dB (0–4).
+    pub gain: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+    /// The gain is keyed: the line shows its base value.
+    pub animated: bool,
+}
+impl Waveform {
+    /// A mono clip from its peaks per bucket (`rate` a second), its loudness
+    /// the same as its peaks: for fixtures and tests.
+    pub fn from_peaks(peaks: &[f32], rate: f64, trim: f64) -> Self {
+        let pairs: Vec<[f32; 2]> = peaks.iter().map(|p| [*p, *p]).collect();
+        Waveform {
+            levels: std::sync::Arc::new(crate::waveform::Levels::new(rate, 1, &pairs, &pairs)),
+            trim,
+            map: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    In,
+    Out,
+}
+#[derive(Clone, Debug)]
+pub enum RowContent {
+    Layer {
+        clip: Option<Clip>,
+        summary: std::sync::Arc<[Key]>,
+    },
+    Property {
+        state: KeyState,
+        keys: Vec<Key>,
+    },
+    Track {
+        clips: Vec<Clip>,
+    },
+}
+#[derive(Clone, Debug)]
+pub struct PaintRow {
+    pub id: String,
+    pub accessibility_label: String,
+    pub depth: usize,
+    pub selected: bool,
+    pub hovered: bool,
+    pub focused: bool,
+    pub content: RowContent,
+}
+impl PaintRow {
+    fn height(&self, t: &Tokens) -> f64 {
+        if matches!(self.content, RowContent::Property { .. }) {
+            t.metrics.property_row as f64
+        } else {
+            t.metrics.track_row as f64
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Marker {
+    pub id: String,
+    pub seconds: f64,
+    pub name: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarState {
+    Missing,
+    Rendering,
+    Rendered,
+    Kept,
+    Stale,
+}
+#[derive(Clone, Debug)]
+pub struct Bar {
+    pub from: f64,
+    pub to: f64,
+    pub state: BarState,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct Viewport {
+    pub width: f64,
+    pub height: f64,
+    pub scroll_y: f64,
+    pub scroll_time: f64,
+    pub pps: f64,
+    pub layer_column: f64,
+}
+impl Viewport {
+    pub(crate) fn x(self, seconds: f64) -> f64 {
+        self.layer_column + (seconds - self.scroll_time) * self.pps
+    }
+    fn rect(self) -> Rect {
+        Rect::new(0., 0., self.width, self.height)
+    }
+    pub fn seconds(self, x: f64) -> Option<f64> {
+        (x >= self.layer_column && x <= self.width)
+            .then_some(self.scroll_time + (x - self.layer_column) / self.pps)
+    }
+    pub(crate) fn valid(self) -> bool {
+        [
+            self.width,
+            self.height,
+            self.scroll_y,
+            self.scroll_time,
+            self.pps,
+            self.layer_column,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+            && self.width > 0.
+            && self.height > 0.
+            && self.scroll_y >= 0.
+            && (4. ..=4000.).contains(&self.pps)
+            && self.layer_column >= 0.
+            && self.layer_column < self.width
+    }
+}
+/// [`Scene::layer_row_at`]: a layer row under the pointer during a reorder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerRowAt {
+    pub id: String,
+    pub fraction: f64,
+    pub depth: usize,
+    /// Panel-space top of the row, its height, and the top of the row after
+    /// everything it owns.
+    pub top: f64,
+    pub height: f64,
+    pub end: f64,
+}
+#[derive(Clone, Debug)]
+struct TransitionCapsule {
+    paired: bool,
+    selected: bool,
+    edge: &'static str,
+    from: f64,
+    duration: f64,
+    label: String,
+    shortened: bool,
+    disabled: bool,
+}
+/// Selected IDs are independent of the immutable row layout.
+#[derive(Clone, Debug)]
+pub struct SceneSelection {
+    layers: HashSet<String>,
+    keys: HashMap<String, HashSet<String>>,
+}
+impl SceneSelection {
+    pub fn new(layers: &[String], keys: &[(String, String)]) -> Self {
+        let mut by_layer: HashMap<String, HashSet<String>> = HashMap::new();
+        for (layer, key) in keys {
+            by_layer.entry(layer.clone()).or_default().insert(key.clone());
+        }
+        Self {
+            layers: layers.iter().cloned().collect(),
+            keys: by_layer,
+        }
+    }
+
+    pub fn key(&self, layer: &str, key: &str) -> bool {
+        self.keys.get(layer).is_some_and(|keys| keys.contains(key))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Scene {
+    rows: std::sync::Arc<Vec<std::sync::Arc<PaintRow>>>,
+    // The previewed start and its offset from the stored layer start.
+    time_preview: HashMap<String, (f64, f64)>,
+    tops: std::sync::Arc<Vec<f64>>,
+    layer_rows: std::sync::Arc<Vec<Option<usize>>>,
+    layer_ends: std::sync::Arc<Vec<usize>>,
+    property_layers: std::sync::Arc<Vec<Option<String>>>,
+    property_positions: std::sync::Arc<HashMap<String, Vec<usize>>>,
+    positions: std::sync::Arc<HashMap<String, usize>>,
+    control_times: std::sync::Arc<HashMap<String, std::sync::Arc<[f64]>>>,
+    track_ends: std::sync::Arc<HashMap<String, Vec<f64>>>,
+    pub duration: f64,
+    pub fps: f64,
+    pub work_area: (f64, f64),
+    pub markers: Vec<Marker>,
+    pub bars: Vec<Bar>,
+    stagger: std::sync::Arc<HashMap<String, Vec<crate::stagger::Band>>>,
+    transitions: std::sync::Arc<HashMap<String, Vec<TransitionCapsule>>>,
+    clip_selection: std::sync::Arc<HashSet<String>>,
+    selection: Option<std::sync::Arc<SceneSelection>>,
+    transition_selection: Option<Option<(String, String)>>,
+    /// The timeline holds the keyboard: selected rows take the accent tint
+    /// then, the neutral selection fill otherwise (the Mac convention, PM-367).
+    pub focused: bool,
+}
+/// Where dropped media joins the layer stack ([`Scene::drop_before`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropSlot {
+    /// On top of the stack (the track view).
+    Top,
+    /// Above this layer; `None`: at the bottom.
+    Before(Option<String>),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    InvalidGeometry,
+    InvalidTime,
+    DuplicateId,
+    MissingTrackPresentation,
+}
+/// Schema/media presentation facts supplied by native services on the worker.
+/// Authored timing, lock and selection are always taken from TimelineModel.
+pub trait ModelPresenter {
+    fn accessibility_label(&self, row: &crate::RowId) -> String;
+    fn layer_label(&self, layer: &crate::Layer) -> Label;
+    fn media(&self, layer: &crate::Layer) -> Media;
+    fn interpolation(&self, key: &crate::Key) -> Interpolation;
+    /// An audio layer's waveform: `Some(None)` while its peaks are read,
+    /// `None` for layers that draw a name.
+    fn waveform(&self, _layer: &crate::Layer) -> Option<Option<Waveform>> {
+        None
+    }
+    fn stagger_bands(&self, _layer: &crate::Layer, _time: f64) -> Vec<crate::stagger::Band> {
+        vec![]
+    }
+    /// A captions layer's cues; none for other layers.
+    fn cues(&self, _layer: &crate::Layer) -> Vec<CueMark> {
+        vec![]
+    }
+    /// Native schema supplies track names/AX copy; no renderer-invented labels.
+    fn track_accessibility_label(
+        &self,
+        _area: crate::tracks::Area,
+        _lane: usize,
+    ) -> Option<String> {
+        None
+    }
+}
+impl Scene {
+    /// Update only moved rows; all other row payloads remain shared. No model
+    /// rebuild or JS publication is needed for a transient scalar offset.
+    pub fn preview_times(&mut self, model: &crate::TimelineModel, starts: &[(String, f64)]) {
+        let offsets: HashMap<_, _> = starts
+            .iter()
+            .filter_map(|(id, from)| {
+                model.index.layer(id).map(|layer| (id.clone(), (*from, from - layer.from)))
+            })
+            .collect();
+        let rows = std::sync::Arc::make_mut(&mut self.rows);
+        for (layer, &(from, offset)) in &offsets {
+            let indexed = model
+                .index
+                .layer(layer)
+                .expect("offset has an indexed layer");
+            let delta = offset
+                - self
+                    .time_preview
+                    .get(layer)
+                    .map_or(0., |&(_, offset)| offset);
+            if let Some(&i) = self.positions.get(&indexed.row_id) {
+                let row = &mut rows[i];
+                let is_non_empty_group =
+                    indexed.kind == "group" && model.index.group_has_children(layer);
+                let moving = !is_non_empty_group
+                    && matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
+                if (delta != 0. || moving)
+                    && let RowContent::Layer { clip, summary } =
+                        &mut std::sync::Arc::make_mut(row).content
+                {
+                    if self.stagger.contains_key(layer)
+                        && let Some(bands) =
+                            std::sync::Arc::make_mut(&mut self.stagger).get_mut(layer)
+                    {
+                        for band in bands {
+                            band.start += delta;
+                            band.end += delta;
+                        }
+                    }
+                    if !is_non_empty_group
+                        && let Some(clip) = clip
+                    {
+                        clip.from = from;
+                    }
+                    for key in std::sync::Arc::make_mut(summary) {
+                        key.seconds += delta;
+                    }
+                }
+            }
+            if delta == 0. {
+                continue;
+            }
+            for &i in self.property_positions.get(layer).into_iter().flatten() {
+                let row = std::sync::Arc::make_mut(&mut rows[i]);
+                let RowContent::Property { keys, state } = &mut row.content else {
+                    continue;
+                };
+                for key in keys.iter_mut() {
+                    key.seconds += delta;
+                }
+                *state = if keys.is_empty() {
+                    KeyState::Static
+                } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
+                    KeyState::AtPlayhead
+                } else {
+                    KeyState::Animated
+                };
+                std::sync::Arc::make_mut(&mut self.control_times).insert(
+                    row.id.clone(),
+                    keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                );
+            }
+        }
+        // Recompute live strip extents for any group whose descendants moved.
+        let mut affected_groups: HashSet<usize> = HashSet::new();
+        for id in offsets.keys().chain(self.time_preview.keys()) {
+            let Some(mut cur) = model.index.layer_ordinal(id) else {
+                continue;
+            };
+            if model.index.layers[cur].kind == "group" {
+                affected_groups.insert(cur);
+            }
+            let mut visited = 0usize;
+            while let Some(parent_id) = model.index.layers[cur].group.as_deref() {
+                let Some(parent) = model.index.layer_ordinal(parent_id) else {
+                    break;
+                };
+                if parent == cur || visited >= model.index.layers.len() {
+                    break;
+                }
+                visited += 1;
+                if model.index.layers[parent].kind == "group" {
+                    affected_groups.insert(parent);
+                }
+                cur = parent;
+            }
+        }
+        if !affected_groups.is_empty() {
+            fn extent_of(
+                index: &crate::TimelineIndex,
+                offsets: &HashMap<String, (f64, f64)>,
+                ordinal: usize,
+                memo: &mut HashMap<usize, Option<(f64, f64)>>,
+                visiting: &mut HashSet<usize>,
+            ) -> Option<(f64, f64)> {
+                if let Some(&cached) = memo.get(&ordinal) {
+                    return cached;
+                }
+                if !visiting.insert(ordinal) {
+                    return None;
+                }
+                let layer = &index.layers[ordinal];
+                let result = if layer.kind != "group" {
+                    let from = offsets.get(&layer.id).map_or(layer.from, |&(f, _)| f);
+                    Some((from, from + layer.duration))
+                } else {
+                    let mut bounds: Option<(f64, f64)> = None;
+                    for &child in index.child_ordinals(ordinal) {
+                        if let Some((a, b)) = extent_of(index, offsets, child, memo, visiting) {
+                            bounds = Some(match bounds {
+                                Some((lo, hi)) => (lo.min(a), hi.max(b)),
+                                None => (a, b),
+                            });
+                        }
+                    }
+                    bounds
+                };
+                visiting.remove(&ordinal);
+                memo.insert(ordinal, result);
+                result
+            }
+            let mut memo = HashMap::new();
+            let mut visiting = HashSet::new();
+            for ordinal in affected_groups {
+                let indexed = &model.index.layers[ordinal];
+                let Some(&row_index) = self.positions.get(&indexed.row_id) else {
+                    continue;
+                };
+                if let Some((start, end)) =
+                    extent_of(&model.index, &offsets, ordinal, &mut memo, &mut visiting)
+                {
+                    let duration = (end - start).max(0.);
+                    let changed = matches!(
+                        &rows[row_index].content,
+                        RowContent::Layer { clip: Some(clip), .. }
+                            if clip.from != start || clip.duration != duration
+                    );
+                    if changed
+                        && let RowContent::Layer {
+                            clip: Some(clip), ..
+                        } = &mut std::sync::Arc::make_mut(&mut rows[row_index]).content
+                    {
+                        clip.from = start;
+                        clip.duration = duration;
+                    }
+                }
+            }
+        }
+        self.time_preview = offsets;
+    }
+    pub fn from_model(
+        model: &crate::TimelineModel,
+        p: &dyn ModelPresenter,
+        t: &Tokens,
+        time: f64,
+    ) -> Result<Self, Error> {
+        Self::from_model_reusing(model, p, t, time, None)
+    }
+
+    /// Reuse the presentation of rows that survived a disclosure change in
+    /// the same Layers view. The caller pins the index and presenter inputs.
+    pub fn from_model_reusing(
+        model: &crate::TimelineModel,
+        p: &dyn ModelPresenter,
+        t: &Tokens,
+        time: f64,
+        previous: Option<&Self>,
+    ) -> Result<Self, Error> {
+        use crate::RowId;
+        if !time.is_finite() {
+            return Err(Error::InvalidTime);
+        }
+        let selected: HashSet<_> = model
+            .selection
+            .layers()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        // Selected keys by (layer, key): key ids may repeat across layers.
+        let selected_keys: HashSet<(&str, &str)> = model
+            .index
+            .selected_keys(&model.selection)
+            .into_iter()
+            .map(|(l, _, k)| (l.id.as_str(), k.id.as_str()))
+            .collect();
+        let keys = |layer: &crate::Layer, channels: Vec<&crate::Channel>| {
+            channels
+                .into_iter()
+                .flat_map(|ch| ch.keys.iter())
+                .map(|k| Key {
+                    id: k.id.clone(),
+                    seconds: layer.from + k.time,
+                    selected: selected_keys.contains(&(layer.id.as_str(), k.id.as_str())),
+                    focused: false,
+                    interpolation: p.interpolation(k),
+                })
+                .collect::<Vec<_>>()
+        };
+        // Layers with a selected key: only their marks are copied to show it.
+        let rows = model
+            .rows()
+            .iter()
+            .filter(|row| {
+                model.mode != crate::TimelineMode::Tracks
+                    || matches!(row.id, RowId::Property { .. } | RowId::Path { .. })
+            })
+            .map(|row| {
+                use std::borrow::Cow;
+                let layer = match &row.id {
+                    RowId::Layer(id) => Some(model.index.layer(id).ok_or(Error::DuplicateId)?),
+                    _ => None,
+                };
+                let id = layer.map_or_else(
+                    || Cow::Owned(crate::v4::row_id(&row.id)),
+                    |layer| Cow::Borrowed(layer.row_id.as_str()),
+                );
+                if let Some(previous) = previous
+                    .and_then(|scene| scene.positions.get(id.as_ref()).map(|&i| &scene.rows[i]))
+                    && previous.depth == row.depth
+                {
+                    return Ok(previous.clone());
+                }
+                let (content, is_selected) = match &row.id {
+                    RowId::Layer(id) => {
+                        let layer = layer.expect("a layer row has an indexed layer");
+                        let summary = layer.summary(|layer| {
+                            keys(layer, layer.channels.iter().collect())
+                                .into_iter()
+                                .map(|key| Key { selected: false, ..key })
+                                .collect()
+                        });
+                        let (from, duration) = model.index.strip_span(layer);
+                        (
+                            RowContent::Layer {
+                                clip: Some(Clip {
+                                    id: id.clone(),
+                                    name: layer.name.to_string_lossy(),
+                                    from,
+                                    duration,
+                                    label: p.layer_label(layer),
+                                    selected: selected.contains(id.as_str()),
+                                    locked: layer.effectively_locked,
+                                    hidden: !layer.visible,
+                                    media: p.media(layer),
+                                    audio: p.waveform(layer),
+                                    muted: layer.audio_muted,
+                                    level: level_of(layer),
+                                    trim: None,
+                                    missing_effect: layer.missing_effects.first().cloned(),
+                                    cues: p.cues(layer),
+                                    transitions: layer
+                                        .transitions
+                                        .each_ref()
+                                        .map(|t| t.as_ref().map(|t| t.duration)),
+                                    transition_selected: model
+                                        .transition
+                                        .as_ref()
+                                        .filter(|(l, _)| *l == id.as_str())
+                                        .map(|(_, e)| *e),
+                                }),
+                                summary,
+                            },
+                            selected.contains(id.as_str()),
+                        )
+                    }
+                    RowId::Effect { .. } | RowId::Path { .. } => (
+                        RowContent::Property {
+                            state: KeyState::Static,
+                            keys: vec![],
+                        },
+                        false,
+                    ),
+                    RowId::Property { layer_id, channel } => {
+                        let layer = model.index.layer(layer_id).ok_or(Error::DuplicateId)?;
+                        let keys = keys(layer, model.track_channels(layer_id, channel));
+                        let state = if keys.is_empty() {
+                            KeyState::Static
+                        } else if keys.iter().any(|k| (k.seconds - time).abs() <= 1e-5) {
+                            KeyState::AtPlayhead
+                        } else {
+                            KeyState::Animated
+                        };
+                        (RowContent::Property { state, keys }, false)
+                    }
+                };
+                let accessibility_label = match &row.id {
+                    RowId::Path { layer_id, path } => model
+                        .index
+                        .layer(layer_id)
+                        .map_or("Path", |layer| layer.path_name(path))
+                        .to_owned(),
+                    RowId::Property { layer_id, channel } => model
+                        .index
+                        .channel(layer_id, channel)
+                        .and_then(|channel| channel.vertex_label.clone())
+                        .unwrap_or_else(|| p.accessibility_label(&row.id)),
+                    _ => p.accessibility_label(&row.id),
+                };
+                Ok(std::sync::Arc::new(PaintRow {
+                    id: id.into_owned(),
+                    accessibility_label,
+                    depth: row.depth,
+                    selected: is_selected,
+                    hovered: false,
+                    focused: false,
+                    content,
+                }))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let rows = if model.mode == crate::TimelineMode::Tracks {
+            use crate::tracks::Area;
+            let layout = model.track_layout();
+            let mut clips: HashMap<(Area, usize), Vec<Clip>> = HashMap::new();
+            let mut lane_by_layer = HashMap::new();
+            for item in &layout.items {
+                let layer = model.index.layer(&item.id).ok_or(Error::DuplicateId)?;
+                lane_by_layer.insert(item.id.as_str(), (item.area, item.lane));
+                let (from, duration) = model.index.strip_span(layer);
+                clips.entry((item.area, item.lane)).or_default().push(Clip {
+                    id: item.id.clone(),
+                    name: layer.name.to_string_lossy(),
+                    from,
+                    duration,
+                    label: p.layer_label(layer),
+                    selected: selected.contains(item.id.as_str()),
+                    locked: layer.effectively_locked,
+                    hidden: !layer.visible,
+                    media: p.media(layer),
+                    audio: p.waveform(layer),
+                    muted: layer.audio_muted,
+                    level: level_of(layer),
+                    trim: None,
+                    missing_effect: layer.missing_effects.first().cloned(),
+                    cues: p.cues(layer),
+                    transitions: layer
+                        .transitions
+                        .each_ref()
+                        .map(|t| t.as_ref().map(|t| t.duration)),
+                    transition_selected: model
+                        .transition
+                        .as_ref()
+                        .filter(|(l, _)| *l == item.id.as_str())
+                        .map(|(_, e)| *e),
+                });
+            }
+            let mut properties: HashMap<(Area, usize), Vec<_>> = HashMap::new();
+            for row in rows {
+                if let Ok(crate::RowId::Property { layer_id, .. } | crate::RowId::Path { layer_id, .. }) =
+                    crate::v4::parse_row(&row.id)
+                    && let Some(lane) = lane_by_layer.get(layer_id.as_str())
+                {
+                    properties.entry(*lane).or_default().push(row);
+                }
+            }
+            let mut tracks = vec![];
+            for (area, lane) in layout.display_order() {
+                tracks.push(std::sync::Arc::new(PaintRow {
+                    id: json!(["track", format!("{area:?}"), lane]).to_string(),
+                    accessibility_label: p
+                        .track_accessibility_label(area, lane)
+                        .ok_or(Error::MissingTrackPresentation)?,
+                    depth: 0,
+                    selected: false,
+                    hovered: false,
+                    focused: false,
+                    content: RowContent::Track {
+                        clips: clips.remove(&(area, lane)).unwrap_or_default(),
+                    },
+                }));
+                if !model.track_collapsed(area, lane) {
+                    tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
+                }
+            }
+            tracks
+        } else {
+            rows
+        };
+        let mut scene = Self::from_rows(rows, model.index.duration, model.index.fps, t, previous)?;
+        scene.work_area = (model.index.work[0], model.index.work[1]);
+        scene.markers = model
+            .index
+            .markers
+            .iter()
+            .enumerate()
+            .map(|(i, m)| Marker {
+                id: m.id.clone().unwrap_or_else(|| format!("marker-{i}")),
+                seconds: m.time,
+                name: m.name.to_string_lossy(),
+            })
+            .collect();
+        if let Some(previous) = previous {
+            scene.stagger = previous.stagger.clone();
+            scene.preview_selection(std::sync::Arc::new(SceneSelection::new(
+                model.selection.layers(),
+                &model.selected_key_pairs(),
+            )));
+            return Ok(scene);
+        }
+        scene.stagger = std::sync::Arc::new(model
+            .index
+            .layers
+            .iter()
+            .filter_map(|l| {
+                let bands = p.stagger_bands(l, time);
+                (!bands.is_empty()).then_some((l.id.clone(), bands))
+            })
+            .collect());
+        // Only the incoming half paints a paired capsule. The cut stays at
+        // the original clip edge, even though rendering uses source handles.
+        if let Some(snapshot) = &model.index.source
+            && let Some(root) = snapshot.root()
+        {
+            let layers = model.index.source_layers();
+            let mut transitions: HashMap<String, Vec<TransitionCapsule>> = HashMap::new();
+            for clip in &model.index.layers {
+                if !clip.has_authored_transition {
+                    continue;
+                }
+                let Some(layer) = model
+                    .index
+                    .source_ordinal(&clip.id)
+                    .and_then(|i| layers.get(i))
+                else {
+                    continue;
+                };
+                for (field, edge) in [("transitionIn", "in"), ("transitionOut", "out")] {
+                    let Some(transition) = layer.get(field) else {
+                        continue;
+                    };
+                    let Some(kind) = transition.get("type").and_then(crate::snapshot::as_str)
+                    else {
+                        continue;
+                    };
+                    let peer = transition.get("paired").and_then(crate::snapshot::as_str);
+                    let paired = peer.is_some();
+                    if paired && edge == "out" {
+                        continue;
+                    }
+                    let duration = crate::snapshot::number(transition.get("dur")).unwrap_or(0.5);
+                    if !duration.is_finite() || duration <= 0. {
+                        continue;
+                    }
+                    let intended_duration = duration;
+                    let fitted = if paired {
+                        peer.and_then(|id| model.index.source_ordinal(id))
+                            .and_then(|i| layers.get(i))
+                            .and_then(|peer| {
+                                pm_kernel::commands::transition_edges::fitted_pair(
+                                    root, layer, peer, true,
+                                )
+                            })
+                    } else {
+                        None
+                    };
+                    let duration = if paired {
+                        fitted.map_or(0., |f| f.duration)
+                    } else {
+                        duration.min(clip.duration)
+                    };
+                    let from = if paired {
+                        clip.from + fitted.map_or(0., |f| f.offset)
+                    } else if edge == "in" {
+                        clip.from
+                    } else {
+                        clip.from + clip.duration - duration.min(clip.duration)
+                    };
+                    let label = match kind {
+                        "crossfade" => "Crossfade",
+                        "wipe" => "Wipe",
+                        "slide" => "Slide",
+                        "zoom" => "Zoom",
+                        other => other,
+                    };
+                    transitions
+                        .entry(clip.id.clone())
+                        .or_default()
+                        .push(TransitionCapsule {
+                            paired,
+                            selected: false,
+                            edge,
+                            from,
+                            duration,
+                            label: label.into(),
+                            shortened: paired && duration < intended_duration - 1e-6,
+                            disabled: paired && duration <= 0.,
+                        });
+                }
+            }
+            scene.transitions = std::sync::Arc::new(transitions);
+        }
+        Ok(scene)
+    }
+    /// O(rows + keys log keys) on publication, never on a display callback.
+    /// Sort presentation indexes only; the source model's ordering is untouched.
+    pub fn new(rows: Vec<PaintRow>, duration: f64, fps: f64, t: &Tokens) -> Result<Self, Error> {
+        Self::from_rows(
+            rows.into_iter().map(std::sync::Arc::new).collect(),
+            duration,
+            fps,
+            t,
+            None,
+        )
+    }
+
+    fn from_rows(
+        mut rows: Vec<std::sync::Arc<PaintRow>>,
+        duration: f64,
+        fps: f64,
+        t: &Tokens,
+        previous: Option<&Self>,
+    ) -> Result<Self, Error> {
+        if !duration.is_finite() || duration < 0. || !fps.is_finite() || fps <= 0. {
+            return Err(Error::InvalidTime);
+        }
+        let mut tops = Vec::with_capacity(rows.len() + 1);
+        tops.push(0.);
+        let mut positions = HashMap::with_capacity(rows.len());
+        let mut property_layers = Vec::with_capacity(rows.len());
+        let mut property_positions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut control_times = HashMap::new();
+        let mut track_ends = HashMap::new();
+        let mut layer_rows = Vec::with_capacity(rows.len());
+        let mut layer_ends = vec![rows.len(); rows.len()];
+        let mut ancestors: Vec<(usize, usize)> = Vec::new();
+        let mut layer = None;
+        for (i, row) in rows.iter_mut().enumerate() {
+            if row.id.is_empty()
+                || row.accessibility_label.is_empty()
+                || positions.insert(row.id.clone(), i).is_some()
+            {
+                return Err(Error::DuplicateId);
+            }
+            // Shared rows already passed validation and sorting in the previous scene.
+            if let Some(row) = std::sync::Arc::get_mut(row) {
+                let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
+                let keys: &[Key] = match &mut row.content {
+                    RowContent::Layer { clip, summary } => {
+                        if clip.as_ref().is_some_and(|clip| !valid_clip(clip)) {
+                            return Err(Error::InvalidTime);
+                        }
+                        if !sorted(summary) {
+                            let mut keys = summary.to_vec();
+                            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                            *summary = keys.into();
+                        }
+                        summary
+                    }
+                    RowContent::Property { keys, .. } => {
+                        if !sorted(keys) {
+                            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                        }
+                        keys
+                    }
+                    RowContent::Track { clips } => {
+                        if clips.iter().any(|clip| !valid_clip(clip)) {
+                            return Err(Error::InvalidTime);
+                        }
+                        clips.sort_by(|a, b| a.from.total_cmp(&b.from));
+                        &[]
+                    }
+                };
+                if keys.iter().any(|key| !key.seconds.is_finite()) {
+                    return Err(Error::InvalidTime);
+                }
+            }
+            let property = match &row.content {
+                RowContent::Layer { .. } => {
+                    while ancestors
+                        .last()
+                        .is_some_and(|&(_, depth)| depth >= row.depth)
+                    {
+                        let (ancestor, _) = ancestors.pop().unwrap();
+                        layer_ends[ancestor] = i;
+                    }
+                    ancestors.push((i, row.depth));
+                    layer = Some(i);
+                    None
+                }
+                RowContent::Property { keys, .. } => {
+                    control_times.insert(
+                        row.id.clone(),
+                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                    );
+                    match crate::v4::parse_row(&row.id) {
+                        Ok(crate::RowId::Property { layer_id, .. }) => {
+                            property_positions
+                                .entry(layer_id.clone())
+                                .or_default()
+                                .push(i);
+                            Some(layer_id)
+                        }
+                        _ => None,
+                    }
+                }
+                RowContent::Track { clips } => {
+                    let mut end = f64::NEG_INFINITY;
+                    track_ends.insert(
+                        row.id.clone(),
+                        clips
+                            .iter()
+                            .map(|clip| {
+                                end = end.max(clip.from + clip.duration);
+                                end
+                            })
+                            .collect(),
+                    );
+                    None
+                }
+            };
+            property_layers.push(property);
+            layer_rows.push(layer);
+            tops.push(tops.last().unwrap() + row.height(t));
+        }
+        let (transitions, clip_selection) = if let Some(previous) = previous {
+            (
+                previous.transitions.clone(),
+                previous.clip_selection.clone(),
+            )
+        } else {
+            let mut transitions = HashMap::new();
+            let mut selection = HashSet::new();
+            for row in &rows {
+                let clips = match &row.content {
+                    RowContent::Layer { clip, .. } => clip.as_slice(),
+                    RowContent::Track { clips } => clips.as_slice(),
+                    _ => &[],
+                };
+                for clip in clips {
+                    if clip.selected {
+                        selection.insert(clip.id.clone());
+                    }
+                    let mut edges = Vec::new();
+                    for ((kind, edge), duration) in [(Edge::In, "in"), (Edge::Out, "out")]
+                        .into_iter()
+                        .zip(clip.transitions)
+                    {
+                        let Some(duration) =
+                            duration.map(|d| d.min(clip.duration)).filter(|d| *d > 0.)
+                        else {
+                            continue;
+                        };
+                        edges.push(TransitionCapsule {
+                            paired: false,
+                            selected: clip.transition_selected == Some(kind),
+                            edge,
+                            from: if kind == Edge::In {
+                                clip.from
+                            } else {
+                                clip.from + clip.duration - duration
+                            },
+                            duration,
+                            label: "Transition".into(),
+                            shortened: false,
+                            disabled: false,
+                        });
+                    }
+                    if !edges.is_empty() {
+                        transitions.insert(clip.id.clone(), edges);
+                    }
+                }
+            }
+            (
+                std::sync::Arc::new(transitions),
+                std::sync::Arc::new(selection),
+            )
+        };
+        Ok(Self {
+            rows: std::sync::Arc::new(rows),
+            time_preview: HashMap::new(),
+            tops: std::sync::Arc::new(tops),
+            layer_rows: std::sync::Arc::new(layer_rows),
+            layer_ends: std::sync::Arc::new(layer_ends),
+            property_layers: std::sync::Arc::new(property_layers),
+            property_positions: std::sync::Arc::new(property_positions),
+            positions: std::sync::Arc::new(positions),
+            control_times: std::sync::Arc::new(control_times),
+            track_ends: std::sync::Arc::new(track_ends),
+            duration,
+            fps,
+            work_area: (0., duration),
+            markers: vec![],
+            bars: vec![],
+            stagger: Default::default(),
+            transitions,
+            clip_selection,
+            selection: None,
+            transition_selection: None,
+            focused: true,
+        })
+    }
+    /// v1's `layerDrop` geometry: the layer row under `y` (panel space; a
+    /// property row counts as its layer's), how far down that row the
+    /// pointer is (past 1 below it), its depth, and where the rows it owns
+    /// (deeper layers and property rows) end. Panel-space tops.
+    pub fn layer_row_at(&self, v: Viewport, t: &Tokens, y: f64) -> Option<LayerRowAt> {
+        let total = self.total();
+        if total == 0 {
+            return None;
+        }
+        let ruler = t.metrics.ruler as f64;
+        let content = (y - ruler + v.scroll_y).max(0.);
+        let row = self
+            .tops
+            .partition_point(|top| *top <= content)
+            .saturating_sub(1)
+            .min(total - 1);
+        let i = self.layer_rows[row]?;
+        let depth = self.rows[i].depth;
+        let height = self.rows[i].height(t).max(1.);
+        let end = self.layer_ends[i];
+        let bottom = |j: usize| {
+            if j < total {
+                self.tops[j]
+            } else {
+                self.tops[total - 1] + self.rows[total - 1].height(t)
+            }
+        };
+        Some(LayerRowAt {
+            id: self.rows[i].id.clone(),
+            fraction: (content - self.tops[i]) / height,
+            depth,
+            top: ruler + self.tops[i] - v.scroll_y,
+            height,
+            end: ruler + bottom(end) - v.scroll_y,
+        })
+    }
+    pub fn total(&self) -> usize {
+        self.rows.len()
+    }
+    pub fn row(&self, id: &str) -> Option<&PaintRow> {
+        self.positions.get(id).map(|i| self.rows[*i].as_ref())
+    }
+    /// AX virtual navigation resolves any ID/ordinal without mounting 60k nodes.
+    pub fn navigate(&self, id: &str, delta: isize) -> Option<&PaintRow> {
+        let i = self.positions.get(id)?.checked_add_signed(delta)?;
+        self.rows.get(i).map(std::sync::Arc::as_ref)
+    }
+    pub fn navigate_first(&self, ordinal: usize) -> Option<String> {
+        self.rows.get(ordinal).map(|r| r.id.clone())
+    }
+    /// Row `i` and its top and bottom in content space.
+    pub fn span(&self, i: usize) -> Option<(&PaintRow, f64, f64)> {
+        let row = self.rows.get(i)?.as_ref();
+        let top = self.tops[i];
+        Some((row, top, self.tops.get(i + 1).copied().unwrap_or(top)))
+    }
+    pub fn scroll_for(&self, id: &str) -> Option<f64> {
+        self.positions.get(id).map(|i| self.tops[*i])
+    }
+    /// Keep the current scroll whenever the complete row is already visible.
+    pub fn reveal_scroll(&self, id: &str, scroll: f64, height: f64) -> f64 {
+        let scroll = self.positions.get(id).and_then(|&i| self.span(i)).map_or(scroll, |(_, top, bottom)| {
+            if top < scroll || bottom - top > height {
+                top
+            } else {
+                scroll.max(bottom - height)
+            }
+        });
+        self.clamp_scroll(scroll, height)
+    }
+
+    /// The first row edge at or after a content-space y (the end of the last
+    /// row is one): where a pane under the rows starts without cutting one.
+    pub fn edge_from(&self, y: f64) -> Option<f64> {
+        self.tops
+            .get(self.tops.partition_point(|top| *top < y))
+            .copied()
+    }
+    /// Content height of all rows, for scroll clamping.
+    pub fn content_height(&self) -> f64 {
+        self.tops.last().copied().unwrap_or(0.)
+    }
+    /// Clamp after a viewport resize or disclosure change, using visible rows.
+    pub fn clamp_scroll(&self, scroll_y: f64, height: f64) -> f64 {
+        scroll_y.clamp(0., (self.content_height() - height.max(0.)).max(0.))
+    }
+    /// The row at a content-space y. Variable heights use the same index as paint.
+    pub fn row_at(&self, y: f64) -> Option<&PaintRow> {
+        if y < 0. {
+            return None;
+        }
+        self.rows
+            .get(self.tops.partition_point(|top| *top <= y).checked_sub(1)?)
+            .map(std::sync::Arc::as_ref)
+    }
+    /// Where media dropped at a content-space y joins the stack (v1.2.0's
+    /// `mediaDropAt`): a new layer is always its own strip, so the pointer
+    /// resolves to a boundary between layers. The upper half of a layer row
+    /// inserts above that layer; its lower half, its property rows and its
+    /// group's children insert below its whole block; below the last row
+    /// appends at the bottom. The layer the new one goes above, `None` for
+    /// the bottom. Track rows (the track view) put new media on top, as v1.
+    pub fn drop_before(&self, y: f64) -> DropSlot {
+        let Some(slot) = self
+            .tops
+            .partition_point(|top| *top <= y.max(0.))
+            .checked_sub(1)
+        else {
+            return DropSlot::Top;
+        };
+        let Some(row) = self.rows.get(slot) else {
+            return DropSlot::Before(None);
+        };
+        if matches!(row.content, RowContent::Track { .. }) {
+            return DropSlot::Top;
+        }
+        let layer_row = |i: usize| match self.rows.get(i).map(|r| (r, crate::v4::parse_row(&r.id)))
+        {
+            Some((r, Ok(crate::RowId::Layer(id)))) => Some((r.depth, id)),
+            _ => None,
+        };
+        // The layer whose block the pointer is in.
+        let mut owner = slot;
+        while owner > 0 && layer_row(owner).is_none() {
+            owner -= 1;
+        }
+        let Some((depth, id)) = layer_row(owner) else {
+            return DropSlot::Before(None);
+        };
+        let height = self.tops[slot + 1] - self.tops[slot];
+        if owner == slot && y - self.tops[slot] < height / 2. {
+            return DropSlot::Before(Some(id));
+        }
+        let next = (owner + 1..self.rows.len())
+            .find_map(|i| layer_row(i).filter(|(d, _)| *d <= depth))
+            .map(|(_, id)| id);
+        DropSlot::Before(next)
+    }
+    /// Ordinal window covering a scroll offset, for the outline's row request.
+    pub fn visible_range(&self, scroll_y: f64, height: f64) -> Range<usize> {
+        let first = self
+            .tops
+            .partition_point(|y| *y <= scroll_y)
+            .saturating_sub(1)
+            .min(self.total());
+        let end = self
+            .tops
+            .partition_point(|y| *y < scroll_y + height)
+            .min(self.total());
+        first..end.max(first)
+    }
+    pub fn anchor(&self, v: Viewport) -> Option<(&str, f64)> {
+        let i = self
+            .tops
+            .partition_point(|y| *y <= v.scroll_y)
+            .saturating_sub(1)
+            .min(self.total().saturating_sub(1));
+        self.rows
+            .get(i)
+            .map(|r| (r.id.as_str(), v.scroll_y - self.tops[i]))
+    }
+    pub fn reanchor(&self, id: &str, offset: f64) -> Option<f64> {
+        self.scroll_for(id).map(|y| (y + offset).max(0.))
+    }
+    /// Native outline mounting shares the track viewport, with two rows of
+    /// overscan so fractional wheel deltas never expose an unmounted row.
+    pub fn mount_range(&self, scroll_y: f64, height: f64) -> Range<usize> {
+        let visible = self.visible_range(scroll_y, height);
+        visible.start.saturating_sub(2)..visible.end.saturating_add(2).min(self.total())
+    }
+    /// The rows on screen. Every scroll prepares a new frame, so rows past
+    /// the viewport would only cost time (a project with baked animation
+    /// puts tens of thousands of keys in them).
+    fn range(&self, v: Viewport, t: &Tokens, reach: f64) -> Range<usize> {
+        let height = (v.height - t.metrics.ruler as f64).max(0.);
+        let first = self
+            .tops
+            .partition_point(|y| *y < (v.scroll_y - reach).max(0.))
+            .saturating_sub(1)
+            .min(self.total());
+        let end = self
+            .tops
+            .partition_point(|y| *y < v.scroll_y + height + reach)
+            .min(self.total());
+        first..end
+    }
+    /// The rows on screen; time keys use binary search.
+    pub fn prepare(&self, v: Viewport, t: &Tokens) -> Result<Frame, Error> {
+        self.prepare_reaching(v, t, 0.)
+    }
+    /// [`Self::prepare`] with the rows `reach` points above and below the
+    /// view too, placed for the same view (a surface that records its rows
+    /// past its edges and replays them shifted while it scrolls). The track
+    /// clip, the work-area veils and the column's edge reach as far; the
+    /// ruler's ops, before [`Frame::fixed`], are the view's own.
+    pub fn prepare_reaching(&self, v: Viewport, t: &Tokens, reach: f64) -> Result<Frame, Error> {
+        self.prepare_in(v, t, reach, Seen::of(v), None, None)
+    }
+    /// [`Self::prepare_reaching`] with the tracks and the ruler `reach_x`
+    /// points past each side of the view too: the frame is prepared for a
+    /// view that much wider each side, starting `reach_x` earlier (its
+    /// `viewport`), so the view's own tracks start `reach_x` into it. Clip
+    /// names, marks and grips and the ruler's first label stand where the view
+    /// itself shows them (a name stays in sight at the view's left edge).
+    pub fn prepare_wide(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        reach_x: f64,
+    ) -> Result<Frame, Error> {
+        self.prepare_with_reach(v, t, reach, reach_x, None, None)
+    }
+    pub fn prepare_native(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        reach_x: f64,
+        waveforms: &mut WaveformCache,
+        keys: Option<&crate::KeyMovePreview>,
+    ) -> Result<Frame, Error> {
+        self.prepare_with_reach(v, t, reach, reach_x, Some(waveforms), keys)
+    }
+    fn prepare_with_reach(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        reach_x: f64,
+        waveforms: Option<&mut WaveformCache>,
+        keys: Option<&crate::KeyMovePreview>,
+    ) -> Result<Frame, Error> {
+        let rx = if reach_x.is_finite() && v.pps > 0. {
+            reach_x.max(0.)
+        } else {
+            0.
+        };
+        let wide = Viewport {
+            width: v.width + 2. * rx,
+            scroll_time: v.scroll_time - rx / v.pps,
+            ..v
+        };
+        let seen = Seen {
+            left: v.layer_column + rx,
+            right: v.width + rx,
+        };
+        self.prepare_in(wide, t, reach, seen, waveforms, keys)
+    }
+    fn prepare_in(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        seen: Seen,
+        mut waveforms: Option<&mut WaveformCache>,
+        keys: Option<&crate::KeyMovePreview>,
+    ) -> Result<Frame, Error> {
+        let reach = if reach.is_finite() { reach.max(0.) } else { 0. };
+        if !v.valid() {
+            return Err(Error::InvalidGeometry);
+        }
+        if !self.work_area.0.is_finite()
+            || !self.work_area.1.is_finite()
+            || self.work_area.0 < 0.
+            || self.work_area.0 > self.work_area.1
+            || self.work_area.1 > self.duration
+            || self.markers.iter().any(|m| !m.seconds.is_finite())
+            || self
+                .bars
+                .iter()
+                .any(|b| !b.from.is_finite() || !b.to.is_finite() || b.to < b.from)
+        {
+            return Err(Error::InvalidTime);
+        }
+        let mut ops = vec![];
+        let m = t.metrics;
+        let c = &t.colors;
+        // The track ground is the panel material (a theme's panel colour at
+        // the material alpha; opaque under Reduce Transparency). The shell
+        // leaves this panel's body to it.
+        let mut ground = Op::new("ground", "rect", v.rect(), c.panel);
+        ground.opacity = if t.translucent() {
+            t.translucency.panel as f64
+        } else {
+            1.
+        };
+        ops.push(ground);
+        ops.push(Op::new(
+            "gutter",
+            "rect",
+            Rect::new(0., 0., v.layer_column, v.height),
+            c.panel_secondary,
+        ));
+        self.ruler(v, t, &mut ops, seen);
+        let fixed = ops.len();
+        let range = self.range(v, t, reach);
+        let visible = if waveforms.is_some() {
+            self.range(v, t, 0.)
+        } else {
+            range.clone()
+        };
+        let mut ax = vec![];
+        let mut controls = vec![];
+        for i in range.clone() {
+            let op_start = ops.len();
+            let row = &self.rows[i];
+            let row_controls = visible.contains(&i).then_some(&mut controls);
+            self.row_ops(
+                i,
+                v,
+                t,
+                &mut ops,
+                row_controls,
+                seen,
+                waveforms.as_deref_mut(),
+                keys,
+            );
+            for op in &mut ops[op_start..] {
+                let track = op.id.starts_with("clip")
+                    || op.id.starts_with("transition")
+                    || op.id.starts_with("lane:")
+                    || op.id.starts_with("key:")
+                    || op.id.starts_with("key-focus:")
+                    || op.id.starts_with("trim:");
+                let x = if track { v.layer_column } else { 0. };
+                let area = Rect::new(
+                    x,
+                    m.ruler as f64 - reach,
+                    v.width - x,
+                    (v.height - m.ruler as f64).max(0.) + reach * 2.,
+                );
+                // An op clipped to its own box (a summary key to its strip)
+                // keeps that inside the tracks; wholly outside, it is not
+                // painted.
+                op.clip = match op.clip {
+                    None => Some(area),
+                    Some(own) => match intersection(own, area) {
+                        Some(both) => Some(both),
+                        None => {
+                            op.covered = true;
+                            Some(own)
+                        }
+                    },
+                };
+            }
+            if waveforms.is_none() && visible.contains(&i) {
+                ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":self.row_selected(row),"depth":row.depth,"focusable":false}));
+            }
+        }
+        // Outside the work area: veil track pixels only, after clips and keys.
+        // Names stand over the veil: it fades the strips toward the ground,
+        // and a name has to read there as well as inside the work area (on
+        // the palest strips of the light canvas a veiled name did not).
+        let (veil, veil_alpha) = t.work_area_veil();
+        let names = ops.len();
+        for (side, (a, b)) in [
+            (v.layer_column, v.x(self.work_area.0)),
+            (v.x(self.work_area.1), v.width),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(r) = span(
+                a,
+                b,
+                m.ruler as f64 - reach,
+                v.height - m.ruler as f64 + reach * 2.,
+                v,
+            ) {
+                let mut o = Op::new(format!("work-area-veil:{side}"), "rect", r, veil);
+                o.opacity = veil_alpha as f64;
+                ops.push(o);
+            }
+        }
+        if ops.len() > names {
+            let named = |o: &Op| {
+                o.shape == "text"
+                    && (o.id.starts_with("clip-content:") || o.id.starts_with("cue-text:"))
+            };
+            let (over, mut under): (Vec<Op>, Vec<Op>) =
+                std::mem::take(&mut ops).into_iter().partition(named);
+            under.extend(over);
+            ops = under;
+        }
+        // The layer column's edge, over row fills and clips: a hairline (the
+        // resize handle's mark).
+        let (edge, edge_alpha) = t.line();
+        let mut o = Op::new(
+            "column-edge",
+            "rect",
+            Rect::new(
+                v.layer_column - m.border as f64,
+                0. - reach,
+                m.border as f64,
+                v.height + reach * 2.,
+            ),
+            edge,
+        );
+        o.opacity = edge_alpha as f64;
+        ops.push(o);
+        // Capsules are the top layer at a cut, after every clip's body,
+        // edge, selected ring, keys and work-area veil.
+        let (capsules, mut below): (Vec<_>, Vec<_>) = ops.into_iter()
+            .partition(|op| op.id.starts_with("transition"));
+        below.extend(capsules);
+        let ops = below;
+        Ok(Frame {
+            viewport: v,
+            fixed,
+            rows_top: m.ruler as f64,
+            strip_gap: t.strip_gap() as f64,
+            range: visible,
+            total: self.total(),
+            ops,
+            accessibility: ax,
+            controls,
+        })
+    }
+    /// What a marquee rectangle (panel coordinates of viewport `v`) covers:
+    /// keys as `(layer, key)` and clips by id. It reads every row under the
+    /// rectangle, built or not: a frame holds only the rows on screen, and a
+    /// marquee dragged past the panel's edge covers rows outside it.
+    pub fn marquee(&self, v: Viewport, t: &Tokens, area: Rect) -> Marquee {
+        let ruler = t.metrics.ruler as f64;
+        let (top, bottom) = (
+            area.y - ruler + v.scroll_y,
+            area.y + area.height - ruler + v.scroll_y,
+        );
+        let first = self
+            .tops
+            .partition_point(|y| *y <= top)
+            .saturating_sub(1)
+            .min(self.total());
+        let end = self
+            .tops
+            .partition_point(|y| *y <= bottom)
+            .min(self.total());
+        let mut covered = Marquee::default();
+        if area.x + area.width < v.layer_column || area.x > v.width {
+            return covered;
+        }
+        for i in first..end {
+            let row = &self.rows[i];
+            let y = ruler + self.tops[i] - v.scroll_y;
+            let h = row.height(t);
+            let mut pick_clip = |clip: &Clip| {
+                if clip_geometry(clip, y, h, v, t)
+                    .is_some_and(|geometry| intersects(geometry.body, area))
+                {
+                    covered.clips.push(clip.id.clone());
+                }
+            };
+            match &row.content {
+                RowContent::Layer { clip, .. } => {
+                    if let Some(clip) = clip {
+                        pick_clip(clip);
+                    }
+                }
+                RowContent::Track { clips } => {
+                    let from = v.scroll_time.max(v.scroll_time + (area.x - v.layer_column - MIN_STRIP * 2.) / v.pps);
+                    let to = v.scroll_time + (v.width.min(area.x + area.width + MIN_STRIP * 2.) - v.layer_column) / v.pps;
+                    let first = self.track_ends[&row.id].partition_point(|end| *end < from);
+                    let last = clips.partition_point(|clip| clip.from <= to);
+                    for clip in &clips[first.min(last)..last] {
+                        pick_clip(clip);
+                    }
+                }
+                RowContent::Property { keys, .. } => {
+                    let size = t.metrics.keyframe as f64;
+                    let top = y + (h - size) / 2.;
+                    if keys.is_empty() || top > area.y + area.height || top + size < area.y {
+                        continue;
+                    }
+                    let lo = v.scroll_time + (area.x - v.layer_column - size / 2.) / v.pps;
+                    let hi = v.scroll_time + (area.x + area.width - v.layer_column + size / 2.) / v.pps;
+                    let from = lo.max(v.scroll_time - size / v.pps);
+                    let to = hi.min(v.scroll_time + (v.width - v.layer_column + size) / v.pps);
+                    if from > to {
+                        continue;
+                    }
+                    let start = keys.partition_point(|key| key.seconds < from);
+                    let end = keys.partition_point(|key| key.seconds <= to);
+                    if let Some(layer_id) = &self.property_layers[i] {
+                        covered.keys.extend(
+                            keys[start..end].iter().map(|key| (layer_id.clone(), key.id.clone())),
+                        );
+                    }
+                }
+            }
+        }
+        covered
+    }
+    pub fn preview_selection(&mut self, selection: std::sync::Arc<SceneSelection>) {
+        self.selection = Some(selection);
+    }
+
+    fn row_selected(&self, row: &PaintRow) -> bool {
+        let Some(selection) = &self.selection else {
+            return row.selected;
+        };
+        matches!(&row.content, RowContent::Layer { clip: Some(clip), .. }
+            if selection.layers.contains(&clip.id))
+    }
+
+    fn clip_selected(&self, clip: &Clip) -> bool {
+        let layers = self.selection.as_ref().map_or(self.clip_selection.as_ref(), |s| &s.layers);
+        let selected = self.selection.as_ref().map_or(clip.selected, |_| layers.contains(&clip.id));
+        selected && !self.transition_selection.as_ref().and_then(Option::as_ref)
+            .is_some_and(|(owner, _)| layers.len() == 1 && *owner == clip.id)
+    }
+
+    pub fn select_transition(&mut self, target: Option<(&str, &str)>) {
+        self.transition_selection = Some(target.map(|(layer, edge)| (layer.to_owned(), edge.to_owned())));
+    }
+
+    pub fn preview_transition(&mut self, layer: &str, edge: &str, start: f64, duration: f64) {
+        if let Some(capsules) = std::sync::Arc::make_mut(&mut self.transitions).get_mut(layer) {
+            for capsule in capsules.iter_mut().filter(|c| c.edge == edge) {
+                capsule.from = start;
+                capsule.duration = duration;
+                capsule.disabled = duration <= 0.;
+                capsule.selected = true;
+            }
+        }
+        self.select_transition(Some((layer, edge)));
+    }
+    /// Trim or move clip names so a transition never paints across them.
+    fn keep_names_clear(ops: &mut [Op], bounds: Rect) {
+        for name in ops.iter_mut().filter(|op| {
+            op.id.starts_with("clip-content:")
+                && op.shape == "text"
+                && op.bounds.y < bounds.y + bounds.height
+                && op.bounds.y + op.bounds.height > bounds.y
+                && op.bounds.x < bounds.x + bounds.width
+                && op.bounds.x + op.bounds.width > bounds.x
+        }) {
+            if name.bounds.x < bounds.x {
+                name.bounds.width = name
+                    .bounds
+                    .width
+                    .min((bounds.x - 4. - name.bounds.x).max(0.));
+            } else {
+                let right = name.bounds.x + name.bounds.width;
+                name.bounds.x = bounds.x + bounds.width + 4.;
+                name.bounds.width = (right - name.bounds.x).max(0.);
+            }
+        }
+    }
+
+    fn paint_transitions(
+        &self,
+        clip: &Clip,
+        strip: Rect,
+        v: Viewport,
+        t: &Tokens,
+        ops: &mut Vec<Op>,
+    ) {
+        for capsule in self.transitions.get(&clip.id).into_iter().flatten() {
+            let selected = self.transition_selection.as_ref().map_or(capsule.selected, |target| {
+                target.as_ref().is_some_and(|(layer, edge)| *layer == clip.id && edge == capsule.edge)
+            });
+            let width = if capsule.disabled {
+                18.
+            } else {
+                (capsule.duration * v.pps).max(4.)
+            };
+            let bounds = Rect::new(
+                v.x(capsule.from) - if capsule.disabled { width / 2. } else { 0. },
+                strip.y + 2.,
+                width,
+                (strip.height - 4.).min(18.).max(6.),
+            );
+            let material = t.strip(clip.label.color(t), strip_state(clip, self.clip_selected(clip)));
+            if !capsule.paired {
+                let gap = t.strip_gap() as f64 / 2.;
+                let x = v.x(capsule.from) + if capsule.edge == "in" { gap } else { -gap };
+                let bounds = Rect::new(x, strip.y, width, strip.height);
+                Self::keep_names_clear(ops, bounds);
+                let edge = if capsule.edge == "in" { Edge::In } else { Edge::Out };
+                let tooltip = format!("{} · {:.2} s", capsule.label, capsule.duration);
+                let detail = json!({"layer":clip.id,"edge":capsule.edge,
+                    "selected":selected,"effectiveDuration":capsule.duration,
+                    "effectiveFrom":capsule.from,"tooltip":tooltip});
+                let wedge = |id: String, color| {
+                    let mut op = Op::new(id, "wedge", bounds, color);
+                    op.radius = t.strip_radius(strip.height as f32) as f64;
+                    op.clip = Some(strip);
+                    op.detail = detail.clone();
+                    op
+                };
+                ops.push(wedge(format!("transition-ground:{}:{}", clip.id, capsule.edge), material.under_label));
+                let mut tint = wedge(transition_op(&clip.id, edge), material.primary);
+                tint.opacity = 0.35;
+                ops.push(tint);
+                if selected {
+                    let selected = t.strip(clip.label.color(t), pm_design::StripState::Selected);
+                    let mut ring = wedge(format!("transition-selection:{}:{}", clip.id, capsule.edge), selected.ring.0);
+                    ring.stroke = 2.;
+                    // The outline straddles the outer path by one point.
+                    ring.clip = None;
+                    ops.push(ring);
+                }
+                continue;
+            }
+            Self::keep_names_clear(ops, bounds);
+            // The tint remains translucent, over an opaque capsule ground.
+            // Clip edges and selection rings must never cross its label.
+            let mut ground = Op::new(
+                format!("transition-ground:{}:{}", clip.id, capsule.edge),
+                "rect",
+                bounds,
+                material.under_label,
+            );
+            ground.radius = bounds.height / 2.;
+            ops.push(ground);
+            let mut op = Op::new(
+                format!("transition:{}:{}", clip.id, capsule.edge),
+                "rect",
+                bounds,
+                material.primary,
+            );
+            op.radius = bounds.height / 2.;
+            op.opacity = if capsule.disabled { 0.16 } else { 0.35 };
+            op.detail = json!({"layer":clip.id,"edge":capsule.edge,"disabled":capsule.disabled,
+                "effectiveDuration":capsule.duration,"effectiveFrom":capsule.from,
+                "tooltip":if capsule.shortened {Some(pm_kernel::commands::transition_edges::SHORTENED_REASON)} else {None}});
+            ops.push(op);
+            if selected {
+                let mut outline = Op::new(
+                    format!("transition-selection:{}:{}", clip.id, capsule.edge),
+                    "ring",
+                    bounds,
+                    t.strip(clip.label.color(t), pm_design::StripState::Selected)
+                        .ring
+                        .0,
+                );
+                outline.radius = bounds.height / 2.;
+                outline.stroke = t
+                    .strip(clip.label.color(t), pm_design::StripState::Selected)
+                    .ring_width as f64;
+                ops.push(outline);
+            }
+            if width >= 66. {
+                let mut label = Op::new(
+                    format!("transition-name:{}:{}", clip.id, capsule.edge),
+                    "text",
+                    bounds,
+                    material.foreground,
+                );
+                label.text = Some(capsule.label.clone());
+                label.font_size = 10.;
+                label.detail = json!({"align":"center"});
+                ops.push(label);
+            }
+        }
+    }
+    fn paint_stagger(&self, clip: &Clip, strip: Rect, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
+        let Some(bands) = self.stagger.get(&clip.id) else {
+            return;
+        };
+        for band in bands {
+            let y1 = strip.y + strip.height - 2.;
+            let y0 = y1 - (strip.height * 0.3).max(4.).min(8.);
+            let x = |seconds| v.x(clip.from + seconds);
+            let mut op = Op::new(
+                format!("stagger:{}:{}", clip.id, band.animator),
+                "stagger",
+                Rect::new(x(band.start), y0, x(band.end) - x(band.start), y1 - y0),
+                t.strip(clip.label.color(t), strip_state(clip, self.clip_selected(clip))).foreground,
+            );
+            op.opacity = 0.8;
+            op.clip = Some(strip);
+            op.detail = json!({"band":band,"points":[[x(band.start),y0],[x(band.start+band.duration),y0],[x(band.end),y1],[x(band.start+band.cascade),y1]],"hitTop":strip.y+strip.height/2.,"hitBottom":strip.y+strip.height,"locked":clip.locked});
+            ops.push(op);
+        }
+    }
+    /// Row `i`'s ops in panel space (unclipped), and its keyframe toggle
+    /// with its key times when `controls` is given.
+    fn row_ops(
+        &self,
+        i: usize,
+        v: Viewport,
+        t: &Tokens,
+        ops: &mut Vec<Op>,
+        controls: Option<&mut Vec<Control>>,
+        seen: Seen,
+        mut waveforms: Option<&mut WaveformCache>,
+        key_preview: Option<&crate::KeyMovePreview>,
+    ) {
+        let (m, c) = (t.metrics, &t.colors);
+        let row = &self.rows[i];
+        let preview = key_preview
+            .filter(|preview| !preview.layers.is_empty())
+            .and_then(|preview| match crate::v4::parse_row(&row.id).ok()? {
+                crate::RowId::Layer(layer)
+                | crate::RowId::Property {
+                    layer_id: layer, ..
+                } => preview.layers.get(&layer),
+                _ => None,
+            });
+        let preview_keys = |keys: &[Key]| {
+            let changes = preview?;
+            if !keys.iter().any(|key| changes.contains_key(&key.id)) {
+                return None;
+            }
+            let mut keys: Vec<_> = keys
+                .iter()
+                .filter_map(|key| {
+                    let seconds = changes.get(&key.id).copied().unwrap_or(Some(key.seconds))?;
+                    Some(Key {
+                        seconds,
+                        ..key.clone()
+                    })
+                })
+                .collect();
+            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+            Some(keys)
+        };
+        let y = m.ruler as f64 + self.tops[i] - v.scroll_y;
+        let h = row.height(t);
+        // Selection and hover fill the outline column only; in the tracks
+        // the clip's accent ring marks the selection (the owner's demo).
+        let rect = Rect::new(0., y, v.layer_column, h);
+        let selected = self.row_selected(row);
+        if selected || row.hovered {
+            ops.push(Op::new(
+                format!("row:{}", row.id),
+                "rect",
+                rect,
+                if selected && !self.focused {
+                    c.selected_fill
+                } else if selected && row.hovered {
+                    c.timeline_selected_hover
+                } else if selected {
+                    c.timeline_selected
+                } else {
+                    c.hover
+                },
+            ));
+        }
+        if row.focused {
+            let mut o = Op::new(
+                format!("focus:{}", row.id),
+                "ring",
+                Rect::new(1., y + 1., v.width - 2., h - 2.),
+                c.focus,
+            );
+            o.stroke = 2.;
+            ops.push(o);
+        }
+        if t.accessibility.increase_contrast && !matches!(row.content, RowContent::Property { .. })
+        {
+            ops.push(Op::new(
+                format!("separator:{}", row.id),
+                "rect",
+                Rect::new(0., y + h - m.border as f64, v.width, m.border as f64),
+                c.separator,
+            ));
+        }
+        match &row.content {
+            RowContent::Layer { clip, summary } => {
+                let strip = clip.as_ref().and_then(|clip| {
+                    paint_clip(
+                        clip,
+                        self.clip_selected(clip),
+                        y,
+                        h,
+                        v,
+                        self.label_step(v).0,
+                        seen,
+                        true,
+                        t,
+                        ops,
+                        waveforms.as_deref_mut(),
+                    )
+                });
+                if let (Some(clip), Some(strip)) = (clip, strip) {
+                    self.paint_stagger(clip, strip, v, t, ops);
+                    self.paint_transitions(clip, strip, v, t, ops);
+                }
+                // Summary marks only while the layer is collapsed (open, its
+                // property rows show the keys themselves), and only inside
+                // the strip they belong to: a layer with no strip on screen
+                // shows none.
+                let open = self
+                    .rows
+                    .get(i + 1)
+                    .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
+                if let (false, Some(clip), Some(strip)) = (open, clip, strip) {
+                    let ink = t.strip(clip.label.color(t), strip_state(clip, self.clip_selected(clip))).foreground;
+                    // In the strip's foot, under the name's descenders.
+                    let size = (m.keyframe - SUMMARY_KEY_INSET) as f64;
+                    let within = Within {
+                        from: v.x(clip.from),
+                        to: v.x(clip.from + clip.duration),
+                        strip,
+                    };
+                    let preview = preview_keys(summary);
+                    paint_keys(
+                        &row.id,
+                        preview.as_deref().unwrap_or(summary),
+                        Some((ink, within)),
+                        None,
+                        strip.y + strip.height - 1.5 * m.border as f64 - size / 2.,
+                        v,
+                        t,
+                        ops,
+                    );
+                }
+            }
+            RowContent::Track { clips } => {
+                let first = self.track_ends[&row.id].partition_point(|end| *end < v.scroll_time);
+                let last = clips.partition_point(|clip| {
+                    clip.from <= v.scroll_time + (v.width - v.layer_column) / v.pps
+                });
+                let grid = self.label_step(v).0;
+                for clip in &clips[first.min(last)..last] {
+                    if let Some(strip) = paint_clip(
+                        clip,
+                        self.clip_selected(clip),
+                        y,
+                        h,
+                        v,
+                        grid,
+                        seen,
+                        false,
+                        t,
+                        ops,
+                        waveforms.as_deref_mut(),
+                    ) {
+                        self.paint_stagger(clip, strip, v, t, ops);
+                        self.paint_transitions(clip, strip, v, t, ops);
+                    }
+                }
+            }
+            RowContent::Property { state, keys } => {
+                let preview = preview_keys(keys);
+                let keys = preview.as_deref().unwrap_or(keys);
+                let mut o = Op::new(
+                    format!("toggle:{}", row.id),
+                    match state {
+                        KeyState::Static => "diamond",
+                        KeyState::Animated => "diamond.lefthalf.filled",
+                        KeyState::AtPlayhead => "diamond.fill",
+                    },
+                    Rect::new(
+                        m.inset as f64 + m.hit as f64 + (m.hit - m.keyframe) as f64 / 2.,
+                        y + (h - m.keyframe as f64) / 2.,
+                        m.keyframe as f64,
+                        m.keyframe as f64,
+                    ),
+                    if *state == KeyState::Static {
+                        c.muted
+                    } else {
+                        c.accent
+                    },
+                );
+                o.detail = json!({"navigationVisible":*state!=KeyState::Static,"labelX":m.inset+3.*m.hit+m.gap});
+                if let Some(controls) = controls {
+                    let times = preview.as_ref().map_or_else(
+                        || self.control_times[&row.id].clone(),
+                        |keys| keys.iter().map(|key| key.seconds).collect(),
+                    );
+                    controls.push((o.clone(), times));
+                }
+                ops.push(o);
+                // The lane the keys sit on (v1): a faint line across the tracks.
+                if !keys.is_empty() {
+                    let mut lane = Op::new(
+                        format!("lane:{}", row.id),
+                        "rect",
+                        Rect::new(
+                            v.layer_column,
+                            y + (h - m.border as f64) / 2.,
+                            v.width - v.layer_column,
+                            m.border as f64,
+                        ),
+                        c.text,
+                    );
+                    lane.opacity = t.translucency.grid as f64;
+                    ops.push(lane);
+                }
+                let selected_keys = self.selection.as_ref().map(|selection| {
+                    self.property_layers[i].as_ref().and_then(|layer| selection.keys.get(layer))
+                });
+                paint_keys(&row.id, keys, None, selected_keys, y + h / 2., v, t, ops);
+            }
+        }
+    }
+    /// Seconds between ruler labels: the first nice step at least 60 pt
+    /// apart, counting frames once a frame is 40 pt wide (then `true`).
+    fn label_step(&self, v: Viewport) -> (f64, bool) {
+        let frames = v.pps / self.fps >= 40.;
+        let step = if frames {
+            (60. / (v.pps / self.fps)).ceil() / self.fps
+        } else {
+            [1., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.]
+                .into_iter()
+                .find(|s| s * v.pps >= 60.)
+                .unwrap_or(3600.)
+        };
+        (step, frames)
+    }
+    fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>, seen: Seen) {
+        let (m, c) = (t.metrics, &t.colors);
+        let h = m.ruler as f64;
+        // The ruler and the band over the layer column are one piece: its
+        // foot is one hairline across the panel.
+        let (edge, edge_alpha) = t.line();
+        let mut border = Op::new(
+            "ruler-border",
+            "rect",
+            Rect::new(0., h - m.border as f64, v.width, m.border as f64),
+            edge,
+        );
+        border.opacity = edge_alpha as f64;
+        ops.push(border);
+        // The work area is the lit stretch of the ruler between two bars, in
+        // the ink, not the accent: the playhead is the ruler's one bright
+        // mark. The tracks outside it are veiled.
+        if self.work_area != (0., self.duration)
+            && let Some(r) = span(v.x(self.work_area.0), v.x(self.work_area.1), 0., h, v)
+        {
+            let mut o = Op::new("work-area", "rect", r, c.text);
+            o.opacity = WORK_AREA_WASH;
+            ops.push(o);
+        }
+        // Its two handles always stand at its edges, as v1's brackets: a
+        // stem down the foot of the ruler with a wing turned into the work
+        // area, and a grab zone wider than either (the surface's reach).
+        for (edge, time) in [("in", self.work_area.0), ("out", self.work_area.1)] {
+            let x = v.x(time);
+            if x < v.layer_column || x > v.width {
+                continue;
+            }
+            let mut o = Op::new(
+                format!("work-{edge}"),
+                "work-area-handle",
+                Rect::new(x - WORK_HANDLE / 2., 0., WORK_HANDLE, h),
+                c.text,
+            );
+            o.opacity = 0.;
+            o.detail = json!({"outerEdge":edge});
+            ops.push(o);
+            // Inward: right of the in point, left of the out point.
+            let top = h / 2.;
+            let foot = h - m.border as f64;
+            let stem = Rect::new(
+                if edge == "in" { x } else { x - WORK_AREA_BAR },
+                top,
+                WORK_AREA_BAR,
+                foot - top,
+            );
+            let wing = Rect::new(
+                if edge == "in" { x } else { x - WORK_HANDLE },
+                top,
+                WORK_HANDLE,
+                WORK_AREA_WING,
+            );
+            for (part, r) in [("stem", stem), ("wing", wing)] {
+                let mut o = Op::new(format!("work-bar:{edge}:{part}"), "rect", r, c.text);
+                o.opacity = WORK_AREA_EDGE;
+                o.radius = WORK_AREA_BAR / 2.;
+                ops.push(o);
+            }
+        }
+        // Each label stands over a small dot, with a faint line down the
+        // tracks; no tick marks. Increase Contrast makes the dot solid.
+        let major = if t.accessibility.increase_contrast {
+            (c.secondary, 1.)
+        } else {
+            (c.text, t.translucency.tick_major as f64)
+        };
+        let (label_step, frames) = self.label_step(v);
+        let right = v.scroll_time + (v.width - v.layer_column) / v.pps;
+        // Between two labels, smaller and fainter dots count the scale off.
+        let minor = minor_step(label_step, v.pps, self.fps, frames);
+        if let Some(minor) = minor {
+            let every = (label_step / minor).round().max(1.) as u64;
+            let mut i = (v.scroll_time / minor).ceil().max(0.) as u64;
+            while i as f64 * minor <= right && ops.len() < 10_000 {
+                if !i.is_multiple_of(every) {
+                    let x = v.x(i as f64 * minor);
+                    let mut o = Op::new(
+                        format!("minor:{i}"),
+                        "circle",
+                        Rect::new(x - 1., h - 6.5, 2., 2.),
+                        major.0,
+                    );
+                    o.opacity = major.1 * MINOR_DOT;
+                    ops.push(o);
+                }
+                i += 1;
+            }
+        }
+        let mut i = (v.scroll_time / label_step).ceil().max(0.) as u64;
+        while i as f64 * label_step <= right && ops.len() < 10_000 {
+            let time = i as f64 * label_step;
+            let x = v.x(time);
+            let mut o = Op::new(
+                format!("major:{i}"),
+                "circle",
+                Rect::new(x - 1.5, h - 7., 3., 3.),
+                major.0,
+            );
+            o.opacity = major.1;
+            ops.push(o);
+            // A faint second grid under the tracks (the owner's demo).
+            if !t.accessibility.increase_contrast {
+                let mut o = Op::new(
+                    format!("grid:{i}"),
+                    "rect",
+                    Rect::new(x, h, m.border as f64, (v.height - h).max(0.)),
+                    c.text,
+                );
+                o.opacity = t.translucency.grid as f64;
+                ops.push(o);
+            }
+            // The label centres over its tick, so the numbers read as a
+            // scale; one that would cross the layer column slides right.
+            let width = label_step * v.pps;
+            let mut o = Op::new(
+                format!("time:{i}"),
+                "text",
+                Rect::new(x - width / 2., 2., width, t.typography.minimum as f64),
+                c.muted,
+            );
+            let seconds = time.floor() as u64;
+            o.text = Some(if frames {
+                format!(
+                    "{}:{:02}:{:02}",
+                    seconds / 60,
+                    seconds % 60,
+                    ((time - seconds as f64) * self.fps).round() as u64
+                )
+            } else {
+                format!("{}:{:02}", seconds / 60, seconds % 60)
+            });
+            o.font_size = t.typography.minimum as f64;
+            o.detail =
+                json!({"tabular":true,"align":"center","minX":seen.left + m.gap as f64});
+            ops.push(o);
+            let Some(next) = i.checked_add(1) else {
+                break;
+            };
+            i = next;
+        }
+        // Marker pins sit on the ruler's foot; a guide drops through the tracks.
+        for marker in &self.markers {
+            let x = v.x(marker.seconds);
+            if x >= v.layer_column && x <= v.width {
+                let mut o = Op::new(
+                    format!("marker-guide:{}", marker.id),
+                    "rect",
+                    Rect::new(x, h, m.border as f64, v.height - h),
+                    c.secondary,
+                );
+                o.opacity = 0.35;
+                ops.push(o);
+                let mut o = Op::new(
+                    format!("marker:{}", marker.id),
+                    "marker",
+                    Rect::new(x - 4.5, h - 11., 9., 10.),
+                    c.secondary,
+                );
+                o.detail = json!({"name":marker.name,"seconds":marker.seconds});
+                ops.push(o);
+            }
+        }
+        for (i, b) in self.bars.iter().enumerate() {
+            if b.state == BarState::Stale {
+                continue;
+            }
+            if let Some(r) = span(v.x(b.from), v.x(b.to), 0., 3., v) {
+                let mut o = Op::new(
+                    format!("render:{i}"),
+                    if b.state == BarState::Rendering && !t.accessibility.reduce_motion {
+                        "stripes-45"
+                    } else {
+                        "rect"
+                    },
+                    r,
+                    match b.state {
+                        BarState::Rendering => c.muted,
+                        // Needs render: can't play in real time yet.
+                        BarState::Missing => c.warning,
+                        _ => c.success,
+                    },
+                );
+                o.opacity = match b.state {
+                    BarState::Rendering if t.accessibility.reduce_motion => 0.5,
+                    BarState::Rendered | BarState::Missing => 0.7,
+                    _ => 1.,
+                };
+                ops.push(o);
+                if b.state == BarState::Kept {
+                    ops.push(Op::new(
+                        format!("kept:{i}"),
+                        "rect",
+                        Rect::new(r.x, r.y, r.width, 1.),
+                        c.text,
+                    ));
+                }
+            }
+        }
+    }
+}
+/// The work area in the ruler: the wash between its two bars, the bars'
+/// ink and their width.
+const WORK_AREA_WASH: f64 = 0.09;
+const WORK_AREA_EDGE: f64 = 0.85;
+const WORK_AREA_BAR: f64 = 2.;
+/// v1's bracket: a wing 6 pt long, 3 pt deep, on a 2 pt stem.
+const WORK_HANDLE: f64 = 6.;
+const WORK_AREA_WING: f64 = 3.;
+/// A minor dot's ink against a label's dot, and the least room between two.
+const MINOR_DOT: f64 = 0.55;
+const MINOR_ROOM: f64 = 7.;
+/// Seconds between the ruler's minor dots: the finest whole division of the
+/// label step that leaves `MINOR_ROOM` between dots; none when even halves
+/// would crowd.
+fn minor_step(label_step: f64, pps: f64, fps: f64, frames: bool) -> Option<f64> {
+    if frames {
+        let frame = 1. / fps;
+        return (label_step > frame * 1.5 && frame * pps >= MINOR_ROOM).then_some(frame);
+    }
+    let divisions: &[f64] = match label_step as u64 {
+        1 => &[10., 5., 2.],
+        5 => &[5.],
+        10 => &[10., 5., 2.],
+        15 => &[3.],
+        30 => &[6., 3., 2.],
+        60 => &[6., 4., 2.],
+        120 => &[4., 2.],
+        300 => &[5.],
+        600 => &[10., 5., 2.],
+        1800 => &[6., 3., 2.],
+        _ => &[6., 4., 2.],
+    };
+    divisions
+        .iter()
+        .map(|n| label_step / n)
+        .find(|step| step * pps >= MINOR_ROOM)
+}
+/// An audio layer's level line.
+fn level_of(layer: &crate::Layer) -> Option<Level> {
+    (layer.kind == "audio").then_some(Level {
+        gain: layer.gain,
+        fade_in: layer.fade_in,
+        fade_out: layer.fade_out,
+        animated: layer.gain_animated,
+    })
+}
+/// A muted clip's waveform: dimmed, still there.
+const WAVEFORM_MUTED: f64 = 0.4;
+/// A row this tall (points) shows a stereo clip's two sides apart.
+const STEREO_ROW: f64 = 56.;
+fn valid_clip(c: &Clip) -> bool {
+    c.from.is_finite()
+        && c.duration.is_finite()
+        && c.duration >= 0.
+        && (c.from + c.duration).is_finite()
+        && c.audio
+            .iter()
+            .flatten()
+            .all(|w| {
+                w.levels.rate.is_finite() && w.levels.rate > 0. && w.trim.is_finite() && w.trim >= 0.
+            })
+}
+/// The tracks a reader sees, in a frame's x: the whole view's, or for a
+/// frame prepared wider ([`Scene::prepare_wide`]) the part the view shows.
+#[derive(Clone, Copy)]
+struct Seen {
+    left: f64,
+    right: f64,
+}
+impl Seen {
+    fn of(v: Viewport) -> Self {
+        Self {
+            left: v.layer_column,
+            right: v.width,
+        }
+    }
+    /// What of a strip's box `r` keeps its name and marks: a strip that
+    /// runs on past either edge of what is seen keeps them inside it; one
+    /// wholly outside keeps its own (a step brings it in with its name).
+    fn inside(self, r: Rect) -> Rect {
+        let end = r.x + r.width;
+        let x = if r.x < self.left && end > self.left {
+            self.left
+        } else {
+            r.x
+        };
+        let end = if r.x < self.right && end > self.right {
+            self.right
+        } else {
+            end
+        };
+        Rect::new(x, r.y, (end - x).max(0.), r.height)
+    }
+}
+fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
+    let x = a.max(v.layer_column);
+    let end = b.min(v.width);
+    (end > x).then_some(Rect::new(x, y, end - x, h.max(0.)))
+}
+/// Width of an offline clip's "Offline" lead, in `minimum` ems.
+const OFFLINE_ADVANCE: f64 = 3.6;
+/// Width of the "Missing effect" badge, in `minimum` ems.
+const MISSING_EFFECT_ADVANCE: f64 = 6.6;
+/// The strip state a clip draws in: a hidden layer is disabled, selection is
+/// the bright rim, and the clip whose edge is under the pointer is hovered
+/// (it also shows the trim grip). A surface that drags a clip paints it with
+/// `StripState::Dragging` itself.
+fn strip_state(c: &Clip, selected: bool) -> pm_design::StripState {
+    use pm_design::StripState;
+    if c.hidden {
+        StripState::Disabled
+    } else if selected {
+        StripState::Selected
+    } else if c.trim.is_some() {
+        StripState::Hover
+    } else {
+        StripState::Rest
+    }
+}
+/// The op naming clip `layer`'s transition at `edge`.
+pub fn transition_op(layer: &str, edge: Edge) -> String {
+    let edge = if edge == Edge::In { "in" } else { "out" };
+    format!("transition:{edge}:{layer}")
+}
+/// How far past a layer's in or out point a press trims it.
+const TRIM_REACH: f64 = 5.;
+/// How far in from a strip's drawn end a press trims it: v1's five points,
+/// with room for an end drawn on a half point, so five points in trims at
+/// both ends (the out end was drawn on a half point and lost its fifth).
+const TRIM_INSIDE: f64 = 6.;
+/// The least reach of a transition's wedge under the pointer, so a short
+/// one near the clip's floor can still be taken.
+const TRANSITION_GRAB: f64 = 4.;
+/// The least width a strip is drawn at, in points (v1's 4 px).
+const MIN_STRIP: f64 = 4.;
+struct ClipGeometry {
+    visible: Rect,
+    body: Rect,
+    start: f64,
+    end: f64,
+    radius: f64,
+}
+
+fn clip_geometry(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens) -> Option<ClipGeometry> {
+    let gap = t.strip_gap() as f64;
+    let start = v.x(c.from) + gap / 2.;
+    let end = (v.x(c.from + c.duration) - gap / 2.).max(start + MIN_STRIP);
+    let visible = span(start, end, y + gap, h - 2. * gap, v)?;
+    let radius = t.strip_radius(visible.height as f32) as f64;
+    // Extend the body past the viewport so clipped ends have no rounded corner.
+    let reach = radius + gap + 2. * t.metrics.border as f64;
+    let (x0, x1) = (start.max(v.layer_column - reach), end.min(v.width + reach));
+    let body = Rect::new(x0, visible.y, x1 - x0, visible.height);
+    Some(ClipGeometry { visible, body, start, end, radius })
+}
+
+/// Paints clip `c` and gives back its strip's box on screen (none when the
+/// clip is off screen).
+#[allow(clippy::too_many_arguments)]
+fn paint_clip(
+    c: &Clip,
+    selected: bool,
+    y: f64,
+    h: f64,
+    v: Viewport,
+    grid: f64,
+    seen: Seen,
+    layers: bool,
+    t: &Tokens,
+    ops: &mut Vec<Op>,
+    waveforms: Option<&mut WaveformCache>,
+) -> Option<Rect> {
+    let m = t.metrics;
+    let colors = &t.colors;
+    let ClipGeometry { visible: r, body, start, end, radius } = clip_geometry(c, y, h, v, t)?;
+    let n = seen.inside(r);
+    // Media Offline (docs/native/design/media-offline.md): the viewer's
+    // ground with the danger hatch, as the engine's card.
+    let offline = c.media == Media::Offline;
+    let fill = if offline {
+        colors.viewer
+    } else {
+        c.label.color(t)
+    };
+    // The strip (pm-design `strip`): a slab of tinted glass in the layer's
+    // hue, a rim of light inside its edge, no outline. Its state carries
+    // selection, the hovered edge and a hidden layer.
+    let material = t.strip(fill, strip_state(c, selected));
+    let strength = 1.;
+    let grid_from = if grid > 0. {
+        let time = v.scroll_time + (r.x - v.layer_column) / v.pps;
+        v.x((time / grid).ceil() * grid)
+    } else {
+        0.
+    };
+    let mut o = Op::new(format!("clip:{}", c.id), "clip", body, fill);
+    o.radius = radius;
+    o.opacity = material.opacity as f64;
+    o.detail = json!({
+        "from":c.from,"duration":c.duration,
+        "cursor":if c.locked {"notAllowed"}else{"openHand"},
+        "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
+        // The strip's own ends as drawn (inside the layer's times).
+        "stripEdges":[start,end],
+        "selected":selected,
+        "top":material.top,"bottom":material.bottom,
+        // The ruler's grid reads through the body: its first line inside
+        // the strip and the distance between lines, in points.
+        "grid":material.grid.0,"gridAlpha":material.grid.1,
+        "gridFrom":grid_from,"gridStep":grid * v.pps,
+        "ring":material.ring.0,"ringAlpha":material.ring.1,"ringWidth":material.ring_width,
+        "light":material.light.0,"lightAlpha":material.light.1,
+        "glow":material.glow.0,"glowAlpha":material.glow.1,
+        "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
+        "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
+    });
+    ops.push(o);
+    if offline {
+        let mut o = Op::new(
+            format!("clip-hatch:{}", c.id),
+            "stripes-45",
+            body,
+            colors.danger,
+        );
+        o.opacity = t.translucency.offline_hatch as f64 * strength;
+        o.radius = radius;
+        o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
+        ops.push(o);
+    }
+    // A locked layer's strip wears the same 45° hatch in a quiet colour, so a
+    // strip that will not move reads as locked, not as a frozen timeline.
+    if c.locked && !offline {
+        let mut o = Op::new(
+            format!("clip-lock-hatch:{}", c.id),
+            "stripes-45",
+            body,
+            colors.muted,
+        );
+        o.opacity = t.translucency.offline_hatch as f64 * strength;
+        o.radius = radius;
+        o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
+        ops.push(o);
+    }
+    // "Offline" leads in `danger`; the name follows in the clip's foreground.
+    // The name starts clear of the trim grip that stands inside a hovered
+    // strip's edge.
+    let grip = t.trim_grip();
+    let negative_start = layers && c.from < 0. && n.width > 20.;
+    if negative_start {
+        let mut marker = Op::new(
+            format!("clip-negative:{}", c.id), "text",
+            Rect::new(n.x + 6., n.y, 8., n.height), material.foreground,
+        );
+        marker.text = Some("‹".into());
+        marker.font_size = t.typography.minimum as f64;
+        marker.opacity = 0.7;
+        let seconds = format!("{:.3}", c.from.abs());
+        let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
+        marker.detail = json!({"tooltip":format!("Starts before 0:00 (−{seconds} s)")});
+        ops.push(marker);
+    }
+    let lead = (grip.inset + grip.width + t.space.xs) as f64
+        + if negative_start { 12. } else { 0. };
+    let offline_w = if offline {
+        let w = t.typography.minimum as f64 * OFFLINE_ADVANCE;
+        let mut o = Op::new(
+            format!("clip-offline:{}", c.id),
+            "text",
+            Rect::new(n.x + lead, n.y, w.min((n.width - lead).max(0.)), n.height),
+            colors.danger,
+        );
+        o.text = Some("Offline".into());
+        o.font_size = t.typography.minimum as f64;
+        o.opacity = strength;
+        o.detail = json!({"truncate":"tail"});
+        ops.push(o);
+        w + m.gap as f64
+    } else {
+        0.
+    };
+    // A missing extension effect: a quiet trailing badge in `danger`; the name
+    // truncates before it (media-offline.md). Too narrow a clip drops it.
+    let badge_w = t.typography.minimum as f64 * MISSING_EFFECT_ADVANCE;
+    let badge = c
+        .missing_effect
+        .as_ref()
+        .filter(|_| n.width - lead - offline_w > badge_w + 3. * lead);
+    let reserve = if badge.is_some() { badge_w + lead } else { 0. };
+    let ink = if offline {
+        colors.text
+    } else {
+        material.foreground
+    };
+    // A readable audio clip shows its waveform in place of the name (v1): the
+    // bars stand on the clip's floor in the body's bright tint, one column per
+    // point summarising every peak under it.
+    if !c.cues.is_empty() {
+        // Captions (S089): each cue a quiet chip with its text, in place of
+        // the clip's name; a cue is clicked, double-clicked and read by itself.
+        for cue in &c.cues {
+            let x0 = v.x(cue.start).max(n.x + m.border as f64);
+            let x1 = v.x(cue.end).min(n.x + n.width - m.border as f64);
+            if x1 - x0 < 2. {
+                continue;
+            }
+            let chip = Rect::new(
+                x0,
+                r.y + 2. * m.border as f64,
+                x1 - x0,
+                (r.height - 4. * m.border as f64).max(0.),
+            );
+            let mut o = Op::new(cue_op(&c.id, &cue.id), "rect", chip, material.primary);
+            o.radius = (radius - 2. * m.border as f64).max(0.);
+            o.opacity = 0.35 * strength;
+            o.detail = json!({"from":cue.start,"to":cue.end,"text":cue.text});
+            ops.push(o);
+            let mut o = Op::new(
+                format!("cue-text:{}\u{1f}{}", c.id, cue.id),
+                "text",
+                Rect::new(
+                    x0 + lead,
+                    chip.y,
+                    (x1 - x0 - 2. * lead).max(0.),
+                    chip.height,
+                ),
+                ink,
+            );
+            o.text = Some(cue.text.replace('\n', " "));
+            o.font_size = t.typography.minimum as f64;
+            o.opacity = strength;
+            o.detail = json!({"truncate":"tail"});
+            ops.push(o);
+        }
+    } else if let (Some(audio), false) = (&c.audio, offline) {
+        // The waveform is light caught inside the glass: it stands on the
+        // strip's floor, just inside the rim, over the strip's whole length,
+        // and the strip's rounded corners cut it (the painter follows them
+        // from the strip's own ends). Two columns per point (device pixels
+        // on Retina), read from the pyramid at this zoom, on a perceptual
+        // scale; the painter softens them and fills one smooth shape.
+        let inset = 2. * m.border as f64;
+        let mut o = Op::new(
+            format!("clip-content:{}", c.id),
+            "waveform",
+            r,
+            material.primary,
+        );
+        o.text = Some(c.name.clone());
+        o.opacity = strength * if c.muted { WAVEFORM_MUTED } else { 1. };
+        let mut detail = json!({
+            "rim": material.ring_width,
+            "radius": radius,
+            "ends": [start, end],
+            "columns": crate::waveform::COLUMNS_PER_POINT,
+            "wave": material.wave.0,
+            "waveAlpha": material.wave.1,
+        });
+        if let Some(w) = audio {
+            let per = crate::waveform::COLUMNS_PER_POINT;
+            let count = (r.width * per).ceil().max(0.) as usize;
+            let step = 1. / (v.pps * per);
+            let left_time = (r.x - v.x(c.from)) / v.pps;
+            let trim = w.trim;
+            let linear = move |t: f64| t + trim;
+            let source: Box<dyn Fn(f64) -> f64> = match &w.map {
+                Some(map) => Box::new(crate::waveform::mapped(map, c.duration)),
+                None => Box::new(linear),
+            };
+            // A tall row shows a stereo clip's two sides, one above the other.
+            let sides = w.levels.sides.as_ref().filter(|_| r.height >= STEREO_ROW);
+            let read = |p: &crate::waveform::Pyramid| {
+                crate::waveform::columns(p, w.levels.rate, &*source, left_time, step, count)
+            };
+            if let Some(cache) = waveforms {
+                let peaks = |p: &crate::waveform::Pyramid| {
+                    crate::waveform::native_peaks(
+                        p,
+                        w.levels.rate,
+                        &*source,
+                        left_time,
+                        step,
+                        count,
+                    )
+                };
+                o.waveform = Some(cache.sample(
+                    c,
+                    w,
+                    left_time,
+                    step,
+                    count,
+                    sides.is_some(),
+                    || match sides {
+                        Some([left, right]) => vec![peaks(left), peaks(right)].into(),
+                        None => vec![peaks(&w.levels.combined)].into(),
+                    },
+                ));
+            } else {
+                match sides {
+                    Some([left, right]) => {
+                        let (lp, lr) = read(left);
+                        let (rp, rr) = read(right);
+                        detail["peak"] = json!(crate::waveform::encode(&lp));
+                        detail["rms"] = json!(crate::waveform::encode(&lr));
+                        detail["peak2"] = json!(crate::waveform::encode(&rp));
+                        detail["rms2"] = json!(crate::waveform::encode(&rr));
+                    }
+                    None => {
+                        let (peak, rms) = read(&w.levels.combined);
+                        detail["peak"] = json!(crate::waveform::encode(&peak));
+                        detail["rms"] = json!(crate::waveform::encode(&rms));
+                    }
+                }
+            }
+        }
+        o.detail = detail;
+        ops.push(o);
+        if let Some(level) = c.level {
+            ops.push(level_line(c, selected, level, r, v, inset, material.level, strength));
+        }
+    } else {
+        let mut o = Op::new(
+            format!("clip-content:{}", c.id),
+            "text",
+            Rect::new(
+                n.x + lead + offline_w,
+                n.y,
+                (n.width - lead - offline_w - reserve).max(0.),
+                n.height,
+            ),
+            ink,
+        );
+        o.text = Some(if c.media == Media::Loading {
+            "Loading…".into()
+        } else {
+            c.name.clone()
+        });
+        o.font_size = if c.media == Media::Loading {
+            t.typography.minimum
+        } else {
+            t.typography.body
+        } as f64;
+        o.opacity = strength * if c.media == Media::Loading { 0.7 } else { 1. };
+        // Names are semibold (pm-design: large-bold text against the slab).
+        o.detail = json!({"truncate":"tail","weight":600,"offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None}});
+        ops.push(o);
+    }
+    if let Some(effect) = badge {
+        let mut o = Op::new(
+            format!("clip-missing-effect:{}", c.id),
+            "text",
+            Rect::new(n.x + n.width - badge_w - lead, n.y, badge_w, n.height),
+            colors.danger,
+        );
+        o.text = Some("Missing effect".into());
+        o.font_size = t.typography.minimum as f64;
+        o.opacity = strength;
+        o.detail = json!({"truncate":"tail","tooltip":format!("Missing effect: {effect}. The layer draws without it.")});
+        ops.push(o);
+    }
+    // Selection is the strip's own white rim (drawn with the body), so a
+    // selected clip never grows into its neighbours and never turns accent.
+    // The trim grip: a short pill inside the edge under the pointer.
+    if let Some(edge) = c.trim {
+        let grip = t.trim_grip();
+        let (w, inset) = (grip.width as f64, grip.inset as f64);
+        let x = match edge {
+            Edge::In => n.x + inset,
+            Edge::Out => n.x + n.width - inset - w,
+        };
+        let height = (r.height * grip.height as f64).round();
+        if x >= v.layer_column && x + w <= v.width && n.width > 3. * inset && !c.locked {
+            let mut o = Op::new(
+                format!("trim:{}", c.id),
+                "rect",
+                Rect::new(x, r.y + (r.height - height) / 2., w, height),
+                grip.color,
+            );
+            o.radius = w / 2.;
+            ops.push(o);
+        }
+    }
+    Some(r)
+}
+/// The strip a collapsed layer's summary marks belong to: its source edges
+/// (`from`, `to`, unclamped panel x) and its box on screen.
+#[derive(Clone, Copy)]
+struct Within {
+    from: f64,
+    to: f64,
+    strip: Rect,
+}
+/// Keys on a property row (v1's marks): linear diamond, ease circle, hold
+/// square; the first and last keys of an animated span are half filled toward
+/// it, so a curve's ends read at a glance; selected keys are `accent` with a
+/// `panel` keyline. A collapsed layer's summary marks (`summary` = the clip's
+/// foreground, and the strip they sit in) are small quiet diamonds inside the
+/// strip's foot, as v1: keys outside the layer's in and out points are not
+/// drawn, the edge keys stand just inside its ends, marks closer than one
+/// glyph to the last one drawn are left out (a dense run reads as evenly
+/// spaced marks, not a bar), and every mark is clipped to the strip.
+/// A key glyph's look: shape, colour, selected (opacity and keyline), half.
+type Glyph<'a> = (&'a str, u32, bool, Option<&'a str>);
+/// A collapsed layer's summary marks are this much smaller than a key.
+const SUMMARY_KEY_INSET: f32 = 5.;
+fn paint_keys(
+    row: &str,
+    keys: &[Key],
+    summary: Option<(u32, Within)>,
+    selected_keys: Option<Option<&HashSet<String>>>,
+    y: f64,
+    v: Viewport,
+    t: &Tokens,
+    ops: &mut Vec<Op>,
+) {
+    let size = t.metrics.keyframe as f64
+        - if summary.is_some() {
+            SUMMARY_KEY_INSET as f64
+        } else {
+            0.
+        };
+    // A summary mark's centre stays this far inside its strip's ends.
+    let reach = size / 2. + 2. * t.metrics.border as f64;
+    let within = summary.map(|(_, w)| w);
+    if within.is_some_and(|w| w.strip.width < 2. * reach) {
+        return;
+    }
+    let from = v.scroll_time - size / v.pps;
+    let to = v.scroll_time + (v.width - v.layer_column + size) / v.pps;
+    let start = keys.partition_point(|k| k.seconds < from);
+    let end = keys.partition_point(|k| k.seconds <= to);
+    let (first, last) = (
+        keys.first().map(|k| k.seconds),
+        keys.last().map(|k| k.seconds),
+    );
+    // The glyph drawn last and its device half-pixel: keys are in time
+    // order, so an identical glyph on the same half-pixel follows it directly.
+    let mut on_top: Option<(i64, Glyph)> = None;
+    // The last summary mark drawn (thinning).
+    let mut drawn = f64::NEG_INFINITY;
+    // `key:["row","key"]`, the row's part escaped once.
+    let prefix = format!("key:[{},", serde_json::to_string(row).unwrap_or_default());
+    for key in &keys[start..end] {
+        let mut x = v.x(key.seconds);
+        if let Some(w) = within {
+            // Outside the layer's in and out points: not drawn (v1).
+            if x < w.from - 0.5 || x > w.to + 0.5 {
+                continue;
+            }
+            x = x.clamp(w.strip.x + reach, w.strip.x + w.strip.width - reach);
+        }
+        let summary = summary.map(|(ink, _)| ink);
+        let shape = if summary.is_some() {
+            "diamond"
+        } else {
+            match key.interpolation {
+                Interpolation::Linear => "diamond",
+                Interpolation::Ease => "circle",
+                Interpolation::Hold => "square",
+            }
+        };
+        let selected = summary.is_none()
+            && selected_keys.map_or(key.selected, |keys| keys.is_some_and(|keys| keys.contains(&key.id)));
+        let color = match summary {
+            Some(ink) => ink,
+            None if selected => t.colors.accent,
+            None => t.colors.text,
+        };
+        let mut id = prefix.clone();
+        id.push_str(&serde_json::to_string(&key.id).unwrap_or_default());
+        id.push(']');
+        let mut o = Op::new(
+            id,
+            shape,
+            Rect::new(x - size / 2., y - size / 2., size, size),
+            color,
+        );
+        o.opacity = match summary {
+            Some(_) => 0.8,
+            None if selected => 1.,
+            None => 0.85,
+        };
+        // A lone key is solid; the ends of a span are half filled toward it.
+        let half = (summary.is_none() && first != last && shape == "diamond")
+            .then(|| {
+                if Some(key.seconds) == first {
+                    Some("right")
+                } else if Some(key.seconds) == last {
+                    Some("left")
+                } else {
+                    None
+                }
+            })
+            .flatten();
+        o.detail = json!({"keyline":if selected {Some(t.colors.panel)}else{None},"keylineWidth":t.metrics.border,"half":half,"seconds":key.seconds});
+        let glyph = ((x * 2.).round() as i64, (shape, color, selected, half));
+        o.covered = on_top == Some(glyph);
+        on_top = Some(glyph);
+        if summary.is_some() {
+            // Summary marks are decorative and thin out when crowded.
+            o.decorative = true;
+            o.clip = within.map(|w| w.strip);
+            if x - drawn < size {
+                o.covered = true;
+            } else {
+                drawn = x;
+            }
+        }
+        ops.push(o);
+        if summary.is_none() && key.focused {
+            // The ring may cover keys under it: the next one draws again.
+            on_top = None;
+            let mut o = Op::new(
+                format!("key-focus:{}", json!([row, key.id])),
+                "outside-ring",
+                Rect::new(x - size / 2., y - size / 2., size, size),
+                t.colors.focus,
+            );
+            o.stroke = 2.;
+            ops.push(o);
+        }
+    }
+}
+/// A key op's `(row, key)` as `(layer, key)`.
+fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
+    match crate::v4::parse_row(&row).ok()? {
+        crate::RowId::Layer(layer)
+        | crate::RowId::Effect {
+            layer_id: layer, ..
+        }
+        | crate::RowId::Path {
+            layer_id: layer, ..
+        }
+        | crate::RowId::Property {
+            layer_id: layer, ..
+        } => Some((layer, key)),
+    }
+}
+fn key_identity(op: &Op) -> Option<(String, String)> {
+    if op.decorative {
+        return None;
+    }
+    serde_json::from_str(op.id.strip_prefix("key:")?).ok()
+}
+fn intersection(a: Rect, b: Rect) -> Option<Rect> {
+    let (x, y) = (a.x.max(b.x), a.y.max(b.y));
+    let (right, bottom) = (
+        (a.x + a.width).min(b.x + b.width),
+        (a.y + a.height).min(b.y + b.height),
+    );
+    (right > x && bottom > y).then(|| Rect::new(x, y, right - x, bottom - y))
+}
+/// A clip as assistive technology sees it. See [`Frame::clip_nodes`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipNode {
+    pub id: String,
+    pub name: String,
+    pub from: f64,
+    pub duration: f64,
+    pub selected: bool,
+    /// Panel coordinates of its visible body.
+    pub bounds: Rect,
+}
+impl ClipNode {
+    /// "Interview, 2 to 7.5 seconds", for VoiceOver and agents.
+    pub fn label(&self) -> String {
+        let seconds = |s: f64| {
+            let s = (s * 100.).round() / 100.;
+            if s.fract() == 0. {
+                format!("{s:.0}")
+            } else {
+                format!("{s}")
+            }
+        };
+        let name = if self.name.is_empty() {
+            "Clip"
+        } else {
+            &self.name
+        };
+        format!(
+            "{name}, {} to {} seconds",
+            seconds(self.from),
+            seconds(self.from + self.duration)
+        )
+    }
+}
+fn intersects(a: Rect, b: Rect) -> bool {
+    a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
+}
+/// A keyframe toggle and its property's key times.
+type Control = (Op, std::sync::Arc<[f64]>);
+/// What a marquee covers. See [`Scene::marquee`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Marquee {
+    /// `(layer, key)`, in row and time order.
+    pub keys: Vec<(String, String)>,
+    /// Clip ids, in row and time order.
+    pub clips: Vec<String>,
+}
+#[derive(Clone, Debug)]
+pub struct Frame {
+    rows_top: f64,
+    strip_gap: f64,
+    pub viewport: Viewport,
+    /// The ops before this index (the ground, the column's ground and the
+    /// ruler with its grid) stand still while the rows scroll.
+    pub fixed: usize,
+    pub range: Range<usize>,
+    pub total: usize,
+    pub ops: Vec<Op>,
+    pub accessibility: Vec<Value>,
+    controls: Vec<Control>,
+}
+impl Frame {
+    pub fn wire(&self) -> Value {
+        json!({"range":[self.range.start,self.range.end],"rowCount":self.total,"ops":self.ops.iter().map(Op::wire).collect::<Vec<_>>(),"accessibility":self.accessibility})
+    }
+    /// Host persists the semantic-ID -> NodeId mapping across publications.
+    /// Unmounted rows stay addressable through Scene::navigate/scroll_for.
+    pub fn accessibility_tree(
+        &self,
+        root: accesskit::NodeId,
+        row_ids: &HashMap<String, accesskit::NodeId>,
+        focused: Option<&str>,
+    ) -> Result<accesskit::TreeUpdate, Error> {
+        use accesskit::{Node, Role, Tree, TreeUpdate};
+        let mut outline = Node::new(Role::Tree);
+        outline.set_label("Timeline");
+        outline.set_row_count(self.total);
+        outline.set_multiselectable();
+        let mut nodes = vec![];
+        let mut children = vec![];
+        for row in &self.accessibility {
+            let id = *row_ids
+                .get(row["id"].as_str().ok_or(Error::DuplicateId)?)
+                .ok_or(Error::DuplicateId)?;
+            if id == root || children.contains(&id) {
+                return Err(Error::DuplicateId);
+            }
+            let mut node = Node::new(Role::TreeItem);
+            node.set_label(row["label"].as_str().unwrap_or_default());
+            node.set_row_index(row["rowIndex"].as_u64().unwrap_or(0) as usize);
+            node.set_selected(row["selected"].as_bool().unwrap_or(false));
+            node.set_level(row["depth"].as_u64().unwrap_or(0) as usize + 1);
+            if focused == row["id"].as_str() {
+                outline.set_active_descendant(id);
+            }
+            children.push(id);
+            nodes.push((id, node));
+        }
+        outline.set_children(children);
+        nodes.push((root, outline));
+        Ok(TreeUpdate {
+            nodes,
+            tree: Some(Tree::new(root)),
+            focus: root,
+            tree_id: accesskit::TreeId::ROOT,
+        })
+    }
+    pub fn paint(&self, p: &mut dyn Painter) {
+        p.paint(self.viewport.rect(), &self.ops);
+    }
+    /// Property diamonds follow transport without re-laying out rows or
+    /// re-enumerating channels. Key times are shared worker-built indexes.
+    pub fn transport(&self, seconds: f64, t: &Tokens) -> Result<Vec<Op>, Error> {
+        let mut ops = self.playhead(seconds, t)?;
+        for (base, times) in &self.controls {
+            let i = times.partition_point(|time| *time < seconds - 1e-5);
+            let at = times
+                .get(i)
+                .is_some_and(|time| (*time - seconds).abs() <= 1e-5);
+            let mut op = base.clone();
+            op.shape = if times.is_empty() {
+                "diamond"
+            } else if at {
+                "diamond.fill"
+            } else {
+                "diamond.lefthalf.filled"
+            };
+            op.color = if times.is_empty() {
+                t.colors.muted
+            } else {
+                t.colors.accent
+            };
+            ops.push(op);
+        }
+        Ok(ops)
+    }
+    /// Retained overlay: no row layout, model scan, JSON or JS on playback tick.
+    pub fn playhead(&self, seconds: f64, t: &Tokens) -> Result<Vec<Op>, Error> {
+        if !seconds.is_finite() {
+            return Err(Error::InvalidTime);
+        }
+        let v = self.viewport;
+        let x = v.x(seconds);
+        if x < v.layer_column || x > v.width {
+            return Ok(vec![]);
+        }
+        // pm-design `playhead` (v1's): a hairline under a pin whose point
+        // rests on the foot of the ruler; it passes over everything.
+        let p = t.playhead();
+        let (line, d) = (p.line as f64, p.head as f64);
+        let top = (t.metrics.ruler as f64 - p.head_foot as f64 - d).max(0.);
+        let mut head = Op::new(
+            "playhead-head",
+            "ph-head",
+            Rect::new(x - d / 2., top, d, d),
+            p.color,
+        );
+        head.detail = json!({"pin":true});
+        // The line starts inside the pin, just above its point.
+        let from = top + d - 1.;
+        Ok(vec![
+            Op::new(
+                "playhead-line",
+                "rect",
+                Rect::new(x - line / 2., from, line, (v.height - from).max(0.)),
+                p.color,
+            ),
+            head,
+        ])
+    }
+    /// Topmost op of a family under the point. Native hit testing follows paint order.
+    /// The tooltip of a clip badge under the point.
+    pub fn tooltip_at(&self, x: f64, y: f64) -> Option<String> {
+        self.hit_op("clip-negative:", x, y, 0.)
+            .or_else(|| self.hit_op("clip-missing-effect:", x, y, 0.))
+            .or_else(|| self.transition_at(x, y))
+            .and_then(|o| o.detail["tooltip"].as_str())
+            .map(str::to_owned)
+    }
+    pub fn hit_op(&self, prefix: &str, x: f64, y: f64, slop: f64) -> Option<&Op> {
+        self.ops.iter().enumerate().rev().find_map(|(i, o)| {
+            let b = o.bounds;
+            let within_rows = y >= self.rows_top && y < self.viewport.height;
+            ((i < self.fixed || within_rows)
+                && !o.decorative
+                && o.id.starts_with(prefix)
+                && Rect::new(
+                    b.x - slop,
+                    b.y - slop,
+                    b.width + 2. * slop,
+                    b.height + 2. * slop,
+                )
+                .contains(x, y)
+                && o.clip.is_none_or(|clip| clip.contains(x, y)))
+            .then_some(o)
+        })
+    }
+    /// `(row id, key id)` of the key under the point, with a hit target padded
+    /// to the design's minimum; the painted diamond stays `metrics.keyframe`.
+    pub fn hit_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
+        key_identity(self.hit_op("key:", x, y, slop)?)
+    }
+    /// The key a press at `(x, y)` takes, as v1 picks it (timeline.ts
+    /// keyDown): the nearest whose centre is less than `reach` points across
+    /// from `x`, in the row under `y` (`row` high). Further off, a press on
+    /// the row starts a marquee and moves no key.
+    pub fn hit_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        if y < self.rows_top || y >= self.viewport.height {
+            return None;
+        }
+        let centre = |o: &Op| {
+            (
+                o.bounds.x + o.bounds.width / 2.,
+                o.bounds.y + o.bounds.height / 2.,
+            )
+        };
+        let op = self
+            .ops
+            .iter()
+            .filter(|o| !o.decorative && o.id.starts_with("key:") && o.clip.is_none_or(|clip| clip.contains(x, y)))
+            .filter(|o| {
+                let (cx, cy) = centre(o);
+                (cx - x).abs() < reach && (cy - y).abs() <= row / 2.
+            })
+            .min_by(|a, b| (centre(a).0 - x).abs().total_cmp(&(centre(b).0 - x).abs()))?;
+        key_identity(op)
+    }
+    /// [`Self::hit_key_across`] as `(layer, key)`.
+    pub fn hit_layer_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        self.hit_key_across(x, y, reach, row).and_then(on_layer)
+    }
+    /// The key under a point as `(layer, key)`: key ids may repeat across
+    /// layers, so the row it sits on names its layer.
+    pub fn hit_layer_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
+        self.hit_key(x, y, slop).and_then(on_layer)
+    }
+    /// One accessible element per painted clip, in paint order: its name and
+    /// times, whether it is selected, and its visible body within the tracks.
+    pub fn clip_nodes(&self) -> Vec<ClipNode> {
+        // One pass indexes each clip's name; the strip itself says whether
+        // it is selected.
+        let mut names = HashMap::new();
+        for o in &self.ops {
+            if let Some(id) = o.id.strip_prefix("clip-content:") {
+                names.insert(id, o.text.as_deref().unwrap_or_default());
+            }
+        }
+        self.ops
+            .iter()
+            .filter_map(|o| {
+                let id = o.id.strip_prefix("clip:")?;
+                let mut bounds = match o.clip {
+                    Some(c) => intersection(o.bounds, c)?,
+                    None => o.bounds,
+                };
+                let bottom = (bounds.y + bounds.height).min(self.viewport.height);
+                bounds.y = bounds.y.max(self.rows_top);
+                bounds.height = bottom - bounds.y;
+                if bounds.width <= 0. || bounds.height <= 0. {
+                    return None;
+                }
+                Some(ClipNode {
+                    id: id.to_owned(),
+                    name: names.get(id).copied().unwrap_or_default().to_owned(),
+                    from: o.detail["from"].as_f64().unwrap_or(0.),
+                    duration: o.detail["duration"].as_f64().unwrap_or(0.),
+                    selected: o.detail["selected"] == true,
+                    bounds,
+                })
+            })
+            .collect()
+    }
+    /// Topmost transition under the pointer. A wedge leaves the clip's trim
+    /// edge and the area below its slope available to normal clip gestures.
+    pub fn transition_at(&self, x: f64, y: f64) -> Option<&Op> {
+        if y < self.rows_top
+            || y >= self.viewport.height
+            || x < self.viewport.layer_column
+            || x > self.viewport.width
+        {
+            return None;
+        }
+        self.ops.iter().rev().find(|o| {
+            if !o.id.starts_with("transition:") || o.clip.is_some_and(|clip| !clip.contains(x, y)) {
+                return false;
+            }
+            let b = o.bounds;
+            if !b.contains(x, y) {
+                return false;
+            }
+            if o.shape != "wedge" {
+                return true;
+            }
+            let inward = if o.detail["edge"] == "in" { x - b.x } else { b.x + b.width - x };
+            let reach = (b.width * (1. - (y - b.y) / b.height)).max(TRANSITION_GRAB);
+            let tip = o.detail["selected"] == true && (inward - b.width).abs() <= TRANSITION_GRAB;
+            tip || inward > TRIM_INSIDE && inward <= reach
+        })
+    }
+
+    pub fn hit_transition(&self, x: f64, y: f64) -> Option<(String, Edge)> {
+        let op = self.transition_at(x, y)?;
+        let layer = op.detail["layer"].as_str()?.to_owned();
+        let edge = if op.detail["edge"] == "in" { Edge::In } else { Edge::Out };
+        Some((layer, edge))
+    }
+    pub fn hit_clip<'a>(&'a self, x: f64, y: f64) -> Option<(&'a str, Option<Edge>)> {
+        if y < self.rows_top
+            || y >= self.viewport.height
+            || x < self.viewport.layer_column
+            || x > self.viewport.width
+        {
+            return None;
+        }
+        let hit = |o: &'a Op, gap: f64, inside: bool| {
+            if !o.id.starts_with("clip:") || o.clip.is_some_and(|clip| !clip.contains(x, y)) {
+                return None;
+            }
+            let bounds = o.bounds;
+            let band = bounds.y - gap..bounds.y + bounds.height + gap;
+            let horizontal = bounds.x..=bounds.x + bounds.width;
+            if !band.contains(&y) || (inside && !horizontal.contains(&x)) {
+                return None;
+            }
+            let edges = o.detail["sourceEdges"].as_array()?;
+            let drawn = o.detail["stripEdges"].as_array()?;
+            let (a, b) = (edges[0].as_f64()?, edges[1].as_f64()?);
+            let (da, db) = (drawn[0].as_f64()?, drawn[1].as_f64()?);
+            // v1's reach at both ends: `TRIM_INSIDE` inside the strip as
+            // drawn and `TRIM_REACH` past the layer's edge; a strip too short
+            // for both trims the end nearer the point.
+            let near_in = x >= a - TRIM_REACH && x <= da + TRIM_INSIDE;
+            let near_out = x >= db - TRIM_INSIDE && x <= b + TRIM_REACH;
+            let edge = match (near_in, near_out) {
+                (true, true) if (x - da).abs() <= (x - db).abs() => Some(Edge::In),
+                (true, true) => Some(Edge::Out),
+                (true, false) => Some(Edge::In),
+                (false, true) => Some(Edge::Out),
+                _ => None,
+            };
+            (inside || edge.is_some()).then(|| (&o.id[5..], edge))
+        };
+        // Prefer a painted body, then let each strip own the padding inside
+        // its row. Trim grips can reach past the drawn ends on that same row.
+        self.ops
+            .iter()
+            .rev()
+            .find_map(|o| hit(o, 0., true))
+            .or_else(|| {
+                self.ops
+                    .iter()
+                    .rev()
+                    .find_map(|o| hit(o, self.strip_gap, true))
+            })
+            .or_else(|| {
+                self.ops
+                    .iter()
+                    .rev()
+                    .find_map(|o| hit(o, self.strip_gap, false))
+            })
+    }
+}
+
+/// One extension shape on a clip (`timeline.paint`), already validated:
+/// finite and bounded, in points from the clip's top-left corner.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decoration {
+    Rect {
+        rect: [f64; 4],
+        color: u32,
+        opacity: f64,
+        radius: f64,
+    },
+    Text {
+        x: f64,
+        y: f64,
+        text: String,
+        size: f64,
+        color: u32,
+        opacity: f64,
+    },
+}
+/// Shapes by clip id.
+pub type Decorations = HashMap<String, Vec<Decoration>>;
+/// Shapes one clip may carry, from every painter together.
+pub const DECORATIONS_PER_CLIP: usize = 64;
+/// Characters one text shape may show.
+pub const DECORATION_TEXT: usize = 200;
+/// How far (points) a shape may sit from its clip; larger is clamped.
+const DECORATION_REACH: f64 = 4096.;
+
+/// Adds one painter's answer (`{clipId: [shape, …]}`) to `into`, keeping only
+/// the `visible` clips, at most [`DECORATIONS_PER_CLIP`] shapes per clip, finite
+/// bounded numbers and [`DECORATION_TEXT`] characters of text. Runs on the
+/// worker that received the answer, before anything reaches the main thread.
+pub fn add_decorations(
+    into: &mut Decorations,
+    answer: &Value,
+    visible: &std::collections::HashSet<String>,
+) {
+    let Some(answer) = answer.as_object() else {
+        return;
+    };
+    let number = |v: &Value, low: f64, high: f64| {
+        v.as_f64()
+            .filter(|n| n.is_finite())
+            .map(|n| n.clamp(low, high))
+    };
+    let colour = |v: &Value| {
+        v.as_str()
+            .and_then(|h| h.strip_prefix('#'))
+            .filter(|h| h.len() == 6)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+    };
+    let reach = DECORATION_REACH;
+    for (id, shapes) in answer {
+        let (Some(shapes), true) = (shapes.as_array(), visible.contains(id)) else {
+            continue;
+        };
+        let list = into.entry(id.clone()).or_default();
+        for shape in shapes {
+            if list.len() >= DECORATIONS_PER_CLIP {
+                break;
+            }
+            let Some(color) = colour(&shape["color"]) else {
+                continue;
+            };
+            let opacity = number(&shape["opacity"], 0., 1.).unwrap_or(1.);
+            if let Some(r) = shape["rect"].as_array().filter(|r| r.len() == 4) {
+                let (Some(x), Some(y), Some(w), Some(h)) = (
+                    number(&r[0], -reach, reach),
+                    number(&r[1], -reach, reach),
+                    number(&r[2], 0., reach),
+                    number(&r[3], 0., reach),
+                ) else {
+                    continue;
+                };
+                list.push(Decoration::Rect {
+                    rect: [x, y, w, h],
+                    color,
+                    opacity,
+                    radius: number(&shape["radius"], 0., 64.).unwrap_or(0.),
+                });
+            } else if let Some(text) = shape["text"].as_str() {
+                list.push(Decoration::Text {
+                    x: number(&shape["x"], -reach, reach).unwrap_or(0.),
+                    y: number(&shape["y"], -reach, reach).unwrap_or(0.),
+                    text: text.chars().take(DECORATION_TEXT).collect(),
+                    size: number(&shape["size"], 6., 24.).unwrap_or(10.),
+                    color,
+                    opacity,
+                });
+            }
+        }
+        if list.is_empty() {
+            into.remove(id);
+        }
+    }
+}
+
+/// The frame's clips' extension decorations as ops, clipped to each clip's
+/// visible part. Main-thread cost (TL-PAINT-1): ≤ 2 ms for 1,000 clips.
+pub fn decoration_ops(ops: &[Op], decorations: &Decorations) -> Vec<Op> {
+    if decorations.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![];
+    for clip in ops {
+        let Some(id) = clip.id.strip_prefix("clip:") else {
+            continue;
+        };
+        let Some(shapes) = decorations.get(id) else {
+            continue;
+        };
+        let b = clip.bounds;
+        let within = Some(match clip.clip {
+            Some(c) => {
+                let (x0, y0) = (b.x.max(c.x), b.y.max(c.y));
+                let (x1, y1) = (
+                    (b.x + b.width).min(c.x + c.width),
+                    (b.y + b.height).min(c.y + c.height),
+                );
+                Rect::new(x0, y0, (x1 - x0).max(0.), (y1 - y0).max(0.))
+            }
+            None => b,
+        });
+        for (i, shape) in shapes.iter().enumerate() {
+            let base = Op {
+                id: format!("deco:{id}:{i}"),
+                shape: "rect",
+                bounds: b,
+                color: 0,
+                opacity: 1.,
+                radius: 0.,
+                stroke: 0.,
+                text: None,
+                font_size: 0.,
+                detail: Value::Null,
+                waveform: None,
+                clip: within,
+                covered: false,
+                decorative: false,
+            };
+            out.push(match shape {
+                Decoration::Rect {
+                    rect: [x, y, w, h],
+                    color,
+                    opacity,
+                    radius,
+                } => Op {
+                    shape: if *radius > 0. { "rounded-rect" } else { "rect" },
+                    bounds: Rect::new(b.x + x, b.y + y, *w, *h),
+                    color: *color,
+                    opacity: *opacity,
+                    radius: *radius,
+                    ..base
+                },
+                Decoration::Text {
+                    x,
+                    y,
+                    text,
+                    size,
+                    color,
+                    opacity,
+                } => Op {
+                    shape: "text",
+                    bounds: Rect::new(b.x + x, b.y + y, b.width, size * 1.4),
+                    text: Some(text.clone()),
+                    font_size: *size,
+                    color: *color,
+                    opacity: *opacity,
+                    ..base
+                },
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::*;
+    fn clips(n: usize) -> Vec<Op> {
+        (0..n)
+            .map(|i| {
+                let mut o = Op::new(
+                    format!("clip:L{i}"),
+                    "rounded-rect",
+                    Rect::new(
+                        300. + (i % 10) as f64 * 80.,
+                        (i / 10) as f64 * 22.,
+                        76.,
+                        20.,
+                    ),
+                    0x1f4b52,
+                );
+                o.clip = Some(Rect::new(266., 28., 1200., 2200.));
+                o
+            })
+            .collect()
+    }
+    fn visible(n: usize) -> std::collections::HashSet<String> {
+        (0..n).map(|i| format!("L{i}")).collect()
+    }
+    /// TL-PAINT-1: extension shapes for 1,000 clips become ops in ≤ 2 ms on the
+    /// main thread, at the 95th percentile of 40 runs. The gate is defined for
+    /// an optimized build: `cargo test --release -p pm-panel-timeline`.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "TL-PAINT-1 is measured in an optimized build (cargo test --release)"
+    )]
+    fn a_thousand_painted_clips_cost_under_two_milliseconds() {
+        let ops = clips(1000);
+        let answer: serde_json::Map<String, Value> = (0..1000)
+            .map(|i| {
+                (
+                    format!("L{i}"),
+                    json!([{"rect":[0,0,76,20],"color":"#5a1f8c","opacity":0.5},
+                           {"text":"take 3","x":4,"y":4,"color":"#ffffff","size":10}]),
+                )
+            })
+            .collect();
+        let mut shapes = Decorations::new();
+        add_decorations(&mut shapes, &Value::Object(answer), &visible(1000));
+        assert_eq!(decoration_ops(&ops, &shapes).len(), 2000);
+        let mut runs: Vec<std::time::Duration> = (0..40)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                std::hint::black_box(decoration_ops(&ops, &shapes));
+                start.elapsed()
+            })
+            .collect();
+        runs.sort();
+        let p95 = runs[37];
+        eprintln!("TL-PAINT-1 decoration ops for 1,000 clips: p95 {p95:?}");
+        assert!(p95 <= std::time::Duration::from_millis(2), "{p95:?}");
+    }
+    #[test]
+    fn painter_output_is_bounded_before_it_is_kept() {
+        let long = "x".repeat(10_000);
+        let many: Vec<Value> = (0..500)
+            .map(|_| json!({"rect":[0,0,4,4],"color":"#ffffff"}))
+            .collect();
+        let answer = json!({
+            "L0": [{"rect":[1e300,-1e300,1e300,5],"radius":1e300,"color":"#ff0000"},
+                   {"rect":[0,0,"wide",5],"color":"#ff0000"},
+                   {"rect":[0,0,5,5],"color":"red"},
+                   {"text":long,"x":1e300,"size":1e300,"color":"#00ff00"}],
+            "L1": many,
+            "gone": [{"rect":[0,0,4,4],"color":"#ffffff"}],
+        });
+        let mut shapes = Decorations::new();
+        add_decorations(&mut shapes, &answer, &visible(2));
+        assert!(!shapes.contains_key("gone"), "only visible clips are kept");
+        assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
+        let l0 = &shapes["L0"];
+        assert_eq!(l0.len(), 2, "unparseable and uncoloured shapes are dropped");
+        let Decoration::Rect { rect, radius, .. } = &l0[0] else {
+            panic!("{l0:?}")
+        };
+        assert_eq!(*rect, [4096., -4096., 4096., 5.]);
+        assert_eq!(*radius, 64.);
+        let Decoration::Text { text, x, size, .. } = &l0[1] else {
+            panic!("{l0:?}")
+        };
+        assert_eq!(text.chars().count(), DECORATION_TEXT);
+        assert_eq!((*x, *size), (4096., 24.));
+        for op in decoration_ops(&clips(2), &shapes) {
+            let b = op.bounds;
+            assert!(
+                [b.x, b.y, b.width, b.height]
+                    .iter()
+                    .all(|v| (*v as f32).is_finite())
+            );
+        }
+        // A second painter adds to the same clip only up to the shared limit.
+        add_decorations(
+            &mut shapes,
+            &json!({"L1":[{"rect":[0,0,4,4],"color":"#000000"}]}),
+            &visible(2),
+        );
+        assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::RowId;
+
+    fn row(row: RowId, depth: usize) -> PaintRow {
+        let content = match row {
+            RowId::Layer(_) => RowContent::Layer {
+                clip: None,
+                summary: std::sync::Arc::from([]),
+            },
+            RowId::Property { .. } | RowId::Effect { .. } | RowId::Path { .. } => RowContent::Property {
+                state: KeyState::Static,
+                keys: vec![],
+            },
+        };
+        PaintRow {
+            id: crate::v4::row_id(&row),
+            accessibility_label: "row".into(),
+            depth,
+            selected: false,
+            hovered: false,
+            focused: false,
+            content,
+        }
+    }
+
+    #[test]
+    fn reveal_scroll_keeps_a_complete_row_in_view() {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let rows = (0..12).map(|i| row(RowId::Layer(format!("l{i}")), 0)).collect();
+        let scene = Scene::new(rows, 10., 30., &tokens).unwrap();
+        let target = crate::v4::row_id(&RowId::Layer("l8".into()));
+        let (_, top, bottom) = scene.span(8).unwrap();
+        let height = 3. * f64::from(tokens.metrics.track_row);
+        let scroll = scene.reveal_scroll(&target, 0., height);
+        assert!(scroll > 0. && top >= scroll && bottom <= scroll + height);
+        assert_eq!(scene.reveal_scroll(&target, scroll, height), scroll);
+        assert_eq!(scene.reveal_scroll(&target, scene.content_height(), height), top);
+    }
+
+    /// v1.2.0's `mediaDropAt`: upper half of a layer row above it, lower
+    /// half and its properties below its block, a group's children inside
+    /// its block, past the last row at the bottom.
+    #[test]
+    fn dropped_media_joins_the_stack_between_layers_as_v1_did() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let layer = |id: &str, depth| row(RowId::Layer(id.into()), depth);
+        let property = |id: &str| {
+            row(
+                RowId::Property {
+                    layer_id: id.into(),
+                    channel: "opacity".into(),
+                },
+                1,
+            )
+        };
+        // A, its opacity row, group G with child C, then B.
+        let scene = Scene::new(
+            vec![
+                layer("A", 0),
+                property("A"),
+                layer("G", 0),
+                layer("C", 1),
+                layer("B", 0),
+            ],
+            10.,
+            30.,
+            &t,
+        )
+        .unwrap();
+        let (l, p) = (t.metrics.track_row as f64, t.metrics.property_row as f64);
+        let before = |id: &str| DropSlot::Before(Some(id.into()));
+        assert_eq!(scene.drop_before(l * 0.25), before("A"));
+        assert_eq!(scene.drop_before(l * 0.75), before("G"));
+        assert_eq!(scene.drop_before(l + p * 0.5), before("G"));
+        // G's lower half: below its whole block (after child C).
+        let g = l + p;
+        assert_eq!(scene.drop_before(g + l * 0.75), before("B"));
+        assert_eq!(scene.drop_before(g + l + l * 0.25), before("C"));
+        assert_eq!(scene.drop_before(g + l + l * 0.75), before("B"));
+        assert_eq!(scene.drop_before(g + 2. * l + l * 0.25), before("B"));
+        assert_eq!(
+            scene.drop_before(g + 2. * l + l * 0.75),
+            DropSlot::Before(None)
+        );
+        assert_eq!(scene.drop_before(10. * l), DropSlot::Before(None));
+    }
+}
+
+#[cfg(test)]
+mod key_cover_tests {
+    use super::*;
+
+    fn key(id: &str, seconds: f64, selected: bool) -> Key {
+        Key {
+            id: id.into(),
+            seconds,
+            selected,
+            focused: false,
+            interpolation: Interpolation::Linear,
+        }
+    }
+
+    #[test]
+    fn marquee_on_600_layers_shares_geometry_and_updates_four_key_highlights() {
+        use crate::{MarqueeSession, RowId, TimelineModel};
+
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let rows = (0..600)
+            .flat_map(|i| {
+                let layer = format!("layer-{i}");
+                let row = |id, content, depth| PaintRow {
+                    id: crate::v4::row_id(&id),
+                    accessibility_label: "row".into(),
+                    depth,
+                    selected: false,
+                    hovered: false,
+                    focused: false,
+                    content,
+                };
+                let property = |channel: &str| row(
+                    RowId::Property { layer_id: layer.clone(), channel: channel.into() },
+                    RowContent::Property {
+                        state: KeyState::Animated,
+                        keys: vec![
+                            key(&format!("{channel}-1"), 1., false),
+                            key(&format!("{channel}-2"), 2., false),
+                        ],
+                    },
+                    1,
+                );
+                [
+                    row(RowId::Layer(layer.clone()), RowContent::Layer {
+                        clip: None,
+                        summary: Default::default(),
+                    }, 0),
+                    property("position.x"),
+                    property("position.y"),
+                ]
+            })
+            .collect();
+        let scene = Scene::new(rows, 5., 30., &t).unwrap();
+        let v = Viewport {
+            width: 1000.,
+            height: 300.,
+            scroll_y: scene.tops[520 * 3 + 1],
+            scroll_time: 0.,
+            pps: 100.,
+            layer_column: 200.,
+        };
+        let y = f64::from(t.metrics.ruler);
+        let height = scene.tops[520 * 3 + 3] - v.scroll_y;
+        let model = TimelineModel::default();
+        let mut marquee = MarqueeSession::begin(&model, false, false);
+        let empty = scene.marquee(v, &t, Rect::new(v.x(3.), y, 30., height));
+        assert!(!marquee.preview(empty.keys, empty.clips));
+        for sample in 0..100 {
+            let box_left = v.x(1.) - 20. + f64::from(sample) / 10.;
+            let hit = scene.marquee(v, &t, Rect::new(box_left, y, 150., height));
+            assert_eq!(hit.keys.len(), 4);
+            assert_eq!(marquee.preview(hit.keys, hit.clips), sample == 0);
+        }
+        let (layers, keys) = marquee.current();
+        let mut preview = scene.clone();
+        preview.preview_selection(std::sync::Arc::new(SceneSelection::new(layers, keys)));
+        assert!(std::sync::Arc::ptr_eq(&scene.rows, &preview.rows));
+        assert!(std::sync::Arc::ptr_eq(&scene.tops, &preview.tops));
+
+        let selected = |scene: &Scene| {
+            scene.prepare(v, &t).unwrap().ops.into_iter()
+                .filter(|op| op.id.starts_with("key:") && !op.detail["keyline"].is_null())
+                .map(|op| op.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(selected(&scene).is_empty());
+        let keys = selected(&preview);
+        assert_eq!(keys.len(), 4);
+        assert!(keys.iter().all(|id| id.contains("layer-520")));
+        assert_eq!(marquee.finish_local().calls.len(), 2);
+    }
+
+    /// Dense keys: a glyph identical to the one before it on the same device
+    /// half-pixel is marked covered (paint leaves it out); every key keeps
+    /// its op for hit testing and marquee selection.
+    #[test]
+    fn identical_keys_on_one_half_pixel_are_covered_not_dropped() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let v = Viewport {
+            width: 1000.,
+            height: 300.,
+            scroll_y: 0.,
+            scroll_time: 0.,
+            pps: 10.,
+            layer_column: 200.,
+        };
+        // A span's ends are half filled (other glyphs); between them, keys
+        // a tenth of a pixel apart at 10 px/s.
+        let keys = vec![
+            key("start", 0., false),
+            key("a", 1., false),
+            key("b", 1.01, false),
+            key("c", 1.02, true),
+            key("d", 1.024, false),
+            key("e", 1.2, false),
+            key("f", 1.21, false),
+            key("end", 9., false),
+        ];
+        let mut ops = vec![];
+        paint_keys("L1", &keys, None, None, 50., v, &t, &mut ops);
+        let covered: Vec<bool> = ops.iter().map(|o| o.covered).collect();
+        // b repeats a on its half-pixel; c is selected (another glyph) and d
+        // is on top of it again; f repeats e.
+        assert_eq!(
+            covered,
+            [false, false, true, false, false, false, true, false]
+        );
+        assert_eq!(ops.len(), keys.len());
+        assert_eq!(ops[1].id, format!("key:{}", json!(["L1", "a"])));
+    }
+}
+
+/// The kind a row's badge and clip read as: a Studio 3D layer by its role.
+pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
+    match (kind, definition) {
+        ("extension", Some("powermove.3d.object")) => "model3d",
+        ("extension", Some("powermove.3d.light")) => "light3d",
+        ("extension", Some("powermove.3d.camera")) => "camera3d",
+        _ => kind,
+    }
+}
+
+/// Electron's fixed yellow dashed latch guide (not a theme or viewer token).
+/// This overlay never enters the cached clip artwork or hit-testing plan.
+pub fn snap_guide(v: Viewport, ruler: f64, target: Option<f64>) -> Vec<Op> {
+    let Some(time) = target.filter(|t| t.is_finite()) else {
+        return vec![];
+    };
+    let x = v.x(time);
+    if x < v.layer_column || x > v.width || v.height <= ruler {
+        return vec![];
+    }
+    let clip = Rect::new(
+        v.layer_column,
+        ruler,
+        v.width - v.layer_column,
+        v.height - ruler,
+    );
+    let mut line = Op::new(
+        "snap-guide",
+        "line",
+        Rect::new(x, ruler + 6., 1.5, v.height - ruler - 6.),
+        0xe7c84b,
+    );
+    line.stroke = 1.5;
+    line.detail = json!({"from":[x,ruler+6.],"to":[x,v.height],"dash":[3.,3.]});
+    line.clip = Some(clip);
+    let mut pin = Op::new(
+        "snap-guide-pin",
+        "marker",
+        Rect::new(x - 4., ruler, 8., 7.),
+        0xe7c84b,
+    );
+    pin.clip = Some(clip);
+    vec![line, pin]
+}
+
+/// An audio clip's level line (Premiere's clip volume line): flat at its
+/// gain on the Mixer's fader law, rising from the floor over its fade in and
+/// falling over its fade out; `r` is the part of the strip inside the glass.
+/// A press near its flat part drags the gain.
+/// An audio clip's level line. It is always there to be grabbed, but drawn
+/// only on a selected clip (`shown`) or under the pointer (the surface's
+/// hover paints it there, with its handle): at rest a clip shows its
+/// waveform alone.
+fn level_line(c: &Clip, selected: bool, level: Level, r: Rect, v: Viewport, inset: f64, light: (u32, f32), strength: f64) -> Op {
+    let top = r.y + inset;
+    let room = (r.height - 2. * inset).max(0.);
+    let floor = top + room;
+    let pos = crate::level::fader_position(crate::level::gain_db(level.gain));
+    let y = top + (1. - pos) * room;
+    let (start, end) = (v.x(c.from), v.x(c.from + c.duration));
+    let fade_in = (level.fade_in * v.pps).min(end - start);
+    let fade_out = (level.fade_out * v.pps).min(end - start - fade_in);
+    let mut points = vec![];
+    if fade_in > 0. {
+        points.push([start, floor]);
+    }
+    points.push([start + fade_in, y]);
+    points.push([end - fade_out, y]);
+    if fade_out > 0. {
+        points.push([end, floor]);
+    }
+    let mut o = Op::new(format!("level:{}", c.id), "levelline", r, light.0);
+    o.opacity = strength * light.1 as f64 * if c.muted { 0.5 } else { 1. };
+    o.clip = Some(r);
+    o.detail = json!({
+        "points": points,
+        "y": y,
+        "from": (start + fade_in).max(r.x),
+        "to": (end - fade_out).min(r.x + r.width),
+        "gain": level.gain,
+        "room": room,
+        "db": crate::level::format_db(crate::level::gain_db(level.gain)),
+        "animated": level.animated,
+        "cursor": "resizeUpDown",
+        "shown": selected,
+    });
+    o
+}
+
+#[cfg(test)]
+mod audio_source_range_tests {
+    use super::*;
+
+    fn sample(wave: &Waveform, rate: f64, a: f64, b: f64) -> f32 {
+        crate::waveform::column(&wave.levels.combined, rate, a, b).0
+    }
+
+    #[test]
+    fn waveform_source_range_respects_trim_and_speed() {
+        let w = Waveform::from_peaks(&[0.1, 0.2, 0.3, 0.4], 1., 1.);
+        let map = std::sync::Arc::from([1., 5.]);
+        let source = crate::waveform::mapped(&map, 2.);
+        let peak = |at| sample(&w, 1., source(at), source(at + 0.5));
+        assert_eq!(peak(0.), 0.2);
+        assert_eq!(peak(0.5), 0.3);
+        assert_eq!(peak(2.), 0.);
+    }
+
+    #[test]
+    fn zoomed_out_summary_excludes_trimmed_away_loud_peaks() {
+        let w = Waveform::from_peaks(&[1., 0.2, 0.3, 0.4, 0.5, 1.], 1., 1.);
+        let peak = |at, width| sample(&w, 1., w.trim + at, w.trim + at + width);
+        assert_eq!(peak(0., 4.), 0.5);
+        assert_eq!(peak(0., 1.), 0.2);
+        assert_eq!(peak(1., 2.), 0.4);
+    }
+
+    #[test]
+    fn reverse_sampling_is_silent_before_source_start() {
+        let w = Waveform::from_peaks(&[0.75, 0.5], 1., 0.);
+        let map = std::sync::Arc::from([0., -2.]);
+        let source = crate::waveform::mapped(&map, 2.);
+        assert_eq!(sample(&w, 1., source(1.), source(1.5)), 0.);
+    }
+}

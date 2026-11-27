@@ -1,0 +1,329 @@
+//! What one render produces (contract 2's `FrameRequest`, as the render
+//! graph sees it).
+
+use pm_protocol::color::Precision;
+use pm_protocol::common::{PixelRect, Size};
+use pm_protocol::frame::{FrameRequest, MAX_OUTPUT_DIMENSION, MAX_SCALE, MIN_SCALE, ViewOverride};
+use pm_protocol::validate::Validate;
+
+use crate::error::RenderError;
+use crate::motion::MotionBlur;
+use crate::sampling::Sampling;
+
+/// Whether the request is an interactive preview or final output. This
+/// controls preview-only canvas clipping, never video frame selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputKind {
+    /// Viewer, scrubbing and thumbnails.
+    #[default]
+    Preview,
+    /// Exports and agent captures.
+    Final,
+}
+
+impl OutputKind {
+    /// The output kind of a contract 2 request: exports and agent captures
+    /// are final output.
+    pub const fn of(purpose: pm_protocol::frame::FramePurpose) -> OutputKind {
+        if purpose.is_final() {
+            OutputKind::Final
+        } else {
+            OutputKind::Preview
+        }
+    }
+}
+
+/// A render of one composition at one time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderRequest {
+    /// The full output, in output pixels. Composition pixel `(x, y)` lands at
+    /// output pixel `(x · sx, y · sy)`.
+    pub output_size: Size,
+    /// Output pixels per composition pixel, per axis. `None` derives it the
+    /// way the legacy compositor does: `W / max(1, comp.w || W)` and
+    /// `H / max(1, comp.h || H)` from the document's composition size.
+    pub scale: Option<(f64, f64)>,
+    /// The part of the output to render (region of interest, section 8:
+    /// final output only); `None` renders all of it. The returned texture is
+    /// the region's size.
+    pub region: Option<PixelRect>,
+    /// A viewer supplied today's canvas. Compatibility source clipping uses
+    /// that complete canvas (`output_size`), including its pan buffer, while
+    /// `region` limits the pixels the engine needs to draw for presentation.
+    /// Other viewer requests keep their region as the source clip window.
+    pub preview_canvas: bool,
+    /// Compatibility request hint. The project Color depth controls intermediate
+    /// storage (`rgba8unorm`, `rgba16float`, or `rgba32float`).
+    pub precision: Precision,
+    /// Also render the depth and object-id surface (contract 2).
+    pub depth_id: bool,
+    /// Draw the composition background. Off for today's alpha exports and
+    /// transparent captures (`renderToPixels(…, {transparent: true})`).
+    pub background: bool,
+    /// The frame feeds an export: media decodes at export depth
+    /// (amendment 6: ProRes 422 as `v216`).
+    pub export: bool,
+    /// The view override of a viewer frame (contract 2's
+    /// `FrameRequest.view`): the editor camera, Wireframe and X-ray looks,
+    /// and Local View. Per request, so nothing carries it into a later
+    /// render; an export never draws it, and [`RenderRequest::from_frame_request`]
+    /// drops it for exports and agent captures (section 8).
+    pub view: Option<ViewOverride>,
+    /// Motion blur of layers with their switch on (`crate::motion`).
+    pub motion_blur: MotionBlur,
+    /// The resampler of `compat` level 2 raster content
+    /// (`crate::sampling`).
+    pub sampling: Sampling,
+    /// Preview-only canvas policy; video timing is identical for both kinds.
+    pub output_kind: OutputKind,
+    /// A frame of a playing viewer: media its next frames read (an image
+    /// sequence's next files) is decoded ahead on workers.
+    pub read_ahead: bool,
+    /// A viewer's frame. Its settled paused picture is final output for
+    /// effects and sampling, but 3D draws at the viewer's own preview tier:
+    /// only a delivery (an export, a still) path-traces at the
+    /// composition's saved quality.
+    pub viewer: bool,
+    /// Where output pixel (0, 0) sits in scaled composition pixels:
+    /// composition pixel `(x, y)` lands at output pixel `(x · sx − ox,
+    /// y · sy − oy)` at the top level (today's `scaledWorld` with a
+    /// preview viewport, the origin being `viewport.x × sx`; decision V1b).
+    /// Groups, mattes, and motion-blur samples share it; a precomp's own
+    /// level starts at its origin. `None`: `(0, 0)`, every snapshot and
+    /// export.
+    pub origin: Option<(f64, f64)>,
+    /// Tone map the finished frame ([`OutputTone`]).
+    pub output_tone: Option<OutputTone>,
+    /// Viewer-only group focus: render only this group and its descendants in
+    /// the top-level composition (never set for exports or exact captures).
+    pub focus_group: Option<String>,
+}
+
+/// BT.2390 on the finished frame ([`crate::composite::ColorSettings::hdr`]):
+/// SDR delivery of an HDR project, and every HDR target, which holds the
+/// mastering display's light: content stated brighter rolls off to it, and
+/// light a grade lifts past it is held at it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputTone {
+    pub source_peak: f32,
+    pub target_peak: f32,
+}
+
+impl OutputTone {
+    /// The one rule for an HDR project's output, shared by delivery, the
+    /// viewer and the Output scopes: `hdr` targets hold `mastering_peak`,
+    /// always (the curve clamps at `source_peak`, so a graded highlight
+    /// never passes the master), SDR targets SDR white. `content_peak` is
+    /// the light the sources state (`pm_render::media::hdr_content`).
+    /// `None` only for an SDR target the frame fits.
+    pub fn for_target(content_peak: f32, mastering_peak: f32, hdr: bool) -> Option<Self> {
+        let source_peak = content_peak.max(mastering_peak);
+        if hdr {
+            return Some(Self {
+                source_peak,
+                target_peak: mastering_peak,
+            });
+        }
+        (source_peak > 203.0).then_some(Self {
+            source_peak,
+            target_peak: 203.0,
+        })
+    }
+}
+
+impl RenderRequest {
+    /// The whole composition at `scale` (output size rounded to whole
+    /// pixels, at least 1).
+    pub fn at_scale(composition: Size, scale: f64, precision: Precision) -> RenderRequest {
+        let px = |v: u32| ((f64::from(v) * scale).round() as u32).max(1);
+        RenderRequest {
+            output_size: Size::new(px(composition.width), px(composition.height)),
+            scale: Some((scale, scale)),
+            region: None,
+            preview_canvas: false,
+            precision,
+            depth_id: false,
+            background: true,
+            export: false,
+            view: None,
+            motion_blur: MotionBlur::Off,
+            sampling: Sampling::Final,
+            output_kind: OutputKind::Preview,
+            read_ahead: false,
+            viewer: false,
+            origin: None,
+            output_tone: None,
+            focus_group: None,
+        }
+    }
+
+    /// An output of a given size; the scale is the size ratio per axis, as
+    /// the legacy compositor derives it (`W / comp.w`, `H / comp.h`).
+    pub fn sized(output: Size, precision: Precision) -> RenderRequest {
+        RenderRequest {
+            output_size: output,
+            scale: None,
+            region: None,
+            preview_canvas: false,
+            precision,
+            depth_id: false,
+            background: true,
+            export: false,
+            view: None,
+            motion_blur: MotionBlur::Off,
+            sampling: Sampling::Final,
+            output_kind: OutputKind::Preview,
+            read_ahead: false,
+            viewer: false,
+            origin: None,
+            output_tone: None,
+            focus_group: None,
+        }
+    }
+
+    /// Contract 2's request, with its view override for viewer frames: the
+    /// override is dropped for exports and agent captures
+    /// (`FramePurpose::is_final`), as sections 8 and 18 require.
+    pub fn from_frame_request(request: &FrameRequest) -> Result<RenderRequest, RenderError> {
+        request
+            .validate()
+            .map_err(|v| RenderError::Request(v.to_string()))?;
+        use pm_protocol::frame::{FramePurpose, MotionBlurKind};
+        // Frames while playing and scrub frames take the playback
+        // resampler; paused frames, exports, and captures the final one.
+        let sampling = if request.purpose == FramePurpose::Scrub
+            || request.motion_blur == MotionBlurKind::PreviewPlaying
+        {
+            Sampling::Playback
+        } else {
+            Sampling::Final
+        };
+        Ok(RenderRequest {
+            output_size: request.output_size,
+            scale: Some((request.scale, request.scale)),
+            region: request.region,
+            preview_canvas: false,
+            precision: request.precision,
+            depth_id: request.depth_id,
+            background: true,
+            export: request.purpose == FramePurpose::Export,
+            view: request.view.clone().filter(|_| !request.purpose.is_final()),
+            motion_blur: match request.motion_blur {
+                MotionBlurKind::Off => MotionBlur::Off,
+                kind => MotionBlur::Kind(kind),
+            },
+            sampling,
+            output_kind: OutputKind::of(request.purpose),
+            read_ahead: request.motion_blur == MotionBlurKind::PreviewPlaying,
+            // Final here is a delivery (an export or an agent capture).
+            viewer: false,
+            origin: None,
+            output_tone: None,
+            focus_group: None,
+        })
+    }
+
+    /// The size of the texture a render returns.
+    pub fn target_size(&self) -> Size {
+        match self.region {
+            Some(r) => Size::new(r.width, r.height),
+            None => self.output_size,
+        }
+    }
+
+    /// The region's origin in output pixels.
+    pub fn origin(&self) -> (u32, u32) {
+        self.region.map_or((0, 0), |r| (r.x, r.y))
+    }
+
+    pub fn validate(&self) -> Result<(), RenderError> {
+        let s = self.output_size;
+        if s.is_empty() || s.width > MAX_OUTPUT_DIMENSION || s.height > MAX_OUTPUT_DIMENSION {
+            return Err(RenderError::Request(format!(
+                "output size {s:?} outside 1..{MAX_OUTPUT_DIMENSION}"
+            )));
+        }
+        if let Some((sx, sy)) = self.scale {
+            // A cropped viewer can use zoom 16 on a 2x display (density
+            // 32). Its actual allocation is bounded by output_size/region;
+            // captures and exports retain the wire scale limit.
+            let viewport = (self.origin.is_some() || self.preview_canvas)
+                && !self.export
+                && self.output_kind == OutputKind::Preview;
+            for v in [sx, sy] {
+                if viewport {
+                    if !(v.is_finite() && v > 0.0) {
+                        return Err(RenderError::Request(format!(
+                            "viewer scale {v} must be finite and positive"
+                        )));
+                    }
+                } else if !(v.is_finite() && (MIN_SCALE * 0.999..=MAX_SCALE * 1.001).contains(&v)) {
+                    return Err(RenderError::Request(format!("scale {v} outside 0.01..16")));
+                }
+            }
+        }
+        if let Some((ox, oy)) = self.origin
+            && !(ox.is_finite() && oy.is_finite())
+        {
+            return Err(RenderError::Request(format!(
+                "output origin ({ox}, {oy}) is not finite"
+            )));
+        }
+        if let Some(r) = self.region
+            && (r.is_empty() || !s.contains(&r))
+        {
+            return Err(RenderError::Request(format!(
+                "region {r:?} is empty or outside {s:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_canvas_uses_its_derived_density_without_changing_frame_scale_limits() {
+        let mut request = RenderRequest::sized(Size::new(2008, 1416), Precision::Float16);
+        request.scale = Some((32.0, 32.0));
+        assert!(
+            request.validate().is_err(),
+            "ordinary frame scale stays bounded"
+        );
+        request.preview_canvas = true;
+        assert!(request.validate().is_ok(), "16x zoom on a 2x display");
+        request.export = true;
+        assert!(request.validate().is_err(), "export scale stays bounded");
+        request.export = false;
+        request.output_kind = OutputKind::Final;
+        assert!(
+            request.validate().is_err(),
+            "final capture scale stays bounded"
+        );
+        request.output_kind = OutputKind::Preview;
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            request.scale = Some((invalid, 32.0));
+            assert!(request.validate().is_err(), "invalid x density {invalid}");
+            request.scale = Some((32.0, invalid));
+            assert!(request.validate().is_err(), "invalid y density {invalid}");
+        }
+    }
+
+    #[test]
+    fn visible_viewer_region_accepts_high_zoom_without_a_canvas() {
+        let mut request = RenderRequest::sized(Size::new(1000, 700), Precision::Float32);
+        request.scale = Some((32.0, 32.0));
+        request.origin = Some((14_000.0, 8_000.0));
+        request.region = Some(PixelRect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 700,
+        });
+        assert!(request.validate().is_ok());
+        request.output_kind = OutputKind::Final;
+        assert!(request.validate().is_err());
+    }
+}

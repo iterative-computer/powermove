@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["hosts/studio-electron", "crates/*", "crates/pm-captions", "crates/pm-fx-defs"]
+# Vendored crates patched below are not members (no workspace lints or tests).
+exclude = ["third_party/wgpu"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/iterative-computer/powermove"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+libm = "0.2"
+sha2 = { version = "0.10", default-features = false }
+proptest = { version = "1", default-features = false, features = ["std"] }
+ryu-js = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Audio callback and frame-budget gates must exercise optimized engine code.
+# Test assertions, overflow checks and the test harness remain enabled.
+[profile.test]
+opt-level = 2
+
+# The gates' f64 references (supersampled coverage of whole frames, Gaussian
+# blurs at large sigma) run in debug test builds.
+[profile.dev.package.pm-reference]
+opt-level = 3
+
+# wgpu 30.0.1's front crate with the engine's work counters added to its
+# resource creations, pass commands, uploads, and readbacks (pm-perf;
+# engine/third_party/wgpu/POWERMOVE.md, docs/engine/perfbench.md).
+[patch.crates-io]
+wgpu = { path = "third_party/wgpu" }

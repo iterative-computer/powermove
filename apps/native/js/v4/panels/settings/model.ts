@@ -1,0 +1,780 @@
+import { HostClient } from "../../src/host-api";
+import type { Json, EventDetail } from "../../src/protocol";
+import {
+  accountRows,
+  extensionTypes,
+  generalRows,
+  projectRows,
+  sections,
+  type Row,
+  type Section,
+  type ExtensionType,
+} from "./catalogue";
+
+export type ExtensionCategory = Exclude<ExtensionType, "All Types">;
+export type ExtensionFilter = "all" | "enabled" | "off" | "attention";
+
+const capabilities: Record<ExtensionCategory, string[]> = {
+  Effects: ["effects", "transitions"],
+  Panels: ["panels"],
+  Appearance: ["themes"],
+  "Layer Types": ["layers"],
+  Media: ["media"],
+  "Editor Tools": ["commands", "inspector", "keybindings", "palette", "menus", "status", "hooks"],
+  Other: [],
+};
+export const extensionFilterLabels: Record<ExtensionFilter, string> = {
+  all: "All",
+  enabled: "Enabled",
+  off: "Off",
+  attention: "Needs attention",
+};
+function provides(extension: Extension, category: ExtensionCategory) {
+  return extension.type === category ||
+    capabilities[category].some((kind) => extension.includes.includes(kind));
+}
+function extensionSearchText(extension: Extension) {
+  return [
+    extension.id, extension.name, extension.author, extension.type,
+    extension.source, extension.about,
+    extension.attention ? "Needs attention" : extension.enabled ? "Enabled" : "Off",
+    ...extension.includes, ...extension.shortcuts, ...extension.files,
+    ...extension.variables.map(searchable),
+  ].join(" ").toLocaleLowerCase();
+}
+
+export interface Extension {
+  id: string;
+  name: string;
+  type: ExtensionCategory;
+  author?: string | null;
+  attention?: "error" | "missing" | null;
+  source: "Built in" | "Installed" | "AI-created" | "Custom" | `From project ${string}`;
+  enabled: boolean;
+  about: string;
+  includes: string[];
+  shortcuts: string[];
+  files: string[];
+  variables: Row[];
+  // Opaque resource, never a filesystem path or web URL.
+  icon?: string;
+  canArchive: boolean;
+  /** The host's lease for the row's on/off switch. */
+  binding?: string;
+}
+export interface SpeechModel {
+  id: string;
+  name: string;
+  size: string;
+  state: "available" | "downloading" | "installed" | "error";
+  progress?: number;
+  error?: string;
+  /** The model transcription runs on now. */
+  inUse?: boolean;
+  recommended?: boolean;
+}
+export interface MemoryNote {
+  id: string;
+  kind: "goal" | "constraint" | "open" | "decision" | "rejected" | "feedback";
+  text: string;
+  why?: string;
+  author: string;
+  updatedAt?: number;
+  resolved: boolean;
+}
+/** Settings › Shortcuts, built by the app from the keymap it uses. */
+export interface ShortcutRow {
+  id: string;
+  menu: string;
+  label: string;
+  /** As glyphs (⌥⇧[) and as the table writes them (alt+shift+[). */
+  keys: string[];
+  chords: string[];
+  changed: boolean;
+  /** The menu bar owns its key (Save, Undo). */
+  fixed: boolean;
+  /** Its next key is being taken. */
+  recording: boolean;
+  /** The key it asked about while recording: another command has it
+   * (pressed again it moves here; `menu`: the menu bar's, never moved). */
+  asked?: { keys: string; other: string; menu: boolean } | null;
+}
+export interface Shortcuts {
+  preset: string;
+  rows: ShortcutRow[];
+  /** One key, several commands, in the order the key tries them. */
+  conflicts: { keys: string; chord: string; labels: string[] }[];
+  changed: boolean;
+}
+export interface Publication {
+  revision: number;
+  accountName?: string | null;
+  accountEmail?: string | null;
+  shortcuts?: Shortcuts;
+  project?: { id: string; name: string };
+  /** Settings › Project's header: the project's poster (a host picture
+   * key), its file and the projects open, for the picker. */
+  header?: {
+    poster?: string | null;
+    path?: string | null;
+    projects: readonly { id: string; name: string }[];
+  } | null;
+  multiWindow: boolean;
+  memory?: { enabled: boolean; entries: readonly MemoryNote[] };
+  rows?: Row[];
+  extensions: readonly Extension[];
+  extensionsState: "ready" | "loading" | "error" | "unavailable";
+  speech: readonly SpeechModel[];
+}
+export type Action =
+  | { type: "row"; id: string; action: string; plan?: string }
+  | { type: "shortcut"; op: "record" | "reset" | "clear"; id: string }
+  | { type: "write"; id: string; value: Json }
+  | { type: "extension.enabled"; id: string; enabled: boolean }
+  | { type: "extension.archive"; id: string }
+  | { type: "extension.reload"; id: string }
+  | { type: "extensions.retry" }
+  | { type: "extension.finder"; id: string }
+  | { type: "store.open" }
+  | {
+      type: "speech";
+      id: string;
+      action: "download" | "cancel" | "remove" | "retry" | "use";
+    };
+/** Implemented by pm-services/host, not a second preferences or document store.
+ * Resolves only after kernel/service acknowledgement; publishes the next snapshot.
+ * Destructive actions must confirm in NSAlert (default Cancel), then archive.
+ * Secrets never enter Publication/Row: secure input requires an opaque native lease.
+ */
+export interface SettingsServices {
+  perform(action: Action, expectedRevision: number): Promise<Publication>;
+}
+/** Native-authorized built-in profile adapter, separate from extension settings.
+ * The scope label documents the integration requirement; the native adapter must
+ * enforce privilege/allowed keys and return actual kernel/persistence acks.
+ */
+export interface ProfileSettings
+  extends Pick<HostClient, "getSetting" | "setSetting"> {
+  readonly scope: "kernel-profile";
+}
+export interface SettingsWindow {
+  present(section: Section): void;
+  closeAndRestoreFocus(): void;
+  title(section: Section): void;
+  scrollTo(section: Section, options: { reduceMotion: boolean }): void;
+  focusSearch(): void;
+  announce(message: string): void;
+}
+export interface Matches {
+  rows: Set<string>;
+  extensions: Set<string>;
+  sections: Set<Section>;
+  count: number;
+}
+const searchable = (row: Row) =>
+  [row.label, row.detail, row.group, ...(row.options ?? []).map((o) => o.label)]
+    .join(" ")
+    .toLocaleLowerCase();
+const emptyMatches = (): Matches => ({
+  rows: new Set(),
+  extensions: new Set(),
+  sections: new Set(),
+  count: 0,
+});
+
+/** This controller lives only on the V8 worker; all native effects are enqueued. */
+export class SettingsModel {
+  publication: Publication;
+  active: Section;
+  query = "";
+  extensionQuery = "";
+  extensionType: ExtensionType = "All Types";
+  detailId?: string;
+  open = false;
+  reduceMotion = false;
+  searching = false;
+  matches = emptyMatches();
+  extensionFilter: ExtensionFilter = "all";
+  extensionTypeOptions: readonly ExtensionType[] = extensionTypes;
+  extensionCounts: Record<ExtensionFilter, number> = { all: 0, enabled: 0, off: 0, attention: 0 };
+  private readonly openExtensionGroups = new Set<ExtensionCategory>();
+  private readonly closedSearchGroups = new Set<ExtensionCategory>();
+  readonly pending = new Set<string>();
+  /** A row's latest choice while it is saving, shown in its place. */
+  private readonly chosen = new Map<string, Json>();
+  /** The choice to save once a row's save in progress returns. */
+  private readonly queued = new Map<string, Json>();
+  private readonly failedReads = new Set<string>();
+  readonly failures = new Map<string, unknown>(); // inspection only; never rendered as product copy
+  private profile = new Map<string, Json>();
+  private listeners = new Set<() => void>();
+  private epoch = 0;
+  private searchEpoch = 0;
+  private alive = true;
+  private filtered: readonly Extension[] = [];
+  private extensionGroups = new Map<ExtensionCategory, Extension[]>();
+  private readonly viewports = new Map<
+    ExtensionCategory,
+    { count: number; anchorId?: string }
+  >();
+  constructor(
+    readonly host: HostClient,
+    publication: Publication,
+    readonly window: SettingsWindow,
+    readonly services?: SettingsServices,
+    readonly profileSettings?: ProfileSettings,
+  ) {
+    this.publication = publication;
+    this.active = "general";
+    this.reindex();
+  }
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+  private changed() {
+    if (this.alive) for (const listener of this.listeners) listener();
+  }
+  get rows(): Row[] {
+    const base = [
+      ...(this.publication.project ? projectRows() : []),
+      ...generalRows(this.publication.multiWindow),
+      ...accountRows(),
+    ];
+    const overrides = new Map(
+      (this.publication.rows ?? []).map((r) => [r.id, r]),
+    );
+    const rows = base.map((row) => overrides.get(row.id) ?? row);
+    for (const row of this.publication.rows ?? [])
+      if (!base.some((r) => r.id === row.id)) rows.push(row);
+    return rows
+      .filter(
+        (r) =>
+          r.section !== "project" || !!this.publication.project,
+      )
+      .map((r) => ({
+        ...r,
+        ...(this.failures.has(r.id) && r.profileKey
+          ? {
+              error: this.failedReads.has(r.id)
+                ? "Couldn’t load this setting."
+                : "Couldn’t save this setting. Try again.",
+              ...(this.failedReads.has(r.id) ? { disabled: true } : {}),
+            }
+          : {}),
+        ...(r.profileKey && !this.profileSettings ? { disabled: true } : {}),
+        ...(r.profileKey && this.profile.has(r.profileKey)
+          ? { value: this.profile.get(r.profileKey) }
+          : {}),
+        ...(this.chosen.has(r.id) ? { value: this.chosen.get(r.id)! } : {}),
+      }));
+  }
+  get availableSections() {
+    return sections.filter(
+      (s) =>
+        (s !== "project" || !!this.publication.project) &&
+        // Providers is published by the development switch's Powermove harness.
+        (s !== "providers" ||
+          (this.publication.rows ?? []).some((r) => r.section === "providers")),
+    );
+  }
+  get visibleSections() {
+    return this.availableSections.filter(
+      (s) => !this.query.trim() || this.matches.sections.has(s),
+    );
+  }
+  get extensions() {
+    return this.filtered;
+  }
+  get detail() {
+    return this.publication.extensions.find((e) => e.id === this.detailId);
+  }
+  extensionCategory(extension: Extension): ExtensionCategory {
+    return this.extensionType === "All Types" ? extension.type : this.extensionType;
+  }
+  get searchingExtensions() {
+    return !!(this.query.trim() || this.extensionQuery.trim());
+  }
+  extensionGroupOpen(category: ExtensionCategory) {
+    return this.openExtensionGroups.has(category) ||
+      (this.searchingExtensions && !this.closedSearchGroups.has(category));
+  }
+  setExtensionGroupOpen(category: ExtensionCategory, open: boolean) {
+    if (open) {
+      this.openExtensionGroups.add(category);
+      this.closedSearchGroups.delete(category);
+    } else {
+      this.openExtensionGroups.delete(category);
+      this.closedSearchGroups.add(category);
+    }
+    this.changed();
+  }
+  setExtensionFilter(filter: ExtensionFilter) {
+    if (filter === this.extensionFilter) return;
+    this.extensionFilter = filter;
+    this.reindex();
+    this.changed();
+  }
+  get categories() {
+    return extensionTypes.filter(
+      (type): type is ExtensionCategory =>
+        type !== "All Types" && this.extensionGroups.has(type),
+    );
+  }
+  extensionList(category: ExtensionCategory) {
+    const rows = this.extensionGroups.get(category) ?? [];
+    const viewport = this.viewports.get(category);
+    const anchor = viewport?.anchorId && rows.findIndex((row) => row.id === viewport.anchorId);
+    const first = typeof anchor === "number" && anchor >= 0 ? anchor : 0;
+    const count = viewport?.count ?? 40;
+    const range: [number, number] = [
+      Math.max(0, first - count),
+      Math.min(rows.length, first + count * 2),
+    ];
+    return { rows, range, anchorId: viewport?.anchorId };
+  }
+  async hydrate() {
+    if (!this.alive || !this.profileSettings) return;
+    const epoch = this.epoch;
+    await Promise.all(
+      generalRows(this.publication.multiWindow)
+        .filter((r) => r.profileKey)
+        .map(async (row) => {
+          const key = row.profileKey!;
+          // Per-key pending guard prevents a late initial read overwriting a user edit.
+          const initial = this.profile.get(key);
+          try {
+            const ack = await this.profileSettings!.getSetting(key);
+            if (!ack.accepted) throw new Error("Profile setting read rejected");
+            if (
+              !this.alive ||
+              epoch !== this.epoch ||
+              this.pending.has(row.id) ||
+              this.profile.get(key) !== initial
+            )
+              return;
+            if (ack.value !== undefined) this.profile.set(key, ack.value);
+          } catch (error) {
+            if (this.alive && epoch === this.epoch) {
+              this.failedReads.add(row.id);
+              this.failures.set(row.id, error);
+            }
+          }
+        }),
+    );
+    this.changed();
+  }
+  show(target?: Section) {
+    if (!this.alive) return;
+    this.open = true;
+    this.query = "";
+    this.reindex();
+    this.active =
+      target && this.availableSections.includes(target)
+        ? target
+        : "general";
+    this.window.present(this.active);
+    this.window.scrollTo(this.active, { reduceMotion: true });
+    this.changed();
+  }
+  close() {
+    if (!this.alive || !this.open) return;
+    this.open = false;
+    this.window.closeAndRestoreFocus();
+    this.changed();
+  }
+  select(section: Section) {
+    if (!this.alive) return;
+    if (section === "account" && this.query) {
+      this.query = "";
+      this.searching = false;
+      this.searchEpoch++;
+      this.reindex();
+    }
+    if (!this.visibleSections.includes(section)) return;
+    this.active = section;
+    this.window.title(section);
+    this.window.scrollTo(section, { reduceMotion: this.reduceMotion });
+    this.changed();
+  }
+  trackSection(section: Section) {
+    if (!this.alive) return;
+    if (!this.visibleSections.includes(section) || this.active === section)
+      return;
+    this.active = section;
+    this.window.title(section);
+    this.changed();
+  }
+  /** Called only by the source-list handler; typing arrows in fields remains native. */
+  navigate(key: string) {
+    const visible = this.visibleSections;
+    const index = Math.max(0, visible.indexOf(this.active));
+    const next =
+      key === "Home"
+        ? 0
+        : key === "End"
+          ? visible.length - 1
+          : key === "ArrowUp"
+            ? Math.max(0, index - 1)
+            : key === "ArrowDown"
+              ? Math.min(visible.length - 1, index + 1)
+              : -1;
+    if (next >= 0 && visible[next]) this.select(visible[next]);
+  }
+  key(event: EventDetail): boolean {
+    if (!this.alive) return false;
+    const command = event.metaKey || event.ctrlKey;
+    const exact = command && !event.altKey && !event.shiftKey;
+    if (exact && event.key === ",") {
+      if (!event.repeat) this.open ? this.close() : this.show();
+      return true;
+    }
+    if (exact && event.key?.toLowerCase() === "w") {
+      this.close();
+      return true;
+    }
+    if (exact && event.key?.toLowerCase() === "f") {
+      this.window.focusSearch();
+      return true;
+    }
+    if (event.key !== "Escape") return false;
+    if (this.query) void this.search("");
+    else if (this.detailId) {
+      this.detailId = undefined;
+      this.changed();
+    } else this.close();
+    return true;
+  }
+  async search(query: string) {
+    if (query.trim() !== this.query.trim()) this.closedSearchGroups.clear();
+    this.query = query;
+    this.searching = true;
+    const epoch = ++this.searchEpoch;
+    this.changed(); // keep previous results while the worker computes
+    await Promise.resolve();
+    if (!this.alive || epoch !== this.searchEpoch) return;
+    this.reindex();
+    this.searching = false;
+    this.window.announce(
+      this.matches.count
+        ? `${this.matches.count} settings found`
+        : "No Results. Try a different search.",
+    );
+    this.changed();
+  }
+  filterExtensions(query: string, type: ExtensionType = this.extensionType) {
+    if (query === this.extensionQuery && type === this.extensionType) return;
+    if (query.trim() !== this.extensionQuery.trim()) this.closedSearchGroups.clear();
+    this.extensionQuery = query;
+    this.extensionType = type;
+    this.reindex();
+    this.changed();
+  }
+  private reindex() {
+    const query = this.query.trim().toLocaleLowerCase();
+    const matches = emptyMatches();
+    for (const row of this.rows)
+      if (!query || searchable(row).includes(query)) {
+        matches.rows.add(row.id);
+        matches.sections.add(row.section);
+        matches.count++;
+      }
+    for (const note of this.publication.memory?.entries ?? []) {
+      if (
+        !query ||
+        `${note.text} ${note.why ?? ""} ${note.kind}`
+          .toLocaleLowerCase()
+          .includes(query)
+      ) {
+        matches.sections.add("project");
+        matches.count++;
+      }
+    }
+    const installed = this.publication.extensions.filter((item) => item.source !== "Built in");
+    this.extensionTypeOptions = extensionTypes.filter((type) =>
+      type === "All Types" || installed.some((extension) => provides(extension, type)),
+    );
+    if (!this.extensionTypeOptions.includes(this.extensionType)) this.extensionType = "All Types";
+    const extensionQuery = this.extensionQuery.trim().toLocaleLowerCase();
+    const filtered: Extension[] = [];
+    const counts = { all: installed.length, enabled: 0, off: 0, attention: 0 };
+    for (const extension of installed) {
+      counts[extension.enabled ? "enabled" : "off"]++;
+      if (extension.attention) counts.attention++;
+      const text = query || extensionQuery ? extensionSearchText(extension) : "";
+      if (query && !text.includes(query)) continue;
+      matches.extensions.add(extension.id);
+      matches.sections.add("extensions");
+      matches.count++;
+      if (extensionQuery && !text.includes(extensionQuery)) continue;
+      if (this.extensionType !== "All Types" && !provides(extension, this.extensionType)) continue;
+      const filter = this.extensionFilter;
+      if (
+        filter === "all" ||
+        (filter === "enabled" && extension.enabled) ||
+        (filter === "off" && !extension.enabled) ||
+        (filter === "attention" && extension.attention)
+      ) filtered.push(extension);
+    }
+    this.filtered = filtered;
+    this.extensionGroups.clear();
+    for (const extension of filtered) {
+      const category = this.extensionCategory(extension);
+      let group = this.extensionGroups.get(category);
+      if (!group) {
+        group = [];
+        this.extensionGroups.set(category, group);
+      }
+      group.push(extension);
+    }
+    this.extensionCounts = counts;
+    // A shortcut is found by its command, its menu, or its key written as
+    // glyphs (⌥⇧S) or words (option shift s, opt-shift-s, alt+shift+s).
+    const words = query.replace(/[+-]/g, " ");
+    for (const row of this.publication.shortcuts?.rows ?? []) {
+      const text = [
+        row.label,
+        row.menu,
+        ...row.keys,
+        ...row.chords.map((c) =>
+          c
+            .replace(/\bcmd\b/, "cmd command")
+            .replace(/\bctrl\b/, "ctrl control")
+            .replace(/\balt\b/, "alt opt option")
+            .replace(/\+/g, " "),
+        ),
+      ]
+        .join(" ")
+        .toLocaleLowerCase();
+      const own = text.split(/\s+/);
+      if (
+        !query ||
+        text.includes(query) ||
+        words.split(/\s+/).every((word) => !word || own.includes(word))
+      ) {
+        matches.rows.add(`shortcut.${row.id}`);
+        matches.sections.add("shortcuts");
+        matches.count++;
+      }
+    }
+    for (const model of this.publication.speech)
+      if (
+        !query ||
+        `${model.name} ${model.size}`.toLocaleLowerCase().includes(query)
+      ) {
+        matches.rows.add(`speech.${model.id}`);
+        matches.sections.add("transcription");
+        matches.count++;
+      }
+    if (!query)
+      for (const section of this.availableSections)
+        matches.sections.add(section);
+    this.matches = matches;
+  }
+  /** Each native category list reports its own logical row indices. */
+  viewport(category: ExtensionCategory, first: number, count: number) {
+    if (![first, count].every(Number.isSafeInteger) || first < 0 || count < 0)
+      throw new RangeError("Invalid viewport");
+    const rows = this.extensionGroups.get(category) ?? [];
+    const anchorId = rows[Math.min(first, rows.length)]?.id;
+    this.viewports.set(category, { count, anchorId });
+    this.changed();
+  }
+  inspect() {
+    return {
+      revision: this.publication.revision,
+      activeSection: this.active,
+      query: this.query,
+      detailId: this.detailId,
+      open: this.open,
+      extensionCount: this.filtered.length,
+      pending: [...this.pending],
+      failedIds: [...this.failures.keys()],
+    };
+  }
+  closeDetail() {
+    this.detailId = undefined;
+    this.changed();
+  }
+  viewExtension(id: string) {
+    if (!this.filtered.some((e) => e.id === id)) return;
+    this.detailId = id;
+    this.changed();
+  }
+  publish(publication: Publication) {
+    if (!this.alive || publication.revision <= this.publication.revision)
+      return false;
+    if (publication.project?.id !== this.publication.project?.id) {
+      this.epoch++;
+      this.pending.clear();
+      this.chosen.clear();
+      this.queued.clear();
+      this.failures.clear();
+    }
+    this.publication = publication;
+    if (!this.availableSections.includes(this.active)) this.active = "general";
+    if (!this.publication.extensions.some((e) => e.id === this.detailId))
+      this.detailId = undefined;
+    this.reindex();
+    this.window.title(this.active);
+    this.changed();
+    return true;
+  }
+  /** A row's choice. A choice made while an earlier one of the same row is
+   * still saving is never dropped: it shows at once and is saved when the
+   * earlier save returns, the last choice winning. */
+  async write(id: string, value: Json): Promise<boolean> {
+    if (!this.alive) return false;
+    const row = this.rows.find((r) => r.id === id);
+    if (
+      !row ||
+      row.disabled ||
+      row.busy ||
+      row.control === "secure" ||
+      !validValue(row, value)
+    )
+      return false;
+    this.chosen.set(id, value);
+    if (this.pending.has(id)) {
+      this.queued.set(id, value);
+      this.changed();
+      return true;
+    }
+    const epoch = this.epoch;
+    const saved = row.profileKey
+      ? await this.saveProfile(id, row.profileKey, value)
+      : await this.perform({ type: "write", id, value });
+    if (!this.alive || epoch !== this.epoch) return false;
+    const next = this.queued.get(id);
+    this.queued.delete(id);
+    if (next !== undefined) return this.write(id, next);
+    this.chosen.delete(id);
+    this.changed();
+    return saved;
+  }
+  private async saveProfile(id: string, key: string, value: Json) {
+    if (!this.profileSettings) return false;
+    const epoch = this.epoch;
+    this.pending.add(id);
+    this.failures.delete(id);
+    this.failedReads.delete(id);
+    this.changed();
+    try {
+      const ack = await this.profileSettings.setSetting(key, value);
+      if (!ack.accepted) throw new Error("Profile setting write rejected");
+      if (!this.alive || epoch !== this.epoch) return false;
+      this.profile.set(key, value);
+      this.reindex();
+      return true;
+    } catch (error) {
+      if (this.alive && epoch === this.epoch) this.failures.set(id, error);
+      return false;
+    } finally {
+      if (this.alive && epoch === this.epoch) {
+        this.pending.delete(id);
+        this.changed();
+      }
+    }
+  }
+  async perform(action: Action) {
+    if (!this.services || !this.alive) return false;
+    const id = "id" in action ? action.id : action.type;
+    if (this.pending.has(id)) return false;
+    if (action.type === "write") {
+      const row = this.rows.find((r) => r.id === id);
+      if (
+        !row ||
+        row.disabled ||
+        row.busy ||
+        row.control === "secure" ||
+        row.profileKey ||
+        !validValue(row, action.value)
+      )
+        return false;
+    }
+    if (action.type === "speech") {
+      const item = this.publication.speech.find((item) => item.id === id);
+      const states = {
+        download: "available",
+        cancel: "downloading",
+        remove: "installed",
+        retry: "error",
+        use: "installed",
+      };
+      if (!item || item.state !== states[action.action]) return false;
+      if (action.action === "use" && item.inUse) return false;
+    }
+    if (action.type === "shortcut") {
+      const row = this.publication.shortcuts?.rows.find(
+        (r) => r.id === action.id,
+      );
+      if (!row || row.fixed) return false;
+    }
+    if (action.type === "row") {
+      const row = this.rows.find((r) => r.id === id);
+      if (!row || row.disabled || row.busy || row.action !== action.action)
+        return false;
+    }
+    if (action.type.startsWith("extension.")) {
+      const extension = this.publication.extensions.find((e) => e.id === id);
+      if (
+        !extension ||
+        (action.type === "extension.archive" && !extension.canArchive)
+      )
+        return false;
+    }
+    const epoch = this.epoch;
+    this.pending.add(id);
+    this.failures.delete(id);
+    this.changed();
+    try {
+      const next = await this.services.perform(
+        action,
+        this.publication.revision,
+      );
+      if (!this.alive || epoch !== this.epoch) return false;
+      return this.publish(next);
+    } catch (error) {
+      if (this.alive && epoch === this.epoch) this.failures.set(id, error);
+      return false;
+    } finally {
+      if (this.alive && epoch === this.epoch) {
+        this.pending.delete(id);
+        this.changed();
+      }
+    }
+  }
+  dispose() {
+    this.alive = false;
+    this.epoch++;
+    this.searchEpoch++;
+    this.listeners.clear();
+    this.pending.clear();
+    this.chosen.clear();
+    this.queued.clear();
+    this.profile.clear();
+  }
+}
+function validValue(row: Row, value: Json) {
+  if (row.control === "choice")
+    return (
+      row.options?.some(
+        (option) =>
+          !option.disabled &&
+          JSON.stringify(option.v) === JSON.stringify(value),
+      ) ?? false
+    );
+  if (row.control === "number")
+    return (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      (row.min === undefined || value >= row.min) &&
+      (row.max === undefined || value <= row.max)
+    );
+  if (row.control === "switch") return typeof value === "boolean";
+  if (row.control === "text" || row.control === "colour")
+    return typeof value === "string";
+  return false;
+}

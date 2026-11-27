@@ -1,0 +1,25 @@
+{
+  "tools": [
+    {
+      "name": "open_project",
+      "description": "Open a saved project by ID from list_projects. Finish any active MCP session first. If recoveryRequired is returned, choose explicitly by calling open_project again with the returned ticket and an available recovery decision. list_projects also returns pendingRecoveries for an interrupted launch-file open. Recovery never happens automatically.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {"type":"string","minLength":1,"maxLength":120},
+          "recovery": {
+            "type":"object",
+            "additionalProperties":false,
+            "properties": {
+              "ticket":{"type":"string","minLength":1,"maxLength":160},
+              "decision":{"type":"string","enum":["recover","discard","open_as_copy","open_saved_version"]}
+            },
+            "required":["ticket","decision"]
+          }
+        },
+        "required":["projectId"]
+      }
+    }
+  ]
+}

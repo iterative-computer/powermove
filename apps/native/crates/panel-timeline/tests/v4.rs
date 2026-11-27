@@ -1,0 +1,1490 @@
+use pm_kernel::{Caller, KernelActor, KernelConfig, OpenSource, SelectionCall};
+use pm_model::json::parse;
+use pm_panel_timeline::{v4, *};
+use serde_json::{Value, json};
+use std::{
+    future::Future,
+    pin::pin,
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
+    time::Duration,
+};
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        std::thread::park_timeout(Duration::from_secs(1));
+    }
+}
+fn client() -> (KernelActor, TimelineClient) {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[
+    {"id":"a:[]","name":"Headline","type":"shape","from":-0.125,"dur":4,"on":true,"p":{"opacity":{"v":10,"kf":[{"i":"original","t":0.125,"v":10,"ei":[1,1],"eo":[0,0],"custom":"retained"}]}}},
+    {"id":"b","name":"Kicker","type":"shape","from":5,"dur":2,"on":true,"p":{}}
+    ]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    block_on(kernel.open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let client = TimelineClient::new(kernel, "P", Caller::native()).unwrap();
+    (actor, client)
+}
+fn dispatch(c: &mut TimelineClient, value: Value) -> Result<Vec<HostEffect>, v4::Error> {
+    let facts = PropertyFacts::default();
+    let context = v4::Context {
+        time: 0.,
+        expected_document: c.model.index.doc_id,
+        expected_revision: c.model.index.revision,
+        millis: 100,
+        in_field: false,
+        keys_admitted: true,
+        property_facts: &facts,
+    };
+    block_on(v4::dispatch(c, &value, &context))
+}
+fn id(id: &str) -> String {
+    v4::row_id(&RowId::Layer(id.into()))
+}
+
+#[test]
+fn stable_ids_roundtrip_arbitrary_imported_punctuation_without_collisions() {
+    let rows = [
+        RowId::Layer("a:[]\"🙂".into()),
+        RowId::Property {
+            layer_id: "a:[]\"🙂".into(),
+            channel: "fx.layer:opacity".into(),
+        },
+    ];
+    for row in rows {
+        assert_eq!(v4::parse_row(&v4::row_id(&row)).unwrap(), row);
+    }
+    for bad in [
+        "layer:a",
+        "[]",
+        "[1]",
+        "[\"layer\",\"\"]",
+        "[\"property\",\"a\"]",
+    ] {
+        assert!(v4::parse_row(bad).is_err());
+    }
+}
+#[test]
+fn selection_uses_actual_model_modifiers_and_preserves_document_revision() {
+    let (_actor, mut c) = client();
+    let revision = c.model.index.revision;
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{}}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("b"),"modifiers":{"shiftKey":true}}),
+    )
+    .unwrap();
+    assert_eq!(c.model.selection.layers(), &["a:[]", "b"]);
+    assert_eq!(c.model.index.revision, revision);
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{"metaKey":true}}),
+    )
+    .unwrap();
+    assert_eq!(c.model.selection.layers(), &["b"]);
+}
+#[test]
+fn tracks_preserve_the_models_toggle_instead_of_layers_range_selection() {
+    let (_actor, mut c) = client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{}}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{"shiftKey":true}}),
+    )
+    .unwrap();
+    assert!(c.model.selection.layers().is_empty());
+    let frame = v4::window(&mut c, 0, 10).unwrap();
+    assert_eq!(frame["mode"], "Tracks");
+    assert!(
+        frame["window"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["kind"] == "track")
+    );
+}
+#[test]
+fn modes_view_and_snap_publish_ui_without_document_history_or_dirtying() {
+    let (_actor, mut c) = client();
+    let revision = c.model.index.revision;
+    for (kind, name, value) in [("mode", "mode", "Tracks"), ("view", "view", "Combined")] {
+        let mut intent = json!({"type":kind});
+        intent[name] = json!(value);
+        dispatch(&mut c, intent).unwrap();
+    }
+    dispatch(&mut c, json!({"type":"snap"})).unwrap();
+    let state = c.kernel.state();
+    let ui = &state.ui["P"].timeline;
+    assert_eq!(
+        ui.get("mode").and_then(pm_model::Value::as_str),
+        Some("tracks")
+    );
+    assert_eq!(
+        ui.get("graphCombined").and_then(pm_model::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        ui.get("trackSnap").and_then(pm_model::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(c.model.index.revision, revision);
+}
+#[test]
+fn disclosure_is_idempotent_for_explicit_open_and_uses_native_row_index() {
+    let (_actor, mut c) = client();
+    for _ in 0..2 {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id("a:[]"),"open":true}),
+        )
+        .unwrap();
+    }
+    let result = v4::window(&mut c, 0, 10).unwrap();
+    assert_eq!(result["window"]["rows"][0]["expanded"], true);
+    assert_eq!(result["window"]["rows"][0]["index"], 1);
+    assert_eq!(result["window"]["rows"][1]["path"], "opacity");
+    assert_eq!(c.model.index.layer_ordinal("b"), Some(1));
+}
+#[test]
+fn visibility_switch_is_a_real_kernel_edit_with_undo() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"switch","id":id("a:[]"),"name":"visibility"}),
+    )
+    .unwrap();
+    assert!(!c.model.index.layer("a:[]").unwrap().visible);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("a:[]").unwrap().visible);
+}
+#[test]
+fn diamond_uses_original_key_identity_and_native_undo_retains_opaque_fields() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"a:[]","path":"opacity"}),
+    )
+    .unwrap();
+    assert!(c.model.index.key("original").is_none());
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .key("original")
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get("custom")
+            .and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+}
+#[test]
+fn shortcuts_require_shell_admission_and_preserve_exact_repeat_policy() {
+    let (_actor, mut c) = client();
+    assert_eq!(
+        dispatch(&mut c, json!({"type":"keyDown","event":{"key":"PageDown"}})).unwrap(),
+        [HostEffect::Seek(1. / 30.)]
+    );
+    assert_eq!(dispatch(&mut c, json!({"type":"keyDown","event":{"key":"ArrowRight","metaKey":true,"shiftKey":true,"repeat":true}})).unwrap(), [HostEffect::Seek(10. / 30.)]);
+    assert!(
+        dispatch(
+            &mut c,
+            json!({"type":"keyDown","event":{"key":" ","repeat":true}})
+        )
+        .is_err()
+    );
+    let facts = PropertyFacts::default();
+    let context = v4::Context {
+        time: 0.,
+        expected_document: c.model.index.doc_id,
+        expected_revision: c.model.index.revision,
+        millis: 0,
+        in_field: false,
+        keys_admitted: false,
+        property_facts: &facts,
+    };
+    assert!(matches!(
+        block_on(v4::dispatch(
+            &mut c,
+            &json!({"type":"keyDown","event":{"key":" "}}),
+            &context
+        )),
+        Err(v4::Error::MissingHost("shell shortcut arbitration"))
+    ));
+}
+#[test]
+fn host_effects_are_requests_not_transport_or_import_success() {
+    let (_actor, mut c) = client();
+    assert_eq!(
+        dispatch(&mut c, json!({"type":"play"})).unwrap(),
+        [HostEffect::TogglePlayback]
+    );
+    assert!(
+        matches!(&dispatch(&mut c, json!({"type":"import"})).unwrap()[0], HostEffect::Import { time, before_layer: None, as_folder: false } if *time == 0.)
+    );
+    // The empty composition's buttons run the app's own commands; only those.
+    for command in v4::RUN_COMMANDS {
+        assert_eq!(
+            dispatch(&mut c, json!({"type":"run","command":command})).unwrap(),
+            [HostEffect::Run(command.into())]
+        );
+    }
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"run","command":"quit"})),
+        Err(v4::Error::InvalidIntent(_))
+    ));
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"tab","id":"c","close":true})),
+        Err(v4::Error::MissingHost(_))
+    ));
+    assert_eq!(
+        dispatch(&mut c, json!({"type":"tab","id":"c","close":false})).unwrap(),
+        [HostEffect::OpenComposition("c".into())]
+    );
+    assert_eq!(
+        dispatch(&mut c, json!({"type":"seek","time":1.5})).unwrap(),
+        [HostEffect::Seek(1.5)]
+    );
+    // Pointer gestures run on the native surface; JS cannot start one.
+    for kind in ["pointerDown", "drop"] {
+        assert!(matches!(
+            dispatch(&mut c, json!({"type":kind})),
+            Err(v4::Error::InvalidIntent(_))
+        ));
+    }
+}
+#[test]
+fn typed_timecode_takes_any_leading_fields_or_bare_frames() {
+    assert_eq!(v4::parse_timecode("00:00:02:15", 30.), Some(2.5));
+    assert_eq!(v4::parse_timecode("2:15", 30.), Some(2.5));
+    assert_eq!(v4::parse_timecode("75", 30.), Some(2.5));
+    assert_eq!(v4::parse_timecode("1:00:00", 30.), Some(60.));
+    assert_eq!(v4::parse_timecode("nonsense", 30.), None);
+    assert_eq!(v4::parse_timecode("", 30.), None);
+    // 29.97 shows frame 18000 as 00:10:00:00; typing it back lands there.
+    let fps = 30000. / 1001.;
+    let time = v4::parse_timecode("00:10:00:00", fps).unwrap();
+    assert_eq!((time * fps).round(), 18000.);
+}
+#[test]
+fn stale_surface_and_malformed_requests_fail_before_any_edit() {
+    let (_actor, mut c) = client();
+    let revision = c.model.index.revision;
+    let facts = PropertyFacts::default();
+    let context = v4::Context {
+        time: 0.,
+        expected_document: c.model.index.doc_id + 1,
+        expected_revision: revision,
+        millis: 0,
+        in_field: false,
+        keys_admitted: true,
+        property_facts: &facts,
+    };
+    assert!(
+        block_on(v4::dispatch(
+            &mut c,
+            &json!({"type":"switch","id":id("a:[]"),"name":"visibility"}),
+            &context
+        ))
+        .is_err()
+    );
+    for value in [
+        json!({"type":"unknown"}),
+        json!({"type":"mode","mode":"other"}),
+        json!({"type":"selectRow","id":id("b"),"modifiers":{"shiftKey":"true"}}),
+    ] {
+        assert!(dispatch(&mut c, value).is_err());
+    }
+    assert_eq!(c.model.index.revision, revision);
+    assert!(c.model.index.layer("a:[]").unwrap().visible);
+}
+#[test]
+fn window_keeps_exact_negative_subframes_and_decimal_stamps() {
+    let (_actor, mut c) = client();
+    let result = v4::window(&mut c, 0, 1).unwrap();
+    assert!(result["document"].is_string());
+    assert!(result["revision"].is_string());
+    assert_eq!(result["window"]["rows"][0]["from"], -0.125);
+    assert_eq!(result["window"]["total"], 2);
+    assert_eq!(result["window"]["rows"].as_array().unwrap().len(), 2);
+    assert!(v4::window(&mut c, 0, 0).is_err());
+}
+#[test]
+fn selection_facts_in_window_follow_the_actual_actor_publication() {
+    let (_actor, mut c) = client();
+    block_on(
+        c.call(
+            SelectionCall::Layers {
+                ids: vec!["b".into()],
+                add: false,
+            }
+            .into(),
+        ),
+    )
+    .unwrap();
+    let result = v4::window(&mut c, 0, 10).unwrap();
+    assert_eq!(result["selection"], json!({"kind":"layers","count":1}));
+    assert_eq!(result["window"]["rows"][0]["selected"], false);
+    assert_eq!(result["window"]["rows"][1]["selected"], true);
+}
+
+#[test]
+fn sixty_thousand_real_model_rows_project_only_three_viewports() {
+    let mut project = json!({"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{}});
+    project["layers"] = Value::Array((0..60_000).map(|i| json!({"id":format!("row-{i}"),"name":"Headline","type":"shape","from":0,"dur":1,"on":true,"p":{}})).collect());
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    block_on(kernel.open(
+        "P",
+        OpenSource::Untitled(parse(&project.to_string()).unwrap()),
+    ))
+    .unwrap()
+    .unwrap();
+    let mut c = TimelineClient::new(kernel, "P", Caller::native()).unwrap();
+    let value = v4::window(&mut c, 30_000, 10).unwrap();
+    assert_eq!(value["window"]["total"], 60_000);
+    assert_eq!(value["window"]["first"], 29_990);
+    assert_eq!(value["window"]["rows"].as_array().unwrap().len(), 30);
+    assert_eq!(value["window"]["rows"][0]["index"], 29_991);
+    assert_eq!(value["indexDigits"], 5);
+}
+
+#[test]
+fn property_navigation_uses_model_composition_times_and_does_not_wrap() {
+    let (_actor, mut c) = client();
+    let facts = PropertyFacts::default();
+    let context = v4::Context {
+        time: 0.5,
+        expected_document: c.model.index.doc_id,
+        expected_revision: c.model.index.revision,
+        millis: 0,
+        in_field: false,
+        keys_admitted: true,
+        property_facts: &facts,
+    };
+    let intent =
+        json!({"type":"adjacentKey","layer":"a:[]","path":"opacity","direction":"previous"});
+    assert_eq!(
+        block_on(v4::dispatch(&mut c, &intent, &context)).unwrap(),
+        [HostEffect::Seek(0.)]
+    );
+    assert!(
+        dispatch(
+            &mut c,
+            json!({"type":"adjacentKey","layer":"a:[]","path":"opacity","direction":"next"})
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+#[test]
+fn scale_link_is_undoable_through_the_actual_layer_command() {
+    let (_actor, mut c) = client();
+    dispatch(&mut c, json!({"type":"scaleLink","layer":"a:[]"})).unwrap();
+    assert!(c.model.index.layer("a:[]").unwrap().scale_linked);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(!c.model.index.layer("a:[]").unwrap().scale_linked);
+}
+#[test]
+fn escape_cancels_an_active_native_preview_before_deselecting() {
+    let (_actor, mut c) = client();
+    let original = c.model.index.layer("a:[]").unwrap().from;
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: vec!["a:[]".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        time_delta: 1.,
+        ..Default::default()
+    }))
+    .unwrap();
+    assert_ne!(c.model.index.layer("a:[]").unwrap().from, original);
+    dispatch(&mut c, json!({"type":"keyDown","event":{"key":"Escape"}})).unwrap();
+    assert_eq!(c.model.index.layer("a:[]").unwrap().from, original);
+    assert!(c.active_drag().is_none());
+}
+#[test]
+fn window_refreshes_the_actual_kernel_publication_without_an_intervening_client_action() {
+    let (_actor, mut c) = client();
+    block_on(c.kernel.call(
+        "P",
+        pm_kernel::Request::new(
+            Caller::native(),
+            SelectionCall::Layers {
+                ids: vec!["b".into()],
+                add: false,
+            },
+        ),
+    ))
+    .unwrap()
+    .unwrap();
+    assert!(c.model.selection.layers().is_empty());
+    let result = v4::window(&mut c, 0, 10).unwrap();
+    assert_eq!(result["window"]["rows"][1]["selected"], true);
+}
+
+use pm_design::{Accessibility, Scheme, Tokens};
+use pm_panel_timeline::render as paint;
+struct Presentation;
+impl paint::ModelPresenter for Presentation {
+    fn accessibility_label(&self, row: &RowId) -> String {
+        v4::row_id(row)
+    }
+    fn layer_label(&self, _: &Layer) -> paint::Label {
+        paint::Label::Blue
+    }
+    fn media(&self, _: &Layer) -> paint::Media {
+        paint::Media::Ready
+    }
+    fn waveform(&self, _: &Layer) -> Option<Option<paint::Waveform>> {
+        Some(Some(paint::Waveform::from_peaks(&[0., 0.25, 0.5], 100., 0.)))
+    }
+    fn interpolation(&self, _: &Key) -> paint::Interpolation {
+        paint::Interpolation::Linear
+    }
+    fn track_accessibility_label(&self, area: tracks::Area, lane: usize) -> Option<String> {
+        Some(format!("{area:?} {}", lane + 1))
+    }
+}
+
+#[test]
+fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{}}),
+    )
+    .unwrap();
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    assert_eq!(scene.total(), c.model.rows().len());
+    let row = scene.row(&id("a:[]")).unwrap();
+    assert!(row.selected);
+    let paint::RowContent::Layer {
+        clip: Some(clip),
+        summary,
+    } = &row.content
+    else {
+        panic!("layer paint");
+    };
+    assert_eq!(clip.from, -0.125);
+    assert_eq!(clip.duration, 4.);
+    assert_eq!(
+        clip.audio
+            .as_ref()
+            .and_then(|w| w.as_ref())
+            .map(|w| w.levels.combined.peak[0].len()),
+        Some(3)
+    );
+    assert_eq!(summary[0].seconds, 0.);
+    c.model.mode = TimelineMode::Tracks;
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    assert!(
+        matches!(&scene.row("[\"track\",\"Video\",0]").unwrap().content,paint::RowContent::Track{clips} if clips.len()==2)
+    );
+}
+
+#[test]
+fn shell_mask_reveal_persists_disclosure_without_editing_animation() {
+    let (_actor, mut c) = client();
+    let before = c.kernel.published("P").unwrap();
+    dispatch(&mut c, json!({"type":"keyDown","event":{"key":"m"}})).unwrap();
+    let shown = c.model.reveal.layers.clone();
+    assert!(!shown.is_empty());
+    assert!(
+        shown
+            .values()
+            .all(|d| !d.collapsed && d.paths == Some(vec!["*".into()]))
+    );
+    let after = c.kernel.published("P").unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert_eq!(
+        after.snapshot.document.to_value(),
+        before.snapshot.document.to_value()
+    );
+    c.sync().unwrap();
+    assert_eq!(c.model.reveal.layers, shown);
+    dispatch(&mut c, json!({"type":"keyDown","event":{"key":"m"}})).unwrap();
+    assert!(c.model.reveal.layers.values().all(|d| d.collapsed));
+}
+
+#[test]
+fn native_drag_steps_replace_from_start_and_commit_as_one_undo() {
+    let (_actor, mut c) = client();
+    let before = c.model.index.layer("a:[]").unwrap().from;
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"layers","ids":["a:[]"]}),
+    )
+    .unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":2.})).unwrap();
+    let moved = c.model.index.layer("a:[]").unwrap().from;
+    // Every sample is total displacement, not a repeated relative increment.
+    assert!((moved - before - 2.).abs() < 1. / 30.);
+    dispatch(&mut c, json!({"type":"endDrag"})).unwrap();
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert_eq!(c.model.index.layer("a:[]").unwrap().from, before);
+}
+
+#[test]
+fn native_disposal_and_pointer_cancellation_restore_the_active_preview() {
+    for action in ["cancelDrag", "dispose"] {
+        let (_actor, mut c) = client();
+        let before = c.model.index.layer("b").unwrap().duration;
+        dispatch(
+            &mut c,
+            json!({"type":"beginDrag","kind":"trimOut","ids":["b"]}),
+        )
+        .unwrap();
+        dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+        assert_ne!(c.model.index.layer("b").unwrap().duration, before);
+        dispatch(&mut c, json!({"type":action})).unwrap();
+        assert_eq!(c.model.index.layer("b").unwrap().duration, before);
+        assert!(c.active_drag().is_none());
+    }
+}
+
+#[test]
+fn numeric_key_time_uses_composition_time_beyond_strip_and_refuses_collision() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"editKeys","ids":["original"],"time":8.,"value":42.}),
+    )
+    .unwrap();
+    let (l, _, k) = c.model.index.key("original").unwrap();
+    // main timeline.ts snaps the layer-local time, retaining a subframe strip origin.
+    assert_eq!(k.time, ((8.0_f64 + 0.125) * 30.).round() / 30.);
+    assert!(l.from + k.time > l.from + l.duration);
+    assert_eq!(k.value.as_f64(), Some(42.));
+    assert_eq!(
+        k.stored
+            .to_value()
+            .get("custom")
+            .and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"a:[]","path":"opacity"}),
+    )
+    .unwrap();
+    let revision = c.model.index.revision;
+    assert!(
+        dispatch(
+            &mut c,
+            json!({"type":"editKeys","ids":["original"],"time":0.})
+        )
+        .is_err()
+    );
+    assert_eq!(c.model.index.revision, revision);
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(42.)
+    );
+}
+
+fn position_client() -> (KernelActor, TimelineClient) {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[{"id":"p","type":"shape","name":"Position","collapsed":false,"from":0,"dur":10,"p":{"position.x":{"v":0,"kf":[{"i":"x","t":0.125,"v":1,"custom":"keep"}]},"position.y":{"v":0,"kf":[{"i":"y","t":0.125,"v":2},{"i":"subframe","t":0.125001,"v":3}]}}}]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    (actor, c)
+}
+
+#[test]
+fn separate_dimensions_is_undoable_and_groups_only_exact_legacy_key_times() {
+    let (_actor, mut c) = position_client();
+    assert!(c.model.index.layer("p").unwrap().separate_dimensions);
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    assert!(!c.model.index.layer("p").unwrap().separate_dimensions);
+    assert!(
+        c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position"))
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"selectKeys","layer":"p","path":"position","ids":["x"]}),
+    )
+    .unwrap();
+    assert_eq!(c.model.selection.keys(), &["x", "y"]);
+    assert_eq!(c.model.index.key("subframe").unwrap().2.time, 0.125001);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    // The key click is its own selection-history step; undo it before the edit.
+    assert!(c.model.selection.keys().is_empty());
+    assert!(!c.model.index.layer("p").unwrap().separate_dimensions);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("p").unwrap().separate_dimensions);
+    assert!(
+        c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position.x"))
+    );
+    assert!(
+        !c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position"))
+    );
+}
+
+/// v1's gutterDown: the diamond on a property row works on that property as
+/// the row does, so keying a static Position plots Position, not the layer's
+/// other animated property above it in the list.
+#[test]
+fn the_diamond_puts_its_property_in_the_graph() {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[{"id":"t","type":"shape","name":"Made","collapsed":false,"from":0,"dur":10,"p":{"opacity":{"v":1,"kf":[{"i":"o1","t":0,"v":0},{"i":"o2","t":1,"v":1}]},"position.x":{"v":5,"kf":[]},"position.y":{"v":6,"kf":[]}}}]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    dispatch(&mut c, json!({"type":"selectRow","id":id("t"),"modifiers":{}})).unwrap();
+    assert_eq!(c.model.graph_series().0, [("t".to_owned(), "opacity".to_owned())]);
+    let position = "position";
+    dispatch(&mut c, json!({"type":"keyToggle","layer":"t","path":position})).unwrap();
+    assert_eq!(
+        c.model.graph_series().0,
+        [
+            ("t".to_owned(), "position.x".to_owned()),
+            ("t".to_owned(), "position.y".to_owned())
+        ]
+    );
+    assert_eq!(c.model.selection.channel(), Some(position));
+}
+
+#[test]
+fn axis_diamond_changes_only_its_axis_and_group_diamond_completes_the_other_axis() {
+    let (_actor, mut c) = position_client();
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"p","path":"position.x"}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.model.index.channel("p", "position.x").unwrap().keys.len(),
+        2
+    );
+    assert_eq!(
+        c.model.index.channel("p", "position.y").unwrap().keys.len(),
+        2
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"p","path":"position"}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.model.index.channel("p", "position.x").unwrap().keys.len(),
+        2
+    );
+    assert_eq!(
+        c.model.index.channel("p", "position.y").unwrap().keys.len(),
+        3
+    );
+}
+
+#[test]
+fn native_graph_drag_and_easing_keep_ids_and_opaque_metadata_through_undo() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"graphKeys","ids":["original"]}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"drag","timeDelta":1.,"valueDelta":3.}),
+    )
+    .unwrap();
+    dispatch(&mut c, json!({"type":"endDrag"})).unwrap();
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(13.)
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"easing","ids":["original"],"curve":[0.25,0.1,0.25,1.]}),
+    )
+    .unwrap();
+    dispatch(&mut c,json!({"type":"interpolation","ids":["original"],"side":"both","interpolation":"continuous"})).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .key("original")
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get("custom")
+            .and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+    for _ in 0..3 {
+        block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    }
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(10.)
+    );
+    assert_eq!(c.model.index.key("original").unwrap().2.time, 0.125);
+}
+
+#[test]
+fn native_parent_pickwhip_uses_kernel_cycle_validation_and_undo() {
+    let (_actor, mut c) = client();
+    dispatch(&mut c, json!({"type":"parent","ids":["b"],"parent":"a:[]"})).unwrap();
+    assert_eq!(
+        c.model.index.layer("b").unwrap().parent.as_deref(),
+        Some("a:[]")
+    );
+    let revision = c.model.index.revision;
+    assert!(dispatch(&mut c, json!({"type":"parent","ids":["a:[]"],"parent":"b"})).is_err());
+    assert_eq!(c.model.index.revision, revision);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("b").unwrap().parent.is_none());
+}
+
+#[test]
+fn malformed_native_actions_and_stale_decimal_stamps_make_no_edit_or_lease() {
+    let (_actor, mut c) = client();
+    let revision = c.model.index.revision;
+    for intent in [
+        json!({"type":"beginDrag","kind":"layers","ids":["b","b"]}),
+        json!({"type":"beginDrag","kind":"layers","ids":[]}),
+        json!({"type":"beginDrag","kind":"layers","ids":["missing"]}),
+        json!({"type":"beginDrag","kind":"layers","ids":["b"],"document":"9999999999999999999"}),
+        json!({"type":"editKeys","ids":["original"],"time":"bad"}),
+        json!({"type":"easing","ids":["original"],"curve":[1,2,3]}),
+        json!({"type":"selectKeys","layer":"b","path":"opacity","ids":["original"]}),
+    ] {
+        assert!(dispatch(&mut c, intent).is_err());
+    }
+    assert_eq!(c.model.index.revision, revision);
+    assert!(c.active_drag().is_none());
+}
+
+fn media_client() -> (KernelActor, TimelineClient) {
+    let layers = [("a",0.),("b",4.),("c",8.)].into_iter().map(|(id,from)|json!({"id":id,"name":id,"type":"video","from":from,"dur":4,"track":0,"on":true,"d":{"asset":"source","trim":{"v":from+2.,"kf":[],"expr":null},"speed":1,"future":{"keep":true}},"p":{},"future":{"keep":id}})).collect::<Vec<_>>();
+    let value = json!({"id":"P","compId":"C","fps":30,"dur":40,"w":100,"h":100,"assets":{"source":{"id":"source","kind":"video","dur":100}},"layers":layers});
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open(
+        "P",
+        OpenSource::Untitled(parse(&value.to_string()).unwrap()),
+    ))
+    .unwrap()
+    .unwrap();
+    let c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    (actor, c)
+}
+fn document(c: &TimelineClient) -> pm_model::Value {
+    c.kernel
+        .published(&c.project)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value()
+}
+#[test]
+fn all_scoped_pro_edit_actions_reach_the_real_kernel_and_undo_exactly() {
+    for (mut input, target, from) in [
+        (json!({"operation":"move","ids":["b"],"delta":1.}), "b", 5.),
+        (
+            json!({"operation":"trim","edge":"in","ids":["b"],"delta":1.}),
+            "b",
+            5.,
+        ),
+        (json!({"operation":"slip","ids":["b"],"delta":1.}), "b", 4.),
+        (
+            json!({"operation":"rippleTrim","edge":"out","layer":"b","delta":1.,"tracks":[{"track":0}]}),
+            "c",
+            9.,
+        ),
+        (
+            json!({"operation":"roll","left":"a","right":"b","delta":1.}),
+            "b",
+            5.,
+        ),
+        (
+            json!({"operation":"slide","previous":"a","layer":"b","next":"c","delta":1.}),
+            "b",
+            5.,
+        ),
+        (
+            json!({"operation":"rippleDelete","ids":["b"],"tracks":[{"track":0}]}),
+            "c",
+            4.,
+        ),
+    ] {
+        let (_actor, mut c) = media_client();
+        let before = document(&c);
+        input["type"] = json!("proEdit");
+        dispatch(&mut c, input).unwrap();
+        assert_eq!(c.model.index.layer(target).unwrap().from, from);
+        assert_ne!(document(&c), before);
+        block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn ripple_pointer_steps_use_total_delta_and_dispose_restores_downstream_clips() {
+    let (_actor, mut c) = media_client();
+    let before = document(&c);
+    dispatch(&mut c,json!({"type":"beginDrag","kind":"proEdit","operation":"rippleTrim","layer":"b","edge":"out","delta":0.,"tracks":[{"track":0}]})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":2.})).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().duration, 6.);
+    assert_eq!(c.model.index.layer("c").unwrap().from, 10.);
+    dispatch(&mut c, json!({"type":"dispose"})).unwrap();
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn locked_downstream_pro_drag_refuses_before_a_gesture_and_preserves_document() {
+    let (_actor, mut c) = media_client();
+    dispatch(&mut c, json!({"type":"switch","id":id("c"),"name":"lock"})).unwrap();
+    let before = document(&c);
+    assert!(dispatch(&mut c,json!({"type":"beginDrag","kind":"proEdit","operation":"rippleTrim","layer":"b","edge":"out","delta":1.,"tracks":[{"track":0}]})).is_err());
+    assert!(c.active_drag().is_none());
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn simplify_is_explicit_and_retains_unknown_authored_key_fields() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    dispatch(&mut c, json!({"type":"simplify","ids":["a:[]"]})).unwrap();
+    assert_eq!(
+        document(&c),
+        before,
+        "unknown authored key fields prevent simplification"
+    );
+}
+
+#[test]
+fn old_native_gesture_cannot_edit_a_reopened_document_with_reused_layer_ids() {
+    let (_actor, mut c) = media_client();
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"layers","ids":["b"]}),
+    )
+    .unwrap();
+    let saved = document(&c);
+    block_on(c.kernel.close("P")).unwrap();
+    block_on(c.kernel.open("P", OpenSource::Untitled(saved.clone())))
+        .unwrap()
+        .unwrap();
+    c.sync().unwrap();
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"drag","timeDelta":2.})),
+        Err(v4::Error::Client(ClientError::DocumentChanged))
+    ));
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"dispose"})),
+        Err(v4::Error::Client(ClientError::DocumentChanged))
+    ));
+    assert!(c.active_drag().is_none());
+    assert_eq!(document(&c), saved);
+}
+
+#[test]
+fn handle_property_and_work_area_native_gestures_cancel_without_losing_authored_data() {
+    for begin in [
+        json!({"type":"beginDrag","kind":"handle","id":"original","side":"out"}),
+        json!({"type":"beginDrag","kind":"property","layer":"a:[]","path":"opacity"}),
+        json!({"type":"beginDrag","kind":"workIn"}),
+        json!({"type":"beginDrag","kind":"workOut"}),
+        json!({"type":"beginDrag","kind":"workMove"}),
+        json!({"type":"beginDrag","kind":"transformKeys","ids":["original"],"anchorTime":0.,"anchorValue":0.}),
+        json!({"type":"beginDrag","kind":"stretchKeys","ids":["original"],"anchorTime":0.,"grabbedTime":1.}),
+        json!({"type":"beginDrag","kind":"keys","ids":["original"]}),
+        json!({"type":"beginDrag","kind":"trimIn","ids":["a:[]"]}),
+        json!({"type":"beginDrag","kind":"offsetLayers","ids":["a:[]","b"]}),
+    ] {
+        let (_actor, mut c) = client();
+        let before = document(&c);
+        dispatch(&mut c, begin).unwrap();
+        dispatch(&mut c,json!({"type":"drag","timeDelta":0.1,"valueDelta":1.,"timeScale":1.5,"valueScale":2.,"handleTime":0.25,"handleValue":0.5})).unwrap();
+        dispatch(&mut c, json!({"type":"cancelDrag"})).unwrap();
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn native_numeric_key_dialog_rejects_non_numeric_values_before_any_edit() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    for value in [json!(null), json!("12"), json!([1, 2]), json!({"v":12})] {
+        assert!(
+            dispatch(
+                &mut c,
+                json!({"type":"editKeys","ids":["original"],"value":value})
+            )
+            .is_err()
+        );
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn graph_native_commands_persist_view_facts_without_document_edits() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    dispatch(&mut c, json!({"type":"command","command":"graph.speed"})).unwrap();
+    let state = c.kernel.state();
+    assert_eq!(
+        state.ui["P"]
+            .timeline
+            .get("graphMode")
+            .and_then(pm_model::Value::as_str),
+        Some("speed")
+    );
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn presentation_can_hold_one_immutable_publication_while_actor_advances() {
+    let (_actor, mut c) = client();
+    let old = c.model.clone();
+    let revision = old.index.revision.to_string();
+    dispatch(
+        &mut c,
+        json!({"type":"switch","id":id("b"),"name":"visibility"}),
+    )
+    .unwrap();
+    let old_frame = v4::project_window(&old, 0, 10).unwrap();
+    assert_eq!(old_frame["revision"], revision);
+    let old_b = old_frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["layer"] == "b")
+        .unwrap();
+    assert_eq!(old_b["visible"], true);
+    let current = v4::window(&mut c, 0, 10).unwrap();
+    assert_ne!(current["revision"], old_frame["revision"]);
+    let new_b = current["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["layer"] == "b")
+        .unwrap();
+    assert_eq!(new_b["visible"], false);
+}
+
+#[test]
+fn tracks_stack_like_premiere_captions_then_highest_video_down_then_audio() {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[
+    {"id":"top","name":"Title","type":"shape","from":0,"dur":4,"on":true,"p":{}},
+    {"id":"base","name":"Plate","type":"shape","from":0,"dur":4,"on":true,"p":{}},
+    {"id":"music","name":"Music","type":"audio","from":0,"dur":4,"on":true,"p":{}}
+    ]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    // The layer that composites on top sits on the higher track, drawn above V1.
+    let frame = v4::window(&mut c, 0, 10).unwrap();
+    let labels: Vec<_> = frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(labels, ["V2", "V1", "A1"]);
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    let painted: Vec<_> = (0..scene.total())
+        .filter_map(|i| scene.navigate_first(i))
+        .collect();
+    assert_eq!(
+        painted,
+        [
+            r#"["track","Video",1]"#,
+            r#"["track","Video",0]"#,
+            r#"["track","Audio",0]"#
+        ]
+    );
+    let top = scene.row(r#"["track","Video",1]"#).unwrap();
+    assert!(
+        matches!(&top.content, paint::RowContent::Track { clips } if clips.len() == 1 && clips[0].id == "top")
+    );
+}
+
+#[test]
+fn the_graph_menu_fits_the_curves_shown() {
+    // The menu's rows are checked against the curves the graph shows: Fit
+    // with one curve shown (it was refused, as if none were).
+    let (_actor, mut c) = client();
+    c.model.graph_focus = Some(("a:[]".into(), "opacity".into()));
+    assert_eq!(c.model.graph_series().0.len(), 1);
+    let effects = dispatch(&mut c, json!({"type":"graphMenu","action":"graph.fit"})).unwrap();
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, HostEffect::FitCurves(..))),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn option_disclosure_hides_and_shows_all_layers() {
+    let (_actor, mut c) = client();
+    for open in [true, false, true] {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id("a:[]"),"open":open,"all":true}),
+        )
+        .unwrap();
+        assert!(c.model.reveal.layers.values().all(|d| d.collapsed == !open));
+    }
+}
+#[test]
+fn revealed_properties_can_be_hidden_by_the_twirl() {
+    let (_actor, mut c) = client();
+    c.model
+        .reveal_property('u', false, 0, &Default::default())
+        .unwrap();
+    for open in [false, true, false] {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id("a:[]"),"open":open}),
+        )
+        .unwrap();
+        assert_eq!(c.model.reveal.layers["a:[]"].collapsed, !open);
+    }
+}
+
+#[test]
+fn property_value_typing_updates_selected_keys_with_one_undo() {
+    let (_actor, mut c) = client();
+    let command = pm_kernel::PropertyCommand::Set(
+        pm_kernel::commands::properties::SetProperty::new("a:[]", "opacity", 90., 1.),
+    );
+    block_on(c.dispatch(Plan::edit(vec![command.into()], c.model.index.revision))).unwrap();
+    let ids = c
+        .model
+        .index
+        .channel("a:[]", "opacity")
+        .unwrap()
+        .keys
+        .iter()
+        .map(|k| k.id.clone())
+        .collect();
+    block_on(c.call(SelectionCall::Keys(ids).into())).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"propertyValue","layer":"a:[]","path":"opacity","value":42}),
+    )
+    .unwrap();
+    assert!(
+        c.model
+            .index
+            .channel("a:[]", "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .all(|k| k.value.as_f64() == Some(42.))
+    );
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert_eq!(
+        c.model.index.channel("a:[]", "opacity").unwrap().keys[1]
+            .value
+            .as_f64(),
+        Some(90.)
+    );
+}
+
+#[test]
+fn delete_groups_expanded_property_click_exits_empty_key_mode() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{}}),
+    )
+    .unwrap();
+    c.model.key_selection_active = true;
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a:[]"),"open":true}),
+    )
+    .unwrap();
+    let property = v4::row_id(&RowId::Property {
+        layer_id: "a:[]".into(),
+        channel: "opacity".into(),
+    });
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":property,"modifiers":{}}),
+    )
+    .unwrap();
+    assert!(!c.model.key_selection_active);
+    dispatch(&mut c, json!({"type":"command","command":"delete"})).unwrap();
+    assert!(c.model.index.layer("a:[]").is_none());
+}
+
+#[test]
+/// Tracks mode with a clip's properties revealed: the outline (the header
+/// column) and the painted rows count the same rows in the same order, so a
+/// deep scroll still shows each row's name beside its keys.
+#[test]
+fn tracks_outline_and_painted_rows_agree_with_properties_revealed() {
+    let (_actor, mut c) = client();
+    c.model.toggle_disclosure("a:[]").unwrap();
+    c.model.mode = TimelineMode::Tracks;
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    let outline = v4::project_window(&c.model, 0, 500).unwrap();
+    let ids: Vec<String> = outline["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        outline["window"]["total"].as_u64().unwrap() as usize,
+        scene.total()
+    );
+    let painted: Vec<String> = (0..scene.total())
+        .map(|i| scene.span(i).unwrap().0.id.clone())
+        .collect();
+    assert_eq!(ids, painted);
+}
+
+/// Three overlapping clips. The preferred lane leaves V1 empty.
+fn tracks_client() -> (KernelActor, TimelineClient) {
+    let keyed = |id: &str, name: &str, from: f64| {
+        format!(
+            r##"{{"id":"{id}","name":"{name}","type":"shape","from":{from},"dur":6,"on":true,"p":{{"opacity":{{"v":10,"kf":[{{"i":"original","t":0.5,"v":10,"ei":[1,1],"eo":[0,0]}}]}}}}}}"##
+        )
+    };
+    let value = parse(&format!(
+        r#"{{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{{}},"assets":{{}},"layers":[{},{},{{"id":"c","name":"Upper","type":"shape","from":2,"dur":6,"track":1,"on":true,"p":{{}}}}]}}"#,
+        keyed("a", "Lower", 0.),
+        keyed("b", "Middle", 1.),
+    ))
+    .unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    block_on(kernel.open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let client = TimelineClient::new(kernel, "P", Caller::native()).unwrap();
+    (actor, client)
+}
+fn track_row_id(lane: usize) -> String {
+    json!(["track", "Video", lane]).to_string()
+}
+fn frame_rows(c: &mut TimelineClient) -> Vec<Value> {
+    v4::window(c, 0, 500).unwrap()["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+fn lane_of(c: &TimelineClient, layer: &str) -> usize {
+    tracks::layout(&c.model.index, &c.model.reveal)
+        .item(layer)
+        .unwrap()
+        .lane
+}
+
+#[test]
+fn track_disclosure_hides_and_restores_the_lanes_property_rows() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a"),"open":true}),
+    )
+    .unwrap();
+    let lane = lane_of(&c, "a");
+    let header = track_row_id(lane);
+    let open_rows = frame_rows(&mut c);
+    let header_row = open_rows.iter().find(|r| r["id"] == header).unwrap();
+    assert_eq!(header_row["expanded"], true);
+    assert_eq!(header_row["canOpen"], true);
+    assert!(open_rows.iter().any(|r| r["kind"] == "property"));
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":header,"open":false}),
+    )
+    .unwrap();
+    let closed_rows = frame_rows(&mut c);
+    assert!(closed_rows.iter().all(|r| r["kind"] == "track"));
+    let header_row = closed_rows.iter().find(|r| r["id"] == header).unwrap();
+    assert_eq!(header_row["expanded"], false);
+    assert_eq!(header_row["canOpen"], true);
+    // The painted rows drop the lane's property rows with the outline.
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &tokens, 0.).unwrap();
+    assert_eq!(scene.total(), closed_rows.len());
+    dispatch(&mut c, json!({"type":"disclosure","id":header,"open":true})).unwrap();
+    assert_eq!(frame_rows(&mut c), open_rows);
+}
+
+#[test]
+fn a_track_with_nothing_to_show_draws_no_chevron() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a"),"open":true}),
+    )
+    .unwrap();
+    let a_lane = lane_of(&c, "a");
+    let rows = frame_rows(&mut c);
+    let empty = rows.iter().find(|r| r["id"] == track_row_id(0)).unwrap();
+    assert_eq!(empty["summary"], "");
+    assert_eq!(empty["canOpen"], false);
+    for row in rows.iter().filter(|r| r["kind"] == "track") {
+        let parts: Vec<Value> = serde_json::from_str(row["id"].as_str().unwrap()).unwrap();
+        let lane = parts[2].as_u64().unwrap() as usize;
+        assert_eq!(row["canOpen"], lane == a_lane, "{row:?}");
+    }
+}
+
+#[test]
+fn track_disclosure_persists_in_the_projects_ui_state() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a"),"open":true}),
+    )
+    .unwrap();
+    let lane = lane_of(&c, "a");
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":track_row_id(lane),"open":false}),
+    )
+    .unwrap();
+    let state = c.kernel.state();
+    let stored = state.ui["P"]
+        .timeline
+        .get("nativeModel")
+        .and_then(|v| v.get("trackDisclosure"))
+        .and_then(|v| v.get("C"))
+        .and_then(|v| v.get(&format!("Video:{lane}")))
+        .and_then(pm_model::Value::as_bool);
+    assert_eq!(stored, Some(true));
+    let mut reopened = TimelineClient::new(c.kernel.clone(), "P", Caller::native()).unwrap();
+    let rows = frame_rows(&mut reopened);
+    let header = rows
+        .iter()
+        .find(|r| r["id"] == track_row_id(lane))
+        .expect("the clip's lane header");
+    assert_eq!(header["expanded"], false);
+    assert!(
+        rows.iter()
+            .all(|r| r["kind"] != "property" || r["layer"] != "a")
+    );
+    // A track with the same number in another composition stays open.
+    let mut other = reopened.model.clone();
+    Arc::make_mut(&mut other.index).comp_id = Some("other".into());
+    let frame = v4::project_window(&other, 0, 500).unwrap();
+    let header = frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == track_row_id(lane))
+        .unwrap();
+    assert_eq!(header["expanded"], true);
+}
+
+#[test]
+fn option_track_disclosure_closes_and_opens_every_track() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    for layer in ["a", "b"] {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id(layer),"open":true}),
+        )
+        .unwrap();
+    }
+    let header = track_row_id(lane_of(&c, "a"));
+    let open_rows = frame_rows(&mut c);
+    for layer in ["a", "b"] {
+        assert!(open_rows.iter().any(|row| row["kind"] == "property" && row["layer"] == layer));
+    }
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":header,"open":false,"all":true}),
+    )
+    .unwrap();
+    let rows = frame_rows(&mut c);
+    assert!(rows.iter().all(|r| r["kind"] == "track"));
+    assert!(rows.iter().all(|r| r["expanded"] == false));
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":header,"open":true,"all":true}),
+    )
+    .unwrap();
+    assert_eq!(frame_rows(&mut c), open_rows);
+}
+
+#[test]
+fn three_d_switch_updates_the_native_row_without_revealing_properties() {
+    let (_actor, mut c) = client();
+    let before = v4::project_window(&c.model, 0, 10).unwrap();
+    assert_eq!(before["window"]["rows"][0]["canOpen"], true);
+    assert_eq!(before["window"]["rows"][1]["canOpen"], false);
+    assert_eq!(before["window"]["rows"][0]["canBe3D"], true);
+    assert_eq!(before["window"]["rows"][0]["threeD"], false);
+
+    dispatch(
+        &mut c,
+        json!({"type":"switch","id":id("a:[]"),"name":"threeD"}),
+    )
+    .unwrap();
+    let after = v4::project_window(&c.model, 0, 10).unwrap();
+    assert_eq!(after["window"]["rows"][0]["threeD"], true);
+    assert_eq!(after["window"]["rows"][0]["expanded"], false);
+    assert_eq!(
+        c.model
+            .index
+            .channel("a:[]", "perspective")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(50.)
+    );
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(!c.model.index.layer("a:[]").unwrap().three_d);
+}
+
+#[test]
+fn separate_dimensions_preserves_a_closed_strip() {
+    let (_actor, mut c) = position_client();
+    c.model.toggle_disclosure("p").unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    assert!(!c.model.layer_expanded("p"));
+    assert_eq!(c.model.rows().len(), 1);
+}
+
+#[test]
+fn open_layer_opens_precomp_and_focuses_nested_groups_like_compositions() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = r##"{
+        "id": "p", "name": "Main", "compId": "main", "w": 640, "h": 360, "fps": 30, "dur": 10,
+        "layers": [
+            {"id":"pre","name":"Precomp","type":"precomp","from":0,"dur":5,"on":true,"d":{"comp":"sub","w":640,"h":360},"p":{}},
+            {"id":"g1","name":"Outer","type":"group","from":0,"dur":5,"on":true,"collapsed":true,"d":{},"p":{}},
+            {"id":"g2","name":"Inner","type":"group","group":"g1","from":0,"dur":5,"on":true,"collapsed":true,"d":{},"p":{}},
+            {"id":"child","name":"Leaf","type":"solid","group":"g2","from":0,"dur":5,"on":true,"d":{"w":100,"h":100,"color":"#ff0000"},"p":{}},
+            {"id":"outside","name":"Outside","type":"solid","from":0,"dur":5,"on":true,"d":{"w":100,"h":100,"color":"#00ff00"},"p":{}}
+        ],
+        "assets": {},
+        "comps": {
+            "sub": {"id":"sub","name":"Sub Comp","w":640,"h":360,"fps":30,"dur":5,"layers":[]}
+        }
+    }"##;
+    actor
+        .handle()
+        .open("P", OpenSource::Untitled(parse(project).unwrap()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    c.sync().unwrap();
+
+    // 1. openLayer on a precomp emits OpenComposition("sub").
+    let effects = dispatch(&mut c, json!({"type":"openLayer","id":id("pre")})).unwrap();
+    assert_eq!(effects, vec![HostEffect::OpenComposition("sub".into())]);
+
+    // 2. openLayer on outer group g1 focuses g1 and scopes rows to its children at depth 0.
+    let effects = dispatch(&mut c, json!({"type":"openLayer","id":id("g1")})).unwrap();
+    assert!(effects.is_empty());
+    assert_eq!(c.model.active_focused_group(), Some("g1"));
+    let rows = v4::project_window(&c.model, 0, 20).unwrap();
+    let row_layers: Vec<&str> = rows["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["layer"].as_str().unwrap())
+        .collect();
+    assert_eq!(row_layers, vec!["g2"]);
+    assert_eq!(rows["window"]["rows"][0]["depth"], 0);
+
+    // 3. openLayer on inner group g2 deepens focus; chain is [g1, g2] and rows show child at depth 0.
+    dispatch(&mut c, json!({"type":"openLayer","id":id("g2")})).unwrap();
+    let chain: Vec<&str> = c
+        .model
+        .focused_group_chain()
+        .into_iter()
+        .map(|l| l.id.as_str())
+        .collect();
+    assert_eq!(chain, vec!["g1", "g2"]);
+    let rows = v4::project_window(&c.model, 0, 20).unwrap();
+    let row_layers: Vec<&str> = rows["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["layer"].as_str().unwrap())
+        .collect();
+    assert_eq!(row_layers, vec!["child"]);
+    assert_eq!(rows["window"]["rows"][0]["depth"], 0);
+
+    // 4. Closing group tab g2 returns to g1; clicking root comp tab exits group focus.
+    dispatch(&mut c, json!({"type":"tab","id":"group:g2","close":true})).unwrap();
+    assert_eq!(c.model.active_focused_group(), Some("g1"));
+    dispatch(&mut c, json!({"type":"tab","id":"main","close":false})).unwrap();
+    assert_eq!(c.model.active_focused_group(), None);
+    let rows = v4::project_window(&c.model, 0, 20).unwrap();
+    let row_layers: Vec<&str> = rows["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["layer"].as_str().unwrap())
+        .collect();
+    assert_eq!(row_layers, vec!["pre", "g1", "outside"]);
+}

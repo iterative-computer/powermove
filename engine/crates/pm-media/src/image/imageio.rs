@@ -1,0 +1,1318 @@
+//! ImageIO: HEIF/HEIC, AVIF, animation frames (GIF, APNG, animated WebP and
+//! AVIF, HEIF sequences), and any other format macOS reads.
+//!
+//! Pixels come from the image's data provider as stored (no color
+//! matching) for RGB and gray images at 8, 16, or 32-bit (integer, half, or
+//! float). Images in other color models (CMYK, Lab, indexed) are converted
+//! by ColorSync through their profile into extended linear sRGB in half
+//! float (`IccClass::ConvertedToSrgb`); CMYK without a profile is device
+//! CMYK.
+
+use super::{
+    Animation, ImageBackend, ImageColor, ImageFormat, Rgba, StillImage, icc, orient, pool_rgba,
+};
+use crate::apple::cf::*;
+use crate::error::{MediaError, Result};
+use crate::pool::FramePool;
+use pm_protocol::color::{AlphaMode, Transfer, may_unpremultiply};
+use std::ffi::c_void;
+use std::path::Path;
+
+type CGImageSourceRef = *mut c_void;
+type CGImageRef = *mut c_void;
+type CGColorSpaceRef = *mut c_void;
+type CGContextRef = *mut c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageSourceCreateWithURL(url: CFTypeRef, options: CFDictionaryRef) -> CGImageSourceRef;
+    fn CGImageSourceGetCount(src: CGImageSourceRef) -> usize;
+    fn CGImageSourceCopyPropertiesAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        options: CFDictionaryRef,
+    ) -> CFDictionaryRef;
+    fn CGImageSourceCopyProperties(
+        src: CGImageSourceRef,
+        options: CFDictionaryRef,
+    ) -> CFDictionaryRef;
+    fn CGImageSourceCreateImageAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        options: CFDictionaryRef,
+    ) -> CGImageRef;
+    fn CGImageSourceCreateThumbnailAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        options: CFDictionaryRef,
+    ) -> CGImageRef;
+    fn CGImageSourceGetType(src: CGImageSourceRef) -> CFStringRef;
+    fn CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        kind: CFStringRef,
+    ) -> CFDictionaryRef;
+    static kCGImageSourceDecodeRequest: CFStringRef;
+    static kCGImageSourceDecodeToHDR: CFStringRef;
+    static kCGImageAuxiliaryDataTypeISOGainMap: CFStringRef;
+    static kCGImageAuxiliaryDataTypeHDRGainMap: CFStringRef;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageGetWidth(img: CGImageRef) -> usize;
+    fn CGImageGetHeight(img: CGImageRef) -> usize;
+    fn CGImageGetBitsPerComponent(img: CGImageRef) -> usize;
+    fn CGImageGetBitsPerPixel(img: CGImageRef) -> usize;
+    fn CGImageGetBytesPerRow(img: CGImageRef) -> usize;
+    fn CGImageGetBitmapInfo(img: CGImageRef) -> u32;
+    fn CGImageGetColorSpace(img: CGImageRef) -> CGColorSpaceRef;
+    fn CGImageGetDataProvider(img: CGImageRef) -> *mut c_void;
+    fn CGDataProviderCopyData(provider: *mut c_void) -> CFTypeRef;
+    fn CGColorSpaceGetModel(space: CGColorSpaceRef) -> i32;
+    fn CGColorSpaceCopyICCData(space: CGColorSpaceRef) -> CFTypeRef;
+    fn CGColorSpaceCreateWithName(name: CFStringRef) -> CGColorSpaceRef;
+    fn CGColorSpaceRelease(space: CGColorSpaceRef);
+    fn CGBitmapContextCreate(
+        data: *mut c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: CGColorSpaceRef,
+        bitmap_info: u32,
+    ) -> CGContextRef;
+    fn CGContextDrawImage(ctx: CGContextRef, rect: CGRect, img: CGImageRef);
+    fn CGContextRelease(ctx: CGContextRef);
+    static kCGColorSpaceExtendedLinearSRGB: CFStringRef;
+    fn CGColorSpaceCreateWithICCData(data: CFTypeRef) -> CGColorSpaceRef;
+    fn CGColorSpaceGetNumberOfComponents(space: CGColorSpaceRef) -> usize;
+    fn CGColorSpaceCopyName(space: CGColorSpaceRef) -> CFStringRef;
+    fn CGImageGetContentHeadroom(img: CGImageRef) -> f32;
+    fn CGColorSpaceGetBaseColorSpace(space: CGColorSpaceRef) -> CGColorSpaceRef;
+    fn CGColorSpaceGetColorTableCount(space: CGColorSpaceRef) -> usize;
+    fn CGColorSpaceGetColorTable(space: CGColorSpaceRef, table: *mut u8);
+    fn CGDataProviderCreateWithCFData(data: CFTypeRef) -> *mut c_void;
+    fn CGDataProviderRelease(provider: *mut c_void);
+    fn CGImageCreate(
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bits_per_pixel: usize,
+        bytes_per_row: usize,
+        space: CGColorSpaceRef,
+        bitmap_info: u32,
+        provider: *mut c_void,
+        decode: *const f64,
+        should_interpolate: bool,
+        intent: i32,
+    ) -> CGImageRef;
+    fn CGImageRelease(img: CGImageRef);
+    fn CGImageGetRenderingIntent(img: CGImageRef) -> i32;
+    fn CGContextSetRenderingIntent(ctx: CGContextRef, intent: i32);
+    fn CGContextSetInterpolationQuality(ctx: CGContextRef, quality: i32);
+}
+
+/// `kCGRenderingIntentRelativeColorimetric`.
+const RELATIVE_COLORIMETRIC: i32 = 2;
+/// `kCGInterpolationNone`.
+const INTERPOLATION_NONE: i32 = 1;
+
+/// Converts a still tagged with an ICC profile that is neither equivalent to
+/// sRGB nor Display P3 (Adobe RGB, ProPhoto, camera and printer RGB
+/// profiles, gray gamma 2.2, ...) through ColorSync, relative colorimetric,
+/// into extended linear sRGB in float: values outside 0..1 are kept (no
+/// clip until output, section 9).
+///
+/// `alpha` is how the stored samples are read: the file's alpha mode, or an
+/// Interpret Footage override replacing it. The profile transforms colors,
+/// never alpha, so the color is taken out of its alpha reading first, in the
+/// stored encoding as the source pass does (a matte removed, then
+/// unpremultiplied above
+/// [`UNPREMULTIPLY_ALPHA_FLOOR`](pm_protocol::color::UNPREMULTIPLY_ALPHA_FLOOR); pixels below it are
+/// converted as stored, the way the source pass keeps them), converted as
+/// opaque color, and premultiplied again in linear light. The result is
+/// premultiplied linear light with Rec.709 primaries and no profile;
+/// `Opaque` reads every alpha as 1.
+pub fn convert_to_linear_srgb(
+    still: &StillImage,
+    pool: &FramePool,
+    alpha: AlphaMode,
+) -> Result<StillImage> {
+    let Some(profile) = still.color.icc.as_ref() else {
+        return Err(MediaError::invalid("the still has no ICC profile"));
+    };
+    let f = &still.frame;
+    if f.format.layout != crate::frame::Layout::Rgba {
+        return Err(MediaError::unsupported(
+            "ColorSync conversion of planar stills",
+        ));
+    }
+    let (w, h) = (f.format.width, f.format.height);
+    let stored = rgba_unit(f)?;
+    // The color to convert (straight, stored encoding), the alpha to keep,
+    // and whether the pixel is premultiplied again after conversion.
+    let mut color = Vec::with_capacity(w * h * 4);
+    let mut alphas = Vec::with_capacity(w * h);
+    let mut kept = Vec::with_capacity(w * h);
+    for px in stored.chunks_exact(4) {
+        let a = px[3];
+        let (rgb, a, premultiply) = match alpha {
+            AlphaMode::Opaque => ([px[0], px[1], px[2]], 1.0, false),
+            AlphaMode::Straight => ([px[0], px[1], px[2]], a, true),
+            AlphaMode::Premultiplied | AlphaMode::PremultipliedWithColor { .. } => {
+                let matte = match alpha {
+                    AlphaMode::PremultipliedWithColor { matte } => matte.map(|m| m as f32),
+                    _ => [0.0; 3],
+                };
+                let removed = [0, 1, 2].map(|c| px[c] - (1.0 - a) * matte[c]);
+                if may_unpremultiply(f64::from(a)) {
+                    (removed.map(|v| v / a), a, true)
+                } else {
+                    (removed, a, false)
+                }
+            }
+        };
+        color.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 1.0]);
+        alphas.push(a);
+        kept.push(!premultiply);
+    }
+    unsafe {
+        let icc = Cf::from_create(CFDataCreate(
+            std::ptr::null(),
+            profile.as_ptr(),
+            profile.len() as isize,
+        ))
+        .ok_or_else(|| MediaError::Image("ICC data".into()))?;
+        let space = CGColorSpaceCreateWithICCData(icc.as_ptr());
+        if space.is_null() {
+            return Err(MediaError::Image(
+                "ColorSync cannot use this ICC profile".into(),
+            ));
+        }
+        let comps = CGColorSpaceGetNumberOfComponents(space);
+        // Gray profiles take gray samples; RGB profiles RGB and a skipped
+        // component. Float samples, so unpremultiplied colors keep their
+        // precision.
+        let (data, spp, alpha_info): (Vec<f32>, usize, u32) = match comps {
+            1 => (color.chunks_exact(4).map(|p| p[0]).collect(), 1, 0),
+            3 => (color, 4, NONE_SKIP_LAST),
+            n => {
+                CGColorSpaceRelease(space);
+                return Err(MediaError::unsupported(format!(
+                    "an ICC profile with {n} components on an RGB still"
+                )));
+            }
+        };
+        let bytes = Cf::from_create(CFDataCreate(
+            std::ptr::null(),
+            data.as_ptr().cast(),
+            (data.len() * 4) as isize,
+        ))
+        .ok_or_else(|| MediaError::Image("pixel data".into()))?;
+        let provider = CGDataProviderCreateWithCFData(bytes.as_ptr());
+        let img = CGImageCreate(
+            w,
+            h,
+            32,
+            32 * spp,
+            w * spp * 4,
+            space,
+            alpha_info | FLOAT | ORDER_32_LITTLE,
+            provider,
+            std::ptr::null(),
+            false,
+            RELATIVE_COLORIMETRIC,
+        );
+        CGDataProviderRelease(provider);
+        CGColorSpaceRelease(space);
+        if img.is_null() {
+            return Err(MediaError::Image(
+                "could not describe the still to ColorSync".into(),
+            ));
+        }
+        let mut out = vec![0f32; w * h * 4];
+        let dst = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+        let ctx = CGBitmapContextCreate(
+            out.as_mut_ptr().cast(),
+            w,
+            h,
+            32,
+            w * 16,
+            dst,
+            PREMULTIPLIED_LAST | FLOAT | ORDER_32_LITTLE,
+        );
+        CGColorSpaceRelease(dst);
+        if ctx.is_null() {
+            CGImageRelease(img);
+            return Err(MediaError::Image("could not create a float context".into()));
+        }
+        CGContextSetRenderingIntent(ctx, RELATIVE_COLORIMETRIC);
+        CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                w: w as f64,
+                h: h as f64,
+            },
+            img,
+        );
+        CGContextRelease(ctx);
+        CGImageRelease(img);
+        // The source was opaque: `out` holds straight linear color.
+        for (i, px) in out.chunks_exact_mut(4).enumerate() {
+            let a = alphas[i];
+            if !kept[i] {
+                for v in &mut px[..3] {
+                    *v *= a;
+                }
+            }
+            px[3] = a;
+        }
+        let opaque = matches!(alpha, AlphaMode::Opaque);
+        let frame = pool_rgba(
+            pool,
+            w,
+            h,
+            Rgba::F32(&out),
+            !opaque,
+            32,
+            format!("ColorSync extended linear sRGB from {}", f.format.label),
+        )?;
+        Ok(StillImage {
+            frame,
+            format: still.format,
+            backend: still.backend,
+            bit_depth: 32,
+            float: true,
+            color: ImageColor::plain(
+                Transfer::Linear,
+                if opaque {
+                    AlphaMode::Opaque
+                } else {
+                    AlphaMode::Premultiplied
+                },
+            ),
+            orientation: still.orientation,
+            oriented: still.oriented,
+        })
+    }
+}
+
+/// The samples of a packed RGBA frame as 0..1 RGBA (integers over their
+/// maximum code; floats as stored).
+pub fn rgba_unit(f: &crate::frame::DecodedFrame) -> Result<Vec<f32>> {
+    use crate::frame::PlaneFormat;
+    let (w, h) = (f.format.width, f.format.height);
+    let format = f.format.planes[0].format;
+    let max = ((1u32 << f.format.bits.clamp(1, 16)) - 1) as f32;
+    f.with_planes(|pl| {
+        let p = &pl[0];
+        let mut out = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            // SAFETY: the plane holds `height` rows of `stride` bytes.
+            let row = |n: usize| unsafe { std::slice::from_raw_parts(p.ptr.add(y * p.stride), n) };
+            match format {
+                PlaneFormat::Rgba8 => out.extend(row(w * 4).iter().map(|&v| f32::from(v) / max)),
+                PlaneFormat::Rgba16 => out.extend(
+                    row(w * 8)
+                        .chunks_exact(2)
+                        .map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / max),
+                ),
+                PlaneFormat::Rgba16Float => out.extend(
+                    row(w * 8)
+                        .chunks_exact(2)
+                        .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()),
+                ),
+                _ => out.extend(
+                    row(w * 16)
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                ),
+            }
+        }
+        out
+    })
+}
+
+const MODEL_MONOCHROME: i32 = 0;
+const MODEL_RGB: i32 = 1;
+const MODEL_CMYK: i32 = 2;
+const MODEL_INDEXED: i32 = 5;
+const ALPHA_MASK: u32 = 0x1F;
+const FLOAT: u32 = 1 << 8;
+const ORDER_MASK: u32 = 0x7000;
+const ORDER_16_LITTLE: u32 = 1 << 12;
+const ORDER_32_LITTLE: u32 = 2 << 12;
+const PREMULTIPLIED_LAST: u32 = 1;
+const ALPHA_LAST: u32 = 3;
+const ALPHA_FIRST: u32 = 4;
+/// `kCGImageAlphaNoneSkipLast`.
+const NONE_SKIP_LAST: u32 = 5;
+
+fn source(path: &Path) -> Result<Cf> {
+    let url = cf_file_url(path).ok_or_else(|| MediaError::invalid("path"))?;
+    let src =
+        unsafe { Cf::from_create(CGImageSourceCreateWithURL(url.as_ptr(), std::ptr::null())) };
+    src.ok_or_else(|| MediaError::Image(format!("ImageIO cannot open {}", path.display())))
+}
+
+/// The pixel size an image is drawn at (after its orientation), read from
+/// its header without decoding it.
+pub fn pixel_size(path: &Path) -> Result<(u32, u32)> {
+    let src = source(path)?;
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+            src.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+        ))
+    }
+    .ok_or_else(|| MediaError::Image(format!("ImageIO cannot read {}", path.display())))?;
+    let number = |key| unsafe { cf_i64(cf_dict_get(props.as_ptr(), key)) };
+    let (Some(w), Some(h)) = (number("PixelWidth"), number("PixelHeight")) else {
+        return Err(MediaError::Image(format!(
+            "no pixel size in {}",
+            path.display()
+        )));
+    };
+    let (w, h) = (u32::try_from(w).unwrap_or(0), u32::try_from(h).unwrap_or(0));
+    // Orientations 5–8 turn the picture a quarter.
+    Ok(match number("Orientation") {
+        Some(5..=8) => (h, w),
+        _ => (w, h),
+    })
+}
+
+/// The bytes a whole decode of the image at `path` holds at most, from its
+/// header (pixel size and bits per sample: 8-bit RGBA, 16-bit or half RGBA,
+/// float RGBA), without decoding it.
+pub fn decoded_bytes_estimate(path: &Path) -> Result<usize> {
+    let (w, h) = pixel_size(path)?;
+    let src = source(path)?;
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+            src.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+        ))
+    }
+    .ok_or_else(|| MediaError::Image(format!("ImageIO cannot read {}", path.display())))?;
+    let depth = unsafe { cf_i64(cf_dict_get(props.as_ptr(), "Depth")) }.unwrap_or(32);
+    let sample = match depth {
+        ..=8 => 1,
+        9..=16 => 2,
+        _ => 4,
+    };
+    Ok(w as usize * h as usize * 4 * sample)
+}
+
+/// [`decoded_bytes_estimate`] of the preview [`read_preview`] makes at
+/// `edge` (its longest side), never more than the whole image's.
+pub fn preview_bytes_estimate(path: &Path, edge: u32) -> Result<usize> {
+    let whole = decoded_bytes_estimate(path)?;
+    let (w, h) = pixel_size(path)?;
+    let ratio = (f64::from(edge) / f64::from(w.max(h).max(1))).min(1.0);
+    Ok((whole as f64 * ratio * ratio).ceil() as usize)
+}
+
+/// Frame count and delays; None for a single image.
+pub fn animation(path: &Path) -> Result<Option<Animation>> {
+    let src = source(path)?;
+    let n = unsafe { CGImageSourceGetCount(src.as_mut_ptr()) };
+    if n <= 1 {
+        return Ok(None);
+    }
+    let mut delays = Vec::with_capacity(n);
+    for i in 0..n {
+        let props = unsafe {
+            Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+                src.as_mut_ptr(),
+                i,
+                std::ptr::null(),
+            ))
+        };
+        let delay = props
+            .as_ref()
+            .and_then(|p| frame_delay(p.as_ptr()))
+            .unwrap_or(0.1);
+        delays.push(delay);
+    }
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyProperties(
+            src.as_mut_ptr(),
+            std::ptr::null(),
+        ))
+    };
+    let loop_count = props.as_ref().and_then(|p| {
+        ["{GIF}", "{PNG}", "{WebP}", "{HEICS}", "{AVIS}"]
+            .iter()
+            .find_map(|k| unsafe {
+                let d = cf_dict_get(p.as_ptr(), k);
+                let v = cf_dict_get(d, "LoopCount");
+                cf_i64(v).map(|v| v as u32)
+            })
+    });
+    Ok(Some(Animation {
+        frames: n,
+        delays,
+        loop_count,
+    }))
+}
+
+/// Unclamped delay where the format has one, else the clamped delay.
+fn frame_delay(props: CFTypeRef) -> Option<f64> {
+    for (dict, keys) in [
+        ("{GIF}", ["UnclampedDelayTime", "DelayTime"]),
+        ("{PNG}", ["UnclampedDelayTime", "DelayTime"]),
+        ("{WebP}", ["UnclampedDelayTime", "DelayTime"]),
+        ("{HEICS}", ["UnclampedDelayTime", "DelayTime"]),
+        ("{AVIS}", ["UnclampedDelayTime", "DelayTime"]),
+    ] {
+        let d = unsafe { cf_dict_get(props, dict) };
+        if d.is_null() {
+            continue;
+        }
+        for k in keys {
+            let v = unsafe { cf_dict_get(d, k) };
+            if !v.is_null() {
+                let mut f = 0f64;
+                if unsafe {
+                    CFNumberGetValue(
+                        v,
+                        13, /* kCFNumberDoubleType */
+                        &mut f as *mut f64 as *mut c_void,
+                    )
+                } != 0
+                    && f > 0.0
+                {
+                    return Some(f);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn read_frame(
+    path: &Path,
+    index: usize,
+    pool: &FramePool,
+    format: ImageFormat,
+) -> Result<StillImage> {
+    read_frame_inner(path, index, pool, format, None, true)
+}
+
+/// [`read_frame`] of a still's first frame, reading a gain-map still as
+/// HDR (`hdr`) or as its SDR base.
+pub fn read_still(
+    path: &Path,
+    pool: &FramePool,
+    format: ImageFormat,
+    hdr: bool,
+) -> Result<StillImage> {
+    read_frame_inner(path, 0, pool, format, None, hdr)
+}
+
+/// Whether the still carries a gain map ImageIO applies (ISO 21496-1, or
+/// Apple's HDR gain map).
+pub fn has_gain_map(path: &Path) -> Result<bool> {
+    let src = source(path)?;
+    Ok(unsafe { gain_map(src.as_mut_ptr()) })
+}
+
+/// # Safety
+/// `src` is a live image source.
+unsafe fn gain_map(src: CGImageSourceRef) -> bool {
+    unsafe {
+        [
+            kCGImageAuxiliaryDataTypeISOGainMap,
+            kCGImageAuxiliaryDataTypeHDRGainMap,
+        ]
+        .into_iter()
+        .any(|kind| {
+            Cf::from_create(CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kind)).is_some()
+        })
+    }
+}
+
+/// The H.273 primaries and transfer of a BT.2100 PQ or HLG color space
+/// (ImageIO's reading of an HDR HEIC, and of a gain-map still decoded as
+/// HDR), by its name.
+fn hdr_signal(space: CGColorSpaceRef) -> Option<(u8, u8)> {
+    if space.is_null() {
+        return None;
+    }
+    let name = unsafe { Cf::from_create(CGColorSpaceCopyName(space)) }?;
+    let name = unsafe { cf_string_value(name.as_ptr()) }?;
+    let primaries = if name.contains("ITUR_709") {
+        1
+    } else if name.contains("ITUR_2100") || name.contains("ITUR_2020") {
+        9
+    } else if name.contains("DisplayP3") {
+        12
+    } else {
+        return None;
+    };
+    let transfer = if name.contains("_PQ") {
+        16
+    } else if name.contains("_HLG") {
+        18
+    } else {
+        return None;
+    };
+    Some((primaries, transfer))
+}
+
+/// The 16-bit RGBA codes of `img` in its own color space (no conversion);
+/// `None` when any pixel is not opaque.
+///
+/// # Safety
+/// `img` is a live image and `space` its color space.
+unsafe fn draw_codes(
+    img: CGImageRef,
+    space: CGColorSpaceRef,
+    w: usize,
+    h: usize,
+) -> Result<Option<Vec<u16>>> {
+    let mut buf = vec![0u16; w * h * 4];
+    unsafe {
+        let ctx = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            w,
+            h,
+            16,
+            w * 8,
+            space,
+            PREMULTIPLIED_LAST | ORDER_16_LITTLE,
+        );
+        if ctx.is_null() {
+            return Err(MediaError::Image(
+                "could not create a 16-bit context".into(),
+            ));
+        }
+        CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                w: w as f64,
+                h: h as f64,
+            },
+            img,
+        );
+        CGContextRelease(ctx);
+    }
+    Ok(buf
+        .chunks_exact(4)
+        .all(|px| px[3] == u16::MAX)
+        .then_some(buf))
+}
+
+/// Decode a viewer-sized image without allocating the native-resolution
+/// bitmap. Exact frames continue to use the original native-depth reader.
+pub fn read_preview(path: &Path, pool: &FramePool, max_edge: u32) -> Result<StillImage> {
+    read_frame_inner(
+        path,
+        0,
+        pool,
+        ImageFormat::Other,
+        Some(max_edge.max(1)),
+        false,
+    )
+}
+
+fn read_frame_inner(
+    path: &Path,
+    index: usize,
+    pool: &FramePool,
+    format: ImageFormat,
+    max_edge: Option<u32>,
+    hdr: bool,
+) -> Result<StillImage> {
+    let src = source(path)?;
+    // A gain map is applied to the still itself (not its animation frames or
+    // previews), at the headroom the map describes, unless its SDR base is
+    // asked for.
+    let gain_map = index == 0 && max_edge.is_none() && unsafe { gain_map(src.as_mut_ptr()) };
+    let count = unsafe { CGImageSourceGetCount(src.as_mut_ptr()) };
+    if index >= count {
+        return Err(MediaError::invalid(format!("frame {index} of {count}")));
+    }
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+            src.as_mut_ptr(),
+            index,
+            std::ptr::null(),
+        ))
+    };
+    let orientation = props
+        .as_ref()
+        .and_then(|p| unsafe { cf_i64(cf_dict_get(p.as_ptr(), "Orientation")) })
+        .filter(|o| (1..=8).contains(o))
+        .unwrap_or(1) as u8;
+    let img = if let Some(edge) = max_edge {
+        let always = cf_str("kCGImageSourceCreateThumbnailFromImageAlways");
+        let max = cf_str("kCGImageSourceThumbnailMaxPixelSize");
+        let cache = cf_str("kCGImageSourceShouldCache");
+        let size = cf_i32(edge.min(i32::MAX as u32) as i32);
+        let options = cf_dict(&[
+            (always.as_ptr(), cf_bool(true)),
+            (max.as_ptr(), size.as_ptr()),
+            (cache.as_ptr(), cf_bool(false)),
+        ]);
+        unsafe {
+            Cf::from_create(CGImageSourceCreateThumbnailAtIndex(
+                src.as_mut_ptr(),
+                index,
+                options.as_ptr(),
+            ))
+        }
+    } else {
+        let request =
+            unsafe { cf_dict(&[(kCGImageSourceDecodeRequest, kCGImageSourceDecodeToHDR)]) };
+        let options = if gain_map && hdr {
+            request.as_ptr()
+        } else {
+            std::ptr::null()
+        };
+        unsafe {
+            Cf::from_create(CGImageSourceCreateImageAtIndex(
+                src.as_mut_ptr(),
+                index,
+                options,
+            ))
+        }
+    }
+    .ok_or_else(|| MediaError::Image(format!("ImageIO could not decode frame {index}")))?;
+    let uti =
+        unsafe { cf_string_value(CGImageSourceGetType(src.as_mut_ptr())) }.unwrap_or_default();
+    let p = img.as_mut_ptr();
+    let (w, h) = unsafe { (CGImageGetWidth(p), CGImageGetHeight(p)) };
+    let bpc = unsafe { CGImageGetBitsPerComponent(p) };
+    let bpp = unsafe { CGImageGetBitsPerPixel(p) };
+    let row = unsafe { CGImageGetBytesPerRow(p) };
+    let info = unsafe { CGImageGetBitmapInfo(p) };
+    let space = unsafe { CGImageGetColorSpace(p) };
+    let model = if space.is_null() {
+        -1
+    } else {
+        unsafe { CGColorSpaceGetModel(space) }
+    };
+    let icc_data = if space.is_null() {
+        None
+    } else {
+        unsafe { Cf::from_create(CGColorSpaceCopyICCData(space)) }
+    };
+    let icc_bytes = icc_data
+        .as_ref()
+        .and_then(|d| unsafe { cf_data_bytes(d.as_ptr()) });
+    let alpha_info = info & ALPHA_MASK;
+    let comps = bpp / bpc.max(1);
+    let direct = (model == MODEL_RGB && (comps == 3 || comps == 4))
+        || (model == MODEL_MONOCHROME && (comps == 1 || comps == 2));
+    let label = format!("ImageIO {uti} {bpc}-bit");
+    // BT.2100 PQ and HLG (an HDR HEIC; a gain-map still read as HDR, in
+    // BT.709 PQ with SDR white at 203 cd/m²): the codes as stored, described
+    // by H.273, so the still is read as video of that signal is. Opaque
+    // only: a partly transparent one is converted as other models are.
+    let coded = match hdr_signal(space).filter(|_| model == MODEL_RGB) {
+        Some(signal) => unsafe { draw_codes(p, space, w, h)? }.map(|codes| (signal, codes)),
+        None => None,
+    };
+    let signal = coded.as_ref().map(|c| c.0);
+    let (rgba, bits, float, premultiplied, icc_class, icc) = if let Some((_, codes)) = coded {
+        (Unpacked::U16(codes), 16, false, false, None, None)
+    } else if direct && matches!(bpc, 8 | 16 | 32) {
+        let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
+            .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
+        let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
+            .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
+        let unpacked = unpack(&bytes, w, h, row, bpc, comps, info)?;
+        let premul = matches!(alpha_info, 1 | 2);
+        let class = icc_bytes.as_deref().map(icc::classify);
+        (
+            unpacked,
+            if bpc == 32 { 32 } else { bpc as u8 },
+            info & FLOAT != 0,
+            premul,
+            class,
+            icc_bytes,
+        )
+    } else if model == MODEL_INDEXED
+        && matches!(bpc, 1 | 2 | 4 | 8)
+        && bpp == bpc
+        && !embedded_profile(path, format)?
+    {
+        // Untagged RGB palette entries are sRGB samples. Drawing their
+        // device RGB base through ColorSync would silently assign a profile.
+        // TIFF's 16-bit map is read from the file; other formats' (TGA's)
+        // entries from the image's color table.
+        let table = if format == ImageFormat::Tiff {
+            super::raster::tiff_palette(path)?
+                .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?
+        } else {
+            unsafe { color_table(space) }
+                .ok_or_else(|| MediaError::Image("missing RGB palette".into()))?
+        };
+        let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
+            .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
+        let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
+            .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
+        (
+            Unpacked::U16(indexed_rgb(&bytes, w, h, row, bpc, &table)?),
+            16,
+            false,
+            false,
+            None,
+            None,
+        )
+    } else if model == MODEL_CMYK && !embedded_profile(path, format)? {
+        // CMYK without a profile has no colorimetry: device CMYK, read as
+        // the shipped converter reads it (R = (1 − C)(1 − K), likewise G and
+        // B), in float, into 16-bit device RGB read as sRGB.
+        let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
+            .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
+        let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
+            .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
+        let rgba = device_cmyk(&bytes, w, h, row, bpc, comps, info)?;
+        (Unpacked::U16(rgba), 16, false, false, None, None)
+    } else {
+        // Other color models (CMYK, Lab, indexed) and packings: ColorSync
+        // converts them through the file's profile (ICC.1, relative
+        // colorimetric unless the image says otherwise) into extended
+        // linear sRGB in half float, so nothing is clipped before output.
+        // The samples are linear sRGB from here on and the profile is kept
+        // for the facts only (`IccClass::ConvertedToSrgb`).
+        //
+        // A bitmap context only holds premultiplied alpha, and ColorSync
+        // converts a straight-alpha image premultiplied, so the color under
+        // partial alpha would not be the file's color converted. Straight
+        // alpha is therefore split off: the color converts as an opaque
+        // image and the file's alpha is attached unchanged.
+        let straight = matches!(alpha_info, ALPHA_LAST | ALPHA_FIRST);
+        let split = if straight {
+            unsafe { split_straight_alpha(p, space, w, h, bpc, comps, row, info) }
+        } else {
+            None
+        };
+        let (buf, straight) = match split {
+            Some((opaque, alpha)) => {
+                let mut buf = unsafe { draw_linear(opaque.as_mut_ptr(), w, h)? };
+                for (px, a) in buf.chunks_exact_mut(4).zip(alpha) {
+                    px[3] = f32::from(a) / 65535.0;
+                }
+                (buf, true)
+            }
+            None => (unsafe { draw_linear(p, w, h)? }, false),
+        };
+        let half: Vec<u16> = buf
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        (
+            Unpacked::U16(half),
+            16,
+            true,
+            !straight,
+            Some(icc::IccClass::ConvertedToSrgb),
+            icc_bytes,
+        )
+    };
+    let frame = match rgba {
+        Unpacked::U8(v) => {
+            let (v, ow, oh) = orient(&v, w, h, 4, orientation);
+            pool_rgba(pool, ow, oh, Rgba::U8(&v), premultiplied, 8, label)?
+        }
+        Unpacked::U16(v) => {
+            let (v, ow, oh) = orient(&v, w, h, 4, orientation);
+            pool_rgba(
+                pool,
+                ow,
+                oh,
+                if float { Rgba::F16(&v) } else { Rgba::U16(&v) },
+                premultiplied,
+                16,
+                label,
+            )?
+        }
+        Unpacked::F32(v) => {
+            let (v, ow, oh) = orient(&v, w, h, 4, orientation);
+            pool_rgba(pool, ow, oh, Rgba::F32(&v), premultiplied, 32, label)?
+        }
+    };
+    let has_alpha = !matches!(alpha_info, 0 | 5 | 6);
+    Ok(StillImage {
+        frame,
+        format,
+        backend: ImageBackend::ImageIo,
+        bit_depth: bits,
+        float,
+        color: ImageColor {
+            icc_bytes: icc.as_ref().map(|d| d.len()),
+            icc,
+            icc_class,
+            cicp: signal.map(|(primaries, transfer)| [primaries, transfer, 0, 1]),
+            // A PQ still's content peak: the headroom over SDR white the
+            // image states (a gain map's), at 203 cd/m².
+            mastering_peak: signal
+                .filter(|s| s.1 == 16)
+                .map(|_| f64::from(unsafe { CGImageGetContentHeadroom(p) }))
+                .filter(|h| *h > 1.0)
+                .map(|h| h * 203.0),
+            gain_map,
+            ..ImageColor::plain(
+                if float {
+                    Transfer::Linear
+                } else {
+                    Transfer::DisplayE
+                },
+                match (has_alpha, premultiplied) {
+                    (false, _) => AlphaMode::Opaque,
+                    (true, true) => AlphaMode::Premultiplied,
+                    (true, false) => AlphaMode::Straight,
+                },
+            )
+        },
+        orientation,
+        oriented: true,
+    })
+}
+
+/// Draws `img` into premultiplied extended linear sRGB (f32 RGBA) through
+/// ColorSync.
+unsafe fn draw_linear(img: CGImageRef, w: usize, h: usize) -> Result<Vec<f32>> {
+    let mut buf = vec![0f32; w * h * 4];
+    unsafe {
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+        let ctx = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            w,
+            h,
+            32,
+            w * 16,
+            space,
+            PREMULTIPLIED_LAST | FLOAT | ORDER_32_LITTLE,
+        );
+        CGColorSpaceRelease(space);
+        if ctx.is_null() {
+            return Err(MediaError::Image("could not create a float context".into()));
+        }
+        CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                w: w as f64,
+                h: h as f64,
+            },
+            img,
+        );
+        CGContextRelease(ctx);
+    }
+    Ok(buf)
+}
+
+/// Whether the file embeds an ICC profile ImageIO converts from (TIFF tag
+/// 34675; TGA has no profile; other containers' CMYK readings always carry
+/// their own).
+fn embedded_profile(path: &Path, format: ImageFormat) -> Result<bool> {
+    Ok(match format {
+        ImageFormat::Tiff => super::raster::tiff_icc(path)?.is_some(),
+        ImageFormat::Tga => false,
+        _ => true,
+    })
+}
+
+/// The RGB entries of an indexed color space, widened to 16 bits; `None`
+/// when its base is not RGB or it has no table.
+///
+/// # Safety
+/// `space` is an indexed color space (or null).
+unsafe fn color_table(space: CGColorSpaceRef) -> Option<Vec<[u16; 3]>> {
+    if space.is_null() {
+        return None;
+    }
+    unsafe {
+        let base = CGColorSpaceGetBaseColorSpace(space);
+        if base.is_null() || CGColorSpaceGetNumberOfComponents(base) != 3 {
+            return None;
+        }
+        let count = CGColorSpaceGetColorTableCount(space);
+        if count == 0 {
+            return None;
+        }
+        let mut table = vec![0u8; count * 3];
+        CGColorSpaceGetColorTable(space, table.as_mut_ptr());
+        Some(
+            table
+                .chunks_exact(3)
+                .map(|e| [e[0], e[1], e[2]].map(|v| u16::from(v) * 257))
+                .collect(),
+        )
+    }
+}
+
+/// Expands MSB-first packed indices without changing their RGB entries.
+fn indexed_rgb(
+    bytes: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    bits: usize,
+    table: &[[u16; 3]],
+) -> Result<Vec<u16>> {
+    if !matches!(bits, 1 | 2 | 4 | 8)
+        || stride < (w * bits).div_ceil(8)
+        || bytes.len() < stride * h
+        || table.is_empty()
+    {
+        return Err(MediaError::Image("invalid RGB palette layout".into()));
+    }
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let bit = x * bits;
+            let index = usize::from(
+                (bytes[y * stride + bit / 8] >> (8 - bits - bit % 8)) & ((1u16 << bits) - 1) as u8,
+            );
+            let rgb = table
+                .get(index)
+                .ok_or_else(|| MediaError::Image("palette index outside its table".into()))?;
+            rgba.extend_from_slice(rgb);
+            rgba.push(u16::MAX);
+        }
+    }
+    Ok(rgba)
+}
+
+/// Device CMYK (ink amounts, 8 or 16-bit, with or without a trailing alpha)
+/// to 16-bit RGBA: (1 − C)(1 − K) per channel. Alpha is kept straight.
+fn device_cmyk(
+    b: &[u8],
+    w: usize,
+    h: usize,
+    row: usize,
+    bpc: usize,
+    comps: usize,
+    info: u32,
+) -> Result<Vec<u16>> {
+    if !matches!(bpc, 8 | 16) || !(4..=5).contains(&comps) || info & FLOAT != 0 {
+        return Err(MediaError::unsupported("this CMYK sample layout"));
+    }
+    let little = info & ORDER_MASK == ORDER_16_LITTLE;
+    let bytes = bpc / 8;
+    if b.len() < row * h.saturating_sub(1) + w * comps * bytes {
+        return Err(MediaError::Image("short pixel data".into()));
+    }
+    let max = ((1u32 << bpc) - 1) as f64;
+    let first = info & ALPHA_MASK == ALPHA_FIRST;
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let read = |c: usize| {
+                let o = y * row + (x * comps + c) * bytes;
+                f64::from(match (bytes, little) {
+                    (1, _) => u16::from(b[o]),
+                    (_, false) => u16::from_be_bytes([b[o], b[o + 1]]),
+                    (_, true) => u16::from_le_bytes([b[o], b[o + 1]]),
+                }) / max
+            };
+            let at = usize::from(comps == 5 && first);
+            let k = 1.0 - read(at + 3);
+            let v = |c: usize| ((1.0 - read(at + c)) * k * 65535.0).round() as u16;
+            let a = if comps == 5 {
+                (read(if first { 0 } else { 4 }) * 65535.0).round() as u16
+            } else {
+                u16::MAX
+            };
+            out.extend_from_slice(&[v(0), v(1), v(2), a]);
+        }
+    }
+    Ok(out)
+}
+
+/// An owned `CGImage`, released on drop.
+struct OwnedImage(CGImageRef);
+
+impl OwnedImage {
+    fn as_mut_ptr(&self) -> CGImageRef {
+        self.0
+    }
+}
+
+impl Drop for OwnedImage {
+    fn drop(&mut self) {
+        unsafe { CGImageRelease(self.0) }
+    }
+}
+
+/// Splits an integer image with straight alpha (8 or 16 bits, alpha first
+/// or last, big-endian or 16-bit little-endian components) into an opaque
+/// image of its color in the same color space and its alpha as 16-bit
+/// codes. None for packings it does not read.
+#[allow(clippy::too_many_arguments)]
+unsafe fn split_straight_alpha(
+    img: CGImageRef,
+    space: CGColorSpaceRef,
+    w: usize,
+    h: usize,
+    bpc: usize,
+    comps: usize,
+    row: usize,
+    info: u32,
+) -> Option<(OwnedImage, Vec<u16>)> {
+    const ORDER_16_BIG: u32 = 3 << 12;
+    const ORDER_32_BIG: u32 = 4 << 12;
+    if space.is_null() || info & FLOAT != 0 {
+        return None;
+    }
+    let n = unsafe { CGColorSpaceGetNumberOfComponents(space) };
+    let order = info & ORDER_MASK;
+    let little = match (bpc, order) {
+        (8, 0) | (8, ORDER_32_BIG) | (16, 0) | (16, ORDER_16_BIG) => false,
+        (16, ORDER_16_LITTLE) => true,
+        _ => return None,
+    };
+    if comps != n + 1 {
+        return None;
+    }
+    let first = info & ALPHA_MASK == ALPHA_FIRST;
+    let bytes_per = bpc / 8;
+    let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(img))) }?;
+    let bytes = unsafe { cf_data_bytes(data.as_ptr()) }?;
+    if bytes.len() < row * (h - 1) + w * comps * bytes_per {
+        return None;
+    }
+    let mut color = Vec::with_capacity(w * h * n * bytes_per);
+    let mut alpha = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for px in bytes[y * row..y * row + w * comps * bytes_per].chunks_exact(comps * bytes_per) {
+            let (a, c) = if first {
+                px.split_at(bytes_per)
+            } else {
+                let (c, a) = px.split_at(n * bytes_per);
+                (a, c)
+            };
+            color.extend_from_slice(c);
+            alpha.push(match (bytes_per, little) {
+                (1, _) => u16::from(a[0]) * 257,
+                (_, false) => u16::from_be_bytes([a[0], a[1]]),
+                (_, true) => u16::from_le_bytes([a[0], a[1]]),
+            });
+        }
+    }
+    let cf = unsafe {
+        Cf::from_create(CFDataCreate(
+            std::ptr::null(),
+            color.as_ptr(),
+            color.len() as isize,
+        ))
+    }?;
+    unsafe {
+        let provider = CGDataProviderCreateWithCFData(cf.as_ptr());
+        let opaque = CGImageCreate(
+            w,
+            h,
+            bpc,
+            bpc * n,
+            w * n * bytes_per,
+            space,
+            order,
+            provider,
+            std::ptr::null(),
+            false,
+            // The file's intent, as drawing the image itself would use.
+            CGImageGetRenderingIntent(img),
+        );
+        CGDataProviderRelease(provider);
+        (!opaque.is_null()).then(|| (OwnedImage(opaque), alpha))
+    }
+}
+
+enum Unpacked {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    F32(Vec<f32>),
+}
+
+/// Raw provider bytes → packed RGBA in R, G, B, A order.
+fn unpack(
+    b: &[u8],
+    w: usize,
+    h: usize,
+    row: usize,
+    bpc: usize,
+    comps: usize,
+    info: u32,
+) -> Result<Unpacked> {
+    let alpha = info & ALPHA_MASK;
+    // Where alpha (or padding) sits: first (ARGB/XRGB) or last (RGBA/RGBX).
+    let alpha_first = matches!(alpha, 2 | 4 | 6);
+    let has_slot = comps == 4 || comps == 2;
+    let little = matches!(info & ORDER_MASK, ORDER_16_LITTLE | ORDER_32_LITTLE);
+    let order32_little = info & ORDER_MASK == ORDER_32_LITTLE;
+    let opaque = matches!(alpha, 0 | 5 | 6);
+    if b.len() < row * (h.saturating_sub(1)) + w * comps * bpc / 8 {
+        return Err(MediaError::Image("short pixel data".into()));
+    }
+    let read = |x: usize, y: usize, c: usize| -> f64 {
+        let o = y * row + (x * comps + c) * bpc / 8;
+        match bpc {
+            8 => {
+                // 32-bit little-endian byte order reverses the four bytes of a pixel (BGRA).
+                let c = if order32_little && comps == 4 {
+                    3 - c
+                } else {
+                    c
+                };
+                b[y * row + x * comps + c] as f64
+            }
+            16 => {
+                let v = [b[o], b[o + 1]];
+                (if little {
+                    u16::from_le_bytes(v)
+                } else {
+                    u16::from_be_bytes(v)
+                }) as f64
+            }
+            _ => {
+                let v = [b[o], b[o + 1], b[o + 2], b[o + 3]];
+                (if little {
+                    f32::from_le_bytes(v)
+                } else {
+                    f32::from_be_bytes(v)
+                }) as f64
+            }
+        }
+    };
+    // Opaque alpha: the maximum code, or 1.0 (as a half float's bit pattern
+    // for 16-bit float images, whose samples are kept as bit patterns).
+    let max = match (bpc, info & FLOAT != 0) {
+        (8, _) => 255.0,
+        (16, false) => 65535.0,
+        (16, true) => 15360.0,
+        _ => 1.0,
+    };
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let (color_off, alpha_c) = match (has_slot, alpha_first) {
+                (true, true) => (1, Some(0)),
+                (true, false) => (0, Some(comps - 1)),
+                _ => (0, None),
+            };
+            let color: [f64; 3] = if comps <= 2 {
+                let g = read(x, y, color_off);
+                [g, g, g]
+            } else {
+                [
+                    read(x, y, color_off),
+                    read(x, y, color_off + 1),
+                    read(x, y, color_off + 2),
+                ]
+            };
+            let a = match alpha_c {
+                Some(c) if !opaque => read(x, y, c),
+                _ => max,
+            };
+            out.extend_from_slice(&[color[0], color[1], color[2], a]);
+        }
+    }
+    Ok(match (bpc, info & FLOAT != 0) {
+        (8, _) => Unpacked::U8(out.into_iter().map(|v| v as u8).collect()),
+        // Half floats keep their bit patterns.
+        (16, _) => Unpacked::U16(out.into_iter().map(|v| v as u16).collect()),
+        _ => Unpacked::F32(out.into_iter().map(|v| v as f32).collect()),
+    })
+}
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+
+    #[test]
+    fn unprofiled_tiff_palette_entries_are_not_color_matched() {
+        // One index into a 16-bit TIFF RGB color table, independently authored.
+        let tags = 9u32;
+        let palette_at = 8 + 2 + tags * 12 + 4;
+        let pixel_at = palette_at + 3 * 256 * 2;
+        let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&(tags as u16).to_le_bytes());
+        for (tag, ty, count, value) in [
+            (256u16, 4u16, 1u32, 1u32),
+            (257, 4, 1, 1),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3),
+            (273, 4, 1, pixel_at),
+            (277, 3, 1, 1),
+            (279, 4, 1, 1),
+            (320, 3, 768, palette_at),
+        ] {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&ty.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for code in [36u16, 72, 252] {
+            bytes.extend_from_slice(&(code * 257).to_le_bytes());
+            bytes.extend_from_slice(&[0; 255 * 2]);
+        }
+        bytes.push(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("palette.tiff");
+        std::fs::write(&path, bytes).unwrap();
+        let still = read_frame(&path, 0, &FramePool::new(0), ImageFormat::Tiff).unwrap();
+        assert_eq!(still.color.icc_class, None);
+        assert_eq!(still.color.transfer, Transfer::DisplayE);
+        let rgba = rgba_unit(&still.frame).unwrap();
+        for (actual, code) in rgba.iter().zip([36.0, 72.0, 252.0, 255.0]) {
+            assert!((actual * 255.0 - code).abs() < 0.01, "{rgba:?}");
+        }
+    }
+
+    #[test]
+    fn packed_palette_indices_preserve_entries_and_validate_bounds() {
+        let table = [[65535, 0, 0], [0, 65535, 0], [0, 0, 65535], [65535; 3]];
+        assert_eq!(
+            indexed_rgb(&[0b00011011, 0], 4, 1, 2, 2, &table).unwrap(),
+            [
+                65535, 0, 0, 65535, 0, 65535, 0, 65535, 0, 0, 65535, 65535, 65535, 65535, 65535,
+                65535
+            ]
+        );
+        assert!(indexed_rgb(&[3], 1, 1, 1, 8, &table[..3]).is_err());
+        assert!(indexed_rgb(&[], 4, 1, 1, 2, &table).is_err());
+    }
+
+    #[test]
+    fn packed_byte_samples_use_the_declared_precision() {
+        let pool = FramePool::new(0);
+        let frame = super::super::pool_rgba(
+            &pool,
+            1,
+            1,
+            Rgba::U8(&[0, 1, 2, 3]),
+            false,
+            2,
+            "2-bit samples".into(),
+        )
+        .unwrap();
+        assert_eq!(rgba_unit(&frame).unwrap(), [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+    }
+}

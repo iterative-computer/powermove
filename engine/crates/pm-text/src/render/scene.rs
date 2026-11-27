@@ -1,0 +1,2372 @@
+//! Ordered exact-outline coverage and color glyph draws in device space.
+
+use std::collections::HashMap;
+use std::mem::size_of;
+use std::sync::Arc;
+
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::overlay::FloatOverlay;
+use kurbo::{Affine, BezPath, PathEl, Rect, Shape, Stroke, StrokeOpts};
+
+use super::bitmap::{Bitmaps, Rgba8, has_bitmaps};
+use super::color::Rgba;
+use super::colr::{Program, RgbaF32};
+use super::outline::{Coords, FaceRef, GlyphStyle, Outlines, synthetic_bold_width};
+use crate::compat::PlacedGlyph;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PathStyle {
+    Fill,
+    Stroke(Stroke),
+}
+
+#[derive(Clone, Debug)]
+pub struct PlacedPath {
+    pub path: Arc<BezPath>,
+    pub transform: Affine,
+    pub style: PathStyle,
+}
+
+/// Maximum curve-to-line deviation in device pixels before area integration.
+/// The CPU comparison uses the same cached geometry.
+pub const COVERAGE_TOLERANCE: f64 = 1e-4;
+const SMALL_COVERAGE_TOLERANCE: f64 = 1e-5;
+const SMALL_COVERAGE_EXTENT: f64 = 32.0;
+
+pub(crate) fn flatten_device_path(path: &BezPath) -> BezPath {
+    let mut lines = BezPath::new();
+    kurbo::flatten(path.iter(), COVERAGE_TOLERANCE, |el| lines.push(el));
+    lines
+}
+
+fn device_coverage_tolerance(extent: f64) -> f64 {
+    if extent.is_finite() && extent <= SMALL_COVERAGE_EXTENT {
+        SMALL_COVERAGE_TOLERANCE
+    } else {
+        COVERAGE_TOLERANCE
+    }
+}
+
+fn path_coverage_tolerance(path: &BezPath, transform: Affine) -> f64 {
+    let bounds = transform.transform_rect_bbox(path.bounding_box());
+    device_coverage_tolerance(bounds.width().max(bounds.height()))
+}
+
+fn local_coverage_tolerance(transform: Affine, device_tolerance: f64) -> f64 {
+    let scale = transform.spectral_norm();
+    if scale.is_finite() && scale > 0.0 {
+        device_tolerance / scale
+    } else {
+        device_tolerance
+    }
+}
+
+/// Return a line-only fill path in page coordinates for one coverage draw.
+/// Strokes expand in local space before the full affine is applied, so
+/// nonuniform transforms preserve their authored stroke shape.
+pub fn coverage_path(placed: &PlacedPath, to_page: Affine) -> BezPath {
+    let transform = to_page * placed.transform;
+    let tolerance = path_coverage_tolerance(&placed.path, transform);
+    match &placed.style {
+        PathStyle::Fill => flatten_transformed(&placed.path, transform, tolerance),
+        PathStyle::Stroke(stroke) => {
+            let path = kurbo::stroke(
+                placed.path.iter(),
+                stroke,
+                &StrokeOpts::default(),
+                local_coverage_tolerance(transform, tolerance),
+            );
+            flatten_transformed(&path, transform, tolerance)
+        }
+    }
+}
+
+/// Compound nonzero filled contours for vector consumers such as extrusion.
+/// Each shape begins with its outer boundary followed by its counters/holes.
+/// Uses the same synthetic/style outline and stroke expansion as flat text.
+pub fn filled_contours(placed: &PlacedPath, transform: Affine, tolerance: f64) -> Vec<Vec<Vec<[f64;2]>>> {
+    filled_contours_rule(placed,transform,tolerance,false)
+}
+pub fn filled_contours_rule(placed: &PlacedPath, transform: Affine, tolerance: f64, even_odd:bool) -> Vec<Vec<Vec<[f64;2]>>> {
+    let matrix=transform*placed.transform;
+    let tolerance=tolerance.max(1e-4);
+    let lines=match &placed.style {
+        PathStyle::Fill=>flatten_transformed(&placed.path,matrix,tolerance),
+        PathStyle::Stroke(stroke)=>{
+            let expanded=kurbo::stroke(placed.path.iter(),stroke,&StrokeOpts::default(),local_coverage_tolerance(matrix,tolerance));
+            flatten_transformed(&expanded,matrix,tolerance)
+        }
+    };
+    let mut resolver=NonzeroResolver::default();
+    let (active,_)=resolver.parse(&lines);
+    if active==0{return vec![];}
+    resolver.overlay.reinit_with_subj(&resolver.contours[..active]);
+    resolver.overlay.overlay(OverlayRule::Subject,if even_odd{FillRule::EvenOdd}else{FillRule::NonZero})
+}
+/// Removes stroke coverage from fill caps, avoiding coplanar surfaces.
+pub fn contour_difference(subject:&[Vec<[f64;2]>],clip:&[Vec<[f64;2]>])->Vec<Vec<Vec<[f64;2]>>>{
+    let mut overlay=FloatOverlay::<[f64;2],i64>::new_empty(Default::default(),Default::default(),0);
+    overlay.reinit_with_subj_and_clip(subject,clip);
+    overlay.overlay(OverlayRule::Difference,FillRule::NonZero)
+}
+
+fn flatten_transformed(path: &BezPath, transform: Affine, tolerance: f64) -> BezPath {
+    let mut count = 0usize;
+    kurbo::flatten(path.iter().map(|el| transform * el), tolerance, |_| {
+        count += 1
+    });
+    let mut lines = BezPath::from_vec(Vec::with_capacity(count));
+    kurbo::flatten(path.iter().map(|el| transform * el), tolerance, |el| {
+        lines.push(el)
+    });
+    lines
+}
+
+/// Reusable nonzero resolver for line-only device paths. The area rasterizers
+/// need nonoverlapping filled boundaries: overlapping source contours would
+/// count their shared pixels twice.
+pub(crate) struct NonzeroResolver {
+    // Element indices borrow the candidate path only during certification;
+    // coordinate contours are materialized only for the union fallback.
+    raw_contours: Vec<Vec<u32>>,
+    contours: Vec<Vec<[f64; 2]>>,
+    edges: Vec<ContourEdge>,
+    active_edges: Vec<u32>,
+    overlay: FloatOverlay<[f64; 2], i64>,
+    peak_estimate: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ContourEdge {
+    contour: u32,
+    index: u32,
+    // The sweep sorts and compares these many times per outline.
+    min_x: f64,
+    max_x: f64,
+}
+
+impl ContourEdge {
+    fn endpoints(self, contours: &[Vec<u32>], elements: &[PathEl]) -> ([f64; 2], [f64; 2]) {
+        let contour = &contours[self.contour as usize];
+        let index = self.index as usize;
+        (
+            raw_point(elements, contour[index]),
+            raw_point(elements, contour[(index + 1) % contour.len()]),
+        )
+    }
+}
+
+fn raw_point(elements: &[PathEl], index: u32) -> [f64; 2] {
+    match elements[index as usize] {
+        PathEl::MoveTo(point) | PathEl::LineTo(point) => [point.x, point.y],
+        _ => unreachable!("raw contours contain only move and line points"),
+    }
+}
+
+fn contour_point_count(elements: &[PathEl], offset: usize) -> usize {
+    let mut count = 1;
+    for next in &elements[offset + 1..] {
+        match *next {
+            PathEl::LineTo(_) => count += 1,
+            PathEl::MoveTo(_) | PathEl::ClosePath => break,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// A strict sign is a proof; zero, overflow, and cancellation are unknown.
+/// The margin is wider than the standard floating-point orientation bound.
+fn orientation_sign(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Option<i32> {
+    let (ax, ay) = (a[0] - c[0], a[1] - c[1]);
+    let (bx, by) = (b[0] - c[0], b[1] - c[1]);
+    let (left, right) = (ax * by, ay * bx);
+    let det = left - right;
+    let sum = left.abs() + right.abs();
+    if !det.is_finite() || !sum.is_finite() {
+        return None;
+    }
+    let margin = (64.0 * f64::EPSILON * sum).max(f64::MIN_POSITIVE);
+    (det.abs() > margin).then_some(if det > 0.0 { 1 } else { -1 })
+}
+
+/// A forward continuation meets the preceding edge only at their shared
+/// endpoint, including when their turn is too small to certify separately.
+fn certified_forward(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
+    let (ux, uy) = (b[0] - a[0], b[1] - a[1]);
+    let (vx, vy) = (c[0] - b[0], c[1] - b[1]);
+    let (horizontal, vertical) = (ux * vx, uy * vy);
+    let dot = horizontal + vertical;
+    let sum = horizontal.abs() + vertical.abs();
+    if !dot.is_finite() || !sum.is_finite() {
+        return false;
+    }
+    let margin = (64.0 * f64::EPSILON * sum).max(f64::MIN_POSITIVE);
+    dot > margin
+}
+
+fn certified_separate(
+    (a_start, a_end): ([f64; 2], [f64; 2]),
+    (b_start, b_end): ([f64; 2], [f64; 2]),
+) -> bool {
+    let a0 = orientation_sign(a_start, a_end, b_start);
+    let a1 = orientation_sign(a_start, a_end, b_end);
+    if a0.is_some() && a0 == a1 {
+        return true;
+    }
+    let b0 = orientation_sign(b_start, b_end, a_start);
+    let b1 = orientation_sign(b_start, b_end, a_end);
+    b0.is_some() && b0 == b1
+}
+
+fn certified_area_sign(contour: &[u32], elements: &[PathEl]) -> Option<i32> {
+    let origin = raw_point(elements, contour[0]);
+    let mut sum = 0.0;
+    let mut magnitude = 0.0;
+    for pair in contour[1..].windows(2) {
+        let (a, b) = (raw_point(elements, pair[0]), raw_point(elements, pair[1]));
+        let left = (a[0] - origin[0]) * (b[1] - origin[1]);
+        let right = (a[1] - origin[1]) * (b[0] - origin[0]);
+        let term = left - right;
+        if !term.is_finite() || !left.is_finite() || !right.is_finite() {
+            return None;
+        }
+        sum += term;
+        magnitude += left.abs() + right.abs();
+    }
+    if !sum.is_finite() || !magnitude.is_finite() {
+        return None;
+    }
+    let margin = (64.0 * contour.len() as f64 * f64::EPSILON * magnitude).max(f64::MIN_POSITIVE);
+    (sum.abs() > margin).then_some(if sum > 0.0 { 1 } else { -1 })
+}
+
+/// Winding of a simple contour at a point certified to be off its boundary.
+fn certified_winding(contour: &[u32], elements: &[PathEl], point: [f64; 2]) -> Option<i32> {
+    let mut winding = 0i32;
+    for index in 0..contour.len() {
+        let a = raw_point(elements, contour[index]);
+        let b = raw_point(elements, contour[(index + 1) % contour.len()]);
+        // The two half-open spans are disjoint, so the sign test can join each.
+        if a[1] <= point[1] && point[1] < b[1] && orientation_sign(a, b, point)? > 0 {
+            winding = winding.checked_add(1)?;
+        } else if b[1] <= point[1] && point[1] < a[1] && orientation_sign(a, b, point)? < 0 {
+            winding = winding.checked_sub(1)?;
+        }
+    }
+    Some(winding)
+}
+
+impl Default for NonzeroResolver {
+    fn default() -> Self {
+        Self {
+            raw_contours: Vec::new(),
+            contours: Vec::new(),
+            edges: Vec::new(),
+            active_edges: Vec::new(),
+            overlay: FloatOverlay::new_empty(Default::default(), Default::default(), 0),
+            peak_estimate: 0,
+        }
+    }
+}
+
+impl NonzeroResolver {
+    fn start_raw_contour(&mut self, index: usize, point: u32, point_count: usize) {
+        if index == self.raw_contours.len() {
+            self.raw_contours.push(Vec::new());
+        }
+        let contour = &mut self.raw_contours[index];
+        contour.clear();
+        if contour.capacity() < point_count {
+            contour.reserve_exact(point_count);
+        }
+        contour.push(point);
+    }
+
+    fn finish_raw_contour(&mut self, index: &mut usize, open: &mut bool, elements: &[PathEl]) {
+        if !*open {
+            return;
+        }
+        let contour = &mut self.raw_contours[*index];
+        if let (Some(&first), Some(&last)) = (contour.first(), contour.last())
+            && raw_point(elements, first) == raw_point(elements, last)
+        {
+            contour.pop();
+        }
+        if contour.len() >= 3 {
+            *index += 1;
+        }
+        *open = false;
+    }
+
+    fn parse_raw(&mut self, lines: &BezPath) -> (usize, bool) {
+        let elements = lines.elements();
+        if u32::try_from(elements.len()).is_err() {
+            return (0, false);
+        }
+        let (mut active, mut open) = (0usize, false);
+        let mut explicit_simple = true;
+        for (offset, el) in elements.iter().enumerate() {
+            match *el {
+                PathEl::MoveTo(_) => {
+                    explicit_simple &= !open;
+                    self.finish_raw_contour(&mut active, &mut open, elements);
+                    self.start_raw_contour(
+                        active,
+                        offset as u32,
+                        contour_point_count(elements, offset),
+                    );
+                    open = true;
+                }
+                PathEl::LineTo(_) if open => {
+                    let point = raw_point(elements, offset as u32);
+                    let contour = &mut self.raw_contours[active];
+                    if contour
+                        .last()
+                        .is_none_or(|&last| raw_point(elements, last) != point)
+                    {
+                        contour.push(offset as u32);
+                    }
+                }
+                PathEl::LineTo(_) => explicit_simple = false,
+                PathEl::ClosePath => {
+                    explicit_simple &= open && self.raw_contours[active].len() >= 3;
+                    self.finish_raw_contour(&mut active, &mut open, elements);
+                }
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                    unreachable!("coverage paths were flattened before nonzero resolution")
+                }
+            }
+        }
+        explicit_simple &= !open;
+        self.finish_raw_contour(&mut active, &mut open, elements);
+        (active, explicit_simple && active != 0)
+    }
+
+    fn start_contour(&mut self, index: usize, point: [f64; 2], point_count: usize) {
+        if index == self.contours.len() {
+            self.contours.push(Vec::new());
+        }
+        let contour = &mut self.contours[index];
+        contour.clear();
+        if contour.capacity() < point_count {
+            contour.reserve_exact(point_count);
+        }
+        contour.push(point);
+    }
+
+    fn finish_contour(&mut self, index: &mut usize, open: &mut bool) {
+        if !*open {
+            return;
+        }
+        let contour = &mut self.contours[*index];
+        if contour.first() == contour.last() {
+            contour.pop();
+        }
+        if contour.len() >= 3 {
+            *index += 1;
+        }
+        *open = false;
+    }
+
+    fn parse(&mut self, lines: &BezPath) -> (usize, bool) {
+        let (mut active, mut open) = (0usize, false);
+        let mut explicit_simple = true;
+        let elements = lines.elements();
+        for (offset, el) in elements.iter().enumerate() {
+            match *el {
+                PathEl::MoveTo(p) => {
+                    explicit_simple &= !open;
+                    self.finish_contour(&mut active, &mut open);
+                    self.start_contour(active, [p.x, p.y], contour_point_count(elements, offset));
+                    open = true;
+                }
+                PathEl::LineTo(p) if open => {
+                    let point = [p.x, p.y];
+                    let contour = &mut self.contours[active];
+                    if contour.last() != Some(&point) {
+                        contour.push(point);
+                    }
+                }
+                PathEl::LineTo(_) => explicit_simple = false,
+                PathEl::ClosePath => {
+                    explicit_simple &= open && self.contours[active].len() >= 3;
+                    self.finish_contour(&mut active, &mut open);
+                }
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                    unreachable!("coverage paths were flattened before nonzero resolution")
+                }
+            }
+        }
+        explicit_simple &= !open;
+        self.finish_contour(&mut active, &mut open);
+        (active, explicit_simple && active != 0)
+    }
+
+    pub(crate) fn resolve(&mut self, lines: &BezPath) -> BezPath {
+        let (active, _) = self.parse(lines);
+        self.overlay_active(active)
+    }
+
+    /// Preserve the owned path only when its raw contours already describe
+    /// the exact nonzero filled boundary. Any uncertified case uses i_overlay.
+    pub(crate) fn resolve_owned(&mut self, lines: BezPath) -> BezPath {
+        let (active, explicit_simple) = self.parse_raw(&lines);
+        if explicit_simple && self.certifies_raw_boundary(&lines, active) {
+            return lines;
+        }
+        let (active, _) = self.parse(&lines);
+        self.overlay_active(active)
+    }
+
+    fn overlay_active(&mut self, active: usize) -> BezPath {
+        if active == 0 {
+            return BezPath::new();
+        }
+        self.overlay.reinit_with_subj(&self.contours[..active]);
+        let shapes = self
+            .overlay
+            .overlay(OverlayRule::Subject, FillRule::NonZero);
+        let mut resolved = BezPath::new();
+        for contour in shapes.iter().flat_map(|shape| shape.iter()) {
+            if let Some(first) = contour.first() {
+                resolved.move_to((first[0], first[1]));
+                for point in &contour[1..] {
+                    resolved.line_to((point[0], point[1]));
+                }
+                resolved.close_path();
+            }
+        }
+        resolved
+    }
+
+    /// Certify simple, nonintersecting contours whose winding is either zero
+    /// or one common sign everywhere. This last condition matters for area
+    /// integration: adjacent opposite-winding outer contours can cancel in a
+    /// pixel even though their boundaries never intersect.
+    fn certifies_raw_boundary(&mut self, lines: &BezPath, count: usize) -> bool {
+        self.edges.clear();
+        self.active_edges.clear();
+        let elements = lines.elements();
+        // Every edge reference and active-list index must be representable.
+        // Large paths use the ordinary union resolver instead of truncating.
+        if u32::try_from(count).is_err()
+            || self.raw_contours[..count]
+                .iter()
+                .any(|contour| u32::try_from(contour.len()).is_err())
+        {
+            return false;
+        }
+        let Some(edge_count) = self.raw_contours[..count]
+            .iter()
+            .try_fold(0usize, |sum, contour| sum.checked_add(contour.len()))
+        else {
+            return false;
+        };
+        if u32::try_from(edge_count).is_err() {
+            return false;
+        }
+        if self.edges.capacity() < edge_count {
+            self.edges.reserve_exact(edge_count);
+        }
+        for (contour_index, contour) in self.raw_contours[..count].iter().enumerate() {
+            if contour.len() < 3
+                || contour
+                    .iter()
+                    .any(|&point| raw_point(elements, point).iter().any(|v| !v.is_finite()))
+            {
+                return false;
+            }
+            for index in 0..contour.len() {
+                let a = raw_point(elements, contour[index]);
+                let b = raw_point(elements, contour[(index + 1) % contour.len()]);
+                let c = raw_point(elements, contour[(index + 2) % contour.len()]);
+                if a == b || (orientation_sign(a, b, c).is_none() && !certified_forward(a, b, c)) {
+                    return false;
+                }
+                self.edges.push(ContourEdge {
+                    contour: contour_index as u32,
+                    index: index as u32,
+                    min_x: a[0].min(b[0]),
+                    max_x: a[0].max(b[0]),
+                });
+            }
+        }
+        let contours = &self.raw_contours;
+        self.edges
+            .sort_unstable_by(|a, b| a.min_x.total_cmp(&b.min_x));
+        for index in 0..self.edges.len() {
+            let edge = self.edges[index];
+            self.active_edges
+                .retain(|&other| self.edges[other as usize].max_x >= edge.min_x);
+            let points = edge.endpoints(contours, elements);
+            let (min_y, max_y) = (points.0[1].min(points.1[1]), points.0[1].max(points.1[1]));
+            for &other_index in &self.active_edges {
+                let other = self.edges[other_index as usize];
+                let other_points = other.endpoints(contours, elements);
+                if max_y < other_points.0[1].min(other_points.1[1])
+                    || other_points.0[1].max(other_points.1[1]) < min_y
+                {
+                    continue;
+                }
+                if edge.contour == other.contour {
+                    let length = contours[edge.contour as usize].len();
+                    if (edge.index as usize + 1) % length == other.index as usize
+                        || (other.index as usize + 1) % length == edge.index as usize
+                    {
+                        // Their sole shared endpoint and strict turn or
+                        // forward continuation were certified above.
+                        continue;
+                    }
+                }
+                if !certified_separate(points, other_points) {
+                    return false;
+                }
+            }
+            self.active_edges.push(index as u32);
+        }
+
+        let mut common_sign = 0i32;
+        for (index, contour) in contours[..count].iter().enumerate() {
+            let sign = match certified_area_sign(contour, elements) {
+                Some(sign) => sign,
+                None => return false,
+            };
+            let probe = raw_point(elements, contour[0]);
+            let mut outside = 0i32;
+            for (other_index, other) in contours[..count].iter().enumerate() {
+                if index == other_index {
+                    continue;
+                }
+                let winding = match certified_winding(other, elements, probe) {
+                    Some(winding) => winding,
+                    None => return false,
+                };
+                outside = match outside.checked_add(winding) {
+                    Some(winding) => winding,
+                    None => return false,
+                };
+            }
+            let inside = match outside.checked_add(sign) {
+                Some(winding) => winding,
+                None => return false,
+            };
+            if (outside == 0) == (inside == 0) {
+                return false;
+            }
+            let filled_sign = if outside == 0 { inside } else { outside };
+            if common_sign == 0 {
+                common_sign = filled_sign;
+            } else if common_sign != filled_sign {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// i_overlay does not expose its internal capacities. Retain only one
+    /// resolver, and discard it after unusually large input/output jobs. The
+    /// estimate covers reusable contours plus a conservative allowance for
+    /// i_overlay's segment, split, graph, and extraction buffers.
+    pub(crate) fn trim_after(
+        &mut self,
+        input_elements: usize,
+        output_elements: usize,
+        limit: usize,
+    ) {
+        let contour_bytes = self.raw_contours.capacity() * size_of::<Vec<u32>>()
+            + self
+                .raw_contours
+                .iter()
+                .map(|contour| contour.capacity() * size_of::<u32>())
+                .sum::<usize>()
+            + self.contours.capacity() * size_of::<Vec<[f64; 2]>>()
+            + self
+                .contours
+                .iter()
+                .map(|contour| contour.capacity() * size_of::<[f64; 2]>())
+                .sum::<usize>();
+        let certificate_bytes = self.edges.capacity() * size_of::<ContourEdge>()
+            + self.active_edges.capacity() * size_of::<u32>();
+        let overlay_allowance = input_elements
+            .max(output_elements)
+            .saturating_mul(16 * size_of::<[f64; 2]>());
+        self.peak_estimate = self.peak_estimate.max(
+            contour_bytes
+                .saturating_add(certificate_bytes)
+                .saturating_add(overlay_allowance),
+        );
+        if self.peak_estimate > limit {
+            *self = Self::default();
+        }
+    }
+}
+
+/// Maximum retained path payload in the default cross-frame cache. At the
+/// coverage tolerance a text glyph's resolved lines take tens of KB; a
+/// text-heavy 1080p frame needs about 10 MB of them, and a cache smaller
+/// than one frame's set rebuilds part of it every frame.
+pub const COVERAGE_PATH_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Largest scratch a [`NonzeroResolver`] keeps between jobs.
+pub const NONZERO_RESOLVER_RETAIN_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Geometry {
+    /// Resolved lines in the source's own space, flattened at this local
+    /// tolerance (bits). Every linear transform whose device tolerance and
+    /// scale bucket give the same local tolerance maps them to its device
+    /// lines, so animated scale and rotation never flatten or resolve again.
+    Local(u64),
+    /// A singular or non-finite linear transform (coefficient bits): its
+    /// device lines, made after the transform.
+    Device([u64; 4]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CoverageKey {
+    source: usize,
+    geometry: Geometry,
+}
+
+struct CoverageEntry {
+    // Retaining the source makes its pointer identity safe as a cache key.
+    source: Arc<BezPath>,
+    style: PathStyle,
+    lines: Arc<BezPath>,
+    bytes: usize,
+    used: u64,
+}
+
+/// A placed path's line-only coverage geometry: `lines` after `linear` are
+/// its resolved device lines before translation.
+#[derive(Clone, Debug)]
+pub struct CoverageLines {
+    pub lines: Arc<BezPath>,
+    pub linear: Affine,
+}
+
+impl CoverageLines {
+    /// The lines after the linear transform, in order.
+    pub fn device_elements(&self) -> impl Iterator<Item = PathEl> + '_ {
+        let linear = self.linear;
+        self.lines.elements().iter().map(move |el| linear * *el)
+    }
+
+    /// The lines after the linear transform.
+    pub fn device(&self) -> BezPath {
+        BezPath::from_vec(self.device_elements().collect())
+    }
+
+    /// Identity of the geometry: the same retained lines and linear map.
+    pub fn key(&self) -> (usize, [u64; 4]) {
+        let [a, b, c, d, _, _] = self.linear.as_coeffs();
+        (
+            Arc::as_ptr(&self.lines) as usize,
+            [a.to_bits(), b.to_bits(), c.to_bits(), d.to_bits()],
+        )
+    }
+}
+
+/// Bounded LRU of line-only coverage geometry, resolved once in the placed
+/// path's own space per scale bucket. Glyph and atlas translations, and the
+/// linear transform, are applied by the rasterizer.
+pub struct CoveragePathCache {
+    entries: HashMap<CoverageKey, Vec<CoverageEntry>>,
+    len: usize,
+    /// Local geometry [`CoveragePathCache::prepare`] made for the misses it
+    /// was given, until [`CoveragePathCache::get`] takes it into the cache.
+    prepared: HashMap<CoverageKey, Vec<(PlacedPath, Vec<PathEl>)>>,
+    resolver: NonzeroResolver,
+    bytes: usize,
+    limit: usize,
+    tick: u64,
+}
+
+impl Default for CoveragePathCache {
+    fn default() -> Self {
+        Self::new(COVERAGE_PATH_CACHE_BYTES)
+    }
+}
+
+/// Scale buckets per octave for reused local geometry. A local tolerance of
+/// device tolerance / bucket top keeps every transform in the bucket within
+/// the device tolerance, at most 2^(1/8) more lines than flattening after it.
+const SCALE_BUCKETS_PER_OCTAVE: f64 = 4.0;
+
+fn linear(transform: Affine) -> Affine {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    Affine::new([a, b, c, d, 0.0, 0.0])
+}
+
+/// The local tolerance `placed`'s geometry is made at, or `None` for a
+/// singular or non-finite transform (made after the transform, as is).
+fn local_tolerance(placed: &PlacedPath) -> Option<f64> {
+    let linear = linear(placed.transform);
+    let scale = linear.spectral_norm();
+    let det = linear.determinant();
+    if !(scale.is_finite() && scale > 0.0 && det.is_finite() && det != 0.0) {
+        return None;
+    }
+    let top = (scale.log2() * SCALE_BUCKETS_PER_OCTAVE).ceil() / SCALE_BUCKETS_PER_OCTAVE;
+    let tolerance = path_coverage_tolerance(&placed.path, linear) / top.exp2();
+    (tolerance.is_finite() && tolerance > 0.0).then_some(tolerance)
+}
+
+impl CoveragePathCache {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            len: 0,
+            prepared: HashMap::new(),
+            resolver: NonzeroResolver::default(),
+            bytes: 0,
+            limit,
+            tick: 0,
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.len = 0;
+        self.prepared.clear();
+        self.resolver = NonzeroResolver::default();
+        self.bytes = 0;
+        self.tick = 0;
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    /// Eviction scans: at this budget it is rare (an index cost more
+    /// allocation per cold frame than the scans it saves).
+    fn evict_oldest(&mut self) {
+        let Some((key, index)) = self
+            .entries
+            .iter()
+            .flat_map(|(key, bucket)| {
+                bucket
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| (*key, index, entry.used))
+            })
+            .min_by_key(|(_, _, used)| *used)
+            .map(|(key, index, _)| (key, index))
+        else {
+            return;
+        };
+        let bucket = self.entries.get_mut(&key).expect("oldest entry exists");
+        let entry = bucket.swap_remove(index);
+        self.len -= 1;
+        let empty = bucket.is_empty();
+        self.bytes -= entry.bytes;
+        if empty {
+            self.entries.remove(&key);
+        }
+    }
+
+    /// Where `placed`'s geometry lives: its local geometry at its local
+    /// tolerance, or (singular transform) its device lines.
+    fn key(placed: &PlacedPath) -> CoverageKey {
+        let source = Arc::as_ptr(&placed.path) as usize;
+        match local_tolerance(placed) {
+            Some(tolerance) => CoverageKey {
+                source,
+                geometry: Geometry::Local(tolerance.to_bits()),
+            },
+            None => {
+                let [a, b, c, d, _, _] = placed.transform.as_coeffs();
+                CoverageKey {
+                    source,
+                    geometry: Geometry::Device([
+                        a.to_bits(),
+                        b.to_bits(),
+                        c.to_bits(),
+                        d.to_bits(),
+                    ]),
+                }
+            }
+        }
+    }
+
+    /// The cached lines for `key`, marked used now.
+    fn hit(&mut self, key: &CoverageKey, placed: &PlacedPath) -> Option<Arc<BezPath>> {
+        let tick = self.next_tick();
+        let entry = self.entries.get_mut(key)?.iter_mut().find(|entry| {
+            Arc::ptr_eq(&entry.source, &placed.path) && entry.style == placed.style
+        })?;
+        entry.used = tick;
+        Some(entry.lines.clone())
+    }
+
+    fn contains(&self, key: &CoverageKey, placed: &PlacedPath) -> bool {
+        self.entries.get(key).is_some_and(|bucket| {
+            bucket.iter().any(|entry| {
+                Arc::ptr_eq(&entry.source, &placed.path) && entry.style == placed.style
+            })
+        })
+    }
+
+    /// Reuse line-only geometry for the same retained source, scale bucket,
+    /// and stroke style. Apply the returned linear map, then
+    /// `placed.transform`'s translation, when drawing. It remains valid after
+    /// eviction.
+    pub fn get(&mut self, placed: &PlacedPath) -> CoverageLines {
+        let key = Self::key(placed);
+        let linear = match key.geometry {
+            Geometry::Local(_) => linear(placed.transform),
+            Geometry::Device(_) => Affine::IDENTITY,
+        };
+        let lines = match self.hit(&key, placed) {
+            Some(lines) => lines,
+            None => {
+                let elements = self.take_prepared(&key, placed).unwrap_or_else(|| {
+                    let (elements, input_elements) = source_geometry(placed, &mut self.resolver);
+                    self.resolver.trim_after(
+                        input_elements,
+                        elements.len(),
+                        self.limit.min(NONZERO_RESOLVER_RETAIN_BYTES),
+                    );
+                    elements
+                });
+                self.insert(key, placed, elements)
+            }
+        };
+        CoverageLines { lines, linear }
+    }
+
+    fn take_prepared(&mut self, key: &CoverageKey, placed: &PlacedPath) -> Option<Vec<PathEl>> {
+        let bucket = self.prepared.get_mut(key)?;
+        let at = bucket
+            .iter()
+            .position(|(p, _)| Arc::ptr_eq(&p.path, &placed.path) && p.style == placed.style)?;
+        Some(bucket.swap_remove(at).1)
+    }
+
+    /// Makes the geometry `paths` miss on several threads at once (a frame
+    /// meeting glyphs, sizes, or transforms new to the cache), each exactly
+    /// as [`Self::get`] makes it alone. `get` takes it into the cache when it
+    /// asks for it, in its own order, so a frame whose geometry outgrows the
+    /// cache evicts what it would have without this. A few misses are left
+    /// to `get`; what an earlier call made and `get` never asked for is
+    /// dropped.
+    ///
+    /// `map(n, make)` returns `make(0), …, make(n - 1)` in order, on threads
+    /// of the caller's choosing.
+    pub fn prepare<'a>(
+        &mut self,
+        paths: impl IntoIterator<Item = &'a PlacedPath>,
+        map: impl FnOnce(usize, &(dyn Fn(usize) -> Vec<PathEl> + Sync)) -> Vec<Vec<PathEl>>,
+    ) {
+        self.prepared.clear();
+        let mut missing: Vec<(CoverageKey, &PlacedPath)> = Vec::new();
+        for placed in paths {
+            let key = Self::key(placed);
+            let known = self.contains(&key, placed)
+                || missing.iter().any(|(k, p)| {
+                    *k == key && Arc::ptr_eq(&p.path, &placed.path) && p.style == placed.style
+                });
+            if !known {
+                missing.push((key, placed));
+            }
+        }
+        if missing.len() < PREPARE_IN_PARALLEL {
+            return;
+        }
+        let make = |i: usize| source_geometry(missing[i].1, &mut NonzeroResolver::default()).0;
+        let made = map(missing.len(), &make);
+        for ((key, placed), elements) in missing.into_iter().zip(made) {
+            self.prepared
+                .entry(key)
+                .or_default()
+                .push((placed.clone(), elements));
+        }
+    }
+
+    fn insert(
+        &mut self,
+        key: CoverageKey,
+        placed: &PlacedPath,
+        elements: Vec<PathEl>,
+    ) -> Arc<BezPath> {
+        let line_capacity = elements.capacity();
+        let lines = Arc::new(BezPath::from_vec(elements));
+        let bytes = (placed.path.elements().len() + line_capacity)
+            .saturating_mul(size_of::<kurbo::PathEl>())
+            .saturating_add(size_of::<CoverageEntry>() + size_of::<CoverageKey>());
+        if bytes <= self.limit {
+            while self.bytes > self.limit - bytes {
+                self.evict_oldest();
+            }
+            let used = self.next_tick();
+            self.entries.entry(key).or_default().push(CoverageEntry {
+                source: placed.path.clone(),
+                style: placed.style.clone(),
+                lines: lines.clone(),
+                bytes,
+                used,
+            });
+            self.len += 1;
+            self.bytes += bytes;
+        }
+        lines
+    }
+}
+
+/// Misses [`CoveragePathCache::prepare`] makes on several threads.
+const PREPARE_IN_PARALLEL: usize = 4;
+
+/// The geometry [`CoveragePathCache::key`] names: `placed`'s resolved
+/// local lines at its local tolerance, or (singular transform) its device
+/// lines; and the element count before resolution.
+fn source_geometry(placed: &PlacedPath, resolver: &mut NonzeroResolver) -> (Vec<PathEl>, usize) {
+    let raw = match local_tolerance(placed) {
+        Some(tolerance) => local_coverage_path(placed, tolerance),
+        None => coverage_path(
+            &PlacedPath {
+                transform: linear(placed.transform),
+                ..placed.clone()
+            },
+            Affine::IDENTITY,
+        ),
+    };
+    let input_elements = raw.elements().len();
+    (resolver.resolve_owned(raw).into_elements(), input_elements)
+}
+
+/// `placed`'s line-only fill path in its own space, strokes expanded there
+/// as in [`coverage_path`].
+fn local_coverage_path(placed: &PlacedPath, tolerance: f64) -> BezPath {
+    match &placed.style {
+        PathStyle::Fill => flatten_transformed(&placed.path, Affine::IDENTITY, tolerance),
+        PathStyle::Stroke(stroke) => {
+            let path = kurbo::stroke(
+                placed.path.iter(),
+                stroke,
+                &StrokeOpts::default(),
+                tolerance,
+            );
+            flatten_transformed(&path, Affine::IDENTITY, tolerance)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ImagePixels {
+    Rgba8(Arc<Rgba8>),
+    WorkingF32(Arc<RgbaF32>),
+    Colr(Arc<Program>),
+}
+
+impl ImagePixels {
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Rgba8(i) => (i.width, i.height),
+            Self::WorkingF32(i) => (i.width, i.height),
+            Self::Colr(i) => (i.width, i.height),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ItemContent {
+    Coverage {
+        paths: Vec<PlacedPath>,
+    },
+    Image {
+        image: ImagePixels,
+        transform: Affine,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub content: ItemContent,
+    /// Straight E-encoded paint color; image draws use its alpha.
+    pub color: Rgba,
+    pub opacity: f64,
+    /// Gaussian sigma in device pixels.
+    pub blur: f64,
+    /// Conservative pre-blur device-space ink box.
+    pub bounds: Rect,
+    /// The paint pass's coverage curve (`smoothing::Weight::curve`).
+    pub curve: [f32; 3],
+}
+
+impl Item {
+    pub fn reach(&self) -> Rect {
+        let pad = blur_radius(self.blur) as f64 + 1.0;
+        self.bounds.inflate(pad, pad)
+    }
+}
+
+pub fn blur_radius(sigma: f64) -> u32 {
+    if sigma > 0.0 && sigma.is_finite() {
+        (8.0 * sigma).ceil().min(u32::MAX as f64) as u32
+    } else {
+        0
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TextScene {
+    pub width: u32,
+    pub height: u32,
+    pub items: Vec<Item>,
+}
+
+impl TextScene {
+    pub fn ink(&self) -> Option<[u32; 4]> {
+        let mut r: Option<Rect> = None;
+        for item in &self.items {
+            let b = item.reach();
+            r = Some(r.map_or(b, |old| old.union(b)));
+        }
+        let r = r?.intersect(Rect::new(0.0, 0.0, self.width as f64, self.height as f64));
+        if r.width() <= 0.0 || r.height() <= 0.0 {
+            return None;
+        }
+        Some([
+            r.x0.floor().max(0.0) as u32,
+            r.y0.floor().max(0.0) as u32,
+            r.x1.ceil().min(self.width as f64) as u32,
+            r.y1.ceil().min(self.height as f64) as u32,
+        ])
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Run<'a> {
+    pub face: FaceRef<'a>,
+    pub size: f32,
+    pub coords: Coords<'a>,
+    pub synthetic_bold: bool,
+    pub synthetic_italic: bool,
+    pub oblique: f64,
+    pub glyphs: &'a [PlacedGlyph],
+    pub bitmap_size: Option<f32>,
+}
+
+pub struct Painter<'a> {
+    pub outlines: &'a mut Outlines,
+    pub bitmaps: &'a mut Bitmaps,
+    pub unsupported: Vec<String>,
+    /// How heavy glyph fills draw (TEXT-SMOOTH-1).
+    pub smoothing: super::smoothing::Smoothing,
+}
+
+fn skew(run: &Run<'_>) -> f64 {
+    if run.synthetic_italic {
+        super::outline::SYNTHETIC_ITALIC_SKEW
+    } else if run.oblique != 0.0 {
+        -run.oblique.to_radians().tan()
+    } else {
+        0.0
+    }
+}
+
+fn device_scale(m: Affine) -> f64 {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let scale = (a * d - b * c).abs().sqrt();
+    if scale.is_finite() { scale } else { 0.0 }
+}
+
+fn device_residual(m: Affine, scale: f64) -> Affine {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    Affine::new([a / scale, b / scale, c / scale, d / scale, 0.0, 0.0])
+}
+
+fn image_bounds(transform: Affine, width: u32, height: u32) -> Rect {
+    transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))
+}
+
+/// A CoreGraphics glyph mask as an image item: coverage through the paint
+/// luminance's mask `table`, premultiplied RGBA8, at the pen `(x, y)`.
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+fn canvas_mask_item(
+    mask: &super::canvas2d::GlyphMask,
+    table: &[u8; 256],
+    x: f64,
+    y: f64,
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Item {
+    let mut data = Vec::with_capacity(mask.coverage.len() * 4);
+    for &coverage in &mask.coverage {
+        let alpha = table[usize::from(coverage)];
+        data.extend(
+            color[..3]
+                .iter()
+                .map(|c| (c * f64::from(alpha)).round() as u8),
+        );
+        data.push(alpha);
+    }
+    let image = ImagePixels::Rgba8(Arc::new(Rgba8 {
+        width: mask.width,
+        height: mask.height,
+        data,
+    }));
+    let transform = Affine::translate((x.floor() + f64::from(mask.left), y + f64::from(mask.top)));
+    Item {
+        bounds: image_bounds(transform, mask.width, mask.height),
+        content: ItemContent::Image { image, transform },
+        color,
+        opacity,
+        blur,
+        curve: super::smoothing::IDENTITY,
+    }
+}
+
+/// Deferred mask rows for one scene. Items have their final order and
+/// retain their outline fallback until the wave is admitted.
+#[derive(Default)]
+pub struct CanvasRows {
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    rows: Vec<PreparedCanvasPaint>,
+}
+
+/// One indexed mask result returned by the renderer's worker pool.
+pub struct CanvasMaskResult(
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))] Option<super::canvas2d::GlyphMask>,
+);
+
+impl CanvasRows {
+    pub fn available() -> bool {
+        cfg!(all(target_os = "macos", feature = "canvas2d"))
+    }
+
+    pub fn reserve_bytes(&self) -> Option<usize> {
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        {
+            self.rows.iter().try_fold(0usize, |bytes, row| {
+                bytes.checked_add(row.masks.reserve_bytes()?)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        {
+            None
+        }
+    }
+
+    pub fn fits_mask_cache(bitmaps: &Bitmaps, bytes: usize) -> bool {
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        return bitmaps.canvas.can_admit_wave(bytes);
+
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        {
+            let _ = (bitmaps, bytes);
+            false
+        }
+    }
+
+    /// Rasterize all rows in one wave and apply the masks in paint order.
+    /// On a possible eviction, the caller replays the original serial
+    /// planning path before publishing any scene from this wave.
+    pub fn resolve_wave(
+        bitmaps: &mut Bitmaps,
+        scenes: &mut [(CanvasRows, TextScene)],
+        map: impl FnOnce(usize, &(dyn Fn(usize) -> CanvasMaskResult + Sync)) -> Vec<CanvasMaskResult>,
+    ) -> bool {
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        {
+            let bytes = scenes.iter().try_fold(0usize, |bytes, (scene, _)| {
+                bytes.checked_add(scene.reserve_bytes()?)
+            });
+            let canvas = &mut bitmaps.canvas;
+            if !bytes.is_some_and(|n| canvas.can_admit_wave(n)) {
+                return false;
+            }
+            let mut job_index = HashMap::new();
+            let mut jobs = Vec::new();
+            let mut slots = Vec::new();
+            for (scene, _) in scenes.iter() {
+                for row in &scene.rows {
+                    slots.push(
+                        row.masks
+                            .jobs()
+                            .map(|(key, job)| {
+                                *job_index
+                                    .entry((key, job.geometry_key()))
+                                    .or_insert_with(|| {
+                                        let i = jobs.len();
+                                        jobs.push(job);
+                                        i
+                                    })
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            drop(job_index);
+            if jobs.is_empty() {
+                return true;
+            }
+            let results = map(jobs.len(), &|i| CanvasMaskResult(jobs[i].rasterize()));
+            assert_eq!(results.len(), jobs.len());
+            let mut results: Vec<_> = results
+                .into_iter()
+                .map(|result| (result.0.map(Arc::new), false))
+                .collect();
+            let mut slots = slots.into_iter();
+            for (prepared, scene) in scenes {
+                for row in prepared.rows.drain(..) {
+                    let indices = slots.next().expect("one index list per mask row");
+                    // Keep the jobs available for failed-mask retries.
+                    let jobs: Vec<_> = row.masks.jobs().map(|(_, job)| job).collect();
+                    let masks = canvas.admit_row(&row.masks, |slot| {
+                        let (mask, attempted) = &mut results[indices[slot]];
+                        if mask.is_none() && *attempted {
+                            *mask = jobs[slot].rasterize().map(Arc::new);
+                        }
+                        *attempted = true;
+                        mask.clone()
+                    });
+                    PreparedCanvasPaint::apply(row.slots, row.table, &masks, &mut scene.items);
+                }
+            }
+            true
+        }
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        {
+            let _ = (bitmaps, scenes, map);
+            false
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+struct PreparedCanvasPaint {
+    masks: super::canvas2d::PendingMasks,
+    // (item index, mask job, pen x, pen y)
+    slots: Vec<(usize, usize, f64, f64)>,
+    table: &'static [u8; 256],
+}
+
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+impl PreparedCanvasPaint {
+    fn new(color: Rgba) -> Self {
+        Self {
+            masks: super::canvas2d::PendingMasks::default(),
+            slots: Vec::new(),
+            table: super::canvas2d::mask_table([color[0], color[1], color[2]]),
+        }
+    }
+
+    fn finish(self, canvas: &mut super::canvas2d::CanvasMasks, out: &mut [Item]) {
+        if self.masks.is_empty() {
+            return;
+        }
+        let masks = canvas.resolve(self.masks);
+        Self::apply(self.slots, self.table, &masks, out);
+    }
+
+    fn apply(
+        slots: Vec<(usize, usize, f64, f64)>,
+        table: &'static [u8; 256],
+        masks: &[Option<Arc<super::canvas2d::GlyphMask>>],
+        out: &mut [Item],
+    ) {
+        for (slot, job, x, y) in slots {
+            if let Some(mask) = &masks[job] {
+                let original = &out[slot];
+                out[slot] = canvas_mask_item(
+                    mask,
+                    table,
+                    x,
+                    y,
+                    original.color,
+                    original.opacity,
+                    original.blur,
+                );
+            }
+        }
+    }
+}
+
+impl Painter<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        m: Affine,
+        stroke: Option<f64>,
+        color: Rgba,
+        opacity: f64,
+        blur: f64,
+        deferred: Option<&mut CanvasRows>,
+    ) {
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        let _ = deferred;
+        let scale = device_scale(m);
+        if scale <= 0.0 || !scale.is_finite() {
+            return;
+        }
+        let residual = device_residual(m, scale);
+        // CoreGraphics masks missing from the cache are collected while the
+        // items are laid out and drawn together after the loop, in parallel
+        // when there are enough. Each such glyph first gets the item it
+        // would get without a mask (its outline coverage), at its final
+        // index, and the mask's item replaces it once drawn; a glyph whose
+        // mask cannot be drawn keeps it, as before.
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        let mut prepared = PreparedCanvasPaint::new(color);
+        for run in runs {
+            let device_size = f64::from(run.size) * scale;
+            let [a, b, c, d, _, _] = m.as_coeffs();
+            let canvas_mask = cfg!(all(target_os = "macos", feature = "canvas2d"))
+                && self.smoothing == super::smoothing::Smoothing::Canvas2d
+                && stroke.is_none()
+                && device_size < 162.0
+                && b == 0.0
+                && c == 0.0
+                && a > 0.0
+                && (a - d).abs() < 1e-9
+                && color[..3].iter().all(|c| (0.0..=1.0).contains(c))
+                && matches!(run.coords, Coords::User(_));
+            // Fills take the smoothing's weight; strokes are plain paths.
+            let weight = if canvas_mask && run.synthetic_bold {
+                // Skia fake bold is a stroked path mask: it retains the glyph
+                // strike's subpixel grid but never CoreGraphics' dilation.
+                super::smoothing::Weight {
+                    snap: true,
+                    ..super::smoothing::Weight::EXACT
+                }
+            } else if stroke.is_none() {
+                self.smoothing.at(device_size)
+            } else {
+                super::smoothing::Weight::EXACT
+            };
+            let smooth = (weight.expand_x / scale, weight.expand_y / scale);
+            let curve = weight.curve(color);
+            let style = GlyphStyle {
+                size: run.size,
+                synthetic_bold: if run.synthetic_bold {
+                    let outset = synthetic_bold_width(f64::from(run.size)) / 2.0;
+                    (outset, outset)
+                } else {
+                    (0.0, 0.0)
+                },
+                smooth,
+                skew: skew(run),
+                expand_tolerance: if run.synthetic_bold || !weight.is_exact() {
+                    local_coverage_tolerance(
+                        m * Affine::skew(skew(run), 0.0),
+                        device_coverage_tolerance(device_size),
+                    )
+                } else {
+                    0.0
+                },
+            };
+            // Smoothing grows glyphs upward: the ink moves up by its
+            // vertical expansion, turning with the glyph.
+            let lift = weight.dy / scale;
+            for glyph in run.glyphs {
+                let glyph_origin = m * kurbo::Point::new(origin.0 + glyph.x, origin.1 + glyph.y);
+                let bitmap_size = run.bitmap_size.unwrap_or(device_size as f32);
+                if has_bitmaps(run.face)
+                    && let Some(bitmap) =
+                        self.bitmaps
+                            .get(run.face, glyph.id, device_size as f32, bitmap_size)
+                {
+                    let transform = Affine::translate((glyph_origin.x, glyph_origin.y))
+                        * residual
+                        * bitmap.transform;
+                    let image = ImagePixels::Rgba8(bitmap.image.clone());
+                    let (w, h) = image.dimensions();
+                    out.push(Item {
+                        bounds: image_bounds(transform, w, h),
+                        content: ItemContent::Image { image, transform },
+                        color,
+                        opacity,
+                        blur,
+                        curve: super::smoothing::IDENTITY,
+                    });
+                    continue;
+                }
+                if super::bitmap::is_colr_glyph(run.face, glyph.id) {
+                    let [a, b, c, d, _, _] = m.as_coeffs();
+                    let linear = Affine::new([a, b, c, d, 0.0, 0.0]);
+                    match self.bitmaps.colr.get(super::colr::ColrRequest {
+                        face: run.face,
+                        coords: run.coords,
+                        id: glyph.id,
+                        size: run.size,
+                        skew: skew(run) as f32,
+                        linear,
+                        origin: (glyph_origin.x, glyph_origin.y),
+                        // Fill-style alpha is applied once to the completed
+                        // color glyph, including palette-only paints.
+                        foreground: [color[0], color[1], color[2], 1.0],
+                    }) {
+                        Ok(Some(program)) => {
+                            let transform =
+                                Affine::translate((glyph_origin.x.floor(), glyph_origin.y.floor()))
+                                    * program.transform;
+                            let image = ImagePixels::Colr(program);
+                            let (w, h) = image.dimensions();
+                            out.push(Item {
+                                bounds: image_bounds(transform, w, h),
+                                content: ItemContent::Image { image, transform },
+                                // Canvas fill-style alpha applies to the whole
+                                // color glyph, including palette-only paints.
+                                color,
+                                opacity,
+                                blur,
+                                curve: super::smoothing::IDENTITY,
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.unsupported.push(format!("COLR: {e}")),
+                    }
+                    continue;
+                }
+                let Some(outline) = self.outlines.get(run.face, run.coords, glyph.id, style) else {
+                    continue;
+                };
+                #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+                let mut defer = None;
+                #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+                {
+                    if canvas_mask
+                        && let super::outline::Coords::User(coords) = run.coords
+                        && let Ok(id) = u16::try_from(glyph.id)
+                    {
+                        let (x, y) = weight.place(glyph_origin.x, glyph_origin.y);
+                        let quarter = ((x - x.floor()) * 4.0).round() as u8;
+                        let bounds = Affine::scale(scale).transform_rect_bbox(outline.bounds);
+                        match self.bitmaps.canvas.lookup(
+                            &mut prepared.masks,
+                            run.face,
+                            coords,
+                            id,
+                            device_size as f32,
+                            quarter,
+                            skew(run) as f32,
+                            bounds,
+                            run.synthetic_bold.then_some((&outline.path, scale)),
+                        ) {
+                            super::canvas2d::MaskLookup::Ready(Some(mask)) => {
+                                out.push(canvas_mask_item(
+                                    &mask,
+                                    prepared.table,
+                                    x,
+                                    y,
+                                    color,
+                                    opacity,
+                                    blur,
+                                ));
+                                continue;
+                            }
+                            super::canvas2d::MaskLookup::Ready(None) => {}
+                            super::canvas2d::MaskLookup::Pending(job) => defer = Some((job, x, y)),
+                        }
+                    }
+                }
+                let mut transform =
+                    m * Affine::translate((origin.0 + glyph.x, origin.1 + glyph.y + lift));
+                // Skia's subpixel grid applies to axis-aligned text only.
+                let [ma, mb, mc, md, _, _] = m.as_coeffs();
+                if weight.snap && mb == 0.0 && mc == 0.0 && ma > 0.0 && md > 0.0 {
+                    let at = transform * kurbo::Point::ZERO;
+                    let (x, y) = weight.place(at.x, at.y);
+                    transform = Affine::translate((x - at.x, y - at.y)) * transform;
+                }
+                let path_style = if let Some(width) = stroke {
+                    PathStyle::Stroke(
+                        Stroke::new(width)
+                            .with_join(kurbo::Join::Round)
+                            .with_miter_limit(2.0),
+                    )
+                } else {
+                    PathStyle::Fill
+                };
+                let mut b = transform.transform_rect_bbox(outline.bounds);
+                if let Some(width) = stroke {
+                    b = b.inflate(width * scale / 2.0, width * scale / 2.0);
+                }
+                #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+                if let Some((job, x, y)) = defer {
+                    prepared.slots.push((out.len(), job, x, y));
+                }
+                out.push(Item {
+                    content: ItemContent::Coverage {
+                        paths: vec![PlacedPath {
+                            path: outline.path.clone(),
+                            transform,
+                            style: path_style,
+                        }],
+                    },
+                    color,
+                    opacity,
+                    blur,
+                    bounds: b,
+                    curve,
+                });
+            }
+        }
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        if let Some(deferred) = deferred {
+            deferred.rows.push(prepared);
+        } else {
+            prepared.finish(&mut self.bitmaps.canvas, out);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_text(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        m: Affine,
+        color: Rgba,
+        opacity: f64,
+        blur: f64,
+    ) {
+        self.draw(out, runs, origin, m, None, color, opacity, blur, None);
+    }
+
+    /// Prepare ordinary fills for a wave. Callers keep synthetic bold and
+    /// color glyph runs on the immediate path.
+    pub fn prepare_canvas_fill(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        m: Affine,
+        color: Rgba,
+        rows: &mut CanvasRows,
+    ) {
+        self.draw(out, runs, origin, m, None, color, 1.0, 0.0, Some(rows));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_text(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        m: Affine,
+        width: f64,
+        color: Rgba,
+        opacity: f64,
+    ) {
+        if width > 0.0 {
+            self.draw(out, runs, origin, m, Some(width), color, opacity, 0.0, None);
+        }
+    }
+}
+
+pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<Item> {
+    let bounds = m.transform_rect_bbox(path.bounding_box());
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return None;
+    }
+    Some(Item {
+        content: ItemContent::Coverage {
+            paths: vec![PlacedPath {
+                path: Arc::new(path),
+                transform: m,
+                style: PathStyle::Fill,
+            }],
+        },
+        color,
+        opacity,
+        blur: 0.0,
+        bounds,
+        curve: super::smoothing::IDENTITY,
+    })
+}
+
+/// Analytic outline of the authored rounded caption rectangle.
+pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    let mut p = BezPath::new();
+    if r <= 0.0 {
+        p.move_to((x, y));
+        p.line_to((x + w, y));
+        p.line_to((x + w, y + h));
+        p.line_to((x, y + h));
+        p.close_path();
+        return p;
+    }
+    const K: f64 = 0.552_284_749_830_793_4;
+    let k = r * K;
+    p.move_to((x + r, y));
+    p.line_to((x + w - r, y));
+    p.curve_to((x + w - r + k, y), (x + w, y + r - k), (x + w, y + r));
+    p.line_to((x + w, y + h - r));
+    p.curve_to(
+        (x + w, y + h - r + k),
+        (x + w - r + k, y + h),
+        (x + w - r, y + h),
+    );
+    p.line_to((x + r, y + h));
+    p.curve_to((x + r - k, y + h), (x, y + h - r + k), (x, y + h - r));
+    p.line_to((x, y + r));
+    p.curve_to((x, y + r - k), (x + r - k, y), (x + r, y));
+    p.close_path();
+    p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field of two item lists, as bits.
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    fn assert_same_items(a: &[Item], b: &[Item], what: &str) {
+        let rect = |r: Rect| [r.x0, r.y0, r.x1, r.y1].map(f64::to_bits);
+        let affine = |m: &Affine| m.as_coeffs().map(f64::to_bits);
+        assert_eq!(a.len(), b.len(), "{what}: item count");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            let what = format!("{what}: item {i}");
+            assert_eq!(
+                x.color.map(f64::to_bits),
+                y.color.map(f64::to_bits),
+                "{what}"
+            );
+            assert_eq!(x.opacity.to_bits(), y.opacity.to_bits(), "{what}");
+            assert_eq!(x.blur.to_bits(), y.blur.to_bits(), "{what}");
+            assert_eq!(
+                x.curve.map(f32::to_bits),
+                y.curve.map(f32::to_bits),
+                "{what}"
+            );
+            assert_eq!(rect(x.bounds), rect(y.bounds), "{what}");
+            match (&x.content, &y.content) {
+                (
+                    ItemContent::Image {
+                        image: ImagePixels::Rgba8(p),
+                        transform: t,
+                    },
+                    ItemContent::Image {
+                        image: ImagePixels::Rgba8(q),
+                        transform: u,
+                    },
+                ) => {
+                    assert_eq!(affine(t), affine(u), "{what}");
+                    assert_eq!((p.width, p.height), (q.width, q.height), "{what}");
+                    assert!(p.data == q.data, "{what}: pixels");
+                }
+                (ItemContent::Coverage { paths: p }, ItemContent::Coverage { paths: q }) => {
+                    assert_eq!(p.len(), q.len(), "{what}");
+                    for (p, q) in p.iter().zip(q) {
+                        assert_eq!(affine(&p.transform), affine(&q.transform), "{what}");
+                        assert!(p.path.elements() == q.path.elements(), "{what}: path");
+                    }
+                }
+                _ => panic!("{what}: different item kinds"),
+            }
+        }
+    }
+
+    /// Level 1 text under an animated scale, painted the way the fixture's
+    /// `Powermove UI 3` text is: CoreGraphics masks collected during the
+    /// paint and drawn together (by the mask workers) give the items, in
+    /// order, that a warm paint (every mask a cache hit, the old path) and
+    /// a paint drawing every mask on this thread give.
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    #[test]
+    fn collected_canvas_masks_paint_the_items_warm_and_serial_paints_make() {
+        use crate::render::smoothing::Smoothing;
+        use read_fonts::TableProvider;
+        let data = std::fs::read("/System/Library/Fonts/SFNS.ttf").expect("SF Pro");
+        let cmap = read_fonts::FontRef::new(&data).unwrap().cmap().unwrap();
+        let glyphs: Vec<PlacedGlyph> = "Powermove GOOD TIMES, Text edit"
+            .chars()
+            .filter_map(|c| cmap.map_codepoint(c as u32))
+            .enumerate()
+            .map(|(i, g)| PlacedGlyph {
+                id: g.to_u32(),
+                x: i as f64 * 27.37,
+                y: 0.0,
+            })
+            .collect();
+        let coords = [(u32::from_be_bytes(*b"wght"), 590.0f32)];
+        let face = FaceRef {
+            data: &data,
+            index: 0,
+            id: 7,
+        };
+        let run = |synthetic_italic: bool| Run {
+            face,
+            size: 51.8,
+            coords: Coords::User(&coords),
+            synthetic_bold: false,
+            synthetic_italic,
+            oblique: 0.0,
+            glyphs: &glyphs,
+            bitmap_size: None,
+        };
+        let runs = [run(false), run(true), run(false)];
+        let paint = |outlines: &mut Outlines, bitmaps: &mut Bitmaps, scale: f64| {
+            let mut painter = Painter {
+                outlines,
+                bitmaps,
+                unsupported: Vec::new(),
+                smoothing: Smoothing::Canvas2d,
+            };
+            let mut out = Vec::new();
+            painter.fill_text(
+                &mut out,
+                &runs,
+                (3.3, 40.0),
+                Affine::scale(scale),
+                [0.2, 0.4, 0.9, 1.0],
+                1.0,
+                0.0,
+            );
+            out
+        };
+        for k in 0..8 {
+            let scale = 0.25 * (1.05 - 0.12 * k as f64 / 7.0) * 1.5;
+            let (mut outlines, mut bitmaps) = (Outlines::new(), Bitmaps::new());
+            let cold = paint(&mut outlines, &mut bitmaps, scale);
+            let warm = paint(&mut outlines, &mut bitmaps, scale);
+            super::super::canvas2d::SERIAL.with(|s| s.set(true));
+            let serial = paint(&mut Outlines::new(), &mut Bitmaps::new(), scale);
+            super::super::canvas2d::SERIAL.with(|s| s.set(false));
+            let images = cold
+                .iter()
+                .filter(|i| matches!(i.content, ItemContent::Image { .. }))
+                .count();
+            assert!(images > 20, "the mask path was taken ({images})");
+            assert_same_items(&cold, &warm, &format!("scale {scale} cold vs warm"));
+            assert_same_items(&cold, &serial, &format!("scale {scale} cold vs serial"));
+        }
+    }
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    #[test]
+    fn canvas_mask_wave_matches_rows_with_one_two_and_many_workers() {
+        use read_fonts::TableProvider;
+
+        let data = std::fs::read("/System/Library/Fonts/SFNS.ttf").expect("SF Pro");
+        let cmap = read_fonts::FontRef::new(&data).unwrap().cmap().unwrap();
+        let glyphs: Vec<_> = "Parallel canvas masks"
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| PlacedGlyph {
+                id: cmap.map_codepoint(ch as u32).unwrap().to_u32(),
+                x: i as f64 * 18.75,
+                y: 0.0,
+            })
+            .collect();
+        let runs = [Run {
+            face: FaceRef {
+                data: &data,
+                index: 0,
+                id: 1,
+            },
+            size: 24.0,
+            coords: Coords::User(&[]),
+            glyphs: &glyphs,
+            bitmap_size: None,
+            synthetic_bold: false,
+            synthetic_italic: false,
+            oblique: 0.0,
+        }];
+        let paint = |outlines: &mut Outlines, bitmaps: &mut Bitmaps, deferred: bool| {
+            let mut painter = Painter {
+                outlines,
+                bitmaps,
+                unsupported: Vec::new(),
+                smoothing: super::super::smoothing::Smoothing::Canvas2d,
+            };
+            (0..3)
+                .map(|layer| {
+                    let mut scene = TextScene {
+                        width: 600,
+                        height: 300,
+                        items: Vec::new(),
+                    };
+                    let mut rows = CanvasRows::default();
+                    for row in 0..2 {
+                        let origin = (5.25, f64::from(90 * layer + 32 * row + 28));
+                        let m = Affine::scale(0.875 + f64::from(layer) * 0.0625);
+                        let color = [0.3, 0.5, f64::from(layer) * 0.25, 1.0];
+                        if deferred {
+                            painter.prepare_canvas_fill(
+                                &mut scene.items,
+                                &runs,
+                                origin,
+                                m,
+                                color,
+                                &mut rows,
+                            );
+                        } else {
+                            painter.fill_text(&mut scene.items, &runs, origin, m, color, 1.0, 0.0);
+                        }
+                    }
+                    (rows, scene)
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = paint(&mut Outlines::new(), &mut Bitmaps::new(), false);
+        let many = std::thread::available_parallelism().map_or(3, |n| n.get().max(3));
+        for workers in [1, 2, many] {
+            let mut bitmaps = Bitmaps::new();
+            let mut scenes = paint(&mut Outlines::new(), &mut bitmaps, true);
+            let mut waves = 0;
+            assert!(CanvasRows::resolve_wave(
+                &mut bitmaps,
+                &mut scenes,
+                |n, run| {
+                    waves += 1;
+                    assert!(n > glyphs.len());
+                    if workers == 1 {
+                        return (0..n).map(run).collect();
+                    }
+                    std::thread::scope(|scope| {
+                        let chunk = n.div_ceil(workers);
+                        let handles: Vec<_> = (0..n)
+                            .step_by(chunk)
+                            .map(|start| {
+                                scope.spawn(move || {
+                                    (start..(start + chunk).min(n)).map(run).collect::<Vec<_>>()
+                                })
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .flat_map(|h| h.join().unwrap())
+                            .collect()
+                    })
+                }
+            ));
+            assert_eq!(waves, 1);
+            for ((_, got), (_, want)) in scenes.iter().zip(&expected) {
+                assert_eq!(got.ink(), want.ink());
+                assert_same_items(&got.items, &want.items, &format!("{workers} workers"));
+            }
+        }
+    }
+
+    use i_overlay::float::simplify::SimplifyShape;
+
+    fn fresh_union(contours: &[Vec<[f64; 2]>]) -> BezPath {
+        let shapes = contours.simplify_shape_as::<i64>(FillRule::NonZero);
+        let mut path = BezPath::new();
+        for contour in shapes.iter().flat_map(|shape| shape.iter()) {
+            if let Some(first) = contour.first() {
+                path.move_to((first[0], first[1]));
+                for point in &contour[1..] {
+                    path.line_to((point[0], point[1]));
+                }
+                path.close_path();
+            }
+        }
+        path
+    }
+
+    fn line_contours(contours: &[Vec<[f64; 2]>]) -> BezPath {
+        let mut path = BezPath::new();
+        for contour in contours {
+            path.move_to((contour[0][0], contour[0][1]));
+            for point in &contour[1..] {
+                path.line_to((point[0], point[1]));
+            }
+            path.close_path();
+        }
+        path
+    }
+
+    fn assert_union_semantics(contours: &[Vec<[f64; 2]>], certified: bool) {
+        let raw = line_contours(contours);
+        let mut resolver = NonzeroResolver::default();
+        let (count, clean) = resolver.parse_raw(&raw);
+        assert!(clean);
+        assert_eq!(resolver.certifies_raw_boundary(&raw, count), certified);
+        let resolved = resolver.resolve_owned(raw);
+        let fresh = fresh_union(contours);
+        for y in -2..13 {
+            for x in -2..17 {
+                let point = kurbo::Point::new(x as f64 * 0.25 + 0.125, y as f64 * 0.25 + 0.125);
+                assert_eq!(resolved.winding(point).abs(), fresh.winding(point).abs());
+            }
+        }
+        assert!((resolved.area().abs() - fresh.area().abs()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn certified_nonzero_boundary_handles_separate_and_nested_contours() {
+        let outer = vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let separate = vec![[2.25, 0.125], [3.25, 0.125], [3.25, 1.125], [2.25, 1.125]];
+        assert_union_semantics(&[outer.clone(), separate.clone()], true);
+        let raw = line_contours(&[outer.clone(), separate.clone()]);
+        let raw_buffer = raw.elements().as_ptr();
+        let preserved = NonzeroResolver::default().resolve_owned(raw);
+        assert_eq!(preserved.elements().as_ptr(), raw_buffer);
+        let opposite: Vec<_> = separate.into_iter().rev().collect();
+        // Separate opposite-winding contours would cancel in a shared pixel.
+        assert_union_semantics(&[outer.clone(), opposite], false);
+
+        let hole = vec![[0.5, 0.5], [0.5, 1.5], [1.5, 1.5], [1.5, 0.5]];
+        assert_union_semantics(&[outer.clone(), hole.clone()], true);
+        assert_union_semantics(&[outer, hole.into_iter().rev().collect()], false);
+    }
+
+    #[test]
+    fn certified_nonzero_boundary_rejects_crossings_and_touches() {
+        let rect = vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let crossing = vec![[1.0, -0.5], [3.0, -0.5], [3.0, 1.5], [1.0, 1.5]];
+        assert_union_semantics(&[rect.clone(), crossing], false);
+        let touching = vec![[2.0, 2.0], [3.0, 2.0], [3.0, 3.0], [2.0, 3.0]];
+        assert_union_semantics(&[rect, touching], false);
+        let bowtie = vec![[0.0, 0.0], [2.0, 2.0], [0.0, 2.0], [2.0, 0.0]];
+        assert_union_semantics(&[bowtie], false);
+        let backtrack = vec![[0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [1.0, 2.0], [0.0, 2.0]];
+        assert_union_semantics(&[backtrack], false);
+    }
+
+    #[test]
+    fn certified_forward_continuations_preserve_simple_boundaries() {
+        let forward = vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        assert_union_semantics(&[forward], true);
+
+        let a = [0.0, 0.0];
+        let b = [1.0, 1.0];
+        let near_collinear = [2.0, 2.0 + 1e-15];
+        assert!(orientation_sign(a, b, near_collinear).is_none());
+        assert!(certified_forward(a, b, near_collinear));
+        assert!(!certified_forward([0.0, 0.0], [2.0, 0.0], [1.0, 0.0]));
+    }
+
+    #[test]
+    fn duplicate_endpoints_do_not_prevent_boundary_certification() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((2.0, 0.0));
+        path.line_to((2.0, 0.0));
+        path.line_to((2.0, 2.0));
+        path.line_to((0.0, 2.0));
+        path.line_to((0.0, 0.0));
+        path.close_path();
+        let buffer = path.elements().as_ptr();
+        let resolved = NonzeroResolver::default().resolve_owned(path);
+        assert_eq!(resolved.elements().as_ptr(), buffer);
+        assert_eq!(resolved.area(), 4.0);
+        assert_eq!(resolved.winding(kurbo::Point::new(1.0, 1.0)), 1);
+    }
+
+    #[test]
+    fn exact_fractional_placement_is_retained() {
+        let path = rounded_rect(0.0, 0.0, 1.0, 1.0, 0.0);
+        let item = fill_path(path, Affine::translate((0.125, 0.375)), [1.0; 4], 1.0).unwrap();
+        assert_eq!(item.bounds.x0, 0.125);
+        assert_eq!(item.bounds.y0, 0.375);
+    }
+
+    #[test]
+    fn coverage_flatten_reserves_exact_line_count() {
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.curve_to((0.25, 2.0), (1.75, -2.0), (2.0, 0.0));
+        curve.close_path();
+        let placed = PlacedPath {
+            path: Arc::new(curve),
+            transform: Affine::translate((0.125, 0.375)),
+            style: PathStyle::Fill,
+        };
+        let elements = coverage_path(&placed, Affine::IDENTITY).into_elements();
+        assert_eq!(elements.len(), elements.capacity());
+    }
+
+    #[test]
+    fn small_device_outlines_use_tighter_curve_tolerance() {
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.curve_to((3.0, 14.0), (11.0, -14.0), (14.0, 0.0));
+        curve.close_path();
+        let source = Arc::new(curve);
+        let small = PlacedPath {
+            path: source.clone(),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Fill,
+        };
+        let large = PlacedPath {
+            path: source,
+            transform: Affine::scale(7.0),
+            style: PathStyle::Fill,
+        };
+        assert_eq!(path_coverage_tolerance(&small.path, small.transform), 1e-5);
+        assert_eq!(path_coverage_tolerance(&large.path, large.transform), 1e-4);
+        let small_lines = coverage_path(&small, Affine::IDENTITY);
+        let mut expected = BezPath::new();
+        kurbo::flatten(small.path.iter(), 1e-5, |el| expected.push(el));
+        assert_eq!(small_lines.elements(), expected.elements());
+        assert!(small_lines.elements().len() > 3);
+    }
+
+    #[test]
+    fn blur_reach_uses_eight_sigma() {
+        assert_eq!(blur_radius(2.25), 18);
+    }
+
+    #[test]
+    fn stroked_path_expands_before_nonuniform_world_transform() {
+        let mut line = BezPath::new();
+        line.move_to((1.0, 2.0));
+        line.line_to((3.0, 2.0));
+        let placed = PlacedPath {
+            path: Arc::new(line),
+            transform: Affine::scale_non_uniform(10.0, 2.0),
+            style: PathStyle::Stroke(Stroke::new(2.0)),
+        };
+        let path = coverage_path(&placed, Affine::translate((5.0, 7.0)));
+        assert!(path.elements().iter().all(|el| matches!(
+            el,
+            kurbo::PathEl::MoveTo(_) | kurbo::PathEl::LineTo(_) | kurbo::PathEl::ClosePath
+        )));
+        let b = path.bounding_box();
+        // Kurbo's default round caps extend one local pixel past each end.
+        assert!((b.x0 - 5.0).abs() < 1e-8 && (b.x1 - 45.0).abs() < 1e-8);
+        assert!((b.y0 - 9.0).abs() < 1e-8 && (b.y1 - 13.0).abs() < 1e-8);
+        assert!(
+            (local_coverage_tolerance(placed.transform, SMALL_COVERAGE_TOLERANCE)
+                - SMALL_COVERAGE_TOLERANCE / 10.0)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn flattened_coverage_cache_reuses_and_bounds_retained_paths() {
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.quad_to((4.0, 8.0), (8.0, 0.0));
+        curve.close_path();
+        let source = Arc::new(curve);
+        let first = PlacedPath {
+            path: source.clone(),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Fill,
+        };
+        let shifted = PlacedPath {
+            transform: Affine::translate((0.25, 0.0)),
+            ..first.clone()
+        };
+        let scaled = PlacedPath {
+            transform: Affine::scale_non_uniform(1.1, 1.0),
+            ..first.clone()
+        };
+        let stroked = PlacedPath {
+            style: PathStyle::Stroke(Stroke::new(1.0)),
+            ..first.clone()
+        };
+        let mut unlimited = CoveragePathCache::new(usize::MAX);
+        let lines = unlimited.get(&first).lines;
+        assert!(Arc::ptr_eq(&lines, &unlimited.get(&first).lines));
+        assert!(Arc::ptr_eq(&lines, &unlimited.get(&shifted).lines));
+        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&scaled).lines));
+        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&stroked).lines));
+
+        let mut probe = CoveragePathCache::new(usize::MAX);
+        probe.get(&first);
+        let one_entry_bytes = probe.bytes();
+        let mut limited = CoveragePathCache::new(one_entry_bytes);
+        let old = limited.get(&first).lines;
+        assert!(Arc::ptr_eq(&old, &limited.get(&first).lines));
+        let same_shape_new_source = PlacedPath {
+            path: Arc::new((*source).clone()),
+            ..first.clone()
+        };
+        limited.get(&same_shape_new_source);
+        assert!(limited.bytes() <= one_entry_bytes);
+        assert!(!Arc::ptr_eq(&old, &limited.get(&first).lines));
+    }
+
+    /// `make(0), …, make(n - 1)` on a thread each.
+    fn threads(n: usize, make: &(dyn Fn(usize) -> Vec<PathEl> + Sync)) -> Vec<Vec<PathEl>> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..n).map(|i| scope.spawn(move || make(i))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    }
+
+    /// Geometry made on several threads is the geometry `get` makes alone,
+    /// with one resolver going from path to path: overlapping contours
+    /// (resolved), simple ones (kept), strokes, and repeated sources.
+    #[test]
+    fn prepared_coverage_geometry_is_what_get_makes() {
+        let mut overlapping = BezPath::new();
+        overlapping.move_to((0.0, 0.0));
+        overlapping.curve_to((4.0, -2.0), (8.0, 2.0), (6.0, 6.0));
+        overlapping.line_to((0.0, 6.0));
+        overlapping.close_path();
+        overlapping.move_to((3.0, 1.0));
+        overlapping.quad_to((9.0, 3.0), (5.0, 9.0));
+        overlapping.line_to((2.0, 8.0));
+        overlapping.close_path();
+        let mut simple = BezPath::new();
+        simple.move_to((0.0, 0.0));
+        simple.quad_to((4.0, 8.0), (8.0, 0.0));
+        simple.close_path();
+        let (overlapping, simple) = (Arc::new(overlapping), Arc::new(simple));
+        let mut paths = Vec::new();
+        for i in 0..12 {
+            let angle = i as f64 * 0.37;
+            let transform = Affine::rotate(angle) * Affine::scale(1.0 + i as f64 * 0.21);
+            for (source, style) in [
+                (&overlapping, PathStyle::Fill),
+                (&simple, PathStyle::Fill),
+                (
+                    &simple,
+                    PathStyle::Stroke(Stroke::new(0.5 + i as f64 * 0.1)),
+                ),
+            ] {
+                paths.push(PlacedPath {
+                    path: source.clone(),
+                    transform,
+                    style,
+                });
+            }
+        }
+        // The same source and transform twice is made once.
+        paths.push(paths[3].clone());
+        let mut alone = CoveragePathCache::new(usize::MAX);
+        let want: Vec<BezPath> = paths.iter().map(|p| alone.get(p).device()).collect();
+        let mut prepared = CoveragePathCache::new(usize::MAX);
+        prepared.prepare(paths.iter().rev(), threads);
+        // One local geometry per source, style and local tolerance.
+        let mut distinct: Vec<(CoverageKey, &PlacedPath)> = Vec::new();
+        for placed in &paths {
+            let key = CoveragePathCache::key(placed);
+            if !distinct.iter().any(|(k, p)| {
+                *k == key && Arc::ptr_eq(&p.path, &placed.path) && p.style == placed.style
+            }) {
+                distinct.push((key, placed));
+            }
+        }
+        assert!(
+            distinct.len() < paths.len() - 1,
+            "scale buckets share geometry"
+        );
+        assert_eq!(
+            prepared.prepared.values().map(Vec::len).sum::<usize>(),
+            distinct.len()
+        );
+        for (placed, want) in paths.iter().zip(&want) {
+            assert_eq!(prepared.get(placed).device().elements(), want.elements());
+        }
+        assert!(prepared.prepared.values().all(Vec::is_empty));
+        // The cache holds what it holds without preparing, in the same order.
+        assert_eq!(prepared.len(), alone.len());
+        assert_eq!(prepared.bytes(), alone.bytes());
+        // A cache too small for the frame evicts as it does without
+        // preparing, and never makes a prepared path again.
+        let one = {
+            let mut probe = CoveragePathCache::new(usize::MAX);
+            probe.get(&paths[0]);
+            probe.bytes()
+        };
+        let (mut small_alone, mut small) = (
+            CoveragePathCache::new(one * 3),
+            CoveragePathCache::new(one * 3),
+        );
+        for placed in &paths {
+            small_alone.get(placed);
+        }
+        small.prepare(paths.iter(), threads);
+        for (placed, want) in paths.iter().zip(&want) {
+            assert_eq!(small.get(placed).device().elements(), want.elements());
+        }
+        assert_eq!(
+            (small.len(), small.bytes()),
+            (small_alone.len(), small_alone.bytes())
+        );
+    }
+
+    /// Animated scale and rotation map one resolved local geometry; each
+    /// frame's lines stay within the device tolerance of flattening after
+    /// the transform, overlaps resolved, for fills and strokes, including a
+    /// reflection.
+    #[test]
+    fn animated_transforms_reuse_local_geometry_within_device_tolerance() {
+        let mut overlapping = BezPath::new();
+        overlapping.move_to((0.0, 0.0));
+        overlapping.curve_to((40.0, -20.0), (80.0, 20.0), (60.0, 60.0));
+        overlapping.line_to((0.0, 60.0));
+        overlapping.close_path();
+        overlapping.move_to((30.0, 10.0));
+        overlapping.quad_to((90.0, 30.0), (50.0, 90.0));
+        overlapping.line_to((20.0, 80.0));
+        overlapping.close_path();
+        let source = Arc::new(overlapping);
+        let mut cache = CoveragePathCache::new(usize::MAX);
+        for style in [PathStyle::Fill, PathStyle::Stroke(Stroke::new(3.0))] {
+            let frames: Vec<Affine> = (0..24)
+                .map(|i| {
+                    let t = i as f64 / 24.0;
+                    Affine::rotate(t * 0.9)
+                        * Affine::scale_non_uniform(2.05 + 0.04 * t, 2.0 - 0.05 * t)
+                })
+                .chain([Affine::scale_non_uniform(-2.05, 2.0)])
+                .collect();
+            let keys: std::collections::HashSet<_> = frames
+                .iter()
+                .map(|&transform| {
+                    CoveragePathCache::key(&PlacedPath {
+                        path: source.clone(),
+                        transform,
+                        style: style.clone(),
+                    })
+                })
+                .collect();
+            assert_eq!(keys.len(), 1, "one scale bucket, one local geometry");
+            for transform in frames {
+                let placed = PlacedPath {
+                    path: source.clone(),
+                    transform,
+                    style: style.clone(),
+                };
+                let lines = cache.get(&placed).device();
+                let mut exact = NonzeroResolver::default();
+                let want = exact.resolve(&coverage_path(&placed, Affine::IDENTITY));
+                let tolerance = path_coverage_tolerance(&placed.path, transform);
+                // Area within the band the two flattenings allow around the
+                // perimeter; the same resolved winding (0 or 1) anywhere.
+                let perimeter: f64 = want
+                    .segments()
+                    .map(|s| kurbo::ParamCurveArclen::arclen(&s, 1e-9))
+                    .sum();
+                assert!(
+                    (lines.area().abs() - want.area().abs()).abs() <= 2.0 * tolerance * perimeter,
+                    "{} vs {}",
+                    lines.area(),
+                    want.area()
+                );
+                for (x, y) in [(35.0, 40.0), (45.0, 50.0), (0.5, 30.0), (500.0, 500.0)] {
+                    let at = transform * kurbo::Point::new(x, y);
+                    assert_eq!(lines.winding(at).abs(), want.winding(at).abs());
+                    assert!(lines.winding(at).abs() <= 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_nonzero_contours_cover_overlap_once() {
+        let mut components = BezPath::new();
+        components.move_to((0.0, 0.0));
+        components.line_to((2.0, 0.0));
+        components.line_to((2.0, 2.0));
+        components.line_to((0.0, 2.0));
+        components.close_path();
+        components.move_to((1.0, 0.0));
+        components.line_to((3.0, 0.0));
+        components.line_to((3.0, 2.0));
+        components.line_to((1.0, 2.0));
+        components.close_path();
+        let placed = PlacedPath {
+            path: Arc::new(components),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Fill,
+        };
+        let raw = coverage_path(&placed, Affine::IDENTITY);
+        assert_eq!(raw.winding(kurbo::Point::new(1.5, 1.0)), 2);
+        let mut cache = CoveragePathCache::default();
+        let resolved = cache.get(&placed).device();
+        assert_eq!(resolved.winding(kurbo::Point::new(1.5, 1.0)), 1);
+        assert!((resolved.area().abs() - 6.0).abs() < 1e-9);
+        assert_eq!(resolved.winding(kurbo::Point::new(3.5, 1.0)), 0);
+        let shifted = PlacedPath {
+            transform: Affine::translate((0.375, 0.125)),
+            ..placed.clone()
+        };
+        assert_eq!(cache.get(&placed).key(), cache.get(&shifted).key());
+    }
+
+    #[test]
+    fn cached_nonzero_stroke_resolves_crossing_segments() {
+        let mut crossing = BezPath::new();
+        crossing.move_to((0.0, 1.0));
+        crossing.line_to((4.0, 1.0));
+        crossing.move_to((2.0, -1.0));
+        crossing.line_to((2.0, 3.0));
+        let placed = PlacedPath {
+            path: Arc::new(crossing),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Stroke(Stroke::new(1.0)),
+        };
+        let raw = coverage_path(&placed, Affine::IDENTITY);
+        assert_eq!(raw.winding(kurbo::Point::new(2.0, 1.0)).abs(), 2);
+        let resolved = CoveragePathCache::default().get(&placed).device();
+        assert_eq!(resolved.winding(kurbo::Point::new(2.0, 1.0)).abs(), 1);
+    }
+
+    #[test]
+    fn nonzero_resolver_reuse_matches_fresh_for_compound_and_self_intersecting_paths() {
+        let mut compound = BezPath::new();
+        for (x0, x1) in [(0.0, 2.0), (1.0, 3.0)] {
+            compound.move_to((x0, 0.0));
+            compound.line_to((x1, 0.0));
+            compound.line_to((x1, 2.0));
+            compound.line_to((x0, 2.0));
+            compound.close_path();
+        }
+        let mut crossing = BezPath::new();
+        crossing.move_to((0.0, 0.0));
+        crossing.line_to((3.0, 3.0));
+        crossing.line_to((0.0, 3.0));
+        crossing.line_to((3.0, 0.0));
+        crossing.close_path();
+
+        let expected_compound = fresh_union(&[
+            vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
+            vec![[1.0, 0.0], [3.0, 0.0], [3.0, 2.0], [1.0, 2.0]],
+        ]);
+        let expected_crossing =
+            fresh_union(&[vec![[0.0, 0.0], [3.0, 3.0], [0.0, 3.0], [3.0, 0.0]]]);
+
+        let mut reused = NonzeroResolver::default();
+        for (path, fresh) in [
+            (&compound, &expected_compound),
+            (&crossing, &expected_crossing),
+            (&compound, &expected_compound),
+            (&crossing, &expected_crossing),
+        ] {
+            let actual = reused.resolve(path);
+            assert_eq!(actual.elements(), fresh.elements());
+            for y in 0..7 {
+                for x in 0..7 {
+                    let point = kurbo::Point::new(x as f64 * 0.5 + 0.25, y as f64 * 0.5 + 0.25);
+                    assert_eq!(actual.winding(point), fresh.winding(point));
+                }
+            }
+        }
+        let resolved_compound = reused.resolve(&compound);
+        assert!((resolved_compound.area().abs() - 6.0).abs() < 1e-9);
+        let resolved_crossing = reused.resolve(&crossing);
+        assert_eq!(
+            resolved_crossing.winding(kurbo::Point::new(1.5, 0.5)).abs(),
+            1
+        );
+        assert_eq!(
+            resolved_crossing.winding(kurbo::Point::new(1.5, 2.5)).abs(),
+            1
+        );
+        assert_eq!(resolved_crossing.winding(kurbo::Point::new(0.5, 1.5)), 0);
+
+        reused.trim_after(1, 1, 0);
+        assert!(reused.contours.is_empty());
+    }
+}

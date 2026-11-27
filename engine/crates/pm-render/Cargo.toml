@@ -1,0 +1,122 @@
+[package]
+name = "pm-render"
+description = "Render graph, 2D layers, 3D scene pass, effects (section 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pm-protocol = { path = "../pm-protocol" }
+# Work counters (docs/engine/perfbench.md).
+pm-perf = { path = "../pm-perf" }
+pm-fx-defs = { path = "../pm-fx-defs" }
+pm-model = { path = "../pm-model" }
+pm-time = { path = "../pm-time" }
+pm-eval = { path = "../pm-eval" }
+pm-expr = { path = "../pm-expr" }
+# Share the kernel expression host (Comp::get, including canonical params).
+pm-wasm = { path = "../pm-wasm" }
+pm-color = { path = "../pm-color" }
+pm-geom3d = { path = "../pm-geom3d" }
+# Studio, the path-traced product renderer (scene3d/studio.rs).
+pm-studio = { path = "../pm-studio" }
+png = "0.18"
+pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
+pm-glsl = { path = "../pm-glsl" }
+pollster = "0.4"
+serde.workspace = true
+pm-media = { path = "../pm-media" }
+pm-vector = { path = "../pm-vector", features = ["render"] }
+# Glyph rendering (text and captions, docs/engine/text-render.md).
+pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2"] }
+kurbo = "0.13.1"
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+thiserror.workspace = true
+libm.workspace = true
+regex = "1"
+sha2 = { workspace = true, features = ["std"] }
+blake3 = "1.8"
+serde_json.workspace = true
+
+[dev-dependencies]
+# Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
+pm-glsl = { path = "../pm-glsl", features = ["test-admission"] }
+tempfile = "3"
+pm-export = { path = "../pm-export", features = ["test-sinks"] }
+# f64 reference renders for the quality gates (docs/engine/gate-policy.md).
+pm-reference = { path = "../pm-reference" }
+# Anchor edits on level 2 text (the semantic gate runs the edit kernels).
+pm-edit = { path = "../pm-edit" }
+# Proxies of an older project's clips select the frames their originals do.
+pm-proxy = { path = "../pm-proxy" }
+pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
+read-fonts = "0.45"
+png = "0.18"
+resvg = { version = "=0.48.1", default-features = false, features = ["raster-images"] }
+tiny-skia = "=0.12.0"
+usvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts"] }
+
+[[test]]
+# Runs on the main thread: the CoreText font registry uses AppKit's font
+# manager.
+name = "text_raster"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_corpus"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry for text layers).
+name = "effect_proof"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "space25d_picks"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_gpu"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_weight"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_box"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry and reference).
+name = "text_level2"
+harness = false
+
+[[test]]
+name = "text_level2_semantics"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_colors"
+harness = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-text = { path = "../pm-text", default-features = false, features = ["canvas2d"] }
+
+[[test]]
+# Offscreen only; CoreText must remain on the main thread.
+name = "glow_capture"
+harness = false
+
+[[test]]
+# CoreText registry on main; headless GPU only, no windows.
+name = "extension_effect_proof"
+harness = false

@@ -1,0 +1,1731 @@
+{
+  "reference": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "sources": [
+    {
+      "path": "apps/desktop/src/extensions/inspector/AlignmentStrip.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--ink-rgb",
+          "line": 81
+        },
+        {
+          "name": "--tx-3",
+          "line": 81
+        },
+        {
+          "name": "--dur-1",
+          "line": 81
+        },
+        {
+          "name": "--dur-1",
+          "line": 81
+        },
+        {
+          "name": "--r-sm",
+          "line": 82
+        },
+        {
+          "name": "--r-sm",
+          "line": 82
+        },
+        {
+          "name": "--r-sm",
+          "line": 83
+        },
+        {
+          "name": "--r-sm",
+          "line": 83
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 84
+        },
+        {
+          "name": "--tx",
+          "line": 84
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 85
+        },
+        {
+          "name": "--tx",
+          "line": 85
+        },
+        {
+          "name": "--accent",
+          "line": 86
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/CaptionsSection.svelte",
+      "declarations": [
+        "--cap-box",
+        "--cap-fill",
+        "--cap-highlight",
+        "--cap-stroke",
+        "--cap-stroke-color",
+        "--cap-weight"
+      ],
+      "reads": [
+        {
+          "name": "--r-md",
+          "line": 164
+        },
+        {
+          "name": "--tx-3",
+          "line": 164
+        },
+        {
+          "name": "--dur-1",
+          "line": 165
+        },
+        {
+          "name": "--dur-1",
+          "line": 165
+        },
+        {
+          "name": "--ink-1",
+          "line": 167
+        },
+        {
+          "name": "--tx-2",
+          "line": 167
+        },
+        {
+          "name": "--tx",
+          "line": 168
+        },
+        {
+          "name": "--bg-panel",
+          "line": 170
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 170
+        },
+        {
+          "name": "--ink-2",
+          "line": 171
+        },
+        {
+          "name": "--r-md",
+          "line": 174
+        },
+        {
+          "name": "--cap-box",
+          "line": 178
+        },
+        {
+          "name": "--cap-fill",
+          "line": 179
+        },
+        {
+          "name": "--cap-weight",
+          "line": 179
+        },
+        {
+          "name": "--cap-stroke",
+          "line": 180
+        },
+        {
+          "name": "--cap-stroke-color",
+          "line": 180
+        },
+        {
+          "name": "--cap-highlight",
+          "line": 182
+        },
+        {
+          "name": "--fs-xs",
+          "line": 183
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/ChannelRow.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--fs-sm",
+          "line": 193
+        },
+        {
+          "name": "--tx-3",
+          "line": 193
+        },
+        {
+          "name": "--accent",
+          "line": 204
+        },
+        {
+          "name": "--danger",
+          "line": 379
+        },
+        {
+          "name": "--tx-3",
+          "line": 388
+        },
+        {
+          "name": "--ink-1",
+          "line": 389
+        },
+        {
+          "name": "--r-xs",
+          "line": 390
+        },
+        {
+          "name": "--tx-2",
+          "line": 392
+        },
+        {
+          "name": "--ink-1",
+          "line": 392
+        },
+        {
+          "name": "--accent",
+          "line": 393
+        },
+        {
+          "name": "--accent",
+          "line": 393
+        },
+        {
+          "name": "--accent",
+          "line": 394
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/ContentSection.svelte",
+      "declarations": [
+        "--fill"
+      ],
+      "reads": [
+        {
+          "name": "--bg-row",
+          "line": 205
+        },
+        {
+          "name": "--r-sm",
+          "line": 205
+        },
+        {
+          "name": "--fs-md",
+          "line": 205
+        },
+        {
+          "name": "--tx",
+          "line": 205
+        },
+        {
+          "name": "--fs-xs",
+          "line": 376
+        },
+        {
+          "name": "--red",
+          "line": 376
+        },
+        {
+          "name": "--tx-3",
+          "line": 392
+        },
+        {
+          "name": "--pad",
+          "line": 396
+        },
+        {
+          "name": "--r-sm",
+          "line": 401
+        },
+        {
+          "name": "--bg-row",
+          "line": 401
+        },
+        {
+          "name": "--tx-3",
+          "line": 401
+        },
+        {
+          "name": "--fs-md",
+          "line": 401
+        },
+        {
+          "name": "--r-sm",
+          "line": 407
+        },
+        {
+          "name": "--tx-2",
+          "line": 407
+        },
+        {
+          "name": "--dur-1",
+          "line": 408
+        },
+        {
+          "name": "--dur-1",
+          "line": 408
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 410
+        },
+        {
+          "name": "--tx",
+          "line": 410
+        },
+        {
+          "name": "--accent",
+          "line": 411
+        },
+        {
+          "name": "--accent-tx",
+          "line": 411
+        },
+        {
+          "name": "--accent-tx",
+          "line": 412
+        },
+        {
+          "name": "--r-md",
+          "line": 416
+        },
+        {
+          "name": "--bg-float",
+          "line": 416
+        },
+        {
+          "name": "--bg-panel",
+          "line": 416
+        },
+        {
+          "name": "--shadow-float",
+          "line": 416
+        },
+        {
+          "name": "--fs-sm",
+          "line": 423
+        },
+        {
+          "name": "--fs-xs",
+          "line": 423
+        },
+        {
+          "name": "--fw-medium",
+          "line": 423
+        },
+        {
+          "name": "--tx",
+          "line": 423
+        },
+        {
+          "name": "--line",
+          "line": 424
+        },
+        {
+          "name": "--r-sm",
+          "line": 428
+        },
+        {
+          "name": "--tx-2",
+          "line": 428
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 430
+        },
+        {
+          "name": "--tx",
+          "line": 430
+        },
+        {
+          "name": "--fs-xs",
+          "line": 431
+        },
+        {
+          "name": "--tx-2",
+          "line": 431
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 441
+        },
+        {
+          "name": "--fill",
+          "line": 441
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 441
+        },
+        {
+          "name": "--fill",
+          "line": 441
+        },
+        {
+          "name": "--accent",
+          "line": 447
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 451
+        },
+        {
+          "name": "--fs-xs",
+          "line": 456
+        },
+        {
+          "name": "--tx-3",
+          "line": 456
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/EffectsPanel.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--pad",
+          "line": 51
+        },
+        {
+          "name": "--tx-3",
+          "line": 52
+        },
+        {
+          "name": "--fs-xs",
+          "line": 53
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/EffectsSection.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--ink-1",
+          "line": 346
+        },
+        {
+          "name": "--accent-dim",
+          "line": 352
+        },
+        {
+          "name": "--accent",
+          "line": 367
+        },
+        {
+          "name": "--accent",
+          "line": 380
+        },
+        {
+          "name": "--tx",
+          "line": 396
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/ExtensionLayerParams.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--r-sm",
+          "line": 54
+        },
+        {
+          "name": "--bg-row",
+          "line": 55
+        },
+        {
+          "name": "--tx-2",
+          "line": 56
+        },
+        {
+          "name": "--fs-xs",
+          "line": 57
+        },
+        {
+          "name": "--tx",
+          "line": 60
+        },
+        {
+          "name": "--font-mono",
+          "line": 60
+        },
+        {
+          "name": "--tx-3",
+          "line": 61
+        },
+        {
+          "name": "--orange",
+          "line": 62
+        },
+        {
+          "name": "--tx",
+          "line": 63
+        },
+        {
+          "name": "--font-mono",
+          "line": 63
+        },
+        {
+          "name": "--tx-3",
+          "line": 64
+        },
+        {
+          "name": "--orange",
+          "line": 65
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/InspectorPanel.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--section-line",
+          "line": 90
+        },
+        {
+          "name": "--pad",
+          "line": 103
+        },
+        {
+          "name": "--tx-3",
+          "line": 104
+        },
+        {
+          "name": "--fs-xs",
+          "line": 105
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/InspectorSurface.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--pad",
+          "line": 50
+        },
+        {
+          "name": "--ctl-h",
+          "line": 74
+        },
+        {
+          "name": "--bg-field",
+          "line": 75
+        },
+        {
+          "name": "--bg-row-hi",
+          "line": 80
+        },
+        {
+          "name": "--tx",
+          "line": 80
+        },
+        {
+          "name": "--bg-row",
+          "line": 81
+        },
+        {
+          "name": "--accent",
+          "line": 82
+        },
+        {
+          "name": "--disabled",
+          "line": 83
+        },
+        {
+          "name": "--ink-1",
+          "line": 85
+        },
+        {
+          "name": "--accent",
+          "line": 86
+        },
+        {
+          "name": "--on-accent",
+          "line": 86
+        },
+        {
+          "name": "--accent-hover",
+          "line": 87
+        },
+        {
+          "name": "--r-xs",
+          "line": 100
+        },
+        {
+          "name": "--tx-4",
+          "line": 101
+        },
+        {
+          "name": "--dur-1",
+          "line": 102
+        },
+        {
+          "name": "--dur-1",
+          "line": 102
+        },
+        {
+          "name": "--ink-1",
+          "line": 106
+        },
+        {
+          "name": "--tx-2",
+          "line": 107
+        },
+        {
+          "name": "--accent",
+          "line": 111
+        },
+        {
+          "name": "--tx-3",
+          "line": 142
+        },
+        {
+          "name": "--dur-2",
+          "line": 143
+        },
+        {
+          "name": "--ease-io",
+          "line": 143
+        },
+        {
+          "name": "--tx-3",
+          "line": 152
+        },
+        {
+          "name": "--fs-sm",
+          "line": 153
+        },
+        {
+          "name": "--lh",
+          "line": 154
+        },
+        {
+          "name": "--pad",
+          "line": 161
+        },
+        {
+          "name": "--tx",
+          "line": 179
+        },
+        {
+          "name": "--fw-medium",
+          "line": 180
+        },
+        {
+          "name": "--tx-3",
+          "line": 184
+        },
+        {
+          "name": "--fw-regular",
+          "line": 185
+        },
+        {
+          "name": "--tx-3",
+          "line": 191
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/LayerOptions.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--tx-2",
+          "line": 50
+        },
+        {
+          "name": "--accent",
+          "line": 51
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/MasksSection.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--ink-1",
+          "line": 78
+        },
+        {
+          "name": "--tx",
+          "line": 80
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/RetimingSection.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--tx-3",
+          "line": 23
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/SectionHeading.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--section-line",
+          "line": 17
+        },
+        {
+          "name": "--tx",
+          "line": 22
+        },
+        {
+          "name": "--fw-regular",
+          "line": 23
+        },
+        {
+          "name": "--r-xs",
+          "line": 33
+        },
+        {
+          "name": "--tx-3",
+          "line": 35
+        },
+        {
+          "name": "--ink-1",
+          "line": 38
+        },
+        {
+          "name": "--tx",
+          "line": 38
+        },
+        {
+          "name": "--accent",
+          "line": 39
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/StructuredSection.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--ctl-h",
+          "line": 139
+        },
+        {
+          "name": "--r-sm",
+          "line": 142
+        },
+        {
+          "name": "--bg-field",
+          "line": 143
+        },
+        {
+          "name": "--tx-2",
+          "line": 144
+        },
+        {
+          "name": "--bg-row-hi",
+          "line": 150
+        },
+        {
+          "name": "--tx",
+          "line": 151
+        },
+        {
+          "name": "--tx-3",
+          "line": 155
+        },
+        {
+          "name": "--tx-3",
+          "line": 161
+        },
+        {
+          "name": "--fs-xs",
+          "line": 162
+        },
+        {
+          "name": "--r-xs",
+          "line": 172
+        },
+        {
+          "name": "--tx-3",
+          "line": 174
+        },
+        {
+          "name": "--ink-1",
+          "line": 179
+        },
+        {
+          "name": "--tx",
+          "line": 180
+        },
+        {
+          "name": "--hairline",
+          "line": 185
+        },
+        {
+          "name": "--line",
+          "line": 185
+        },
+        {
+          "name": "--tx-3",
+          "line": 191
+        },
+        {
+          "name": "--fs-xs",
+          "line": 192
+        },
+        {
+          "name": "--fw-medium",
+          "line": 193
+        },
+        {
+          "name": "--tx-2",
+          "line": 198
+        },
+        {
+          "name": "--tx-3",
+          "line": 203
+        },
+        {
+          "name": "--fs-xs",
+          "line": 204
+        },
+        {
+          "name": "--r-sm",
+          "line": 211
+        },
+        {
+          "name": "--bg-field",
+          "line": 212
+        },
+        {
+          "name": "--tx-3",
+          "line": 213
+        },
+        {
+          "name": "--accent",
+          "line": 218
+        },
+        {
+          "name": "--bg-field",
+          "line": 218
+        },
+        {
+          "name": "--accent",
+          "line": 219
+        },
+        {
+          "name": "--fw-medium",
+          "line": 234
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/TextAlignment.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--bg-row",
+          "line": 33
+        },
+        {
+          "name": "--r-sm",
+          "line": 33
+        },
+        {
+          "name": "--r-sm",
+          "line": 34
+        },
+        {
+          "name": "--tx-3",
+          "line": 34
+        },
+        {
+          "name": "--ink-1",
+          "line": 35
+        },
+        {
+          "name": "--tx",
+          "line": 35
+        },
+        {
+          "name": "--ink-2",
+          "line": 36
+        },
+        {
+          "name": "--tx",
+          "line": 36
+        },
+        {
+          "name": "--bg-panel",
+          "line": 37
+        },
+        {
+          "name": "--tx",
+          "line": 37
+        },
+        {
+          "name": "--accent",
+          "line": 38
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/TextAnimators.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--ink-1",
+          "line": 301
+        },
+        {
+          "name": "--tx-3",
+          "line": 302
+        },
+        {
+          "name": "--tx",
+          "line": 306
+        },
+        {
+          "name": "--r-xs",
+          "line": 312
+        },
+        {
+          "name": "--bg-field",
+          "line": 312
+        },
+        {
+          "name": "--tx",
+          "line": 312
+        },
+        {
+          "name": "--accent",
+          "line": 314
+        },
+        {
+          "name": "--tx-3",
+          "line": 319
+        },
+        {
+          "name": "--fs-xs",
+          "line": 319
+        },
+        {
+          "name": "--r-sm",
+          "line": 326
+        },
+        {
+          "name": "--bg-row",
+          "line": 326
+        },
+        {
+          "name": "--r-sm",
+          "line": 329
+        },
+        {
+          "name": "--tx-3",
+          "line": 329
+        },
+        {
+          "name": "--fs-xs",
+          "line": 330
+        },
+        {
+          "name": "--ink-1",
+          "line": 332
+        },
+        {
+          "name": "--tx",
+          "line": 332
+        },
+        {
+          "name": "--bg-panel",
+          "line": 333
+        },
+        {
+          "name": "--tx",
+          "line": 333
+        },
+        {
+          "name": "--accent",
+          "line": 334
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/inspector/TypeSettings.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--tx-3",
+          "line": 60
+        },
+        {
+          "name": "--fs-xs",
+          "line": 60
+        },
+        {
+          "name": "--fw-regular",
+          "line": 60
+        },
+        {
+          "name": "--tx",
+          "line": 61
+        },
+        {
+          "name": "--tx-3",
+          "line": 62
+        },
+        {
+          "name": "--fs-xs",
+          "line": 62
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/mods/ModRow.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--row-h",
+          "line": 143
+        },
+        {
+          "name": "--r-sm",
+          "line": 145
+        },
+        {
+          "name": "--dur-1",
+          "line": 147
+        },
+        {
+          "name": "--ease",
+          "line": 147
+        },
+        {
+          "name": "--bg-row",
+          "line": 152
+        },
+        {
+          "name": "--tx",
+          "line": 165
+        },
+        {
+          "name": "--fs-md",
+          "line": 166
+        },
+        {
+          "name": "--lh-tight",
+          "line": 167
+        },
+        {
+          "name": "--tx-2",
+          "line": 174
+        },
+        {
+          "name": "--tx-3",
+          "line": 178
+        },
+        {
+          "name": "--tx-3",
+          "line": 182
+        },
+        {
+          "name": "--fs-xs",
+          "line": 183
+        },
+        {
+          "name": "--lh-tight",
+          "line": 184
+        },
+        {
+          "name": "--tx-4",
+          "line": 191
+        },
+        {
+          "name": "--fs-xs",
+          "line": 192
+        },
+        {
+          "name": "--lh-tight",
+          "line": 193
+        },
+        {
+          "name": "--danger",
+          "line": 201
+        },
+        {
+          "name": "--fs-xs",
+          "line": 202
+        },
+        {
+          "name": "--lh-tight",
+          "line": 203
+        },
+        {
+          "name": "--tx-2",
+          "line": 211
+        },
+        {
+          "name": "--fs-xs",
+          "line": 212
+        },
+        {
+          "name": "--lh-tight",
+          "line": 213
+        },
+        {
+          "name": "--accent-tx",
+          "line": 225
+        },
+        {
+          "name": "--fs-xs",
+          "line": 226
+        },
+        {
+          "name": "--lh-tight",
+          "line": 227
+        },
+        {
+          "name": "--accent-hover",
+          "line": 232
+        },
+        {
+          "name": "--r-xs",
+          "line": 249
+        },
+        {
+          "name": "--tx-3",
+          "line": 251
+        },
+        {
+          "name": "--fs-md",
+          "line": 252
+        },
+        {
+          "name": "--dur-1",
+          "line": 256
+        },
+        {
+          "name": "--ease",
+          "line": 256
+        },
+        {
+          "name": "--ink-1",
+          "line": 266
+        },
+        {
+          "name": "--tx",
+          "line": 267
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/mods/ModsPanel.svelte",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--f-ui",
+          "line": 136
+        },
+        {
+          "name": "--tx-3",
+          "line": 141
+        },
+        {
+          "name": "--fs-xs",
+          "line": 142
+        },
+        {
+          "name": "--lh-tight",
+          "line": 143
+        },
+        {
+          "name": "--tx-4",
+          "line": 155
+        },
+        {
+          "name": "--fs-xs",
+          "line": 156
+        },
+        {
+          "name": "--fw-medium",
+          "line": 157
+        },
+        {
+          "name": "--lh-tight",
+          "line": 158
+        },
+        {
+          "name": "--tx-3",
+          "line": 164
+        },
+        {
+          "name": "--fs-xs",
+          "line": 165
+        },
+        {
+          "name": "--lh",
+          "line": 166
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/timeline/comp-tabs.ts",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--bg-panel",
+          "line": 15
+        },
+        {
+          "name": "--line",
+          "line": 15
+        },
+        {
+          "name": "--tx-3",
+          "line": 18
+        },
+        {
+          "name": "--fs-xs",
+          "line": 18
+        },
+        {
+          "name": "--tx-2",
+          "line": 19
+        },
+        {
+          "name": "--tx",
+          "line": 20
+        },
+        {
+          "name": "--accent",
+          "line": 21
+        },
+        {
+          "name": "--r-xs",
+          "line": 23
+        },
+        {
+          "name": "--bg-hover",
+          "line": 25
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/timeline/index.ts",
+      "declarations": [
+        "--tl-gutter",
+        "--tl-ruler"
+      ],
+      "reads": [
+        {
+          "name": "--tl-gutter",
+          "line": 29
+        },
+        {
+          "name": "--tl-ruler",
+          "line": 29
+        },
+        {
+          "name": "--bg-panel",
+          "line": 29
+        },
+        {
+          "name": "--line",
+          "line": 29
+        },
+        {
+          "name": "--line",
+          "line": 29
+        },
+        {
+          "name": "--tx",
+          "line": 30
+        },
+        {
+          "name": "--bg-panel",
+          "line": 30
+        },
+        {
+          "name": "--r-sm",
+          "line": 30
+        },
+        {
+          "name": "--bg-hover",
+          "line": 31
+        },
+        {
+          "name": "--fs-sm",
+          "line": 36
+        },
+        {
+          "name": "--on-accent",
+          "line": 39
+        },
+        {
+          "name": "--accent",
+          "line": 39
+        },
+        {
+          "name": "--accent-hover",
+          "line": 40
+        },
+        {
+          "name": "--tx-2",
+          "line": 43
+        },
+        {
+          "name": "--r-sm",
+          "line": 45
+        },
+        {
+          "name": "--r-sm",
+          "line": 45
+        },
+        {
+          "name": "--r-sm",
+          "line": 46
+        },
+        {
+          "name": "--r-sm",
+          "line": 46
+        },
+        {
+          "name": "--tx",
+          "line": 47
+        },
+        {
+          "name": "--on-accent",
+          "line": 48
+        },
+        {
+          "name": "--accent",
+          "line": 48
+        },
+        {
+          "name": "--f-mono",
+          "line": 49
+        },
+        {
+          "name": "--fs-md",
+          "line": 49
+        },
+        {
+          "name": "--tx-2",
+          "line": 49
+        },
+        {
+          "name": "--accent",
+          "line": 50
+        },
+        {
+          "name": "--r-sm",
+          "line": 53
+        },
+        {
+          "name": "--bg-float",
+          "line": 53
+        },
+        {
+          "name": "--tx",
+          "line": 53
+        },
+        {
+          "name": "--shadow-float",
+          "line": 53
+        },
+        {
+          "name": "--line",
+          "line": 53
+        },
+        {
+          "name": "--r-sm",
+          "line": 56
+        },
+        {
+          "name": "--tx",
+          "line": 56
+        },
+        {
+          "name": "--bg-panel",
+          "line": 56
+        },
+        {
+          "name": "--r-sm",
+          "line": 57
+        },
+        {
+          "name": "--tx-3",
+          "line": 57
+        },
+        {
+          "name": "--fs-xs",
+          "line": 57
+        },
+        {
+          "name": "--tx",
+          "line": 59
+        },
+        {
+          "name": "--tx",
+          "line": 60
+        },
+        {
+          "name": "--bg-panel",
+          "line": 60
+        },
+        {
+          "name": "--line",
+          "line": 60
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/timeline/timeline.ts",
+      "declarations": [
+        "--bg-sunken",
+        "--tl-gutter",
+        "--tl-ruler"
+      ],
+      "reads": [
+        {
+          "name": "--tl-gutter",
+          "line": 982
+        },
+        {
+          "name": "--tl-ruler",
+          "line": 983
+        },
+        {
+          "name": "--accent",
+          "line": 1146
+        },
+        {
+          "name": "--tx",
+          "line": 1146
+        },
+        {
+          "name": "--tx-2",
+          "line": 1147
+        },
+        {
+          "name": "--tx-3",
+          "line": 1147
+        },
+        {
+          "name": "--tx-4",
+          "line": 1148
+        },
+        {
+          "name": "--bg-panel-2",
+          "line": 1153
+        },
+        {
+          "name": "--bg-panel",
+          "line": 1153
+        },
+        {
+          "name": "--bg-float",
+          "line": 1154
+        },
+        {
+          "name": "--bg-panel",
+          "line": 1155
+        },
+        {
+          "name": "--bg-panel-2",
+          "line": 1155
+        },
+        {
+          "name": "--line",
+          "line": 1156
+        },
+        {
+          "name": "--on-accent",
+          "line": 1765
+        },
+        {
+          "name": "--on-accent",
+          "line": 2406
+        },
+        {
+          "name": "--bg-row",
+          "line": 3347
+        },
+        {
+          "name": "--accent",
+          "line": 3348
+        },
+        {
+          "name": "--tx",
+          "line": 3348
+        },
+        {
+          "name": "--bg-row",
+          "line": 4242
+        },
+        {
+          "name": "--accent",
+          "line": 4242
+        },
+        {
+          "name": "--tx",
+          "line": 4243
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/viewer/index.ts",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--bg-panel-2",
+          "line": 8
+        },
+        {
+          "name": "--tx-3",
+          "line": 11
+        },
+        {
+          "name": "--tx",
+          "line": 16
+        },
+        {
+          "name": "--r-md",
+          "line": 21
+        },
+        {
+          "name": "--ui-corner-smoothing",
+          "line": 21
+        },
+        {
+          "name": "--r-md",
+          "line": 24
+        },
+        {
+          "name": "--bg-float",
+          "line": 24
+        },
+        {
+          "name": "--tx-3",
+          "line": 24
+        },
+        {
+          "name": "--fs-xs",
+          "line": 24
+        },
+        {
+          "name": "--r-sm",
+          "line": 26
+        },
+        {
+          "name": "--accent",
+          "line": 26
+        },
+        {
+          "name": "--on-accent",
+          "line": 26
+        },
+        {
+          "name": "--fw-medium",
+          "line": 26
+        },
+        {
+          "name": "--tx",
+          "line": 27
+        },
+        {
+          "name": "--bg-row-hi",
+          "line": 27
+        },
+        {
+          "name": "--accent",
+          "line": 28
+        },
+        {
+          "name": "--accent",
+          "line": 29
+        },
+        {
+          "name": "--accent",
+          "line": 29
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/viewer/source-preview.ts",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--bg-panel-2",
+          "line": 22
+        },
+        {
+          "name": "--ease-io",
+          "line": 23
+        },
+        {
+          "name": "--bg-panel-2",
+          "line": 26
+        },
+        {
+          "name": "--gap",
+          "line": 28
+        },
+        {
+          "name": "--pad",
+          "line": 28
+        },
+        {
+          "name": "--tx-4",
+          "line": 28
+        },
+        {
+          "name": "--pad",
+          "line": 31
+        },
+        {
+          "name": "--pad",
+          "line": 31
+        },
+        {
+          "name": "--r-sm",
+          "line": 31
+        },
+        {
+          "name": "--bg-float",
+          "line": 31
+        },
+        {
+          "name": "--shadow-float",
+          "line": 31
+        },
+        {
+          "name": "--tx-2",
+          "line": 32
+        },
+        {
+          "name": "--fs-xs",
+          "line": 32
+        },
+        {
+          "name": "--fw-medium",
+          "line": 32
+        },
+        {
+          "name": "--hit",
+          "line": 33
+        },
+        {
+          "name": "--hit",
+          "line": 33
+        },
+        {
+          "name": "--r-sm",
+          "line": 33
+        },
+        {
+          "name": "--tx-2",
+          "line": 33
+        },
+        {
+          "name": "--tx",
+          "line": 34
+        },
+        {
+          "name": "--bg-row-hi",
+          "line": 34
+        },
+        {
+          "name": "--bg-sunken",
+          "line": 35
+        },
+        {
+          "name": "--accent",
+          "line": 36
+        },
+        {
+          "name": "--hit",
+          "line": 38
+        },
+        {
+          "name": "--r-xs",
+          "line": 38
+        },
+        {
+          "name": "--r-pill",
+          "line": 39
+        },
+        {
+          "name": "--ink-rgb",
+          "line": 39
+        },
+        {
+          "name": "--accent",
+          "line": 40
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/extensions/viewer/viewer.ts",
+      "declarations": [],
+      "reads": [
+        {
+          "name": "--r-sm",
+          "line": 865
+        },
+        {
+          "name": "--tx",
+          "line": 865
+        },
+        {
+          "name": "--bg-panel",
+          "line": 865
+        },
+        {
+          "name": "--tx-2",
+          "line": 865
+        },
+        {
+          "name": "--fs-md",
+          "line": 865
+        },
+        {
+          "name": "--f-ui",
+          "line": 865
+        },
+        {
+          "name": "--r-sm",
+          "line": 877
+        },
+        {
+          "name": "--tx",
+          "line": 877
+        },
+        {
+          "name": "--bg-panel",
+          "line": 877
+        },
+        {
+          "name": "--tx-2",
+          "line": 877
+        },
+        {
+          "name": "--fs-md",
+          "line": 877
+        },
+        {
+          "name": "--f-ui",
+          "line": 877
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,306 @@
+{
+ "generatedBy": "engine/crates/pm-model/tests/vectors/generate-container-vectors.ts",
+ "files": [
+  {
+   "name": "json-plain.pmv",
+   "ok": {
+    "format": "json",
+    "documentHash": "d79e39a63645e2339612bed6093373dbf1f4f14d72a316869529bbdf5d4297db",
+    "media": []
+   }
+  },
+  {
+   "name": "json-bom-invalid-utf8.pmv",
+   "ok": {
+    "format": "json",
+    "documentHash": "58a00145423375f8813d4849222b136fa89056cb29bfc599fdd462b758043bf5",
+    "media": []
+   }
+  },
+  {
+   "name": "json-invalid.pmv",
+   "error": "json"
+  },
+  {
+   "name": "tiny.pmv",
+   "error": "json"
+  },
+  {
+   "name": "pmv3.pmv",
+   "ok": {
+    "format": "pmv3",
+    "documentHash": "819141d9b44d54881748a2e25b196078b38944e6276b3f91e2b3c27fe59c3ad7",
+    "media": [
+     {
+      "id": "img",
+      "type": "image/png",
+      "offset": 625,
+      "length": 7,
+      "revision": null,
+      "sha256": null,
+      "dataSha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79"
+     },
+     {
+      "id": "clip",
+      "type": "video/webm",
+      "offset": 632,
+      "length": 1000,
+      "revision": null,
+      "sha256": null,
+      "dataSha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532"
+     }
+    ]
+   }
+  },
+  {
+   "name": "pmv3-no-media.pmv",
+   "ok": {
+    "format": "pmv3",
+    "documentHash": "d79e39a63645e2339612bed6093373dbf1f4f14d72a316869529bbdf5d4297db",
+    "media": []
+   }
+  },
+  {
+   "name": "pmv3-truncated.pmv",
+   "error": "The project container is truncated."
+  },
+  {
+   "name": "pmv3-short-header.pmv",
+   "error": "The project container header is invalid."
+  },
+  {
+   "name": "pmv3-header-overrun.pmv",
+   "error": "The project container header is invalid."
+  },
+  {
+   "name": "pmv3-no-document.pmv",
+   "error": "The project container header is invalid."
+  },
+  {
+   "name": "pmv3-media-not-array.pmv",
+   "error": "The project container header is invalid."
+  },
+  {
+   "name": "pmv3-duplicate-ids.pmv",
+   "error": "The project container media index is invalid."
+  },
+  {
+   "name": "pmv3-range-overflow.pmv",
+   "error": "The project container media index is invalid."
+  },
+  {
+   "name": "pmv3-fractional-length.pmv",
+   "error": "The project container media index is invalid."
+  },
+  {
+   "name": "pmv3-negative-zero-offset.pmv",
+   "ok": {
+    "format": "pmv3",
+    "documentHash": "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862",
+    "media": [
+     {
+      "id": "x",
+      "type": "t",
+      "offset": 84,
+      "length": 2,
+      "revision": null,
+      "sha256": null,
+      "dataSha256": "a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f63222"
+     }
+    ]
+   }
+  },
+  {
+   "name": "pmv3-array-header.pmv",
+   "error": "The project container header is invalid."
+  },
+  {
+   "name": "pmv3-bad-json.pmv",
+   "error": "json"
+  },
+  {
+   "name": "pmv4.pmv",
+   "ok": {
+    "format": "pmv4",
+    "documentHash": "819141d9b44d54881748a2e25b196078b38944e6276b3f91e2b3c27fe59c3ad7",
+    "media": [
+     {
+      "id": "img",
+      "type": "image/png",
+      "offset": 485,
+      "length": 7,
+      "revision": "r1",
+      "sha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79",
+      "dataSha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79"
+     },
+     {
+      "id": "clip",
+      "type": "video/webm",
+      "offset": 495,
+      "length": 1000,
+      "revision": "r2",
+      "sha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532",
+      "dataSha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532"
+     }
+    ]
+   }
+  },
+  {
+   "name": "pmv4-no-media.pmv",
+   "ok": {
+    "format": "pmv4",
+    "documentHash": "819141d9b44d54881748a2e25b196078b38944e6276b3f91e2b3c27fe59c3ad7",
+    "media": []
+   }
+  },
+  {
+   "name": "pmv4-short.pmv",
+   "error": "The project commit is truncated or invalid."
+  },
+  {
+   "name": "pmv4-bad-end-magic.pmv",
+   "error": "The project commit is truncated or invalid."
+  },
+  {
+   "name": "pmv4-bad-index-checksum.pmv",
+   "error": "The project index checksum does not match."
+  },
+  {
+   "name": "pmv4-index-offset-mismatch.pmv",
+   "error": "The project index is invalid."
+  },
+  {
+   "name": "pmv4-index-length-huge.pmv",
+   "error": "The project index is invalid."
+  },
+  {
+   "name": "pmv4-index-offset-fraction.pmv",
+   "error": "The project index is invalid."
+  },
+  {
+   "name": "pmv4-wrong-version.pmv",
+   "error": "The project index is invalid."
+  },
+  {
+   "name": "pmv4-document-too-short.pmv",
+   "error": "The project index is invalid."
+  },
+  {
+   "name": "pmv4-bad-hash-format.pmv",
+   "error": "The project media index is invalid."
+  },
+  {
+   "name": "pmv4-duplicate-media.pmv",
+   "error": "The project media index is invalid."
+  },
+  {
+   "name": "pmv4-empty-revision.pmv",
+   "error": "The project media index is invalid."
+  },
+  {
+   "name": "pmv4-long-id.pmv",
+   "error": "The project media index is invalid."
+  },
+  {
+   "name": "pmv4-id-at-limit.pmv",
+   "ok": {
+    "format": "pmv4",
+    "documentHash": "819141d9b44d54881748a2e25b196078b38944e6276b3f91e2b3c27fe59c3ad7",
+    "media": [
+     {
+      "id": "img",
+      "type": "image/png",
+      "offset": 485,
+      "length": 7,
+      "revision": "r1",
+      "sha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79",
+      "dataSha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79"
+     },
+     {
+      "id": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "type": "video/webm",
+      "offset": 495,
+      "length": 1000,
+      "revision": "r2",
+      "sha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532",
+      "dataSha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532"
+     }
+    ]
+   }
+  },
+  {
+   "name": "pmv4-overlap.pmv",
+   "error": "The project records overlap."
+  },
+  {
+   "name": "pmv4-range-past-index.pmv",
+   "error": "The project media index is invalid."
+  },
+  {
+   "name": "pmv4-zero-length-overlap-ok.pmv",
+   "ok": {
+    "format": "pmv4",
+    "documentHash": "819141d9b44d54881748a2e25b196078b38944e6276b3f91e2b3c27fe59c3ad7",
+    "media": [
+     {
+      "id": "img",
+      "type": "image/png",
+      "offset": 485,
+      "length": 7,
+      "revision": "r1",
+      "sha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79",
+      "dataSha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79"
+     },
+     {
+      "id": "clip",
+      "type": "video/webm",
+      "offset": 486,
+      "length": 0,
+      "revision": "r2",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dataSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+     }
+    ]
+   }
+  },
+  {
+   "name": "pmv4-document-corrupt.pmv",
+   "error": "The project content checksum does not match."
+  },
+  {
+   "name": "pmv4-media-corrupt.pmv",
+   "error": "The project content checksum does not match."
+  },
+  {
+   "name": "pmv4-document-not-json.pmv",
+   "error": "json"
+  },
+  {
+   "name": "pmv4-bare-project.pmv",
+   "ok": {
+    "format": "pmv4",
+    "documentHash": "d79e39a63645e2339612bed6093373dbf1f4f14d72a316869529bbdf5d4297db",
+    "media": [
+     {
+      "id": "img",
+      "type": "image/png",
+      "offset": 435,
+      "length": 7,
+      "revision": "r1",
+      "sha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79",
+      "dataSha256": "cdf3cefe7ec6253d1cb4828ab654da6beb8a4727daac0c49dbf26bedf5887f79"
+     },
+     {
+      "id": "clip",
+      "type": "video/webm",
+      "offset": 445,
+      "length": 1000,
+      "revision": "r2",
+      "sha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532",
+      "dataSha256": "89f4ff56a25dd1db06a4ce6033603775d705fb96f30f8693733fef602a1ca532"
+     }
+    ]
+   }
+  }
+ ]
+}

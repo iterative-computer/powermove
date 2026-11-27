@@ -1,0 +1,5707 @@
+use pm_kernel::commands::keyframes::{EaseSide, Interpolation};
+use pm_kernel::{
+    Call, Caller, Command, DocumentStore, HistoryCall, KernelActor, KernelConfig, KeyframeCommand,
+    OpenSource, Origin, PropertyCommand, Reply, Request, SelectionCall, WriteBody,
+};
+use pm_model::{Value, json::parse};
+use pm_panel_timeline::snap::{Anchor, DirectionalSnap, Edge, Target};
+use pm_panel_timeline::*;
+use std::{
+    future::Future,
+    pin::pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll, Wake, Waker},
+    time::Duration,
+};
+
+const FIXTURE: &str = r##"{"id":"P","compId":"C","name":"Synthetic timeline","w":200,"h":100,"fps":30,"dur":10,"work":[1,9],"comps":{},"assets":{},"markers":[{"id":"marker","t":4,"name":"Authored"}],"layers":[
+{"id":"a","name":"A","type":"shape","from":1,"dur":4,"on":true,"collapsed":false,"p":{"opacity":{"v":10,"kf":[{"i":"a0","t":0,"v":10,"eo":[0,0],"ei":[1,1],"hold":false,"custom":{"keep":true}},{"i":"a2","t":2,"v":50,"eo":[0,0],"ei":[1,1],"hold":false}],"expr":null},"position.x":{"v":0,"kf":[{"i":"px","t":1,"v":5,"eo":[0,0],"ei":[1,1]}],"expr":null},"scale.x":{"v":100,"kf":[{"i":"sx","t":0.125,"v":100,"eo":[0,0],"ei":[1,1]}],"expr":null},"scale.y":{"v":100,"kf":[{"i":"sy","t":0.125,"v":100,"eo":[0,0],"ei":[1,1]}],"expr":null}}},
+{"id":"b","name":"B","type":"shape","from":5,"dur":2,"on":true,"p":{"opacity":{"v":80,"kf":[{"i":"b0","t":0,"v":80,"eo":[0,0],"ei":[1,1]}],"expr":null}}},
+{"id":"c","name":"C","type":"shape","from":-2,"dur":3,"on":true,"p":{"opacity":{"v":70,"kf":[],"expr":null}}}
+]}"##;
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = TaskContext::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+            return value;
+        }
+        std::thread::park_timeout(Duration::from_secs(1));
+    }
+}
+fn model(value: Value) -> TimelineModel {
+    let store = DocumentStore::new_untitled(value);
+    let mut m = TimelineModel::default();
+    m.index = Arc::new(TimelineIndex::from_snapshot(&store.snapshot()));
+    m.rebuild_rows();
+    m
+}
+fn fixture() -> Value {
+    parse(FIXTURE).unwrap()
+}
+
+#[test]
+fn vertex_rows_use_their_path_name_and_authored_vertex_number() {
+    let vertex = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "p": {
+                "x": {"v": 0, "kf": [{"i": format!("{id}-x"), "t": 1, "v": 10}]},
+                "y": {"v": 0, "kf": [{"i": format!("{id}-y"), "t": 1, "v": 20}]}
+            }
+        })
+    };
+    let document = serde_json::json!({
+        "id": "P", "compId": "C", "name": "Vertex rows",
+        "w": 200, "h": 100, "fps": 30, "dur": 3, "layers": [{
+            "id": "shape", "name": "Shape", "type": "shape", "from": 0,
+            "dur": 3, "collapsed": false, "p": {},
+            "d": {"paths": [
+                {"id": "outer", "name": "Outline", "vertices": [vertex("z"), vertex("a")]},
+                {"id": "inner", "name": "Cutout", "vertices": [vertex("c")]},
+                {"id": "unnamed", "vertices": [vertex("d")]}
+            ]}
+        }]
+    });
+    let mut model = model(parse(&document.to_string()).unwrap());
+    let expected = [
+        (Some("heading"), Some(1), Some("Outline")),
+        (Some("property"), Some(2), Some("Vertex 1 x")),
+        (Some("property"), Some(2), Some("Vertex 1 y")),
+        (Some("property"), Some(2), Some("Vertex 2 x")),
+        (Some("property"), Some(2), Some("Vertex 2 y")),
+        (Some("heading"), Some(1), Some("Cutout")),
+        (Some("property"), Some(2), Some("Vertex 1 x")),
+        (Some("property"), Some(2), Some("Vertex 1 y")),
+        (Some("heading"), Some(1), Some("Path")),
+        (Some("property"), Some(2), Some("Vertex 1 x")),
+        (Some("property"), Some(2), Some("Vertex 1 y")),
+    ];
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        model.mode = mode;
+        let window = v4::project_window(&model, 0, 32).unwrap();
+        let rows: Vec<_> = window["window"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row["kind"].as_str(), Some("heading" | "property")))
+            .map(|row| {
+                (
+                    row["kind"].as_str(),
+                    row["depth"].as_u64(),
+                    row["label"].as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected, "{mode:?}");
+    }
+}
+
+fn client_with(value: Value) -> (KernelActor, TimelineClient) {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let k = actor.handle();
+    block_on(k.open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let c = TimelineClient::new(k, "P", Caller::native()).unwrap();
+    (actor, c)
+}
+fn client() -> (KernelActor, TimelineClient) {
+    client_with(fixture())
+}
+fn run(c: &mut TimelineClient, p: Plan) -> Vec<HostEffect> {
+    block_on(c.dispatch(p)).unwrap()
+}
+fn command(c: &mut TimelineClient, id: &str, time: f64) -> Vec<HostEffect> {
+    let p = c
+        .model
+        .command(id, time, None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    run(c, p)
+}
+// Fixture setup is navigation outside the user gestures exercised below.
+fn select(c: &mut TimelineClient, ids: &[&str]) {
+    block_on(
+        c.call(
+            SelectionCall::Preview(vec![SelectionCall::Layers {
+                ids: ids.iter().map(|s| (*s).into()).collect(),
+                add: false,
+            }])
+            .into(),
+        ),
+    )
+    .unwrap();
+}
+fn select_keys(c: &mut TimelineClient, ids: &[&str]) {
+    block_on(
+        c.call(
+            SelectionCall::Preview(vec![SelectionCall::Keys(
+                ids.iter().map(|s| (*s).into()).collect(),
+            )])
+            .into(),
+        ),
+    )
+    .unwrap();
+}
+fn edit(c: &mut TimelineClient, commands: Vec<Command>) {
+    let p = Plan::edit(commands, c.model.index.revision);
+    run(c, p);
+}
+fn undo(c: &mut TimelineClient) {
+    block_on(c.call(HistoryCall::Undo.into())).unwrap();
+}
+fn sample(delta: f64) -> DragSample {
+    DragSample {
+        time_delta: delta,
+        playhead: 8.,
+        time_scale: 1.,
+        value_scale: 1.,
+        ..Default::default()
+    }
+}
+fn key_time(c: &TimelineClient, id: &str) -> f64 {
+    c.model.index.key(id).unwrap().2.time
+}
+fn strings(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|s| (*s).into()).collect()
+}
+/// Keys on one layer, as a marquee picks them.
+fn on(layer: &str, ids: &[&str]) -> Vec<(String, String)> {
+    ids.iter().map(|id| (layer.into(), (*id).into())).collect()
+}
+fn mods() -> Modifiers {
+    Modifiers::default()
+}
+fn layer_mut(value: &mut Value, index: usize) -> &mut pm_model::Map {
+    value
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()[index]
+        .as_object_mut()
+        .unwrap()
+}
+
+#[test]
+fn snapshot_preserves_authored_subframes_and_negative_time() {
+    let m = model(fixture());
+    assert_eq!(m.index.minimum_time(), -2.);
+    assert_eq!(m.index.key("sx").unwrap().2.time, 0.125);
+    assert_eq!(m.index.channel("a", "opacity").unwrap().keys.len(), 2);
+}
+#[test]
+fn snapshot_keeps_unknown_key_fields() {
+    let m = model(fixture());
+    assert_eq!(
+        m.index
+            .key("a0")
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get("custom")
+            .unwrap()
+            .get("keep"),
+        Some(&Value::Bool(true))
+    );
+}
+#[test]
+fn default_disclosure_matches_tag() {
+    let m = model(fixture());
+    assert!(!m.index.layer("a").unwrap().collapsed);
+    assert!(m.index.layer("b").unwrap().collapsed);
+}
+#[test]
+fn virtual_window_has_bounded_overscan_and_identity_lookup() {
+    let m = model(fixture());
+    let w = m.window(2, 2, 1);
+    assert_eq!(w.first, 1);
+    assert_eq!(w.rows.len(), 4);
+    for (i, r) in m.rows().iter().enumerate() {
+        assert_eq!(m.row_position(&r.id), Some(i));
+    }
+    assert!(m.window(usize::MAX, usize::MAX, 0).rows.is_empty());
+}
+#[test]
+fn sixty_thousand_rows_remain_virtual_and_pack_without_quadratic_scans() {
+    let mut value = fixture();
+    let base = value.get("layers").unwrap().as_array().unwrap()[2].clone();
+    let mut layers = Vec::new();
+    for i in 0..60_001 {
+        let mut l = base.clone();
+        let map = l.as_object_mut().unwrap();
+        map.insert("id", Value::from(format!("L{i}")));
+        map.insert("from", Value::Number(i as f64 * 2.));
+        map.insert("dur", Value::Number(1.));
+        layers.push(l);
+    }
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("layers", Value::Array(layers));
+    let m = model(value);
+    assert_eq!(m.window(30_000, 40, 4).rows.len(), 48);
+    assert_eq!(m.rows().len(), 60_001);
+    let layout = tracks::layout(&m.index, &m.reveal);
+    assert_eq!(layout.items.len(), 60_001);
+    assert_eq!(layout.video, 1);
+}
+#[test]
+fn selection_publications_never_rebuild_document_rows() {
+    let (_a, mut c) = client();
+    let n = c.model.rebuilds;
+    for _ in 0..10 {
+        select(&mut c, &["a"]);
+    }
+    assert_eq!(c.model.rebuilds, n);
+}
+#[test]
+fn document_session_change_resets_transient_selection_anchor() {
+    let (_a, mut c) = client();
+    let p = c.model.select_layer("a", mods()).unwrap();
+    for call in p {
+        block_on(c.call(call)).unwrap();
+    }
+    block_on(c.kernel.close("P")).unwrap();
+    block_on(c.kernel.open("P", OpenSource::Untitled(fixture())))
+        .unwrap()
+        .unwrap();
+    c.sync().unwrap();
+    assert!(c.model.selection.is_empty());
+}
+#[test]
+fn plain_layer_click_retains_multiselection_and_clears_keys() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a", "b"]);
+    select_keys(&mut c, &["a0"]);
+    let calls = c.model.select_layer("a", mods()).unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert_eq!(c.model.selection.layers(), strings(&["a", "b"]));
+    assert!(c.model.selection.keys().is_empty());
+}
+#[test]
+fn command_click_toggles_layer_membership() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    let calls = c
+        .model
+        .select_layer(
+            "a",
+            Modifiers {
+                meta: true,
+                ..mods()
+            },
+        )
+        .unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert!(c.model.selection.layers().is_empty());
+}
+#[test]
+fn shift_range_extends_then_shrinks_from_original_anchor() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    for id in ["c", "b"] {
+        let calls = c
+            .model
+            .select_layer(
+                id,
+                Modifiers {
+                    shift: true,
+                    ..mods()
+                },
+            )
+            .unwrap();
+        for call in calls {
+            block_on(c.call(call)).unwrap();
+        }
+    }
+    assert_eq!(c.model.selection.layers(), strings(&["a", "b"]));
+}
+#[test]
+fn command_shift_range_unions_previous_selection() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a", "c"]);
+    let calls = c
+        .model
+        .select_layer(
+            "b",
+            Modifiers {
+                shift: true,
+                control: true,
+                ..mods()
+            },
+        )
+        .unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert!(c.model.selection.contains("c"));
+    assert_eq!(c.model.selection.layers().len(), 3);
+}
+#[test]
+fn additive_key_click_toggles_only_at_pointer_up() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    let ids = strings(&["a0"]);
+    for dragging in [true, false] {
+        let calls = c
+            .model
+            .select_keys("a", "opacity", &ids, true, dragging)
+            .unwrap();
+        for call in calls {
+            block_on(c.call(call)).unwrap();
+        }
+        if dragging {
+            assert_eq!(c.model.selection.keys(), ids);
+        }
+    }
+    assert!(c.model.selection.keys().is_empty());
+}
+#[test]
+fn strip_click_preserves_graph_focus() {
+    let (_a, mut c) = client();
+    let calls = c
+        .model
+        .select_keys("a", "opacity", &strings(&["a0"]), false, false)
+        .unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    let calls = c.model.select_layer("b", mods()).unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert_eq!(c.model.graph_focus, Some(("a".into(), "opacity".into())));
+}
+#[test]
+fn marquee_does_not_seek_and_preserves_additive_keys() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    let calls = c.model.marquee(strings(&["b"]), strings(&["b0"]), true);
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    assert_eq!(c.model.selection.keys(), strings(&["a0", "b0"]));
+}
+#[test]
+fn group_disclosure_opens_group_properties() {
+    let mut v = fixture();
+    let a = layer_mut(&mut v, 0);
+    a.insert("type", Value::from("group"));
+    a.insert("collapsed", Value::Bool(true));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    let mut m = model(v);
+    assert!(m.row_position(&RowId::Layer("b".into())).is_none());
+    m.toggle_disclosure("a").unwrap();
+    assert!(m.row_position(&RowId::Layer("b".into())).is_some());
+    assert!(
+        m.rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { layer_id,.. } if layer_id=="a"))
+    );
+}
+#[test]
+fn cyclic_group_input_is_bounded_and_retains_every_id() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("group", Value::from("b"));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    let m = model(v);
+    assert_eq!(
+        m.rows()
+            .iter()
+            .filter(|r| matches!(r.id, RowId::Layer(_)))
+            .count(),
+        3
+    );
+}
+#[test]
+fn inherited_group_lock_is_indexed() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("lock", Value::Bool(true));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    let m = model(v);
+    assert!(m.index.layer("b").unwrap().effectively_locked);
+    assert!(
+        Drag::begin(
+            &m,
+            DragKind::Layers {
+                ids: strings(&["b"])
+            }
+        )
+        .is_err()
+    );
+}
+#[test]
+fn mixed_selection_with_a_locked_layer_moves_the_unlocked_ones() {
+    let mut v = fixture();
+    layer_mut(&mut v, 1).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    let b_from = c.model.index.layer("b").unwrap().from;
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a", "b"]),
+    }))
+    .unwrap();
+    let note = c.active_drag().unwrap().locked_note();
+    assert_eq!(
+        note,
+        Some(HostEffect::Status("1 locked layer didn't move".into()))
+    );
+    block_on(c.drag(sample(2.))).unwrap();
+    assert_eq!(c.model.index.layer("a").unwrap().from, 3.);
+    assert_eq!(c.model.index.layer("b").unwrap().from, b_from);
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+}
+#[test]
+fn mixed_selection_with_a_locked_layer_trims_the_unlocked_ones() {
+    let mut v = fixture();
+    layer_mut(&mut v, 1).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    let a_duration = c.model.index.layer("a").unwrap().duration;
+    let b = c.model.index.layer("b").unwrap().clone();
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["a", "b"]),
+    }))
+    .unwrap();
+    assert_eq!(
+        c.active_drag().unwrap().locked_note(),
+        Some(HostEffect::Status("1 locked layer didn't trim".into()))
+    );
+    block_on(c.drag(sample(-0.5))).unwrap();
+    assert!(c.model.index.layer("a").unwrap().duration < a_duration);
+    assert_eq!(c.model.index.layer("b").unwrap().duration, b.duration);
+    block_on(c.finish_drag(true)).unwrap();
+}
+#[test]
+fn only_locked_selection_still_refuses_the_drag() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("lock", Value::Bool(true));
+    layer_mut(&mut v, 1).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    assert!(
+        block_on(c.begin_drag(DragKind::Layers {
+            ids: strings(&["a", "b"])
+        }))
+        .is_err()
+    );
+}
+#[test]
+fn adjacent_navigation_uses_local_offsets_selected_scope_and_no_wrap() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    assert_eq!(c.model.adjacent_key(1, 1.2, None), Some(2.));
+    assert_eq!(c.model.adjacent_key(-1, 1., None), None);
+    assert_eq!(
+        c.model.adjacent_key(1, 2., Some(("a", "opacity"))),
+        Some(3.)
+    );
+}
+#[test]
+fn adjacent_navigation_filters_channel() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    block_on(c.call(SelectionCall::Channel(Some("opacity".into())).into())).unwrap();
+    assert_eq!(c.model.adjacent_key(1, 1.1, None), Some(3.));
+}
+#[test]
+fn frame_step_and_work_navigation_use_explicit_commands() {
+    let (_a, mut c) = client();
+    assert_eq!(
+        command(&mut c, "nextFrame", 1.),
+        vec![HostEffect::Seek(1. + 1. / 30.)]
+    );
+    assert_eq!(
+        command(&mut c, "gotoWorkOut", 0.),
+        vec![HostEffect::Seek(9.)]
+    );
+    assert_eq!(command(&mut c, "gotoEnd", 0.), vec![HostEffect::Seek(10.)]);
+}
+#[test]
+fn layer_navigation_uses_authored_in_and_exclusive_out() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a", "b"]);
+    assert_eq!(
+        command(&mut c, "gotoLayerIn", 0.),
+        vec![HostEffect::Seek(1.)]
+    );
+    assert_eq!(
+        command(&mut c, "gotoLayerOut", 0.),
+        vec![HostEffect::Seek(7.)]
+    );
+}
+#[test]
+fn visible_event_navigation_includes_strip_edges_and_real_keys() {
+    let (_a, mut c) = client();
+    // The marker at 4 s is a stop, as are the work area's ends (1 s, 9 s).
+    assert_eq!(
+        command(&mut c, "nextVisibleEvent", 3.1),
+        vec![HostEffect::Seek(4.)]
+    );
+    assert_eq!(
+        command(&mut c, "nextVisibleEvent", 4.),
+        vec![HostEffect::Seek(5.)]
+    );
+    assert_eq!(
+        command(&mut c, "prevVisibleEvent", 1.1),
+        vec![HostEffect::Seek(1.)]
+    );
+    // Nothing later than the composition's end: the playhead stays.
+    assert_eq!(command(&mut c, "nextVisibleEvent", 10.), vec![]);
+}
+#[test]
+fn keymap_keeps_control_navigation_distinct_from_command_frames() {
+    for (m, id) in [
+        (
+            Modifiers {
+                meta: true,
+                ..mods()
+            },
+            "prevFrame",
+        ),
+        (
+            Modifiers {
+                control: true,
+                ..mods()
+            },
+            "timeline.adjacentKeyframe:prev",
+        ),
+    ] {
+        let key = resolve_key(&KeyInput {
+            key: "left",
+            modifiers: m,
+            repeat: false,
+            in_field: false,
+        })
+        .unwrap();
+        assert_eq!(key.command, id);
+    }
+}
+#[test]
+fn keymap_repeat_and_field_admission_match_tag() {
+    assert!(
+        resolve_key(&KeyInput {
+            key: "space",
+            modifiers: mods(),
+            repeat: true,
+            in_field: false
+        })
+        .is_none()
+    );
+    assert!(
+        resolve_key(&KeyInput {
+            key: "pagedown",
+            modifiers: mods(),
+            repeat: true,
+            in_field: false
+        })
+        .is_some()
+    );
+    assert!(
+        resolve_key(&KeyInput {
+            key: "p",
+            modifiers: mods(),
+            repeat: false,
+            in_field: true
+        })
+        .is_none()
+    );
+    assert!(
+        resolve_key(&KeyInput {
+            key: "p",
+            modifiers: Modifiers {
+                alt: true,
+                ..mods()
+            },
+            repeat: false,
+            in_field: false
+        })
+        .is_none()
+    );
+}
+#[test]
+fn every_timeline_shortcut_resolves_to_registered_behaviour() {
+    let mut m = model(fixture());
+    for key in [
+        "space", "home", "end", "pageup", "pagedown", "j", "k", "i", "o", "[", "]", "b", "n", "f9",
+        "p", "s", "r", "t", "a", "u", "m", "f", "e", "l", "escape", "delete",
+    ] {
+        let s = resolve_key(&KeyInput {
+            key,
+            modifiers: mods(),
+            repeat: false,
+            in_field: false,
+        })
+        .unwrap();
+        assert!(
+            m.command(
+                s.command,
+                0.,
+                s.frames,
+                s.shift_reveal,
+                0,
+                &PropertyFacts::default()
+            )
+            .is_ok(),
+            "{key}"
+        );
+    }
+}
+#[test]
+fn unknown_agent_commands_and_ids_are_errors() {
+    let mut m = model(fixture());
+    assert!(
+        m.command("missing", 0., None, false, 0, &PropertyFacts::default())
+            .is_err()
+    );
+    assert!(m.select_layer("gone", mods()).is_err());
+    assert!(m.add_marker(f64::NAN).is_err());
+}
+#[test]
+fn ruler_scrub_keeps_exact_subframe_time_and_is_lazy() {
+    let m = model(fixture());
+    let mut scrub = Scrub::begin(m.index, 0.).unwrap();
+    assert_eq!(
+        scrub.update(1.0123, false, 0.1).unwrap(),
+        HostEffect::Seek(1.0123)
+    );
+    assert!(!scrub.targets_loaded());
+    assert_eq!(scrub.update(-4., false, 0.1).unwrap(), HostEffect::Seek(0.));
+    assert_eq!(
+        scrub.update(30., false, 0.1).unwrap(),
+        HostEffect::Seek(10.)
+    );
+}
+#[test]
+fn scrub_shift_changes_mid_gesture_do_not_catch_already_passed_targets() {
+    let m = model(fixture());
+    let mut scrub = Scrub::begin(m.index, 0.).unwrap();
+    scrub.update(4.02, false, 0.1).unwrap();
+    assert_eq!(scrub.modifiers(true, 0.1).unwrap(), HostEffect::Seek(4.02));
+    assert!(scrub.targets_loaded());
+    assert_eq!(scrub.update(5.01, true, 0.1).unwrap(), HostEffect::Seek(5.));
+    assert_eq!(scrub.modifiers(false, 0.1).unwrap(), HostEffect::Seek(5.01));
+}
+#[test]
+fn marker_add_snaps_to_frame_and_refuses_duplicate_frame() {
+    let (_a, mut c) = client();
+    let p = c.model.add_marker(2.012).unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.markers.len(), 2);
+    let p = c.model.add_marker(2.013).unwrap();
+    assert!(p.calls.is_empty());
+    undo(&mut c);
+    assert_eq!(c.model.index.markers.len(), 1);
+}
+#[test]
+fn marker_menu_resolves_id_after_reordering() {
+    let (_a, mut c) = client();
+    let ctx = Context::Marker {
+        id: "marker".into(),
+    };
+    let p = c.model.add_marker(1.).unwrap();
+    run(&mut c, p);
+    let p = c.model.menu_action(&ctx, "marker.remove", 0.).unwrap();
+    run(&mut c, p);
+    assert!(
+        c.model
+            .index
+            .markers
+            .iter()
+            .all(|m| m.id.as_deref() != Some("marker"))
+    );
+}
+#[test]
+fn work_area_keeps_at_least_one_frame() {
+    let (_a, mut c) = client();
+    command(&mut c, "workIn", 9.9);
+    assert!(c.model.index.work[1] - c.model.index.work[0] >= 1. / 30. - 1e-9);
+    undo(&mut c);
+    assert_eq!(c.model.index.work, [1., 9.]);
+}
+#[test]
+fn work_out_drag_extends_live_keeps_peak_and_undo_restores_duration() {
+    let (_a, mut c) = client();
+    let layer_duration = c.model.index.layer("a").unwrap().duration;
+    block_on(c.begin_drag(DragKind::WorkOut)).unwrap();
+    for (delta, end) in [(5., 14.), (2., 11.), (-3., 6.)] {
+        block_on(c.drag(sample(delta))).unwrap();
+        assert_eq!(c.model.index.duration, 14.);
+        assert_eq!(c.model.index.work, [1., end]);
+        assert_eq!(c.model.index.layer("a").unwrap().duration, layer_duration);
+    }
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert_eq!(c.model.index.duration, 10.);
+    assert_eq!(c.model.index.work, [1., 9.]);
+}
+/// An audio clip's level line drags its gain along the Mixer's fader law,
+/// live, in one Undo step labelled as the Mixer labels it (PM-492).
+#[test]
+fn the_level_line_drags_an_audio_clips_gain() {
+    let project = parse(r##"{"id":"P","name":"p","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"x":{"id":"x","name":"a.wav","kind":"audio","dur":5}},"comps":{},"layers":[{"id":"m","type":"audio","name":"a.wav","from":0,"dur":5,"d":{"asset":"x","trim":0,"gain":1,"fadeIn":0.5,"fadeOut":0}}]}"##).unwrap();
+    let (_a, mut c) = client_with(project);
+    let layer = c.model.index.layer("m").unwrap();
+    assert_eq!((layer.gain, layer.fade_in, layer.gain_animated), (1., 0.5, false));
+    let start = pm_panel_timeline::level::fader_position(0.);
+    block_on(c.begin_drag(DragKind::Gain {
+        layer: "m".into(),
+        start,
+    }))
+    .unwrap();
+    for up in [0.05, 0.1, 0.14] {
+        block_on(c.drag(DragSample {
+            value_delta: up,
+            ..sample(0.)
+        }))
+        .unwrap();
+    }
+    // 0.72 + 0.14 on the law is +6 dB.
+    let gain = c.model.index.layer("m").unwrap().gain;
+    assert!((pm_panel_timeline::level::gain_db(gain) - 6.).abs() < 1e-6, "{gain}");
+    block_on(c.finish_drag(true)).unwrap();
+    let published = c.kernel.published("P").unwrap();
+    assert_eq!(published.history.entries, 1);
+    assert_eq!(published.history.undo_label.as_deref(), Some("Gain"));
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("m").unwrap().gain, 1.);
+}
+#[test]
+fn work_move_clamps_as_rigid_range() {
+    let m = model(fixture());
+    let mut drag = Drag::begin(&m, DragKind::WorkMove).unwrap();
+    let commands = drag.commands(sample(9.)).unwrap();
+    let (_a, mut c) = client();
+    edit(&mut c, commands);
+    assert_eq!(c.model.index.work, [2., 10.]);
+}
+#[test]
+fn strip_drag_publishes_live_and_commits_one_undo_step() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a", "b"]),
+    }))
+    .unwrap();
+    for delta in [0.5, 1., 2.] {
+        block_on(c.drag(sample(delta))).unwrap();
+    }
+    assert_eq!(c.model.index.layer("a").unwrap().from, 3.);
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+}
+#[test]
+fn escape_restores_strip_start_without_undo_entry() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(2.))).unwrap();
+    block_on(c.finish_drag(false)).unwrap();
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
+}
+#[test]
+fn group_drag_expands_once_and_preserves_member_spacing() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("type", Value::from("group"));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    let (_a, mut c) = client_with(v);
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(2.))).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().from, 7.);
+    assert_eq!(c.model.index.layer("a").unwrap().from, 3.);
+    block_on(c.finish_drag(true)).unwrap();
+}
+#[test]
+fn trim_in_and_out_respect_minimum_frame() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert!((c.model.index.layer("a").unwrap().duration - 1. / 30.).abs() < 1e-9);
+    block_on(c.finish_drag(false)).unwrap();
+    block_on(c.begin_drag(DragKind::TrimIn {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(9.))).unwrap();
+    assert!((c.model.index.layer("a").unwrap().duration - 1. / 30.).abs() < 1e-9);
+    block_on(c.finish_drag(true)).unwrap();
+}
+#[test]
+fn quick_offset_layers_keeps_first_anchor_and_subframes() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::QuickOffsetLayers {
+        ids: strings(&["a", "b", "c"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.125))).unwrap();
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+    assert_eq!(c.model.index.layer("b").unwrap().from, 5.0625);
+    assert_eq!(c.model.index.layer("c").unwrap().from, -1.875);
+    block_on(c.finish_drag(true)).unwrap();
+}
+#[test]
+fn key_drag_collision_is_restored_when_pointer_returns() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::Keys {
+        ids: strings(&["a0"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(2.))).unwrap();
+    assert!(c.model.index.key("a2").is_none());
+    block_on(c.drag(sample(0.))).unwrap();
+    assert_eq!(key_time(&c, "a2"), 2.);
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
+}
+#[test]
+fn gain_key_drag_previews_the_final_curve_without_a_document_write() {
+    let (_actor, mut c) = client_with(
+        parse(
+            r#"{
+        "id":"P","compId":"C","w":200,"h":100,"fps":30,"dur":4,"comps":{},"assets":{},
+        "layers":[{"id":"a","from":0,"dur":4,"type":"audio","on":true,"d":{
+            "gain":{"v":1,"kf":[{"i":"first","t":0,"v":1},{"i":"second","t":2,"v":0.5}]}
+        }}]
+    }"#,
+        )
+        .unwrap(),
+    );
+    let published = c.kernel.published("P").unwrap();
+    let kind = DragKind::GraphKeys {
+        ids: strings(&["first"]),
+    };
+    assert!(c.is_gain_drag(&kind));
+    for commit in [false, true] {
+        c.begin_preview_drag(kind.clone()).unwrap();
+        block_on(c.drag(DragSample {
+            value_delta: -0.2,
+            ..sample(0.)
+        }))
+        .unwrap();
+        let current = c.kernel.published("P").unwrap();
+        assert_eq!(current.revision(), published.revision());
+        assert_eq!(current.history.entries, published.history.entries);
+        let preview = c.layer_preview().unwrap();
+        assert!(
+            preview
+                .gain_commands
+                .as_ref()
+                .is_some_and(|commands| !commands.is_empty())
+        );
+        let index = TimelineIndex::from_snapshot(&preview.snapshot);
+        let value = index.key("first").unwrap().2.value.as_f64().unwrap();
+        assert!((value - 0.8).abs() < 1e-8);
+        block_on(c.finish_drag(commit)).unwrap();
+        let value = c
+            .model
+            .index
+            .key("first")
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap();
+        assert!((value - if commit { 0.8 } else { 1.0 }).abs() < 1e-8);
+    }
+    assert_eq!(
+        c.kernel.published("P").unwrap().history.entries,
+        published.history.entries + 1
+    );
+    undo(&mut c);
+    assert_eq!(
+        c.model.index.key("first").unwrap().2.value.as_f64(),
+        Some(1.)
+    );
+}
+
+#[test]
+fn graph_drag_stops_before_unselected_neighbour() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::GraphKeys {
+        ids: strings(&["a0"]),
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(9.)
+    }))
+    .unwrap();
+    assert_eq!(key_time(&c, "a2"), 2.);
+    assert!(key_time(&c, "a0") <= 2. - 1. / 30. + 1e-9);
+    block_on(c.finish_drag(false)).unwrap();
+}
+#[test]
+fn graph_value_only_drag_keeps_authored_subframe_time() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::GraphKeys {
+        ids: strings(&["sx"]),
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    assert_eq!(key_time(&c, "sx"), 0.125);
+    block_on(c.finish_drag(true)).unwrap();
+}
+#[test]
+fn option_stretch_uses_opposite_endpoint_anchor() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::StretchKeys {
+        ids: strings(&["a0", "a2"]),
+        anchor_time: 1.,
+        grabbed_time: 3.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(2.))).unwrap();
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(key_time(&c, "a2"), 4.);
+    block_on(c.finish_drag(true)).unwrap();
+    undo(&mut c);
+    assert_eq!(key_time(&c, "a2"), 2.);
+}
+#[test]
+fn graph_transform_scales_numeric_values() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::TransformKeys {
+        ids: strings(&["a0", "a2"]),
+        anchor_time: 1.,
+        anchor_value: 10.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_scale: 2.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    assert_eq!(c.model.index.key("a2").unwrap().2.value, Value::Number(90.));
+    block_on(c.finish_drag(false)).unwrap();
+}
+#[test]
+fn ease_shortcuts_use_kernel_interpolation_and_undo() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0"]);
+    command(&mut c, "easyEaseOut", 0.);
+    let key = &c.model.index.key("a0").unwrap().2.stored;
+    assert!(key.get("outEase").is_some());
+    undo(&mut c);
+    assert!(
+        c.model
+            .index
+            .key("a0")
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get("outEase")
+            .is_none()
+    );
+}
+#[test]
+fn handle_drag_is_undoable_and_option_splits_continuity() {
+    let (_a, mut c) = client();
+    edit(
+        &mut c,
+        vec![
+            KeyframeCommand::SetInterpolation {
+                key_ids: strings(&["a0"]),
+                side: EaseSide::Both,
+                interpolation: Interpolation::Continuous,
+            }
+            .into(),
+        ],
+    );
+    block_on(c.begin_drag(DragKind::Handle {
+        id: "a0".into(),
+        side: EaseSide::Out,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        handle_time: 0.5,
+        handle_value: 20.,
+        modifiers: Modifiers {
+            alt: true,
+            ..mods()
+        },
+        ..sample(0.)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .key("a0")
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get("continuous"),
+        Some(&Value::Bool(false))
+    );
+}
+#[test]
+fn speed_graph_handle_and_key_drags_never_corrupt_previous_segment() {
+    let (_a, mut c) = client_with(
+        parse(
+            r#"{
+        "id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":5,"comps":{},"assets":{},
+        "layers":[{"id":"l1","from":0,"dur":5,"type":"shape","on":true,"p":{
+            "position.x":{"v":0,"kf":[
+                {"i":"x0","t":0,"v":0,"inInterp":"linear","outInterp":"bezier","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":75},"continuous":false,"autoBezier":false},
+                {"i":"x1","t":1,"v":300,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":65},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false},
+                {"i":"x2","t":2,"v":600,"inInterp":"bezier","outInterp":"linear","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false}
+            ]},
+            "position.y":{"v":540,"kf":[
+                {"i":"y0","t":0,"v":540,"inInterp":"linear","outInterp":"bezier","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":75},"continuous":false,"autoBezier":false},
+                {"i":"y1","t":1,"v":540,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":65},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false},
+                {"i":"y2","t":2,"v":540,"inInterp":"bezier","outInterp":"linear","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false}
+            ]}
+        }}]
+    }"#,
+        )
+        .unwrap(),
+    );
+    c.model.graph_mode = pm_panel_timeline::GraphMode::Speed;
+    let x1_in_before = c
+        .model
+        .index
+        .key("x1")
+        .unwrap()
+        .2
+        .stored
+        .to_value()
+        .get("inEase")
+        .unwrap()
+        .clone();
+    // 1) Dragging x1's outgoing handle in Speed Graph MUST NOT touch x1.inEase (segment x0->x1)!
+    block_on(c.begin_drag(DragKind::Handle {
+        id: "x1".into(),
+        side: EaseSide::Out,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        handle_time: 1.7,
+        handle_value: 200.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let x1_after_handle = c.model.index.key("x1").unwrap().2.stored.to_value();
+    let y1_after_handle = c.model.index.key("y1").unwrap().2.stored.to_value();
+    assert_eq!(
+        x1_after_handle.get("inEase").unwrap(),
+        &x1_in_before,
+        "previous segment's incoming ease must not be altered"
+    );
+    let x1_out_inf = x1_after_handle
+        .get("outEase")
+        .and_then(|e| e.get("influence"))
+        .and_then(Value::as_f64)
+        .unwrap();
+    let y1_out_speed = y1_after_handle
+        .get("outEase")
+        .and_then(|e| e.get("speed"))
+        .and_then(Value::as_f64)
+        .unwrap();
+    assert!((x1_out_inf - 70.).abs() < 1e-3, "got {x1_out_inf}");
+    assert_eq!(
+        y1_out_speed,
+        0.,
+        "constant Y axis must not receive bogus speed"
+    );
+    // 2) Dragging x1 in time in Speed Graph MUST NOT rewrite its easing handles!
+    let x1_out_before_move = x1_after_handle.get("outEase").unwrap().clone();
+    block_on(c.begin_drag(DragKind::GraphKeys {
+        ids: c.model.expand_graph_keys(&strings(&["x1"])),
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 450.,
+        ..sample(0.2)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let x1_after_move = c.model.index.key("x1").unwrap().2.stored.to_value();
+    assert!((key_time(&c, "x1") - 1.2).abs() < 1e-3);
+    assert_eq!(x1_after_move.get("inEase").unwrap(), &x1_in_before);
+    assert_eq!(x1_after_move.get("outEase").unwrap(), &x1_out_before_move);
+}
+#[test]
+fn menu_easing_uses_current_selected_keys_only_if_hit_selected() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0", "a2"]);
+    assert_eq!(
+        c.model.context_keys(&strings(&["a0"])),
+        strings(&["a0", "a2"])
+    );
+    assert_eq!(c.model.context_keys(&strings(&["b0"])), strings(&["b0"]));
+    let ctx = Context::Keys {
+        ids: strings(&["a0"]),
+    };
+    let p = c.model.menu_action(&ctx, "ease.linear", 0.).unwrap();
+    run(&mut c, p);
+}
+#[test]
+fn hold_context_toggle_applies_to_whole_selected_scope() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0", "a2"]);
+    let ctx = Context::Keys {
+        ids: strings(&["a0"]),
+    };
+    let p = c.model.menu_action(&ctx, "keys.hold", 0.).unwrap();
+    run(&mut c, p);
+    for id in ["a0", "a2"] {
+        assert_eq!(
+            c.model
+                .index
+                .key(id)
+                .unwrap()
+                .2
+                .stored
+                .to_value()
+                .get("outInterp")
+                .and_then(Value::as_str),
+            Some("hold")
+        );
+    }
+}
+#[test]
+fn clipboard_retains_unknown_fields_and_composition_offsets() {
+    let m = model(fixture());
+    let tracks = m.copy_keys(&strings(&["a0", "b0"]));
+    assert_eq!(tracks[0].keys[0].at, 0.);
+    assert_eq!(tracks[1].keys[0].at, 4.);
+    assert!(tracks[0].keys[0].key.get("custom").is_some());
+}
+#[test]
+fn paste_selects_new_ids_and_is_undoable() {
+    let (_a, mut c) = client();
+    let copied = c.model.copy_keys(&strings(&["a0", "a2"]));
+    let p = c
+        .model
+        .paste_keys("b", "opacity", 5., &copied[0].keys)
+        .unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.selection.keys().len(), 2);
+    let id = c.model.selection.keys()[1].clone();
+    assert_eq!(key_time(&c, &id), 2.);
+    undo(&mut c);
+    assert!(c.model.index.key(&id).is_none());
+}
+#[test]
+fn name_draft_enter_commits_escape_and_blank_do_not_write() {
+    let (_a, mut c) = client();
+    for (text, commit) in [("Changed", false), ("   ", true)] {
+        let p = Draft::Name {
+            layer_id: "a".into(),
+            text: text.into(),
+        }
+        .finish(commit, c.model.index.revision);
+        assert!(p.calls.is_empty());
+    }
+    let p = Draft::Name {
+        layer_id: "a".into(),
+        text: "New name".into(),
+    }
+    .finish(true, c.model.index.revision);
+    run(&mut c, p);
+    assert_eq!(
+        c.model.index.layer("a").unwrap().name.to_string_lossy(),
+        "New name"
+    );
+    undo(&mut c);
+}
+#[test]
+fn property_draft_updates_multiple_layers_atomically() {
+    let (_a, mut c) = client();
+    let p = Draft::Property {
+        targets: vec![
+            ("a".into(), "opacity".into()),
+            ("c".into(), "opacity".into()),
+        ],
+        value: Value::Number(35.),
+        time: 1.,
+    }
+    .finish(true, c.model.index.revision);
+    run(&mut c, p);
+    assert_eq!(
+        c.model.index.channel("c", "opacity").unwrap().value,
+        Value::Number(35.)
+    );
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+}
+#[test]
+fn visibility_solo_lock_switches_go_through_transactions() {
+    let (_a, mut c) = client();
+    for s in [LayerSwitch::Visible, LayerSwitch::Solo, LayerSwitch::Locked] {
+        let p = c.model.switch("a", s).unwrap();
+        run(&mut c, p);
+    }
+    let l = c.model.index.layer("a").unwrap();
+    assert!(!l.visible);
+    assert!(l.solo);
+    assert!(l.locked);
+    let p = c.model.switch("a", LayerSwitch::Locked).unwrap();
+    run(&mut c, p);
+    assert!(!c.model.index.layer("a").unwrap().locked);
+}
+#[test]
+fn stale_view_commands_refuse_without_overwriting_foreign_edit() {
+    let (_a, mut c) = client();
+    let p = c.model.switch("a", LayerSwitch::Visible).unwrap();
+    edit(
+        &mut c,
+        vec![Command::SetLayerName {
+            layer_id: "a".into(),
+            name: "Foreign".into(),
+        }],
+    );
+    assert!(block_on(c.dispatch(p)).is_err());
+    assert!(c.model.index.layer("a").unwrap().visible);
+}
+#[test]
+fn agent_origin_cannot_unlock_and_edit_locked_layer() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    c.caller = Caller::realm(301, 1, Origin::Mcp);
+    let p = c.model.switch("a", LayerSwitch::Locked).unwrap();
+    assert!(block_on(c.dispatch(p)).is_err());
+    assert!(c.model.index.layer("a").unwrap().locked);
+}
+#[test]
+fn idempotent_agent_retry_does_not_apply_twice() {
+    let (_a, mut c) = client();
+    c.caller = Caller::realm(302, 1, Origin::Mcp);
+    let cmd = Command::SetLayerName {
+        layer_id: "a".into(),
+        name: "Agent".into(),
+    };
+    let first = block_on(c.transact_idempotent(vec![cmd.clone()], 77)).unwrap();
+    let second = block_on(c.transact_idempotent(vec![cmd], 77)).unwrap();
+    assert_eq!(first.revision, second.revision);
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+}
+#[test]
+fn cancel_preserves_acknowledged_foreign_layer_name() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(2.))).unwrap();
+    let foreign = Caller::realm(303, 1, Origin::Agent);
+    let call = Call::Transact {
+        label: None,
+        body: WriteBody::Commands(vec![Command::SetLayerName {
+            layer_id: "a".into(),
+            name: "Kept".into(),
+        }]),
+        expected_revision: None,
+    };
+    let ack = block_on(c.kernel.call("P", Request::new(foreign, call)))
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, Reply::Throw(_)));
+    block_on(c.finish_drag(false)).unwrap();
+    assert_eq!(
+        c.model.index.layer("a").unwrap().name.to_string_lossy(),
+        "Kept"
+    );
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+}
+#[test]
+fn split_selects_tail_and_keeps_source_animation_time() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    command(&mut c, "split", 2.);
+    assert_eq!(c.model.selection.layers().len(), 1);
+    let tail = c.model.selection.layers()[0].clone();
+    let l = c.model.index.layer(&tail).unwrap();
+    assert_eq!(l.from, 2.);
+    let times: Vec<_> = l
+        .channels
+        .iter()
+        .find(|ch| ch.path == "opacity")
+        .unwrap()
+        .keys
+        .iter()
+        .map(|k| l.from + k.time)
+        .collect();
+    assert_eq!(times, vec![1., 3.]);
+    undo(&mut c);
+    assert!(c.model.index.layer(&tail).is_none());
+}
+#[test]
+fn reveal_single_shift_toggle_and_double_tap_are_ui_only() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    let revision = c.model.index.revision;
+    let facts = PropertyFacts::default();
+    c.model.reveal_property('p', false, 0, &facts).unwrap();
+    assert_eq!(
+        c.model.reveal.layers["a"].paths,
+        Some(strings(&["position.x"]))
+    );
+    c.model.reveal_property('t', true, 400, &facts).unwrap();
+    assert!(
+        c.model.reveal.layers["a"]
+            .paths
+            .as_ref()
+            .unwrap()
+            .contains(&"opacity".into())
+    );
+    c.model.reveal_property('t', true, 800, &facts).unwrap();
+    assert!(
+        !c.model.reveal.layers["a"]
+            .paths
+            .as_ref()
+            .unwrap()
+            .contains(&"opacity".into())
+    );
+    c.model.reveal_property('e', false, 1200, &facts).unwrap();
+    c.model.reveal_property('e', false, 1400, &facts).unwrap();
+    assert_eq!(c.model.index.revision, revision);
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
+}
+/// v1–3's `TimelineService.reveal`: opens the layer and adds the keys to
+/// what it showed (its animated channels), UI state only.
+#[test]
+fn service_reveal_adds_keys_to_the_animated_channels() {
+    let (_a, mut c) = client();
+    let revision = c.model.index.revision;
+    c.model.reveal_paths("a", &strings(&["rotation"])).unwrap();
+    let shown = &c.model.reveal.layers["a"];
+    assert!(!shown.collapsed);
+    assert_eq!(
+        shown.paths,
+        Some(strings(&[
+            "opacity",
+            "position.x",
+            "scale.x",
+            "scale.y",
+            "rotation"
+        ]))
+    );
+    c.model.reveal_paths("a", &strings(&["rotation"])).unwrap();
+    assert_eq!(
+        c.model.reveal.layers["a"].paths,
+        Some(strings(&[
+            "opacity",
+            "position.x",
+            "scale.x",
+            "scale.y",
+            "rotation"
+        ]))
+    );
+    assert!(c.model.reveal_paths("missing", &[]).is_err());
+    assert_eq!(c.model.index.revision, revision);
+}
+#[test]
+fn reveal_double_u_includes_schema_reported_modified_properties() {
+    let mut m = model(fixture());
+    let mut facts = PropertyFacts::default();
+    facts.modified.insert(("c".into(), "opacity".into()));
+    m.reveal_property('u', false, 0, &facts).unwrap();
+    m.reveal_property('u', false, 299, &facts).unwrap();
+    assert!(
+        m.reveal.layers["c"]
+            .paths
+            .as_ref()
+            .unwrap()
+            .contains(&"opacity".into())
+    );
+}
+#[test]
+fn global_m_is_repeatable_disclosure_not_a_double_tap() {
+    let mut m = model(fixture());
+    m.reveal_property('m', false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(m.reveal.layers.values().all(|d| !d.collapsed));
+    m.reveal_property('m', false, 1, &PropertyFacts::default())
+        .unwrap();
+    assert!(m.reveal.layers.values().all(|d| d.collapsed));
+}
+#[test]
+fn graph_and_timeline_modes_do_not_touch_document() {
+    let (_a, mut c) = client();
+    let rev = c.model.index.revision;
+    for id in [
+        "graph",
+        "graph.speed",
+        "graph.combined",
+        "timeline.mode:tracks",
+        "timeline.toggleMode",
+    ] {
+        command(&mut c, id, 0.);
+    }
+    assert_eq!(c.model.index.revision, rev);
+    assert_eq!(c.model.mode, TimelineMode::Layers);
+    assert_eq!(c.model.graph_mode, GraphMode::Speed);
+}
+#[test]
+fn graph_menu_eligibility_tracks_series_count() {
+    let m = model(fixture());
+    for series in 0..3 {
+        let menu = m.menu(&Context::Graph { series });
+        assert_eq!(
+            menu.iter().find(|i| i.id == "graph.fit").unwrap().enabled,
+            series > 0
+        );
+        assert_eq!(
+            menu.iter().find(|i| i.id == "graph.merge").unwrap().enabled,
+            series >= 2
+        );
+    }
+}
+#[test]
+fn track_context_disables_clear_for_static_property() {
+    let m = model(fixture());
+    let menu = m.menu(&Context::Track {
+        layer: "c".into(),
+        channel: "opacity".into(),
+    });
+    assert!(!menu.iter().find(|i| i.id == "track.clear").unwrap().enabled);
+}
+#[test]
+fn clipboard_and_dialogs_are_explicit_host_effects() {
+    let mut m = model(fixture());
+    let ctx = Context::Keys {
+        ids: strings(&["a0"]),
+    };
+    assert!(matches!(
+        m.menu_action(&ctx, "keys.value", 0.)
+            .unwrap()
+            .effects
+            .as_slice(),
+        [HostEffect::EditKeyValues(_)]
+    ));
+    assert!(matches!(
+        m.menu_action(&ctx, "keys.copy", 0.)
+            .unwrap()
+            .effects
+            .as_slice(),
+        [HostEffect::CopyKeys(_)]
+    ));
+    assert!(m.menu_action(&ctx, "missing", 0.).is_err());
+}
+#[test]
+fn scale_key_selection_expands_both_axes_without_retiming() {
+    let m = model(fixture());
+    assert_eq!(
+        m.expand_scale_keys(&strings(&["sx"])),
+        strings(&["sx", "sy"])
+    );
+}
+#[test]
+fn property_diamond_adds_missing_targets_then_removes_all() {
+    let (_a, mut c) = client();
+    let targets = vec![
+        ("a".into(), "opacity".into()),
+        ("c".into(), "opacity".into()),
+    ];
+    let p = c.model.property_diamond(&targets, 1.).unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.channel("a", "opacity").unwrap().keys.len(), 2);
+    assert_eq!(c.model.index.channel("c", "opacity").unwrap().keys.len(), 1);
+    let p = c.model.property_diamond(&targets, 1.).unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.channel("a", "opacity").unwrap().keys.len(), 1);
+    assert!(
+        c.model
+            .index
+            .channel("c", "opacity")
+            .unwrap()
+            .keys
+            .is_empty()
+    );
+}
+#[test]
+fn stopwatch_is_undoable() {
+    let (_a, mut c) = client();
+    let p = c.model.stopwatch("c", "opacity", 1.).unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.channel("c", "opacity").unwrap().keys.len(), 1);
+    undo(&mut c);
+    assert!(
+        c.model
+            .index
+            .channel("c", "opacity")
+            .unwrap()
+            .keys
+            .is_empty()
+    );
+}
+#[test]
+fn numeric_field_drag_observes_fine_fast_clamps_and_precision() {
+    let meta = NumericMetadata {
+        step: 0.5,
+        min: 0.,
+        max: 100.,
+    };
+    assert_eq!(dragged_value(10., 4., meta, true, true).unwrap(), 10.2);
+    assert_eq!(dragged_value(10., 4., meta, false, true).unwrap(), 30.);
+    assert_eq!(dragged_value(99., 4., meta, false, false).unwrap(), 100.);
+    assert!(dragged_value(0., f64::NAN, meta, false, false).is_err());
+}
+#[test]
+fn viewport_pan_zoom_and_negative_time_have_no_visual_constants() {
+    let mut v = TimeViewport::new(0., 10.).unwrap();
+    v.pan(-5., -2.).unwrap();
+    assert_eq!((v.start, v.end), (-2., 8.));
+    v.zoom(3., 2., -2.).unwrap();
+    assert_eq!((v.start, v.end), (0.5, 5.5));
+    assert!(v.zoom(0., 0., 0.).is_err());
+}
+#[test]
+fn composition_tab_close_predicate_and_keyboard_open_are_host_semantics() {
+    let tabs = composition_tabs(&strings(&["C", "Other"]), "C");
+    assert!(tabs[0].active);
+    assert!(tabs.iter().all(|t| t.closable));
+    assert!(!composition_tabs(&strings(&["C"]), "C")[0].closable);
+}
+#[test]
+fn cue_modifiers_toggle_without_starting_drag() {
+    let mut s = CueSelection::default();
+    assert!(s.click("caption", "one", false));
+    assert!(!s.click("caption", "two", true));
+    assert_eq!(s.ids, strings(&["one", "two"]));
+    assert!(!s.click("caption", "one", true));
+    assert_eq!(s.ids, strings(&["two"]));
+    s.clear();
+    assert_eq!(s, CueSelection::default());
+}
+#[test]
+fn caption_moves_reach_the_kernel_and_undo_retains_cues() {
+    let mut v = fixture();
+    layer_mut(&mut v, 2).insert("type", Value::from("captions"));
+    layer_mut(&mut v, 2).insert("d", pm_model::json::parse(r#"{"cues":[{"id":"cue","start":1,"end":2,"text":"Synthetic"}],"opaque":{"keep":true}}"#).unwrap());
+    let (_a, mut c) = client_with(v);
+    let p = c
+        .model
+        .caption_edit(
+            "c",
+            pm_kernel::commands::captions::CaptionEdit::Move {
+                ids: strings(&["cue"]),
+                by: 1.,
+            },
+        )
+        .unwrap();
+    let published = c.kernel.published(&c.project).unwrap();
+    let before = published.snapshot.document.to_value().unwrap();
+    let before_revision = published.revision();
+    block_on(c.dispatch(p)).unwrap();
+    assert!(c.kernel.published(&c.project).unwrap().revision() > before_revision);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    let after = c
+        .kernel
+        .published(&c.project)
+        .unwrap()
+        .snapshot
+        .document
+        .to_value()
+        .unwrap();
+    // History preserves authored content; revision is a separate monotonic stamp.
+    let layer = |document: pm_model::Value| {
+        let document = pm_model::canonical::realize_project(document);
+        document
+            .get("layers")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l.get("id").and_then(Value::as_str) == Some("c"))
+            .unwrap()
+            .get("d")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(layer(before), layer(after));
+}
+#[test]
+fn import_drop_is_id_addressed_and_option_requests_folder() {
+    let m = model(fixture());
+    assert_eq!(
+        m.import_drop(1.012, Some("b".into()), true).unwrap(),
+        HostEffect::Import {
+            time: 1.,
+            before_layer: Some("b".into()),
+            as_folder: true
+        }
+    );
+    assert!(m.import_drop(1., Some("gone".into()), false).is_err());
+}
+#[test]
+fn text_stagger_body_and_stretch_use_existing_timing_channels() {
+    let band = TextStagger {
+        delay: 0.,
+        duration: 1.,
+        stagger: 0.2,
+        cascade: 1.,
+    };
+    let body = band.commands("a", "TA", false, 1.01, 30., 0.).unwrap();
+    assert!(
+        matches!(&body[0],Command::Property(PropertyCommand::Set(s)) if s.channel=="ta.TA.delay" && s.value==Value::Number(1.))
+    );
+    let end = band.commands("a", "TA", true, 2., 30., 0.).unwrap();
+    assert_eq!(end.len(), 2);
+    assert!(
+        matches!(&end[0],Command::Property(PropertyCommand::Set(s)) if s.value==Value::Number(2.))
+    );
+}
+#[test]
+fn quick_offset_keys_preserves_subframe_total() {
+    let (_a, mut c) = client();
+    let p = c
+        .model
+        .quick_offset_keys(&[strings(&["a0"]), strings(&["b0"])], 0.125, 0.)
+        .unwrap();
+    run(&mut c, p);
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(key_time(&c, "b0"), 0.125);
+}
+
+fn oracle() -> Value {
+    parse(include_str!("fixtures/tag-oracle.json")).unwrap()
+}
+fn n(value: &Value, key: &str) -> f64 {
+    value.get(key).unwrap().as_f64().unwrap()
+}
+fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).unwrap().as_str().unwrap()
+}
+fn edge(value: Option<&Value>) -> Option<Edge> {
+    match value.and_then(Value::as_str) {
+        Some("in") => Some(Edge::In),
+        Some("out") => Some(Edge::Out),
+        _ => None,
+    }
+}
+fn legacy_track_fixture(case: &Value) -> Value {
+    let mut project = fixture();
+    let mut layers = case.get("layers").unwrap().clone();
+    // The Electron oracle packed groups by member timing alone. Model those
+    // as untimed group strips while checking the legacy lane assignments.
+    for layer in layers.as_array_mut().unwrap() {
+        if layer.get("type").and_then(Value::as_str) == Some("group") {
+            layer
+                .as_object_mut()
+                .unwrap()
+                .insert("dur", Value::Number(0.));
+        }
+    }
+    let root = project.as_object_mut().unwrap();
+    root.insert("layers", layers);
+    root.insert("dur", Value::Number(20.));
+    project
+}
+
+#[test]
+fn track_layout_matches_forty_tag_generated_group_audio_caption_and_overlap_cases() {
+    for (case_no, case) in oracle()
+        .get("tracks")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut m = model(legacy_track_fixture(case));
+        for id in case.get("collapsed").unwrap().as_array().unwrap() {
+            m.reveal
+                .layers
+                .entry(id.as_str().unwrap().into())
+                .or_default()
+                .group_collapsed = true;
+        }
+        // Explicitly open other groups: default legacy disclosure is closed.
+        for l in &m.index.layers {
+            m.reveal.layers.entry(l.id.clone()).or_default();
+        }
+        let out = tracks::layout(&m.index, &m.reveal);
+        let expected = case.get("expected").unwrap();
+        assert_eq!(
+            (out.video, out.audio, out.captions),
+            (
+                n(expected, "video") as usize,
+                n(expected, "audio") as usize,
+                n(expected, "captions") as usize
+            ),
+            "case {case_no}"
+        );
+        let items = expected.get("items").unwrap().as_array().unwrap();
+        assert_eq!(out.items.len(), items.len());
+        for (actual, want) in out.items.iter().zip(items) {
+            assert_eq!(actual.id, text(want, "id"), "case {case_no}");
+            assert_eq!(actual.lane, n(want, "lane") as usize);
+            assert!((actual.from - n(want, "from")).abs() < 1e-9);
+            assert!((actual.duration - n(want, "dur")).abs() < 1e-9);
+            assert_eq!(actual.depth, n(want, "depth") as usize);
+            assert_eq!(
+                actual.area,
+                match text(want, "area") {
+                    "video" => tracks::Area::Video,
+                    "audio" => tracks::Area::Audio,
+                    _ => tracks::Area::Captions,
+                }
+            );
+        }
+    }
+}
+#[test]
+fn crossing_latch_matches_960_tag_samples_including_reversals_and_modifier_changes() {
+    for case in oracle().get("snapping").unwrap().as_array().unwrap() {
+        let anchors: Vec<_> = case
+            .get("anchors")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| Anchor {
+                time: n(a, "time"),
+                edge: edge(a.get("edge")),
+            })
+            .collect();
+        let targets: Vec<_> = case
+            .get("targets")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| Target {
+                time: n(a, "time"),
+                edge: edge(a.get("edge")),
+                weight: n(a, "weight"),
+            })
+            .collect();
+        let mut snap = DirectionalSnap::default();
+        for step in case.get("steps").unwrap().as_array().unwrap() {
+            let delta = snap.resolve(
+                &anchors,
+                n(step, "raw"),
+                &targets,
+                0.15,
+                step.get("enabled").unwrap().as_bool().unwrap(),
+            );
+            assert!((delta - n(step, "delta")).abs() < 1e-9);
+            match step.get("lock").unwrap() {
+                Value::Null => assert!(snap.lock.is_none()),
+                want => {
+                    let actual = snap.lock.unwrap();
+                    assert_eq!(actual.anchor, n(want, "anchor") as usize);
+                    assert_eq!(actual.direction, n(want, "direction") as i8);
+                    assert!((actual.target - n(want, "target")).abs() < 1e-9);
+                }
+            }
+        }
+    }
+}
+#[test]
+fn snap_does_not_attract_nearby_edges_before_crossing() {
+    let mut s = DirectionalSnap::default();
+    let a = [Anchor {
+        time: 0.,
+        edge: None,
+    }];
+    assert_eq!(s.resolve(&a, 0.95, &[Target::at(1.)], 0.1, true), 0.95);
+    assert_eq!(s.resolve(&a, 1.01, &[Target::at(1.)], 0.1, true), 1.);
+    assert_eq!(s.resolve(&a, 0.99, &[Target::at(1.)], 0.1, true), 0.99);
+}
+#[test]
+fn snap_release_observes_removed_targets_and_incompatible_edges() {
+    let mut s = DirectionalSnap::default();
+    let a = [Anchor {
+        time: 0.,
+        edge: Some(Edge::In),
+    }];
+    let target = Target {
+        time: 1.,
+        edge: Some(Edge::Out),
+        weight: 1.,
+    };
+    assert_eq!(s.resolve(&a, 1.01, &[target], 0.1, true), 1.01);
+    s.reset(0.);
+    assert_eq!(s.resolve(&a, 1.01, &[Target::at(1.)], 0.1, true), 1.);
+    assert_eq!(s.resolve(&a, 1.02, &[], 0.1, true), 1.02);
+}
+#[test]
+fn snap_weights_only_break_equal_distance_ties() {
+    let mut s = DirectionalSnap::default();
+    let a = [Anchor {
+        time: 0.,
+        edge: None,
+    }];
+    assert_eq!(
+        s.resolve(
+            &a,
+            1.05,
+            &[
+                Target {
+                    time: 1.,
+                    edge: None,
+                    weight: 100.
+                },
+                Target::at(1.04)
+            ],
+            0.1,
+            true
+        ),
+        1.04
+    );
+}
+#[test]
+fn invalid_snap_samples_hold_last_raw_time() {
+    let mut s = DirectionalSnap::new(0.5);
+    assert_eq!(s.resolve(&[], f64::NAN, &[], f64::NAN, false), 0.5);
+}
+#[test]
+fn track_move_preview_matches_forty_tag_cases_including_group_and_area_slots() {
+    for (case_no, case) in oracle()
+        .get("tracks")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut m = model(legacy_track_fixture(case));
+        for l in &m.index.layers {
+            m.reveal.layers.entry(l.id.clone()).or_default();
+        }
+        for id in case.get("collapsed").unwrap().as_array().unwrap() {
+            m.reveal
+                .layers
+                .get_mut(id.as_str().unwrap())
+                .unwrap()
+                .group_collapsed = true;
+        }
+        let mv = case.get("move").unwrap();
+        let lanes = mv.get("lanes").unwrap();
+        let ids: Vec<_> = mv
+            .get("ids")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().into())
+            .collect();
+        let actual = tracks::plan_move(
+            &m.index,
+            &m.reveal,
+            &ids,
+            n(mv, "dt"),
+            tracks::LaneDelta {
+                video: n(lanes, "video") as isize,
+                audio: n(lanes, "audio") as isize,
+                captions: n(lanes, "captions") as isize,
+            },
+        )
+        .unwrap();
+        let expected = case.get("moved").unwrap().as_array().unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, want) in actual.iter().zip(expected) {
+            assert_eq!(actual.id, text(want, "id"), "case {case_no}");
+            assert_eq!(
+                actual.track,
+                n(want, "track") as usize,
+                "case {case_no} id {}",
+                actual.id
+            );
+            assert_eq!(actual.from, n(want, "from"));
+        }
+    }
+}
+#[test]
+fn keyframe_proximity_snap_is_distinct_from_strip_crossing() {
+    let m = model(fixture());
+    let mut drag = Drag::begin(
+        &m,
+        DragKind::Keys {
+            ids: strings(&["a0"]),
+        },
+    )
+    .unwrap();
+    drag.commands(DragSample {
+        modifiers: Modifiers {
+            shift: true,
+            ..mods()
+        },
+        acquire_tolerance: 0.1,
+        release_tolerance: 0.15,
+        ..sample(1.95)
+    })
+    .unwrap();
+    assert_eq!(drag.key_snap.unwrap().target, 3.);
+}
+#[test]
+fn track_magnet_snaps_by_default_and_shift_temporarily_inverts_it() {
+    let mut m = model(fixture());
+    m.mode = TimelineMode::Tracks;
+    let mut drag = Drag::begin(
+        &m,
+        DragKind::Layers {
+            ids: strings(&["a"]),
+        },
+    )
+    .unwrap();
+    drag.commands(DragSample {
+        release_tolerance: 0.1,
+        ..sample(0.01)
+    })
+    .unwrap();
+    drag.commands(DragSample {
+        release_tolerance: 0.1,
+        ..sample(2.01)
+    })
+    .unwrap();
+    assert!(drag.snap.lock.is_some());
+    drag.commands(DragSample {
+        modifiers: Modifiers {
+            shift: true,
+            ..mods()
+        },
+        release_tolerance: 0.1,
+        ..sample(2.02)
+    })
+    .unwrap();
+    assert!(drag.snap.lock.is_none());
+}
+#[test]
+fn playhead_targets_use_visible_frames_not_exclusive_out_edges() {
+    let m = model(fixture());
+    let targets = playhead_targets(&m.index);
+    assert!(targets.contains(&(7. - 1. / 30.)));
+    assert!(!targets.contains(&7.));
+    assert_eq!(first_frame(0.01, 30.), 1. / 30.);
+    assert!((last_frame(0., 1., 30.) - 29. / 30.).abs() < 1e-12);
+}
+#[test]
+fn animated_property_drag_starts_at_evaluated_value() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "opacity".into())],
+        time: 2.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    let p = c.kernel.published("P").unwrap();
+    let mut mirror = pm_kernel::QueryMirror::new(&p);
+    let value = mirror
+        .queries()
+        .evaluate(Some("C"), "a", "opacity", 2.)
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert!((value - 35.).abs() < 1e-7);
+    block_on(c.finish_drag(false)).unwrap();
+}
+#[test]
+fn ui_session_patch_preserves_opaque_and_legacy_fields() {
+    let ui = pm_kernel::state::UiState { timeline:parse(r#"{"pps":75,"scrollT":-2,"extension":{"keep":true},"nativeModel":{"unknown":1,"disclosure":{"a":{"future":true}}}}"#).unwrap(), ..Default::default() };
+    let mut m = model(fixture());
+    m.toggle_disclosure("a").unwrap();
+    m.mode = TimelineMode::Tracks;
+    let patched = m.patch_ui(&ui);
+    assert_eq!(patched.timeline.get("pps"), Some(&Value::Number(75.)));
+    assert_eq!(
+        patched.timeline.get("extension"),
+        ui.timeline.get("extension")
+    );
+    assert_eq!(
+        patched
+            .timeline
+            .get("nativeModel")
+            .unwrap()
+            .get("disclosure")
+            .unwrap()
+            .get("a")
+            .unwrap()
+            .get("future"),
+        Some(&Value::Bool(true))
+    );
+    let mut restored = model(fixture());
+    restored.restore_ui(&patched);
+    assert_eq!(restored.mode, TimelineMode::Tracks);
+    assert_eq!(restored.reveal.layers["a"], m.reveal.layers["a"]);
+}
+#[test]
+fn ui_publication_never_creates_document_undo() {
+    let (_a, mut c) = client();
+    let rev = c.model.index.revision;
+    c.model.mode = TimelineMode::Tracks;
+    block_on(c.publish_view()).unwrap();
+    assert_eq!(c.model.index.revision, rev);
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
+    assert_eq!(
+        c.kernel.state().ui["P"]
+            .timeline
+            .get("mode")
+            .and_then(Value::as_str),
+        Some("tracks")
+    );
+}
+#[test]
+fn track_shift_selection_toggles_instead_of_selecting_range() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    let (calls, drag) = c
+        .model
+        .select_track_layer(
+            "c",
+            Modifiers {
+                shift: true,
+                ..mods()
+            },
+        )
+        .unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    assert!(drag);
+    assert_eq!(c.model.selection.layers(), strings(&["a", "c"]));
+    let (_, drag) = c
+        .model
+        .select_track_layer(
+            "a",
+            Modifiers {
+                shift: true,
+                ..mods()
+            },
+        )
+        .unwrap();
+    assert!(!drag);
+}
+#[test]
+fn track_header_select_lock_visibility_and_disclosure_target_its_layers() {
+    let (_a, mut c) = client();
+    let layout = tracks::layout(&c.model.index, &c.model.reveal);
+    let lane = layout.item("b").unwrap().lane;
+    let expected: Vec<_> = layout
+        .items
+        .iter()
+        .filter(|i| i.area == tracks::Area::Video && i.lane == lane)
+        .map(|i| i.id.clone())
+        .collect();
+    let p = c
+        .model
+        .track_header(tracks::Area::Video, lane, TrackHeaderAction::Select);
+    run(&mut c, p);
+    assert_eq!(c.model.selection.layers(), expected);
+    let p = c
+        .model
+        .track_header(tracks::Area::Video, lane, TrackHeaderAction::Visible);
+    run(&mut c, p);
+    for id in &expected {
+        assert!(!c.model.index.layer(id).unwrap().visible);
+    }
+    let p = c
+        .model
+        .track_header(tracks::Area::Video, lane, TrackHeaderAction::Disclosure);
+    assert!(p.calls.is_empty());
+    let p = c
+        .model
+        .track_header(tracks::Area::Video, lane, TrackHeaderAction::Lock);
+    run(&mut c, p);
+    for id in &expected {
+        assert!(c.model.index.layer(id).unwrap().locked);
+    }
+}
+#[test]
+fn reorder_moves_a_selected_block_before_and_after_by_target_id() {
+    let (_a, mut c) = client();
+    let p = c
+        .model
+        .reorder(&strings(&["a", "b"]), "c", true, 0.)
+        .unwrap();
+    run(&mut c, p);
+    assert_eq!(
+        c.model
+            .index
+            .layers
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c", "a", "b"]
+    );
+    undo(&mut c);
+    let p = c
+        .model
+        .reorder(&strings(&["c", "b"]), "a", false, 0.)
+        .unwrap();
+    run(&mut c, p);
+    assert_eq!(
+        c.model
+            .index
+            .layers
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b", "c", "a"]
+    );
+}
+#[test]
+fn drop_inside_group_preserves_order_and_is_one_undo_entry() {
+    let mut v = fixture();
+    fill_transforms(&mut v);
+    layer_mut(&mut v, 0).insert("type", Value::from("group"));
+    let (_a, mut c) = client_with(v);
+    let p = c
+        .model
+        .drop_layers(
+            &strings(&["b", "c"]),
+            "a",
+            DropMode::Inside,
+            0.,
+            Origin::Interface,
+        )
+        .unwrap();
+    run(&mut c, p);
+    assert_eq!(
+        c.model.index.layer("b").unwrap().group.as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        c.model.index.layer("c").unwrap().group.as_deref(),
+        Some("a")
+    );
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert!(c.model.index.layer("b").unwrap().group.is_none());
+}
+#[test]
+fn reorder_rejects_self_group_cycles_and_locked_destination() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("type", Value::from("group"));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    layer_mut(&mut v, 2).insert("lock", Value::Bool(true));
+    let m = model(v);
+    assert!(m.reorder(&strings(&["a"]), "b", false, 0.).is_err());
+    assert!(m.reorder(&strings(&["a"]), "c", false, 0.).is_err());
+}
+#[test]
+fn track_move_commits_preferences_stack_and_timing_in_one_undo_step() {
+    let (_a, mut c) = client();
+    let p = c
+        .model
+        .move_tracks(
+            &strings(&["b"]),
+            0.125,
+            tracks::LaneDelta {
+                video: 1,
+                ..Default::default()
+            },
+            Origin::Interface,
+        )
+        .unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.layer("b").unwrap().from, 5.125);
+    assert!(c.model.index.layer("b").unwrap().preferred_track > 0);
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("b").unwrap().from, 5.);
+}
+#[test]
+fn preplanned_operation_batch_cannot_cross_caller_origin() {
+    let (_a, mut c) = client();
+    let p = c
+        .model
+        .move_tracks(
+            &strings(&["b"]),
+            1.,
+            tracks::LaneDelta::default(),
+            Origin::Interface,
+        )
+        .unwrap();
+    c.caller = Caller::realm(510, 1, Origin::Mcp);
+    assert!(matches!(
+        block_on(c.dispatch(p)),
+        Err(ClientError::OriginMismatch)
+    ));
+}
+#[test]
+fn preplanned_operations_are_bound_to_document_identity() {
+    let (_a, mut c) = client();
+    let p = c.model.reorder(&strings(&["c"]), "a", false, 0.).unwrap();
+    block_on(c.kernel.close("P")).unwrap();
+    block_on(c.kernel.open("P", OpenSource::Untitled(fixture())))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        block_on(c.dispatch(p)),
+        Err(ClientError::DocumentChanged)
+    ));
+}
+#[test]
+fn selected_value_keys_away_from_playhead_insert_normally() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0", "a2"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "opacity".into())],
+        time: 2.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    let ch = c.model.index.channel("a", "opacity").unwrap();
+    assert_eq!(ch.keys.len(), 3);
+    assert_eq!(ch.keys[0].value, Value::Number(10.));
+    assert_eq!(ch.keys[1].value, Value::Number(35.));
+    block_on(c.finish_drag(false)).unwrap();
+}
+#[test]
+fn linked_scale_value_preserves_ratio_and_zero_baseline_rules() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    let p = c
+        .model
+        .scale_value("a", "scale.x", 200., 2., 100., 50.)
+        .unwrap();
+    run(&mut c, p);
+    let pubd = c.kernel.published("P").unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&pubd);
+    assert_eq!(
+        q.queries()
+            .evaluate(Some("C"), "a", "scale.y", 2.)
+            .unwrap()
+            .as_f64(),
+        Some(100.)
+    );
+    undo(&mut c);
+    let p = c
+        .model
+        .scale_value("a", "scale.x", 20., 2., 0., 50.)
+        .unwrap();
+    run(&mut c, p);
+    let pubd = c.kernel.published("P").unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&pubd);
+    assert_eq!(
+        q.queries()
+            .evaluate(Some("C"), "a", "scale.y", 2.)
+            .unwrap()
+            .as_f64(),
+        Some(20.)
+    );
+}
+
+#[test]
+fn three_d_timeline_scale_and_position_channels_include_z_axis() {
+    let mut v = fixture();
+    {
+        let l = layer_mut(&mut v, 0);
+        l.insert("threeD", Value::Bool(true));
+        l.insert("scaleLinked", Value::Bool(true));
+        let p = l.get_mut("p").unwrap().as_object_mut().unwrap();
+        p.insert("position.x", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("position.y", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("position.z", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("scale.x", parse(r#"{"v":100,"kf":[]}"#).unwrap());
+        p.insert("scale.y", parse(r#"{"v":100,"kf":[]}"#).unwrap());
+        p.insert("scale.z", parse(r#"{"v":100,"kf":[]}"#).unwrap());
+        p.insert("anchor.x", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("anchor.y", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("anchor.z", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("orientation.x", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("orientation.y", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+        p.insert("orientation.z", parse(r#"{"v":0,"kf":[]}"#).unwrap());
+    }
+    let (_a, mut c) = client_with(v);
+    for (track, expected) in [
+        ("position", vec!["position.x", "position.y", "position.z"]),
+        ("scale", vec!["scale.x", "scale.y", "scale.z"]),
+        ("anchor", vec!["anchor.x", "anchor.y", "anchor.z"]),
+        (
+            "orientation",
+            vec!["orientation.x", "orientation.y", "orientation.z"],
+        ),
+    ] {
+        let channels: Vec<&str> = c
+            .model
+            .track_channels("a", track)
+            .into_iter()
+            .map(|ch| ch.path.as_str())
+            .collect();
+        assert_eq!(channels, expected, "track_channels for {track}");
+    }
+    let plan = c
+        .model
+        .scale_values("a", "scale.x", 200., 2., 100., &[("scale.y", 50.), ("scale.z", 100.)])
+        .unwrap();
+    run(&mut c, plan);
+    let pubd = c.kernel.published("P").unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&pubd);
+    assert_eq!(
+        q.queries()
+            .evaluate(Some("C"), "a", "scale.y", 2.)
+            .unwrap()
+            .as_f64(),
+        Some(100.)
+    );
+    assert_eq!(
+        q.queries()
+            .evaluate(Some("C"), "a", "scale.z", 2.)
+            .unwrap()
+            .as_f64(),
+        Some(200.)
+    );
+}
+#[test]
+fn property_target_translation_respects_mask_effect_ordinals_and_type() {
+    let mut v = fixture();
+    for (i, fx, mask) in [(0, "fxA", "maskA"), (1, "fxB", "maskB")] {
+        let l = layer_mut(&mut v, i);
+        l.insert(
+            "fx",
+            parse(&format!(
+                r#"[{{"id":"{fx}","type":"blur","p":{{"radius":{{"v":5,"kf":[]}}}}}}]"#
+            ))
+            .unwrap(),
+        );
+        l.insert(
+            "masks",
+            parse(&format!(
+                r#"[{{"id":"{mask}","p":{{"x":{{"v":0,"kf":[]}}}}}}]"#
+            ))
+            .unwrap(),
+        );
+    }
+    let (_a, mut c) = client_with(v);
+    select(&mut c, &["a", "b"]);
+    assert_eq!(
+        c.model
+            .property_targets("a", &strings(&["fxA.radius", "m.maskA.x"]))
+            .unwrap(),
+        vec![
+            ("a".into(), "fxA.radius".into()),
+            ("a".into(), "m.maskA.x".into()),
+            ("b".into(), "fxB.radius".into()),
+            ("b".into(), "m.maskB.x".into())
+        ]
+    );
+}
+#[test]
+fn shader_extension_transition_and_structured_channels_keep_contract_paths() {
+    let mut v = fixture();
+    let l = layer_mut(&mut v, 0);
+    l.insert("type", Value::from("shader"));
+    l.insert("d",parse(r#"{"uniforms":{"amount":{"v":1,"kf":[]}},"paths":[{"id":"path","p":{"closed":{"v":false,"kf":[]}},"vertices":[{"id":"vertex","p":{"x":{"v":2,"kf":[]}}}]}],"animators":[{"id":"animator","p":{"delay":{"v":0,"kf":[]}}}],"styles":[{"id":"style","p":{"size":{"v":16,"kf":[]}}}]}"#).unwrap());
+    l.insert(
+        "transitionIn",
+        parse(r#"{"p":{"amount":{"v":1,"kf":[]}}}"#).unwrap(),
+    );
+    let m = model(v);
+    for path in [
+        "u.amount",
+        "g.path.closed",
+        "g.path.v.vertex.x",
+        "ta.animator.delay",
+        "ts.style.size",
+        "transitionIn.p.amount",
+    ] {
+        assert!(m.index.channel("a", path).is_some(), "{path}");
+    }
+    assert!(m.index.channel("a", "c.uniforms.amount").is_none());
+}
+#[test]
+fn parent_commands_are_atomic_and_reject_cycles() {
+    let mut v = fixture();
+    fill_transforms(&mut v);
+    let (_a, mut c) = client_with(v);
+    let p = c.model.parent(&strings(&["b"]), Some("a".into()), 0.);
+    run(&mut c, p);
+    assert_eq!(
+        c.model.index.layer("b").unwrap().parent.as_deref(),
+        Some("a")
+    );
+    let p = c.model.parent(&strings(&["a"]), Some("b".into()), 0.);
+    assert!(block_on(c.dispatch(p)).is_err());
+    undo(&mut c);
+    assert!(c.model.index.layer("b").unwrap().parent.is_none());
+}
+#[test]
+fn embedded_audio_mute_uses_content_transaction() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("type", Value::from("video"));
+    layer_mut(&mut v, 0).insert("d", parse(r#"{"audioMuted":false}"#).unwrap());
+    let (_a, mut c) = client_with(v);
+    let p = c.model.mute("a", 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.index.layer("a").unwrap().audio_muted);
+    undo(&mut c);
+    assert!(!c.model.index.layer("a").unwrap().audio_muted);
+}
+
+fn fill_transforms(value: &mut Value) {
+    for i in 0..3 {
+        let l = layer_mut(value, i);
+        let p = l.get_mut("p").unwrap().as_object_mut().unwrap();
+        for (path, v) in [
+            ("position.x", 0.),
+            ("position.y", 0.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("rotation", 0.),
+            ("skew", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+        ] {
+            if p.get(path).is_none() {
+                let mut prop = pm_model::Map::new();
+                prop.insert("v", Value::Number(v));
+                prop.insert("kf", Value::Array(Vec::new()));
+                p.insert(path, Value::Object(prop));
+            }
+        }
+    }
+}
+#[test]
+fn scale_row_groups_axes_but_keeps_individual_stored_ids() {
+    let m = model(fixture());
+    assert!(
+        m.rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel=="scale"))
+    );
+    assert!(
+        !m.rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel=="scale.y"))
+    );
+    assert_eq!(m.track_channels("a", "scale").len(), 2);
+}
+#[test]
+fn property_search_reveals_collapsed_group_children_without_document_changes() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("type", Value::from("group"));
+    layer_mut(&mut v, 0).insert("collapsed", Value::Bool(true));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    let mut m = model(v);
+    let revision = m.index.revision;
+    assert!(m.row_position(&RowId::Layer("b".into())).is_none());
+    m.set_search("B");
+    assert!(m.row_position(&RowId::Layer("b".into())).is_some());
+    m.set_search("");
+    assert!(m.row_position(&RowId::Layer("b".into())).is_none());
+    assert_eq!(m.index.revision, revision);
+}
+#[test]
+fn external_selection_reveals_group_ancestors() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("type", Value::from("group"));
+    layer_mut(&mut v, 0).insert("collapsed", Value::Bool(true));
+    layer_mut(&mut v, 1).insert("group", Value::from("a"));
+    let (_a, mut c) = client_with(v);
+    assert!(c.model.row_position(&RowId::Layer("b".into())).is_none());
+    select(&mut c, &["b"]);
+    assert!(c.model.row_position(&RowId::Layer("b".into())).is_some());
+}
+#[test]
+fn keyframe_proximity_latch_matches_600_tag_generated_samples() {
+    for case in oracle().get("groupSnapping").unwrap().as_array().unwrap() {
+        let numbers = |key| {
+            case.get(key)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let anchors = numbers("anchors");
+        let targets = numbers("targets");
+        let mut lock = None;
+        for step in case.get("steps").unwrap().as_array().unwrap() {
+            let (delta, next) =
+                snap::keyframe_group(&anchors, n(step, "raw"), &targets, 0.1, lock, 0.15);
+            lock = next;
+            assert!((delta - n(step, "delta")).abs() < 1e-9);
+            match step.get("lock").unwrap() {
+                Value::Null => assert!(lock.is_none()),
+                v => assert_eq!(
+                    lock,
+                    Some(snap::GroupLock {
+                        anchor: n(v, "anchor"),
+                        target: n(v, "target")
+                    })
+                ),
+            }
+        }
+    }
+}
+#[test]
+fn playhead_targets_match_twenty_tag_frame_boundary_cases() {
+    for case in oracle().get("playhead").unwrap().as_array().unwrap() {
+        let input = case.get("input").unwrap();
+        let mut value = fixture();
+        let map = value.as_object_mut().unwrap();
+        map.insert("fps", input.get("fps").unwrap().clone());
+        map.insert("work", input.get("work").unwrap().clone());
+        map.insert("markers", input.get("markers").unwrap().clone());
+        let layers = input
+            .get("layers")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let mut layer = l.as_object().unwrap().clone();
+                layer.remove("keys");
+                layer.insert("id", Value::from(format!("L{i}")));
+                layer.insert("type", Value::from("shape"));
+                let mut keys = Vec::new();
+                for (j, t) in l
+                    .get("keys")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
+                    let mut k = pm_model::Map::new();
+                    k.insert("i", Value::from(format!("K{i}_{j}")));
+                    k.insert("t", t.clone());
+                    k.insert("v", Value::Number(0.));
+                    keys.push(Value::Object(k));
+                }
+                let mut prop = pm_model::Map::new();
+                prop.insert("v", Value::Number(0.));
+                prop.insert("kf", Value::Array(keys));
+                let mut p = pm_model::Map::new();
+                p.insert("opacity", Value::Object(prop));
+                layer.insert("p", Value::Object(p));
+                Value::Object(layer)
+            })
+            .collect();
+        map.insert("layers", Value::Array(layers));
+        let m = model(value);
+        let actual = playhead_targets(&m.index);
+        let want = case.get("expected").unwrap().as_array().unwrap();
+        assert_eq!(actual.len(), want.len());
+        for (a, b) in actual.iter().zip(want) {
+            assert!((a - b.as_f64().unwrap()).abs() < 1e-9);
+        }
+    }
+}
+#[test]
+fn linked_hit_with_one_selected_axis_preserves_selection_on_click() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["sx"]);
+    let calls = c
+        .model
+        .select_keys("a", "scale", &strings(&["sx", "sy"]), false, false)
+        .unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    assert_eq!(c.model.selection.keys(), strings(&["sx", "sy"]));
+}
+#[test]
+fn shift_marquee_toggles_keys_against_captured_selection_each_sample() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    let mut marquee = MarqueeSession::begin(&c.model, true, false);
+    for _ in 0..2 {
+        let p = marquee.update(on("a", &["a0", "a2"]), Vec::new());
+        run(&mut c, p);
+        assert_eq!(c.model.selection.keys(), strings(&["a2"]));
+    }
+}
+#[test]
+fn a_mixed_timeline_marquee_prefers_keys_and_clip_only_clears_even_additive_keys() {
+    let (_actor, mut client) = client();
+    select(&mut client, &["a"]);
+    select_keys(&mut client, &["a0"]);
+    let mut marquee = MarqueeSession::begin(&client.model, true, false);
+    // Crossing clip bars while covering keyframes keeps keyframe selection.
+    let mixed = marquee.update(on("a", &["a2"]), strings(&["b"]));
+    run(&mut client, mixed);
+    assert_eq!(client.model.selection.keys(), strings(&["a0", "a2"]));
+    assert_eq!(client.model.selection.layers(), strings(&["a"]));
+    // When no keyframes are covered, touching clips switches to clip selection and clears keys.
+    let clips_only = marquee.update(Vec::new(), strings(&["b"]));
+    run(&mut client, clips_only);
+    assert_eq!(client.model.selection.layers(), strings(&["a", "b"]));
+    assert!(client.model.selection.keys().is_empty());
+}
+
+#[test]
+fn graph_marquee_retains_original_during_preview_then_replaces_on_release() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0"]);
+    let mut marquee = MarqueeSession::begin(&c.model, false, true);
+    let p = marquee.update(on("a", &["a2"]), strings(&["b"]));
+    run(&mut c, p);
+    assert_eq!(c.model.selection.keys(), strings(&["a0", "a2"]));
+    let p = marquee.finish();
+    run(&mut c, p);
+    assert_eq!(c.model.selection.keys(), strings(&["a2"]));
+}
+#[test]
+fn graph_marquee_empty_release_and_escape_restore_original_ids() {
+    let (_a, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    let mut marquee = MarqueeSession::begin(&c.model, false, true);
+    let p = marquee.update(Vec::new(), Vec::new());
+    run(&mut c, p);
+    let p = marquee.finish();
+    run(&mut c, p);
+    assert_eq!(c.model.selection.keys(), strings(&["a0"]));
+    let p = marquee.update(on("a", &["a2"]), Vec::new());
+    run(&mut c, p);
+    run(&mut c, marquee.cancel());
+    assert_eq!(c.model.selection.keys(), strings(&["a0"]));
+}
+#[test]
+fn graph_focus_resolution_precedes_selected_layer_and_falls_back_safely() {
+    let candidates = vec![
+        ("a".into(), "opacity".into()),
+        ("b".into(), "opacity".into()),
+    ];
+    assert_eq!(
+        graph_target(
+            &candidates,
+            Some(("a", "opacity")),
+            &strings(&["b"]),
+            Some("opacity")
+        ),
+        Some(&candidates[0])
+    );
+    assert_eq!(
+        graph_target(&candidates, None, &strings(&["b"]), Some("opacity")),
+        Some(&candidates[1])
+    );
+    assert!(graph_target(&[], None, &[], None).is_none());
+}
+/// A strip trim's targets are absolute times from the drag's start: an edit
+/// published after the last sample is kept, never overwritten at mouse-up,
+/// and a sample after it ends the trim.
+#[test]
+fn strip_trim_refuses_to_overwrite_a_foreign_edit() {
+    for publish_before_sample in [false, true] {
+        let (_a, mut c) = client_with(group_trim_fixture());
+        c.model.track_snap_disabled = true;
+        c.begin_preview_drag(DragKind::TrimOut {
+            ids: strings(&["late"]),
+        })
+        .unwrap();
+        block_on(c.drag(sample(-0.5))).unwrap();
+        let foreign = Caller::realm(777, 1, Origin::Agent);
+        let call = Call::Transact {
+            label: None,
+            body: WriteBody::Commands(vec![pm_kernel::TimingCommand::Move {
+                layer_ids: strings(&["late"]),
+                delta: 1.,
+            }
+            .into()]),
+            expected_revision: None,
+        };
+        block_on(c.kernel.call("P", Request::new(foreign, call)))
+            .unwrap()
+            .unwrap();
+        if publish_before_sample {
+            assert!(matches!(
+                block_on(c.drag(sample(-0.6))),
+                Err(ClientError::ConcurrentRelativeGesture)
+            ));
+        }
+        assert!(block_on(c.finish_drag(true)).is_err());
+        assert_eq!(trim_spans(&c, &["late"]), [(7., 2.)], "the agent's move stays");
+    }
+}
+
+#[test]
+fn relative_key_gesture_refuses_to_compound_across_a_foreign_write() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::Keys {
+        ids: strings(&["a0"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.5))).unwrap();
+    let foreign = Caller::realm(777, 1, Origin::Agent);
+    let call = Call::Transact {
+        label: None,
+        body: WriteBody::Commands(vec![Command::SetLayerName {
+            layer_id: "a".into(),
+            name: "Kept".into(),
+        }]),
+        expected_revision: None,
+    };
+    block_on(c.kernel.call("P", Request::new(foreign, call)))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        block_on(c.drag(sample(1.))),
+        Err(ClientError::ConcurrentRelativeGesture)
+    ));
+    block_on(c.finish_drag(false)).unwrap();
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(
+        c.model.index.layer("a").unwrap().name.to_string_lossy(),
+        "Kept"
+    );
+}
+#[test]
+fn async_disposal_cancels_owned_drag_without_blocking_in_drop() {
+    let (_a, mut c) = client();
+    let kernel = c.kernel.clone();
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(c.drag(sample(2.))).unwrap();
+    assert!(block_on(c.dispose()).unwrap().is_some());
+    let p = kernel.published("P").unwrap();
+    let index = TimelineIndex::from_snapshot(&p.snapshot);
+    assert_eq!(index.layer("a").unwrap().from, 1.);
+    assert!(p.entry.is_none());
+}
+
+#[test]
+fn quick_offset_key_gesture_replaces_preview_and_undoes_in_one_step() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::QuickOffsetKeys {
+        groups: vec![strings(&["a0", "a2"]), strings(&["b0"])],
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.125))).unwrap();
+    block_on(c.drag(sample(0.25))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(key_time(&c, "a2"), 2.);
+    assert_eq!(key_time(&c, "b0"), 0.25);
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(key_time(&c, "b0"), 0.);
+}
+
+#[test]
+fn text_stagger_gesture_updates_animator_channels_and_undo_restores_both() {
+    let document = parse(r#"{"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[{"id":"text","type":"text","from":0,"dur":5,"p":{},"d":{"text":"Hello","animators":[{"id":"a","mode":"stagger","timingVersion":2,"p":{"delay":{"v":0.5,"kf":[]},"duration":{"v":1,"kf":[]},"stagger":{"v":0.1,"kf":[]}}}]}}]}"#).unwrap();
+    let (_actor, mut c) = client_with(document);
+    let band = stagger::Band {
+        layer: "text".into(),
+        animator: "a".into(),
+        delay: 0.5,
+        duration_value: 1.,
+        stagger: 0.1,
+        start: 0.5,
+        duration: 1.,
+        cascade: 0.4,
+        end: 1.9,
+        out: false,
+        legacy: false,
+    };
+    block_on(c.begin_drag(DragKind::TextStagger {
+        band,
+        end: true,
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.7))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.duration")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(1.5)
+    );
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.stagger")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(0.15)
+    );
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.duration")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(1.)
+    );
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.stagger")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(0.1)
+    );
+}
+
+#[test]
+fn linked_scale_scrub_away_from_selected_keys_keys_the_playhead() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
+    let (_actor, mut c) = client_with(v);
+    select_keys(&mut c, &["sx", "sy"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "scale.x".into())],
+        time: 2.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        let ch = c.model.index.channel("a", axis).unwrap();
+        assert_eq!(ch.keys.len(), 2);
+        assert_eq!(ch.keys[0].value, Value::Number(100.));
+        assert_eq!(ch.keys[1].value, Value::Number(105.));
+        assert_eq!(ch.keys[0].time, 0.125);
+    }
+    block_on(c.finish_drag(false)).unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        assert_eq!(
+            c.model.index.channel("a", axis).unwrap().keys[0].value,
+            Value::Number(100.)
+        );
+    }
+}
+
+#[test]
+fn a_focused_axis_plots_its_whole_track_as_v1() {
+    // v1 plots the focused track's every axis: Scale X brings Scale Y.
+    let mut m = model(fixture());
+    m.graph_focus = Some(("a".into(), "scale.x".into()));
+    let (series, picked) = m.graph_series();
+    assert!(!picked);
+    assert_eq!(
+        series,
+        vec![
+            ("a".to_owned(), "scale.x".to_owned()),
+            ("a".to_owned(), "scale.y".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn a_graph_marquee_that_picks_nothing_keeps_the_layers_whose_curves_show() {
+    // The graph plots the selected layer's curves; a box drawn in it must
+    // not deselect the layer before it picks a key (the curves would vanish).
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    let mut marquee = MarqueeSession::begin(&c.model, false, true);
+    let live = marquee.update(vec![], vec![]);
+    run(&mut c, live);
+    assert_eq!(c.model.selection.layers(), strings(&["a"]));
+    run(&mut c, marquee.finish());
+    assert_eq!(c.model.selection.layers(), strings(&["a"]));
+}
+
+#[test]
+fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
+    let mut m = model(fixture());
+    let facts = PropertyFacts::default();
+    for start in [0, 1000] {
+        m.reveal_property('u', false, start, &facts).unwrap();
+        if start == 1000 {
+            m.reveal_property('u', false, start + 100, &facts).unwrap();
+        }
+        m.reveal_property('u', false, start + 400, &facts).unwrap();
+        if start == 1000 {
+            m.reveal_property('u', false, start + 500, &facts).unwrap();
+        }
+        assert!(m.reveal.layers.values().all(|d| d.collapsed));
+    }
+}
+
+#[test]
+fn selected_property_drag_sets_all_selected_keys_absolutely_and_undoes_once() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0", "a2", "px"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "opacity".into())],
+        time: 1.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let ch = c.model.index.channel("a", "opacity").unwrap();
+    assert_eq!(ch.keys[0].value, Value::Number(15.));
+    assert_eq!(ch.keys[1].value, Value::Number(15.));
+    assert_eq!(
+        c.model.index.channel("a", "position.x").unwrap().keys[0].value,
+        Value::Number(5.)
+    );
+    undo(&mut c);
+    assert_eq!(
+        c.model.index.channel("a", "opacity").unwrap().keys[1].value,
+        Value::Number(50.)
+    );
+}
+
+#[test]
+fn delete_groups_key_precedence_matches_electron_even_after_last_key() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    // Programmatic selection can contain keys before the local flag changes.
+    c.model.key_selection_active = false;
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_some());
+    assert!(
+        !c.model
+            .index
+            .channel("a", "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .any(|k| k.id == "a0")
+    );
+    assert!(c.model.key_selection_active);
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_some());
+    // A layer-row gesture leaves key mode and permits layer deletion.
+    let calls = c.model.select_layer("a", Modifiers::default()).unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_none());
+    undo(&mut c);
+    assert!(c.model.index.layer("a").is_some());
+}
+
+#[test]
+fn delete_groups_adapter_skips_locked_and_reports_in_one_step() {
+    let value = parse(
+        r#"{"id":"P","w":100,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"g","name":"Group","type":"group","p":{}},
+      {"id":"n","type":"group","group":"g","p":{}},
+      {"id":"c","type":"shape","group":"n","p":{}},
+      {"id":"l","name":"Locked","type":"shape","lock":true,"p":{}},
+      {"id":"l2","name":"Locked 2","type":"shape","lock":true,"p":{}}
+    ]}"#,
+    )
+    .unwrap();
+    let (_actor, mut c) = client_with(value);
+    select(&mut c, &["g", "n", "c", "l", "l2"]);
+    let effects = command(&mut c, "delete", 0.);
+    assert_eq!(
+        effects,
+        vec![HostEffect::Status("Skipped 2 locked layers".into())]
+    );
+    assert_eq!(c.model.index.layers.len(), 2);
+    assert_eq!(c.model.index.layers[0].id, "l");
+    assert_eq!(c.model.index.layers[1].id, "l2");
+    undo(&mut c);
+    assert_eq!(c.model.index.layers.len(), 5);
+}
+
+#[test]
+fn delete_groups_adapter_ignores_stale_ids_after_external_edit_and_undo() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a", "b"]);
+    edit(
+        &mut c,
+        vec![
+            pm_kernel::LayerCommand::Delete {
+                layer_ids: vec!["a".into()],
+            }
+            .into(),
+        ],
+    );
+    undo(&mut c);
+    // A concurrent writer removes one of the selected items. The published
+    // selection and revision are consumed before the next user command.
+    let kernel = c.kernel.clone();
+    block_on(kernel.call(
+        "P",
+        Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("External edit".into()),
+                expected_revision: None,
+                body: WriteBody::Commands(
+                    vec![pm_kernel::LayerCommand::Delete { layer_ids: vec!["b".into()] }.into()],
+                ),
+            },
+        ),
+    ))
+    .unwrap()
+    .unwrap();
+    c.sync().unwrap();
+    // Model a stale UI snapshot; the kernel correctly refuses a fresh
+    // selection request containing IDs that no longer exist.
+    c.model.selection = pm_kernel::Selection::from_parts(
+        strings(&["a", "b", "stale"]), Vec::new(), None,
+    );
+    command(&mut c, "delete", 0.);
+    assert!(c.model.index.layer("a").is_none());
+    assert!(c.model.index.layer("c").is_some());
+    undo(&mut c);
+    assert!(c.model.index.layer("a").is_some());
+    assert!(c.model.index.layer("b").is_none());
+}
+
+#[test]
+fn delete_groups_adapter_counts_protected_group_once_and_keeps_its_children() {
+    let value = parse(
+        r#"{"id":"P","w":100,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"g","type":"group","p":{}},
+      {"id":"n","type":"group","group":"g","p":{}},
+      {"id":"locked","type":"shape","group":"n","lock":true,"p":{}},
+      {"id":"editable-child","type":"shape","group":"g","p":{}},
+      {"id":"other","type":"shape","p":{}}
+    ]}"#,
+    )
+    .unwrap();
+    let (_actor, mut c) = client_with(value);
+    select(&mut c, &["g", "n", "locked", "editable-child", "other"]);
+    assert_eq!(
+        command(&mut c, "delete", 0.),
+        vec![HostEffect::Status("Skipped 1 locked group".into())]
+    );
+    for id in ["g", "n", "locked", "editable-child"] {
+        assert!(c.model.index.layer(id).is_some(), "{id}");
+    }
+    assert!(c.model.index.layer("other").is_none());
+    undo(&mut c);
+    assert_eq!(c.model.index.layers.len(), 5);
+}
+
+#[test]
+fn selection_history_marquee_is_one_entry_and_restores_key_active_state() {
+    let (_actor, mut c) = client();
+    let before = c.model.selection.clone();
+    let mut marquee = MarqueeSession::begin(&c.model, false, false);
+    for ids in [vec!["a0"], vec!["a0", "a2"], vec!["a2"]] {
+        run(&mut c, marquee.update(on("a", &ids), Vec::new()));
+    }
+    run(&mut c, marquee.finish());
+    assert!(c.model.key_selection_active);
+    undo(&mut c);
+    assert_eq!(c.model.selection, before);
+    assert!(!c.model.key_selection_active);
+    block_on(c.call(HistoryCall::Redo.into())).unwrap();
+    assert_eq!(c.model.selection.keys(), strings(&["a2"]));
+    assert!(c.model.key_selection_active);
+    // A second Undo reaches the beginning: no individual sample entries.
+    undo(&mut c);
+    let history = &c.kernel.published("P").unwrap().history;
+    assert_eq!((history.entries, history.applied), (1, 0));
+    assert!(matches!(
+        block_on(c.call(HistoryCall::Undo.into())).unwrap().reply,
+        Reply::Bool(false)
+    ));
+}
+
+#[test]
+fn selection_history_key_click_is_one_entry_for_layers_keys_and_channel() {
+    let (_actor, mut c) = client();
+    let before = c.model.selection.clone();
+    let calls = c
+        .model
+        .select_keys("a", "opacity", &strings(&["a0"]), false, false)
+        .unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    assert_eq!(c.model.selection.channel(), Some("opacity"));
+    assert_eq!(c.model.selection.keys(), strings(&["a0"]));
+    undo(&mut c);
+    assert_eq!(c.model.selection, before);
+    assert!(!c.model.key_selection_active);
+    block_on(c.call(HistoryCall::Redo.into())).unwrap();
+    assert_eq!(c.model.selection.channel(), Some("opacity"));
+    assert!(c.model.key_selection_active);
+}
+
+#[test]
+fn trim_in_gesture_keeps_key_comp_times_and_undoes_once() {
+    let (_a, mut c) = client();
+    let before = c.model.index.layer("a").unwrap().clone();
+    block_on(c.begin_drag(DragKind::TrimIn {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    for delta in [0.25, 0.5, 1.] {
+        block_on(c.drag(sample(delta))).unwrap();
+        let l = c.model.index.layer("a").unwrap();
+        let times: Vec<_> = l
+            .channels
+            .iter()
+            .find(|ch| ch.path == "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| l.from + k.time)
+            .collect();
+        let expected: Vec<_> = before
+            .channels
+            .iter()
+            .find(|ch| ch.path == "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| before.from + k.time)
+            .collect();
+        assert_eq!(times, expected);
+    }
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("a").unwrap().from, before.from);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, before.duration);
+}
+
+fn group_trim_fixture() -> Value {
+    parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"layers":[
+        {"id":"g","type":"group","on":true,"from":1,"dur":8,"collapsed":false,"p":{"opacity":{"v":100,"kf":[{"i":"gk","t":4,"v":50}]}}},
+        {"id":"n","type":"group","on":true,"group":"g","from":2,"dur":6,"collapsed":false,"p":{}},
+        {"id":"leaf","type":"shape","on":true,"group":"n","from":3,"dur":5,"p":{}},
+        {"id":"locked","type":"shape","on":true,"group":"g","from":1,"dur":8,"lock":true,"p":{}},
+        {"id":"early","type":"shape","on":true,"group":"g","from":1,"dur":1,"p":{}},
+        {"id":"late","type":"shape","on":true,"group":"g","from":6,"dur":2,"p":{}},
+        {"id":"empty","type":"group","on":true,"from":10,"dur":2,"p":{}}
+    ]}"#).unwrap()
+}
+
+fn trim_spans(c: &TimelineClient, ids: &[&str]) -> Vec<(f64, f64)> {
+    ids.iter()
+        .map(|id| {
+            let l = c.model.index.layer(id).unwrap();
+            (l.from, l.duration)
+        })
+        .collect()
+}
+
+#[test]
+fn strip_trim_previews_group_and_legacy_members_locally_until_one_commit() {
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        for legacy in [false, true] {
+            for trim_in in [false, true] {
+                let mut fixture = group_trim_fixture();
+                if legacy {
+                    let layers = fixture
+                        .as_object_mut()
+                        .unwrap()
+                        .get_mut("layers")
+                        .unwrap()
+                        .as_array_mut()
+                        .unwrap();
+                    layers[0]
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("dur", Value::Number(0.));
+                }
+                let (_actor, mut c) = client_with(fixture);
+                c.model.mode = mode;
+                c.model.track_snap_disabled = true;
+                let before = c.kernel.published("P").unwrap();
+                let original = before.snapshot.root().unwrap().to_value();
+                let ids = strings(&["g"]);
+                let kind = if trim_in {
+                    DragKind::TrimIn { ids }
+                } else {
+                    DragKind::TrimOut { ids }
+                };
+                let span =
+                    |index: &TimelineIndex, id: &str| index.strip_span(index.layer(id).unwrap());
+                let (group_from, group_duration) = span(&c.model.index, "g");
+                let (leaf_from, leaf_duration) = span(&c.model.index, "leaf");
+                for commit in [false, true] {
+                    c.begin_preview_drag(kind.clone()).unwrap();
+                    for delta in [0.5, 0.8] {
+                        block_on(c.drag(sample(delta))).unwrap();
+                        let frame = c.layer_preview().unwrap();
+                        assert!(frame.trimmed);
+                        let shown = TimelineIndex::from_snapshot(&frame.snapshot);
+                        let wanted_leaf = if trim_in {
+                            (leaf_from + delta, leaf_duration - delta)
+                        } else {
+                            (leaf_from, leaf_duration + delta)
+                        };
+                        // `g`'s dynamic strip span is the union of all its
+                        // descendants (including `locked` at 1..9); trimming
+                        // `late`/`leaf` (ends at 8) by +0.5/+0.8 stays inside
+                        // `locked`'s 1..9 extent.
+                        let expected_group = (
+                            group_from.min(if trim_in { group_from + delta } else { group_from }),
+                            (group_from + group_duration)
+                                .max(if trim_in {
+                                    group_from + group_duration
+                                } else {
+                                    8. + delta
+                                })
+                                - group_from,
+                        );
+                        for (id, expected) in [("g", expected_group), ("leaf", wanted_leaf)] {
+                            let actual = span(&shown, id);
+                            assert!((actual.0 - expected.0).abs() < 1e-9, "{id}: {actual:?}");
+                            assert!((actual.1 - expected.1).abs() < 1e-9, "{id}: {actual:?}");
+                        }
+                        assert_eq!(span(&shown, "locked"), span(&c.model.index, "locked"));
+                        let current = c.kernel.published("P").unwrap();
+                        assert_eq!(current.revision(), before.revision());
+                        assert_eq!(current.history.entries, before.history.entries);
+                    }
+                    let shown = c
+                        .layer_preview()
+                        .unwrap()
+                        .snapshot
+                        .root()
+                        .unwrap()
+                        .to_value();
+                    block_on(c.finish_drag(commit)).unwrap();
+                    assert!(c.layer_preview().is_none());
+                    let after = c.kernel.published("P").unwrap();
+                    assert_eq!(
+                        after.history.entries,
+                        before.history.entries + usize::from(commit)
+                    );
+                    assert_eq!(
+                        &after.snapshot.root().unwrap().to_value(),
+                        if commit { &shown } else { &original }
+                    );
+                }
+                undo(&mut c);
+                assert_eq!(
+                    c.kernel
+                        .published("P")
+                        .unwrap()
+                        .snapshot
+                        .root()
+                        .unwrap()
+                        .to_value(),
+                    original
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn group_trim_drag_batches_matching_edges_and_preserves_offsets() {
+    let ids = ["g", "n", "leaf", "locked"];
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let (_a, mut c) = client_with(group_trim_fixture());
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        let kind = DragKind::TrimOut {
+            ids: strings(&["g"]),
+        };
+        let mut drag = Drag::begin(&c.model, kind.clone()).unwrap();
+        let commands = drag.commands(sample(2.)).unwrap();
+        let trims: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Timing(pm_kernel::TimingCommand::TrimOut { layer_ids, time }) => {
+                    Some((layer_ids.clone(), *time))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            trims,
+            [
+                (strings(&["g"]), 11.),
+                (strings(&["n"]), 10.),
+                (strings(&["leaf", "late"]), 10.),
+                (strings(&["early"]), 4.),
+            ]
+        );
+
+        let before = trim_spans(&c, &ids);
+        block_on(c.begin_drag(kind)).unwrap();
+        block_on(c.drag(sample(2.))).unwrap();
+        assert_eq!(
+            trim_spans(&c, &ids),
+            [(1., 10.), (2., 8.), (3., 7.), (1., 8.)]
+        );
+        block_on(c.drag(sample(-2.))).unwrap();
+        assert_eq!(
+            trim_spans(&c, &ids),
+            [(1., 6.), (2., 4.), (3., 3.), (1., 8.)]
+        );
+        block_on(c.finish_drag(true)).unwrap();
+        undo(&mut c);
+        assert_eq!(trim_spans(&c, &ids), before);
+
+        block_on(c.begin_drag(DragKind::TrimIn {
+            ids: strings(&["g"]),
+        }))
+        .unwrap();
+        block_on(c.drag(sample(0.5))).unwrap();
+        assert_eq!(
+            trim_spans(&c, &ids),
+            [(1.5, 7.5), (3.5, 4.5), (3.5, 4.5), (1., 8.)]
+        );
+        let group = c.model.index.layer("g").unwrap();
+        assert_eq!(group.from + key_time(&c, "gk"), 5.);
+        block_on(c.finish_drag(true)).unwrap();
+        undo(&mut c);
+        assert_eq!(trim_spans(&c, &ids), before);
+    }
+}
+
+use render::{Label, Media, ModelPresenter, Scene, Viewport};
+
+struct GroupStripPresenter;
+impl ModelPresenter for GroupStripPresenter {
+    fn accessibility_label(&self, row: &RowId) -> String {
+        format!("{row:?}")
+    }
+    fn layer_label(&self, layer: &Layer) -> Label {
+        Label::for_kind(&layer.kind)
+    }
+    fn media(&self, _: &Layer) -> Media {
+        Media::Ready
+    }
+    fn interpolation(&self, _: &Key) -> render::Interpolation {
+        render::Interpolation::Linear
+    }
+    fn track_accessibility_label(&self, _: tracks::Area, lane: usize) -> Option<String> {
+        Some(format!("Track {}", lane + 1))
+    }
+}
+
+#[test]
+fn group_strip_uses_its_trimmed_edge_for_hit_testing_in_both_modes() {
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let viewport = Viewport {
+        width: 1100.,
+        height: 500.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 60.,
+        layer_column: 200.,
+    };
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let (_a, mut c) = client_with(group_trim_fixture());
+        c.model.mode = mode;
+        select(&mut c, &["g"]);
+        command(&mut c, "trimOut", 7.);
+        let frame = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.)
+            .unwrap()
+            .prepare(viewport, &tokens)
+            .unwrap();
+        // `locked` inside `g` stays at 1..9 so `g`'s dynamic member span ends
+        // at 9., while `n` (only unlocked `leaf`) trims to 7. and `empty` keeps
+        // its own 10..12 span.
+        for (id, end) in [("g", 9.), ("n", 7.), ("empty", 12.)] {
+            let strip = frame
+                .ops
+                .iter()
+                .find(|op| op.id.strip_prefix("clip:") == Some(id))
+                .unwrap_or_else(|| panic!("Missing strip for {id} in {mode:?}"));
+            let x = viewport.layer_column + end * viewport.pps - 1.;
+            let y = strip.bounds.y + strip.bounds.height / 2.;
+            assert_eq!(
+                frame.hit_clip(x, y),
+                Some((id, Some(render::Edge::Out))),
+                "{mode:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_group_trim_snaps_and_updates_the_strip() {
+    let (_a, mut c) = client_with(group_trim_fixture());
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["empty"]),
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        time_delta: 1.14,
+        playhead: 13.125,
+        modifiers: Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        release_tolerance: 0.08,
+        ..sample(0.)
+    }))
+    .unwrap();
+    assert_eq!(
+        c.active_drag().unwrap().snap_target_in(&c.model.index),
+        Some(13.125)
+    );
+    assert_eq!(trim_spans(&c, &["empty"]), [(10., 3.125)]);
+    block_on(c.finish_drag(true)).unwrap();
+}
+
+/// Whether the evaluator draws `id` at `t` in the published document (a
+/// group with a duration always answers yes; its members draw by their own
+/// timing).
+fn drawn(a: &KernelActor, id: &str, t: f64) -> bool {
+    let p = a.handle().published("P").unwrap();
+    pm_kernel::QueryContext::new(&p.snapshot.document)
+        .active(None, id, t)
+        .unwrap()
+}
+
+#[test]
+fn keyboard_group_trim_refuses_to_leave_a_member_outside_and_skips_locked() {
+    let (a, mut c) = client_with(group_trim_fixture());
+    let ids = ["g", "n", "leaf", "locked", "early", "late"];
+    let before = trim_spans(&c, &ids);
+    let facts = PropertyFacts::default();
+    select(&mut c, &["g"]);
+    // late starts at 6 and early ends at 2: an Out at 5 or an In at 4 would
+    // leave them drawing outside the group's edge.
+    assert!(drawn(&a, "late", 7.));
+    for (edge, time) in [("trimOut", 5.), ("trimIn", 4.)] {
+        assert!(c.model.command(edge, time, None, false, 0, &facts).is_err(), "{edge}");
+        assert_eq!(trim_spans(&c, &ids), before);
+    }
+    assert!(drawn(&a, "late", 7.));
+
+    command(&mut c, "trimOut", 7.);
+    let spans = trim_spans(&c, &ids);
+    assert_eq!((spans[0].0 + spans[0].1, spans[5].0 + spans[5].1), (7., 7.));
+    assert_eq!(spans[3], (1., 8.), "the locked member keeps its record");
+    assert!(drawn(&a, "late", 6.9));
+    for id in ["leaf", "early", "late"] {
+        assert!(!drawn(&a, id, 7.1), "{id} past the Out edge");
+    }
+    undo(&mut c);
+    assert_eq!(trim_spans(&c, &ids), before);
+
+    command(&mut c, "trimIn", 1.5);
+    assert_eq!(trim_spans(&c, &ids)[0].0, 1.5);
+    assert!(drawn(&a, "early", 1.6));
+    for id in ["leaf", "early", "late"] {
+        assert!(!drawn(&a, id, 1.4), "{id} before the In edge");
+    }
+    undo(&mut c);
+    select(&mut c, &["g", "early"]);
+    assert!(c.model.command("trimIn", 4., None, false, 0, &facts).is_err());
+}
+
+#[test]
+fn group_trim_drag_stops_where_a_member_would_stay_outside() {
+    let (a, mut c) = client_with(group_trim_fixture());
+    c.model.track_snap_disabled = true;
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["g"]),
+    }))
+    .unwrap();
+    // Past late's start (6 s): the edge stops a frame after it.
+    block_on(c.drag(sample(-3.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let edge = 6. + 1. / 30.;
+    let spans = trim_spans(&c, &["g", "late"]);
+    for (from, duration) in spans {
+        assert!((from + duration - edge).abs() < 1e-9, "{from} + {duration}");
+    }
+    assert!(drawn(&a, "late", 6.01));
+    for id in ["leaf", "early", "late"] {
+        assert!(!drawn(&a, id, edge + 0.05), "{id} past the Out edge");
+    }
+}
+
+#[test]
+fn default_rows_include_only_keyframed_transforms_and_effect_parameters() {
+    let m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"a","type":"shape","collapsed":false,"p":{"opacity":{"v":100,"kf":[]},"position.y":{"v":0,"kf":[{"i":"k","t":0,"v":0}]},"rotation":{"v":0,"kf":[],"expr":"time*10"},"anchor.x":{"v":0,"kf":[],"expr":""}},"fx":[{"id":"blur","type":"Blur","p":{"radius":{"v":10,"kf":[{"i":"r","t":0,"v":10}]},"quality":{"v":1,"kf":[]}}},{"id":"empty","type":"Glow","p":{"amount":{"v":0,"kf":[]}}}]}]}"#).unwrap());
+    let paths: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(paths, ["position.y", "blur.radius"]);
+    assert_eq!(
+        m.rows()
+            .iter()
+            .filter(|r| matches!(r.id, RowId::Effect { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(m.rows().last().unwrap().depth, 2);
+    let frame = v4::project_window(&m, 0, 20).unwrap();
+    assert_eq!(frame["window"]["rows"][2]["kind"], "heading");
+    assert_eq!(frame["window"]["rows"][2]["label"], "Blur");
+}
+
+#[test]
+fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
+    let (_actor, mut c) = client();
+    assert!(!c.model.layer_disclosable("c"));
+    c.model.toggle_disclosure("c").unwrap();
+    let property = RowId::Property {
+        layer_id: "c".into(),
+        channel: "opacity".into(),
+    };
+    let targets = vec![("c".into(), "opacity".into())];
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    assert!(c.model.layer_disclosable("c"));
+    c.model.editing_property = Some(("c".into(), "opacity".into()));
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    let editing_row = c.model.row_position(&property).unwrap();
+    c.model.editing_property = None;
+    c.model.rebuild_rows();
+    assert_eq!(c.model.row_position(&property), Some(editing_row));
+    select(&mut c, &["c"]);
+    c.model
+        .reveal_property('u', false, 1000, &PropertyFacts::default())
+        .unwrap();
+    assert!(c.model.row_position(&property).is_none());
+    assert!(!c.model.layer_disclosable("c"));
+}
+
+#[test]
+fn explicit_reveal_can_show_static_properties_until_the_strip_is_closed() {
+    let mut m = model(fixture());
+    m.reveal_property('*', false, 100, &PropertyFacts::default())
+        .unwrap();
+    assert!(m.layer_disclosable("c"));
+    assert!(m.property_visible("c", m.index.channel("c", "opacity").unwrap()));
+    m.toggle_disclosure("c").unwrap();
+    assert!(!m.layer_disclosable("c"));
+    assert!(m.layer_disclosable("b"));
+    m.toggle_disclosure("b").unwrap(); // Close the explicit reveal.
+    m.toggle_disclosure("b").unwrap(); // Open with only keys.
+    assert!(m.reveal.layers["b"].paths.is_none());
+}
+
+#[test]
+fn three_d_group_twirl_filters_static_transforms_and_keeps_children_indented() {
+    let mut m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"g","name":"Synthetic wordmark","type":"group","threeD":true,"collapsed":true,"p":{"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"anchor.z":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null},"orientation.x":{"v":0,"kf":[],"expr":null},"orientation.y":{"v":0,"kf":[],"expr":null},"orientation.z":{"v":0,"kf":[],"expr":null},"perspective":{"v":50,"kf":[],"expr":null},"position.x":{"v":100,"kf":[],"expr":null},"position.y":{"v":200,"kf":[{"i":"y","t":0,"v":210},{"i":"y2","t":1,"v":200}],"expr":null},"position.z":{"v":0,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"rotation.x":{"v":0,"kf":[],"expr":null},"rotation.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[{"i":"sx","t":0,"v":100}],"expr":null},"scale.y":{"v":100,"kf":[{"i":"sy","t":0,"v":100}],"expr":null},"scale.z":{"v":100,"kf":[],"expr":null},"skew":{"v":0,"kf":[],"expr":null}}},{"id":"child","type":"shape","group":"g","p":{"opacity":{"v":100,"kf":[]}}}]}"#).unwrap());
+    m.toggle_disclosure("g").unwrap();
+    let properties: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(properties, ["position.y", "scale"]);
+    assert_eq!(m.rows().last().unwrap().id, RowId::Layer("child".into()));
+    assert_eq!(m.rows().last().unwrap().depth, 1);
+    assert!(m.reveal.layers["g"].paths.is_none());
+}
+
+#[test]
+fn electron_snap_gesture_target_matrix_at_multiple_zooms() {
+    // A short moving clip avoids equal-distance ties between its two ends
+    // and separate landmarks. Outside samples clear both anchors and the
+    // exclusive out-edge target one frame beyond the playhead.
+    let m = model(parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"work":[6,18],"markers":[{"id":"m","t":12}],"layers":[{"id":"a","type":"shape","from":2,"dur":0.25,"p":{"opacity":{"v":0,"kf":[{"i":"k","t":0,"v":0}]}}},{"id":"b","type":"shape","from":8,"dur":2,"on":false,"collapsed":true,"p":{"opacity":{"v":0,"kf":[{"i":"other","t":1,"v":0}]}}}]}"#).unwrap());
+    for pps in [40., 100., 400.] {
+        for kind in [
+            DragKind::Layers {
+                ids: strings(&["a"]),
+            },
+            DragKind::TrimIn {
+                ids: strings(&["a"]),
+            },
+            DragKind::TrimOut {
+                ids: strings(&["a"]),
+            },
+            DragKind::Keys {
+                ids: strings(&["k"]),
+            },
+            DragKind::GraphKeys {
+                ids: strings(&["k"]),
+            },
+        ] {
+            let keys = matches!(kind, DragKind::Keys { .. } | DragKind::GraphKeys { .. });
+            let anchor = if matches!(kind, DragKind::TrimOut { .. }) {
+                2.25
+            } else {
+                2.
+            };
+            let (acquire, release) = snap::tolerances(keys, pps);
+            for target in [0., 20., 6., 18., 12., 8., 10., 14.] {
+                for inside in [true, false] {
+                    let mut drag = Drag::begin(&m, kind.clone()).unwrap();
+                    let direction = if target < anchor { -1. } else { 1. };
+                    let overshoot = if inside {
+                        (acquire * 0.5).min(0.001)
+                    } else {
+                        release + 2. / pps + if matches!(kind, DragKind::Layers { .. }) { 0.25 } else { 0. } + if keys { 0. } else { 1. / m.index.fps }
+                    };
+                    drag.commands(DragSample {
+                        time_delta: target - anchor + direction * overshoot,
+                        modifiers: Modifiers {
+                            shift: true,
+                            ..mods()
+                        },
+                        acquire_tolerance: acquire,
+                        release_tolerance: release,
+                        playhead: 14.,
+                        ..sample(0.)
+                    })
+                    .unwrap();
+                    let lock = if keys {
+                        drag.key_snap.map(|s| s.target)
+                    } else {
+                        drag.snap_target()
+                    };
+                    assert_eq!(
+                        lock,
+                        inside.then_some(target),
+                        "{kind:?}, target {target}, pps {pps}, inside {inside}"
+                    );
+                    assert_eq!(drag.snap_target().is_some(), inside && !keys);
+                    drag.commands(DragSample {
+                        time_delta: target - anchor,
+                        acquire_tolerance: acquire,
+                        release_tolerance: release,
+                        playhead: 14.,
+                        ..sample(0.)
+                    })
+                    .unwrap();
+                    assert!(drag.snap_target().is_none() && drag.key_snap.is_none());
+                }
+            }
+            let mut drag = Drag::begin(&m, kind).unwrap();
+            drag.commands(DragSample {
+                time_delta: 9. - anchor + 0.01 / pps,
+                modifiers: Modifiers {
+                    shift: true,
+                    ..mods()
+                },
+                acquire_tolerance: acquire,
+                release_tolerance: release,
+                playhead: 14.,
+                ..sample(0.)
+            })
+            .unwrap();
+            assert_eq!(drag.key_snap.map(|s| s.target), keys.then_some(9.));
+            assert!(drag.snap_target().is_none());
+        }
+    }
+}
+
+#[test]
+fn electron_scrub_target_matrix_feedback_and_shift_release() {
+    let m = model(fixture());
+    for pps in [40., 100., 400.] {
+        let radius = snap::tolerances(false, pps).1;
+        for target in playhead_targets(&m.index).into_iter().filter(|t| *t > 0.) {
+            let mut scrub = Scrub::begin(m.index.clone(), target - 0.5).unwrap();
+            assert_eq!(
+                scrub.update(target + 1e-6, true, radius).unwrap(),
+                HostEffect::Seek(target)
+            );
+            assert_eq!(scrub.snap_target(), Some(target));
+            scrub.modifiers(false, radius).unwrap();
+            assert_eq!(scrub.snap_target(), None);
+        }
+    }
+}
+
+#[test]
+fn electron_work_area_is_frame_only_even_with_shift() {
+    let m = model(fixture());
+    for kind in [DragKind::WorkIn, DragKind::WorkOut, DragKind::WorkMove] {
+        let mut drag = Drag::begin(&m, kind).unwrap();
+        drag.commands(DragSample {
+            modifiers: Modifiers {
+                shift: true,
+                ..mods()
+            },
+            acquire_tolerance: 0.1,
+            release_tolerance: 0.15,
+            ..sample(0.99)
+        })
+        .unwrap();
+        assert!(drag.snap_target().is_none() && drag.key_snap.is_none());
+    }
+}
+
+#[test]
+fn electron_key_tie_prefers_head() {
+    let m = model(fixture());
+    let mut drag = Drag::begin(
+        &m,
+        DragKind::Keys {
+            ids: strings(&["a0"]),
+        },
+    )
+    .unwrap();
+    drag.commands(DragSample {
+        modifiers: Modifiers {
+            shift: true,
+            ..mods()
+        },
+        acquire_tolerance: 0.3,
+        release_tolerance: 0.4,
+        playhead: 2.5,
+        ..sample(1.75)
+    })
+    .unwrap();
+    assert_eq!(drag.key_snap.unwrap().target, 2.5);
+    assert!(drag.snap_target().is_none());
+}
+
+#[test]
+fn electron_multi_key_rigid_snap_and_modifier_release() {
+    let m = model(fixture());
+    for pps in [40., 100., 400.] {
+        let (acquire, release) = snap::tolerances(true, pps);
+        let mut drag = Drag::begin(
+            &m,
+            DragKind::Keys {
+                ids: strings(&["a0", "a2"]),
+            },
+        )
+        .unwrap();
+        drag.commands(DragSample {
+            modifiers: Modifiers {
+                shift: true,
+                ..mods()
+            },
+            acquire_tolerance: acquire,
+            release_tolerance: release,
+            ..sample(3. - acquire / 2.)
+        })
+        .unwrap();
+        assert_eq!(
+            drag.key_snap,
+            Some(snap::GroupLock {
+                anchor: 1.,
+                target: 4.
+            })
+        );
+        assert!(drag.snap_target().is_none());
+        drag.commands(DragSample {
+            acquire_tolerance: acquire,
+            release_tolerance: release,
+            ..sample(3.)
+        })
+        .unwrap();
+        assert!(drag.key_snap.is_none());
+    }
+}
+
+#[test]
+fn electron_scrub_has_no_attraction_before_crossing_or_beyond_pixel_radius() {
+    let m = model(fixture());
+    for pps in [40., 100., 400.] {
+        let radius = snap::tolerances(false, pps).1;
+        let mut scrub = Scrub::begin(m.index.clone(), 3.).unwrap();
+        scrub.update(4. - 0.001, true, radius).unwrap();
+        assert_eq!(scrub.snap_target(), None);
+        scrub.update(4. + radius + 0.001, true, radius).unwrap();
+        assert_ne!(scrub.snap_target(), Some(4.));
+    }
+}
+
+#[test]
+fn electron_trim_guide_clears_when_legal_bounds_prevent_alignment() {
+    let (_actor, mut client) = client();
+    block_on(client.begin_drag(DragKind::TrimIn {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(client.drag(DragSample {
+        modifiers: Modifiers {
+            shift: true,
+            ..mods()
+        },
+        acquire_tolerance: 0.1,
+        release_tolerance: 0.15,
+        playhead: 8.,
+        ..sample(7.01)
+    }))
+    .unwrap();
+    let drag = client.active_drag().unwrap();
+    assert_eq!(drag.snap_target(), Some(8.));
+    assert_eq!(drag.snap_target_in(&client.model.index), None);
+    block_on(client.finish_drag(false)).unwrap();
+}
+
+#[test]
+fn work_area_sample_streams_are_monotonic_frame_only_and_one_undo() {
+    for pps in [24., 96., 240.] {
+        for step in [1., 20.] {
+            for is_end in [false, true] {
+                let (_actor, mut c) = client();
+                let before = c.model.index.clone();
+                let kind = if is_end {
+                    DragKind::WorkOut
+                } else {
+                    DragKind::WorkIn
+                };
+                let edge = before.work[usize::from(is_end)];
+                block_on(c.begin_drag(kind)).unwrap();
+                let mut previous = edge;
+                let mut peak = before.duration;
+                // Deliberately alternate Shift, which must have no influence.
+                for i in 1..=48 {
+                    let delta = i as f64 * step / pps;
+                    block_on(c.drag(DragSample {
+                        modifiers: Modifiers {
+                            shift: i % 2 == 0,
+                            ..mods()
+                        },
+                        acquire_tolerance: 100.,
+                        release_tolerance: 100.,
+                        ..sample(delta)
+                    }))
+                    .unwrap();
+                    let at = c.model.index.work[usize::from(is_end)];
+                    assert!(at >= previous, "{pps} {step} {is_end}: {previous} -> {at}");
+                    let expected = if is_end {
+                        frame(edge + delta, before.fps)
+                    } else {
+                        frame(edge + delta, before.fps).min(before.work[1] - 1. / before.fps)
+                    };
+                    assert!((at - expected).abs() < 1e-9);
+                    peak = peak.max(at);
+                    assert_eq!(
+                        c.model.index.duration,
+                        if is_end { peak } else { before.duration }
+                    );
+                    assert!(c.active_drag().unwrap().snap_target().is_none());
+                    previous = at;
+                }
+                // Reversing from beyond the end preserves the peak duration;
+                // it does not inflate again from the previous sample's result.
+                for i in (0..48).rev() {
+                    block_on(c.drag(sample(i as f64 * step / pps))).unwrap();
+                    let at = c.model.index.work[usize::from(is_end)];
+                    assert!(at <= previous);
+                    previous = at;
+                    assert_eq!(
+                        c.model.index.duration,
+                        if is_end { peak } else { before.duration }
+                    );
+                }
+                // Finish away from the initial edge so history has one edit.
+                block_on(c.drag(sample(0.5))).unwrap();
+                block_on(c.finish_drag(true)).unwrap();
+                assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+                undo(&mut c);
+                assert_eq!(c.model.index.work, before.work);
+                assert_eq!(c.model.index.duration, before.duration);
+            }
+        }
+    }
+}
+
+#[test]
+fn work_handles_quantize_absolute_time_and_cancel_peak_extension() {
+    let (_actor, mut c) = client_with(
+        parse(r#"{"id":"P","compId":"C","fps":30,"dur":10,"work":[1.01,9.01],"layers":[]}"#)
+            .unwrap(),
+    );
+    for end in [false, true] {
+        let before = c.model.index.clone();
+        block_on(c.begin_drag(if end {
+            DragKind::WorkOut
+        } else {
+            DragKind::WorkIn
+        }))
+        .unwrap();
+        block_on(c.drag(sample(0.01))).unwrap();
+        assert_eq!(
+            c.model.index.work[usize::from(end)],
+            frame(before.work[usize::from(end)] + 0.01, 30.)
+        );
+        if end {
+            block_on(c.drag(sample(20.))).unwrap();
+        }
+        block_on(c.finish_drag(false)).unwrap();
+        assert_eq!(c.model.index.work, before.work);
+        assert_eq!(c.model.index.duration, before.duration);
+        assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
+    }
+}
+
+#[test]
+/// v1's keyframe menu (timeline.ts pushKeyframeMenu): a header naming what
+/// it acts on, the dialogs, the ten eases with the one every key has
+/// checked, hold, a separator, then Copy and Delete with the count.
+#[test]
+fn keyframe_menu_names_what_it_acts_on_and_checks_the_keys_ease() {
+    let (_actor, mut c) = client();
+    let one = Context::Keys {
+        ids: strings(&["a0"]),
+    };
+    let labels = |c: &TimelineClient, ctx: &Context| -> Vec<String> {
+        c.model.menu(ctx).iter().map(|i| i.label.clone()).collect()
+    };
+    let menu = c.model.menu(&one);
+    assert_eq!(menu[0].id, MenuItem::HEADER);
+    assert_eq!(
+        labels(&c, &one),
+        [
+            "Keyframe",
+            "Edit Value…",
+            "Keyframe Velocity…",
+            "Scale Keyframes…",
+            "Linear",
+            "Ease In",
+            "Ease Out",
+            "Easy Ease",
+            "Swish",
+            "Power",
+            "Exponential Out",
+            "Overshoot",
+            "Snap",
+            "Glide",
+            "Toggle Hold",
+            "",
+            "Copy Keyframe",
+            "Delete Keyframe",
+        ]
+    );
+    let plan = c.model.menu_action(&one, "ease.glide", 0.).unwrap();
+    run(&mut c, plan);
+    let checked: Vec<&str> = c
+        .model
+        .menu(&one)
+        .iter()
+        .filter(|i| i.checked)
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(checked, ["ease.glide"]);
+    let two = Context::Keys {
+        ids: strings(&["a0", "a2"]),
+    };
+    let two_labels = labels(&c, &two);
+    assert_eq!(two_labels[0], "2 Keyframes");
+    assert!(two_labels.ends_with(&["Copy 2 Keyframes".into(), "Delete 2 Keyframes".into()]));
+    assert!(two_labels.contains(&"Hold Keyframes".into()));
+    // Only one of the two has Glide: no ease is checked.
+    assert!(c.model.menu(&two).iter().all(|i| !i.checked));
+}
+/// The ruler's menu (v1 onCtx): Add Marker Here, a separator, the work
+/// area's three, a separator, then the switch naming the timeline it goes to.
+#[test]
+fn ruler_menu_groups_marker_work_area_and_the_switch() {
+    let m = model(fixture());
+    let menu = m.menu(&Context::Ruler { time: 2. });
+    let labels: Vec<&str> = menu.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Add Marker Here",
+            "",
+            "Set Work Area Start",
+            "Set Work Area End",
+            "Reset Work Area",
+            "",
+            "Switch to Track Timeline",
+        ]
+    );
+    assert_eq!(menu[1].id, MenuItem::SEPARATOR);
+}
+
+/// PM-476: the timeline's view write lands even when another write moved the
+/// project's view state on after it was read (the editor writes it on most
+/// changes): it is made again on the new state, and the other write's change
+/// stays. It never fails with the stale state's error.
+#[test]
+fn a_view_write_on_state_another_write_moved_on_still_lands() {
+    use pm_kernel::state::{StateOp, StateTransaction, UiState};
+    let (_actor, c) = client();
+    let stale = c.kernel.state();
+    let mut other = stale.ui.get("P").cloned().unwrap_or_default();
+    if let Value::Object(viewer) = &mut other.viewer {
+        viewer.insert("zoom", Value::from(3.0));
+    }
+    block_on(c.kernel.state_transaction(StateTransaction {
+        expected_revision: Some(stale.revision),
+        ops: vec![StateOp::Ui {
+            project: "P".into(),
+            next: other,
+        }],
+    }))
+    .unwrap()
+    .unwrap();
+    assert!(c.kernel.state().revision > stale.revision);
+    block_on(c.publish_view_from(stale)).expect("the view write lands on the new state");
+    let ui: UiState = c.kernel.state().ui.get("P").cloned().unwrap();
+    assert_eq!(
+        ui.viewer.get("zoom").and_then(Value::as_f64),
+        Some(3.0),
+        "the other write's change stays"
+    );
+}
+
+/// No timeline error reaches the status line as a variant or an id.
+#[test]
+fn timeline_errors_read_as_sentences() {
+    let stale = ClientError::Kernel(
+        pm_kernel::KernelFailure::Storage(pm_kernel::state::STATE_CHANGED.into()).to_string(),
+    );
+    let all = [
+        stale,
+        ClientError::Closed,
+        ClientError::GestureActive,
+        ClientError::NoGesture,
+        ClientError::DocumentChanged,
+        ClientError::OriginMismatch,
+        ClientError::ConcurrentRelativeGesture,
+        ClientError::Model(ModelError::UnknownId("Cl86qj39".into())),
+        ClientError::Model(ModelError::UnknownCommand("x.y".into())),
+        ClientError::Model(ModelError::HiddenRow),
+        ClientError::Model(ModelError::InvalidNumber),
+        ClientError::Model(ModelError::Locked("Cl86qj39".into())),
+        ClientError::Model(ModelError::InvalidGesture),
+        ClientError::Model(ModelError::MissingHost("unknown edit tool")),
+    ];
+    for error in all {
+        let text = error.to_string();
+        assert!(
+            !text.contains('(') && !text.contains("Cl86qj39") && text.ends_with('.'),
+            "{error:?} reads {text:?}"
+        );
+    }
+}
+
+/// PM-462: v1.2.0 stores a shape path's vertex keys without ids. The
+/// kernel names them on read; the timeline shows them, a click selects one,
+/// a nudge moves it, and it keeps its id.
+#[test]
+fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
+    let key = |t: f64, v: f64| {
+        format!(
+            r#"{{"t":{t},"v":{v},"inInterp":"linear","outInterp":"linear","inEase":{{"speed":0,"influence":16.7}},"outEase":{{"speed":0,"influence":16.7}}}}"#
+        )
+    };
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"Paths","w":200,"h":100,"fps":30,"dur":10,"comps":{{}},"assets":{{}},"layers":[
+        {{"id":"s","name":"Outline","type":"shape","from":0,"dur":5,"on":true,"p":{{}},"d":{{"shape":"path","paths":[{{"id":"outline","p":{{}},
+          "vertices":[{{"id":"v0","p":{{"x":{{"v":0,"kf":[{},{}],"expr":null}},"y":{{"v":0,"kf":[{}],"expr":null}}}}}}]}}]}}}}]}}"##,
+        key(0., 0.),
+        key(1., 10.),
+        key(0., 3.)
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    let channel = "g.outline.v.v0.x";
+    let ids: Vec<String> = c.model.track_channels("s", channel)[0]
+        .keys
+        .iter()
+        .map(|k| k.id.clone())
+        .collect();
+    let named =
+        |i| pm_kernel::model::derived_key_id("C", "s", "d.paths.outline.vertices.v0.p.x", i);
+    assert_eq!(ids, [named(0), named(1)]);
+    assert_eq!(
+        c.model.track_channels("s", "g.outline.v.v0.y")[0]
+            .keys
+            .len(),
+        1
+    );
+    let calls = c
+        .model
+        .select_keys("s", channel, &[named(1)], false, false)
+        .unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert_eq!(c.model.selection.keys(), [named(1)]);
+    command(&mut c, "nudgeKeyframes", 0.);
+    c.sync().unwrap();
+    let keys = &c.model.track_channels("s", channel)[0].keys;
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[1].id, named(1));
+    assert!(
+        (keys[1].time - (1. + 1. / 30.)).abs() < 1e-9,
+        "{}",
+        keys[1].time
+    );
+    assert_eq!(c.model.selection.keys(), [named(1)]);
+}
+/// PM-477 by hand: M, on top of the stack, rests on the lower lane because
+/// nothing overlaps it; E, on the lane above, slides into M's time. Each
+/// clip keeps the lane it showed on: E now composites over M, as its track
+/// says (the stack follows the lanes, as v1's track view writes it).
+#[test]
+fn a_slide_into_another_tracks_time_moves_no_clip_to_another_lane() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3,"dur":2,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        ["m", "e", "k", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let before = lanes(&c);
+    assert!(before[1] > before[0], "E shows above M: {before:?}");
+    let command = pm_panel_timeline::tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        pm_kernel::TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    edit(&mut c, vec![command.into()]);
+    c.sync().unwrap();
+    assert_eq!(lanes(&c), before);
+}
+/// PM-477 by hand: in Tracks mode an edge trim that frees room on a lower
+/// lane leaves an untouched clip on its own: K rests on lane 2 because E
+/// overlapped it; trimming E's Out edge away from K keeps K where it is.
+#[test]
+fn an_edge_trim_in_tracks_moves_no_untouched_clip_to_another_lane() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"k","name":"K","type":"shape","from":2.5,"dur":1.5,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":3,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        ["k", "e", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let before = lanes(&c);
+    assert_eq!(before, [2, 1, 0]);
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: vec!["e".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert_eq!(c.model.index.layer("e").unwrap().duration, 2.);
+    assert_eq!(lanes(&c), before);
+}
+/// PM-477/PM-485: while the timeline shows tracks, the lanes it shows are the
+/// truth for every edit, whatever makes it (a timeline key or drag, a menu,
+/// Properties, an agent through the kernel): after each, no clip the edit
+/// did not touch is on another lane; a new clip takes a free lane.
+#[test]
+fn in_tracks_no_edit_from_any_source_moves_an_untouched_clip() {
+    use pm_kernel::commands::layers::{AddLayer, LayerPatch};
+    use pm_kernel::{LayerCommand, TimingCommand};
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3.5,"dur":2,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":2.5,"dur":1.5,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":3,"on":true,"p":{}},
+        {"id":"x","name":"X","type":"shape","from":8,"dur":2,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| -> std::collections::BTreeMap<String, usize> {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        layout
+            .items
+            .iter()
+            .map(|i| (i.id.clone(), i.lane))
+            .collect()
+    };
+    // Every edit arrives as the kernel's publication, as any source's does.
+    let kernel = |c: &mut TimelineClient, command: Command| {
+        edit(c, vec![command]);
+        c.sync().unwrap();
+    };
+    let check = |c: &TimelineClient,
+                 before: &std::collections::BTreeMap<String, usize>,
+                 touched: &[&str],
+                 what: &str| {
+        let after = lanes(c);
+        for (id, lane) in before {
+            if !touched.contains(&id.as_str()) && after.contains_key(id) {
+                assert_eq!(after[id], *lane, "{what}: {id} moved");
+            }
+        }
+    };
+    c.sync().unwrap();
+    // A first change in Tracks mode records the lanes it shows.
+    let start = lanes(&c);
+    // A keyboard trim (Trim Out to playhead): E stops overlapping K.
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["e".into()],
+            time: 2.0,
+        }
+        .into(),
+    );
+    check(&c, &before, &["e"], "trim");
+    // Properties: K's duration.
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        LayerCommand::Set {
+            layer_id: "k".into(),
+            patch: LayerPatch {
+                duration: Some(0.5),
+                ..Default::default()
+            },
+        }
+        .into(),
+    );
+    check(&c, &before, &["k"], "duration");
+    // An agent moves X into everyone's time.
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        LayerCommand::Set {
+            layer_id: "x".into(),
+            patch: LayerPatch {
+                from: Some(1.0),
+                ..Default::default()
+            },
+        }
+        .into(),
+    );
+    check(&c, &before, &["x"], "move");
+    // A drag's edge trim.
+    let before = lanes(&c);
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: vec!["m".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-0.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    check(&c, &before, &["m"], "drag trim");
+    // A slide by key, through the timeline's Tracks wrapper.
+    let before = lanes(&c);
+    let slide = pm_panel_timeline::tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    kernel(&mut c, slide.into());
+    check(&c, &before, &["e"], "slide");
+    // A new clip takes a free lane; a deleted one leaves the rest.
+    let before = lanes(&c);
+    let new = AddLayer {
+        id: "y".into(),
+        layer_type: "shape".into(),
+        comp: None,
+        name: None,
+        from: Some(4.0),
+        duration: Some(1.0),
+        content: Default::default(),
+        properties: Default::default(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    kernel(&mut c, LayerCommand::Add(Box::new(new)).into());
+    check(&c, &before, &["y"], "add");
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        LayerCommand::Delete {
+            layer_ids: vec!["k".into()],
+        }
+        .into(),
+    );
+    check(&c, &before, &["k"], "delete");
+    let _ = start;
+}
+/// Tracks mode: a track row's lock and eye act on every clip on the lane,
+/// as v1's track view does, one undo step named for the track; the row
+/// shows the new state.
+#[test]
+fn a_track_rows_lock_and_eye_act_on_its_clips() {
+    let (_a, mut c) = client();
+    c.model.mode = TimelineMode::Tracks;
+    let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+    let item = layout
+        .items
+        .iter()
+        .find(|i| i.id == "a")
+        .expect("a has a track")
+        .clone();
+    let on_lane: Vec<String> = layout
+        .items
+        .iter()
+        .filter(|i| i.area == item.area && i.lane == item.lane)
+        .map(|i| i.id.clone())
+        .collect();
+    let label = |p: &Plan| match p.calls.first() {
+        Some(Call::Transact { label, .. }) => label.clone(),
+        _ => None,
+    };
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "lock", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Lock Track"));
+    run(&mut c, p);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| c.model.index.layer(id).unwrap().locked)
+    );
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "lock", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Unlock Track"));
+    run(&mut c, p);
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "visibility", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Hide Track"));
+    run(&mut c, p);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| !c.model.index.layer(id).unwrap().visible)
+    );
+    undo(&mut c);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| c.model.index.layer(id).unwrap().visible)
+    );
+}
+/// Sol's review of the stack write (w58): a Tracks edge trim on E, which
+/// nobody else touches, leaves the stack exactly as it was in each
+/// arrangement: a collapsed locked group's children, lanes held after an
+/// outside edit, a caption between video layers, a 2D layer between two 3D
+/// runs (so the runs stay split).
+#[test]
+fn a_tracks_trim_never_changes_the_stack() {
+    use pm_kernel::commands::layers::LayerPatch;
+    let order = |c: &TimelineClient| -> Vec<String> {
+        c.model.index.layers.iter().map(|l| l.id.clone()).collect()
+    };
+    let solid = |id: &str, from: f64, dur: f64, extra: &str| {
+        format!(r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}{extra}}}"##)
+    };
+    let arrangements: Vec<(&str, Vec<String>, bool)> = vec![
+        ("locked group", vec![
+            r#"{"id":"g","name":"G","type":"group","from":0,"dur":20,"on":true,"lock":true,"collapsed":true,"groupCollapsed":true,"p":{}}"#.into(),
+            solid("a", 0., 10., r#","group":"g","track":0"#),
+            solid("b", 0., 10., r#","group":"g","track":1"#),
+            solid("e", 12., 3., ""),
+        ], false),
+        ("held after an outside edit", vec![
+            solid("a", 0., 4., ""),
+            solid("b", 5., 4., ""),
+            solid("e", 12., 3., ""),
+        ], true),
+        ("caption between video", vec![
+            solid("r", 3., 2., ""),
+            r#"{"id":"c","name":"C","type":"captions","from":0,"dur":10,"on":true,"d":{"cues":[{"id":"q","start":4,"end":5,"text":"Hi"}]},"p":{}}"#.into(),
+            solid("b", 0., 2., ""),
+            solid("x", 0., 2., ""),
+            solid("e", 12., 3., ""),
+        ], false),
+        ("3D runs", vec![
+            solid("a", 0., 10., r#","threeD":true"#),
+            solid("d", 20., 1., r#","track":2"#),
+            solid("b", 0., 10., r#","threeD":true"#),
+            solid("e", 30., 5., ""),
+        ], false),
+    ];
+    for (what, layers, outside) in arrangements {
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"Stack","w":200,"h":100,"fps":30,"dur":40,"comps":{{}},"assets":{{}},"layers":[{}]}}"##,
+            layers.join(",")
+        ))
+        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        if outside {
+            // Properties or an agent moves B over A: the stack stays.
+            edit(
+                &mut c,
+                vec![pm_kernel::LayerCommand::Set {
+                    layer_id: "b".into(),
+                    patch: LayerPatch { from: Some(2.), ..Default::default() },
+                }
+                .into()],
+            );
+            c.sync().unwrap();
+        }
+        let before = order(&c);
+        block_on(c.begin_drag(DragKind::TrimOut { ids: vec!["e".into()] })).unwrap();
+        block_on(c.drag(sample(-1.))).unwrap();
+        block_on(c.finish_drag(true)).unwrap();
+        c.sync().unwrap();
+        assert_eq!(order(&c), before, "{what}");
+    }
+}
+
+/// A Tracks move to another lane changes only the moved clip's place in the
+/// stack, and never across a locked layer: then only its lane changes.
+#[test]
+fn a_tracks_move_reorders_only_the_moved_clip_and_never_past_a_lock() {
+    use pm_panel_timeline::tracks::move_order;
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Move","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"t","name":"T","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+        {"id":"l","name":"L","type":"shape","from":0,"dur":5,"on":true,"lock":true,"p":{}},
+        {"id":"u","name":"U","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+        {"id":"m","name":"M","type":"shape","from":0,"dur":5,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, c) = client_with(project);
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // M to just under T, past U and locked L: refused, the stack stays.
+    assert_eq!(move_order(&c.model.index, &s(&["m"]), &s(&["t", "m", "l", "u"])), None);
+    // M just above U (past nothing locked): only M moves.
+    assert_eq!(
+        move_order(&c.model.index, &s(&["m"]), &s(&["t", "l", "m", "u"])),
+        Some(s(&["t", "l", "m", "u"]))
+    );
+}
+
+/// A transition's wedge drags its duration (keeping its type, values and
+/// keys) as one step named for it; selected, Delete removes it and leaves
+/// the clip; an audio clip's fade drags and deletes the same way.
+#[test]
+fn a_transition_drags_its_duration_and_delete_removes_only_it() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"a","name":"A","type":"solid","from":0,"dur":6,"on":true,"d":{"color":"#ff0000","w":100,"h":100},"p":{},
+         "transitionIn":{"type":"wipe","dur":0.5,"p":{"angle":{"v":45,"kf":[{"t":0,"v":10},{"t":0.4,"v":80}],"expr":null}}},
+         "transitionOut":null},
+        {"id":"s","name":"S","type":"audio","from":0,"dur":6,"on":true,"d":{"fadeIn":0,"fadeOut":1},"p":{}}]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.sync().unwrap();
+    let transition = |c: &TimelineClient, id: &str, slot: usize| {
+        c.model.index.layer(id).unwrap().transitions[slot].clone()
+    };
+    assert_eq!(transition(&c, "a", 0).unwrap().duration, 0.5);
+    assert!(transition(&c, "a", 1).is_none());
+    assert_eq!(transition(&c, "s", 1).unwrap().duration, 1.);
+    assert!(transition(&c, "s", 0).is_none(), "no fade, no wedge");
+    let kind = DragKind::Transition {
+        layer: "a".into(),
+        edge: render::Edge::In,
+    };
+    assert_eq!(
+        Drag::begin(&c.model, kind.clone()).unwrap().label(),
+        "Transition Duration"
+    );
+    block_on(c.begin_drag(kind)).unwrap();
+    block_on(c.drag(sample(0.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    let t = transition(&c, "a", 0).unwrap();
+    assert!((t.duration - 1.).abs() < 1e-9, "{t:?}");
+    assert_eq!(t.kind, "wipe");
+    assert_eq!(t.params, vec!["angle".to_owned()]);
+    let channel = c
+        .model
+        .index
+        .layer("a")
+        .unwrap()
+        .channels
+        .iter()
+        .find(|ch| ch.path == "transitionIn.p.angle")
+        .cloned()
+        .expect("its keys survive");
+    assert_eq!(channel.keys.len(), 2);
+    // Never past the clip, never under the kernel's least.
+    block_on(c.begin_drag(DragKind::Transition {
+        layer: "a".into(),
+        edge: render::Edge::In,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(30.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert!((transition(&c, "a", 0).unwrap().duration - 6.).abs() < 1e-9);
+    undo(&mut c);
+    c.sync().unwrap();
+    assert!((transition(&c, "a", 0).unwrap().duration - 1.).abs() < 1e-9);
+    // An Out fade drags from the clip's end: left makes it longer.
+    block_on(c.begin_drag(DragKind::Transition {
+        layer: "s".into(),
+        edge: render::Edge::Out,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert!((transition(&c, "s", 1).unwrap().duration - 2.).abs() < 1e-9);
+    // Selected, Delete takes the transition and leaves the clip.
+    select(&mut c, &["a"]);
+    c.sync().unwrap();
+    c.model.transition = Some(("a".into(), render::Edge::In));
+    let plan = c
+        .model
+        .command("delete", 0., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(matches!(
+        &plan.calls[0],
+        Call::Transact { label: Some(l), .. } if l == "Remove Transition"
+    ));
+    run(&mut c, plan);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("a").is_some(), "the clip stays");
+    assert!(transition(&c, "a", 0).is_none());
+    assert_eq!(c.model.transition, None, "nothing left selected");
+    // A selected fade goes the same way.
+    select(&mut c, &["s"]);
+    c.sync().unwrap();
+    c.model.transition = Some(("s".into(), render::Edge::Out));
+    let plan = c
+        .model
+        .command("delete", 0., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(matches!(
+        &plan.calls[0],
+        Call::Transact { label: Some(l), .. } if l == "Remove Fade"
+    ));
+    run(&mut c, plan);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("s").is_some());
+    assert!(transition(&c, "s", 1).is_none());
+    // With no transition selected, Delete is the clip's again.
+    command(&mut c, "delete", 0.);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("s").is_none());
+}
+
+/// Two clips that run into each other across a cut under a transition share
+/// their track in Tracks mode: the overlap is the transition's, not a clash.
+/// The same overlap without a transition stacks them, as before.
+#[test]
+fn clips_crossing_a_cut_under_a_transition_stay_on_one_track() {
+    let lanes = |transition: &str| {
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":20,"comps":{{}},"assets":{{}},"layers":[
+            {{"id":"b","name":"B","type":"solid","from":4.5,"dur":4,"on":true,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}},"transitionIn":{transition}}},
+            {{"id":"a","name":"A","type":"solid","from":0,"dur":5,"on":true,"d":{{"color":"#00ff00","w":100,"h":100}},"p":{{}}}}]}}"##
+        ))
+        .unwrap();
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        let layout = tracks::layout(&c.model.index, &c.model.reveal);
+        (
+            layout.item("a").unwrap().lane,
+            layout.item("b").unwrap().lane,
+        )
+    };
+    let (a, b) = lanes(r#"{"type":"crossfade","dur":1,"p":{}}"#);
+    assert_eq!(a, b, "one track across the cut");
+    let (a, b) = lanes("null");
+    assert_ne!(a, b, "an overlap with no transition stacks");
+}
+
+/// PM-512: in Tracks, a new layer (the top of the stack) goes on a track
+/// above every clip it overlaps, at once: never into a free lower track
+/// under a still the picture draws it over. Clips already shown keep theirs.
+#[test]
+fn a_new_layer_in_tracks_goes_above_what_it_overlaps() {
+    use pm_kernel::commands::layers::AddLayer;
+    let solid = |id: &str, from: f64, dur: f64, track: u32| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    // V3 holds a still from 11 s; V2 is empty; V1 two clips.
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{},{}]}}"##,
+        solid("still", 11., 9., 2),
+        solid("a", 0., 7., 0),
+        solid("b", 7., 6., 0),
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    let lane = |c: &TimelineClient, id: &str| {
+        tracks::layout(&c.model.index, &c.model.reveal)
+            .item(id)
+            .unwrap()
+            .lane
+    };
+    let shown = [lane(&c, "still"), lane(&c, "a"), lane(&c, "b")];
+    assert!(
+        shown[0] > shown[2] + 1,
+        "a free track under the still: {shown:?}"
+    );
+    let title = AddLayer {
+        id: "title".into(),
+        layer_type: "text".into(),
+        comp: None,
+        name: None,
+        from: Some(11.),
+        duration: Some(3.),
+        content: Default::default(),
+        properties: Default::default(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    edit(
+        &mut c,
+        vec![pm_kernel::LayerCommand::Add(Box::new(title)).into()],
+    );
+    c.sync().unwrap();
+    assert_eq!(c.model.index.layers[0].id, "title", "the top of the stack");
+    assert!(
+        lane(&c, "title") > lane(&c, "still"),
+        "above the still it is drawn over: title {} still {}",
+        lane(&c, "title"),
+        lane(&c, "still")
+    );
+    // Nothing that was shown moves.
+    assert_eq!([lane(&c, "still"), lane(&c, "a"), lane(&c, "b")], shown);
+}
+
+/// Every pair of root clips of one area that overlap in time: the one higher
+/// in the stack (drawn over) is on the higher track.
+fn assert_tracks_follow_the_stack(index: &TimelineIndex, layout: &tracks::Layout, what: &str) {
+    let lanes: Vec<_> = index
+        .layers
+        .iter()
+        .map(|l| (l, layout.item(&l.id).unwrap().lane))
+        .collect();
+    for (i, (upper, upper_lane)) in lanes.iter().enumerate() {
+        for (lower, lower_lane) in &lanes[i + 1..] {
+            let overlap = upper.from < lower.from + lower.duration - 1e-5
+                && lower.from < upper.from + upper.duration - 1e-5;
+            if overlap && tracks::area(&upper.kind) == tracks::area(&lower.kind) {
+                assert!(
+                    upper_lane > lower_lane,
+                    "{what}: {} (stack above, lane {upper_lane}) is drawn over {} (lane {lower_lane}); lanes {:?}",
+                    upper.id,
+                    lower.id,
+                    lanes.iter().map(|(l, n)| (l.id.as_str(), l.from, l.duration, *n)).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+/// PM-512: over random Tracks layouts, and random edits made while the
+/// timeline shows them (a slide, a move, trims, a new layer from the
+/// viewer), the track order of overlapping clips is their render order, and
+/// no clip the edit did not retime changes track (PM-477).
+#[test]
+fn track_order_matches_render_order_over_random_layouts() {
+    use pm_kernel::commands::layers::AddLayer;
+    use pm_kernel::{LayerCommand, TimingCommand};
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let solid = |id: &str, from: u64, dur: u64, track: u64| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    for round in 0..60 {
+        let count = 3 + next(5) as usize;
+        let layers: Vec<String> = (0..count)
+            .map(|n| solid(&format!("c{n}"), next(20), 1 + next(8), next(4)))
+            .collect();
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":40,"comps":{{}},"assets":{{}},"layers":[{}]}}"##,
+            layers.join(",")
+        ))
+        .unwrap();
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        let shown = tracks::layout(&c.model.index, &c.model.reveal);
+        assert_tracks_follow_the_stack(&c.model.index, &shown, &format!("round {round}, opened"));
+        for step in 0..4 {
+            let index = c.model.index.clone();
+            let shown = tracks::layout(&index, &c.model.reveal);
+            let before: std::collections::HashMap<String, (usize, f64, f64)> = index
+                .layers
+                .iter()
+                .map(|l| (l.id.clone(), (shown.item(&l.id).unwrap().lane, l.from, l.duration)))
+                .collect();
+            let id = index.layers[next(index.layers.len() as u64) as usize].id.clone();
+            let kind = next(5);
+            let wrap = |command| tracks::in_tracks(&index, &c.model.reveal, command).into();
+            let command: Command = match kind {
+                0 => wrap(TimingCommand::Slide {
+                    layer_id: id.clone(),
+                    delta: next(9) as f64 - 4.,
+                }),
+                1 => wrap(TimingCommand::Move {
+                    layer_ids: vec![id.clone()],
+                    delta: next(13) as f64 - 6.,
+                }),
+                2 => wrap(TimingCommand::TrimOut {
+                    layer_ids: vec![id.clone()],
+                    time: next(30) as f64,
+                }),
+                3 => wrap(TimingCommand::TrimIn {
+                    layer_ids: vec![id.clone()],
+                    time: next(30) as f64,
+                }),
+                _ => {
+                    let (from, duration) = (next(20) as f64, 1. + next(8) as f64);
+                    let (track, at) =
+                        tracks::top_place(&index, &c.model.reveal, "shape", from, from + duration);
+                    LayerCommand::Add(Box::new(AddLayer {
+                        id: format!("n{step}"),
+                        layer_type: "shape".into(),
+                        comp: None,
+                        name: None,
+                        from: Some(from),
+                        duration: Some(duration),
+                        content: Default::default(),
+                        properties: Default::default(),
+                        color: None,
+                        index: Some(at),
+                        parent: None,
+                        blend: None,
+                        motion_blur: None,
+                        visible: None,
+                        shy: None,
+                        collapsed: None,
+                        track: Some(track as u32),
+                        time: 0.,
+                    }))
+                    .into()
+                }
+            };
+            // An edit the kernel refuses (a slide with no room) changes nothing.
+            let _ = block_on(c.dispatch(Plan::edit(vec![command], index.revision)));
+            c.sync().unwrap();
+            let what = format!("round {round}, step {step}, edit {kind} on {id}");
+            let layout = tracks::layout(&c.model.index, &c.model.reveal);
+            assert_tracks_follow_the_stack(&c.model.index, &layout, &what);
+            for l in &c.model.index.layers {
+                if let Some(&(lane, from, duration)) = before.get(&l.id)
+                    && l.id != id
+                    && (l.from - from).abs() < 1e-9
+                    && (l.duration - duration).abs() < 1e-9
+                {
+                    assert_eq!(layout.item(&l.id).unwrap().lane, lane, "{what}: {} changed track", l.id);
+                }
+            }
+        }
+    }
+}
+
+/// PM-512: in Tracks the track decides stacking. E, on the track above M,
+/// slides into M's time: M, drawn over E until now, is restacked under it,
+/// every clip keeps its track, and one undo restores the time and the stack.
+#[test]
+fn a_tracks_edit_restacks_overlapping_clips_by_track_in_the_same_undo_step() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3,"dur":2,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    let lanes = |c: &TimelineClient| {
+        let layout = tracks::layout(&c.model.index, &c.model.reveal);
+        ["m", "e", "k", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let order = |c: &TimelineClient| -> Vec<String> {
+        c.model.index.layers.iter().map(|l| l.id.clone()).collect()
+    };
+    let before = lanes(&c);
+    assert_eq!(before, [1, 2, 1, 0]);
+    let slide = tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        pm_kernel::TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    edit(&mut c, vec![slide.into()]);
+    c.sync().unwrap();
+    assert_eq!(lanes(&c), before, "no clip changes track");
+    assert_eq!(order(&c), ["e", "m", "k", "n"], "E (V3) is drawn over M (V2)");
+    undo(&mut c);
+    c.sync().unwrap();
+    assert_eq!(order(&c), ["m", "e", "k", "n"]);
+    assert_eq!(c.model.index.layer("e").unwrap().from, 0.);
+}
+
+/// The common Tracks gesture: a slide drag on a clip with a neighbour on one
+/// side only, and on a still, works (the media-only edit refused both); the
+/// clip keeps its track and so do its neighbours.
+#[test]
+fn a_tracks_slide_drag_works_on_a_still_and_with_one_neighbour() {
+    let solid = |id: &str, from: f64, dur: f64| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":0,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{}]}}"##,
+        solid("a", 0., 5.),
+        solid("b", 5., 5.),
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    select(&mut c, &["b"]);
+    c.sync().unwrap();
+    block_on(
+        c.begin_drag(DragKind::Timing(pm_kernel::TimingCommand::Slide {
+            layer_id: "b".into(),
+            delta: 0.,
+        })),
+    )
+    .unwrap();
+    block_on(c.drag(sample(1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    let span = |c: &TimelineClient, id: &str| {
+        let l = c.model.index.layer(id).unwrap();
+        (l.from, l.from + l.duration)
+    };
+    assert_eq!(span(&c, "b").0, 6., "slid a second later");
+    assert_eq!(span(&c, "a"), (0., 6.), "the clip before follows");
+    let layout = tracks::layout(&c.model.index, &c.model.reveal);
+    assert_eq!(
+        layout.item("a").unwrap().lane,
+        layout.item("b").unwrap().lane
+    );
+}
+
+#[test]
+fn revealing_a_property_opens_its_collapsed_parent_group() {
+    let mut m = model(parse(r#"{"layers":[{"id":"g","type":"group","groupCollapsed":true},{"id":"child","type":"shape","group":"g","collapsed":true,"p":{"opacity":{"v":100,"kf":[]}}}]}"#).unwrap());
+    m.reveal_paths("child", &["opacity".into()]).unwrap();
+    assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id == "child" && channel == "opacity")));
+}
+
+fn add_reveal_key(c: &mut TimelineClient, layer: &str, path: &str, id: &str, time: f64) {
+    edit(
+        c,
+        vec![
+            KeyframeCommand::Add {
+                layer_id: layer.into(),
+                channel: path.into(),
+                time,
+                key_id: id.into(),
+                value: None,
+            }
+            .into(),
+        ],
+    );
+}
+fn has_property(c: &TimelineClient, layer: &str, path: &str) -> bool {
+    c.model.rows().iter().any(|r| {
+        matches!(&r.id, RowId::Property { layer_id, channel }
+        if layer_id == layer && channel == path)
+    })
+}
+#[test]
+fn keyframe_reveal_opens_a_collapsed_layer_and_explicit_property_filter() {
+    let (_actor, mut c) = client();
+    c.model.reveal.layers.insert(
+        "c".into(),
+        Disclosure {
+            collapsed: true,
+            paths: Some(vec!["rotation".into()]),
+            ..Default::default()
+        },
+    );
+    c.model.rebuild_rows();
+    assert!(!has_property(&c, "c", "opacity"));
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    assert!(has_property(&c, "c", "opacity"));
+    assert_eq!(
+        c.model.reveal.layers["c"].paths.as_ref().unwrap(),
+        &["rotation", "opacity"]
+    );
+    assert_eq!(
+        c.model.reveal_target,
+        Some(pm_panel_timeline::RevealTarget::Property {
+            layer: "c".into(),
+            path: "opacity".into()
+        })
+    );
+}
+#[test]
+fn keyframe_reveal_opens_a_collapsed_animated_only_filter() {
+    let (_actor, mut c) = client();
+    c.model.reveal.layers.insert(
+        "c".into(),
+        Disclosure {
+            collapsed: true,
+            ..Default::default()
+        },
+    );
+    c.model.rebuild_rows();
+    assert!(!has_property(&c, "c", "opacity"));
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    assert!(has_property(&c, "c", "opacity"));
+    assert!(!c.model.reveal.layers["c"].collapsed);
+    assert!(c.model.reveal.layers["c"].paths.is_none());
+}
+#[test]
+fn keyframe_reveal_does_not_reopen_a_user_collapse_until_the_next_edit() {
+    let (_actor, mut c) = client();
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    let serial = c.model.reveal_serial;
+    c.model.reveal.layers.get_mut("c").unwrap().collapsed = true;
+    c.model.rebuild_rows();
+    c.sync().unwrap();
+    assert!(!has_property(&c, "c", "opacity"));
+    assert_eq!(c.model.reveal_serial, serial);
+    add_reveal_key(&mut c, "c", "opacity", "next", 1.);
+    assert!(has_property(&c, "c", "opacity"));
+    assert!(c.model.reveal_serial > serial);
+}
+#[test]
+fn keyframe_reveal_keeps_the_last_removed_keys_row_until_animated_refresh() {
+    let (_actor, mut c) = client();
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    let serial = c.model.reveal_serial;
+    edit(
+        &mut c,
+        vec![
+            KeyframeCommand::Delete {
+                key_ids: vec!["new".into()],
+            }
+            .into(),
+        ],
+    );
+    assert!(has_property(&c, "c", "opacity"));
+    assert!(!c.model.layer_disclosable("c"));
+    assert_eq!(c.model.reveal_serial, serial);
+    select(&mut c, &["c"]);
+    c.model
+        .reveal_property('u', false, 1000, &PropertyFacts::default())
+        .unwrap();
+    assert!(!has_property(&c, "c", "opacity"));
+}
+
+#[test]
+fn keyframe_reveal_releases_the_empty_row_on_the_next_collapse() {
+    let (_actor, mut c) = client();
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    edit(
+        &mut c,
+        vec![
+            KeyframeCommand::Delete {
+                key_ids: vec!["new".into()],
+            }
+            .into(),
+        ],
+    );
+    assert!(has_property(&c, "c", "opacity"));
+    c.model.reveal.layers.get_mut("c").unwrap().collapsed = true;
+    c.model.rebuild_rows();
+    c.model.reveal.layers.get_mut("c").unwrap().collapsed = false;
+    c.model.rebuild_rows();
+    assert!(!has_property(&c, "c", "opacity"));
+}
+
+#[test]
+fn keyframe_reveal_runs_once_per_property_in_a_live_gesture() {
+    let (_actor, mut c) = client();
+    let ack = block_on(
+        c.call(
+            pm_kernel::GestureCall::Begin {
+                label: "Adjust opacity".into(),
+            }
+            .into(),
+        ),
+    )
+    .unwrap();
+    let Reply::Gesture(gesture) = ack.reply else {
+        panic!("gesture")
+    };
+    for (step, value) in [50., 60.].into_iter().enumerate() {
+        block_on(
+            c.call(
+                pm_kernel::GestureCall::Step {
+                    gesture,
+                    replace: false,
+                    body: WriteBody::Commands(vec![
+                        KeyframeCommand::Add {
+                            layer_id: "c".into(),
+                            channel: "opacity".into(),
+                            time: step as f64,
+                            key_id: format!("gesture-{step}"),
+                            value: Some(value.into()),
+                        }
+                        .into(),
+                    ]),
+                }
+                .into(),
+            ),
+        )
+        .unwrap();
+        if step == 0 {
+            assert!(has_property(&c, "c", "opacity"));
+            c.model.reveal.layers.get_mut("c").unwrap().collapsed = true;
+            c.model.rebuild_rows();
+        } else {
+            assert!(!has_property(&c, "c", "opacity"));
+        }
+    }
+    block_on(c.call(pm_kernel::GestureCall::Commit { gesture }.into())).unwrap();
+    add_reveal_key(&mut c, "c", "opacity", "later-gesture", 2.);
+    assert!(has_property(&c, "c", "opacity"));
+}
+
+#[test]
+#[test]
+fn g3_roll_tool_preserves_rotation_and_work_area_shortcuts() {
+    for (key, expected) in [("r", "timeline.revealProperty:r"), ("n", "workOut")] {
+        let resolved = resolve_key(&KeyInput {
+            key,
+            modifiers: mods(),
+            repeat: false,
+            in_field: false,
+        }).unwrap();
+        assert_eq!(resolved.command, expected);
+    }
+    let (_a, mut c) = client();
+    command(&mut c, "timeline.tool:roll", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Roll);
+    command(&mut c, "timeline.tool:selection", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+}
+#[test]
+fn g3_tracks_drag_stops_at_zero_but_layers_keep_negative_starts() {
+    for (mode, expected) in [(TimelineMode::Tracks, 0.), (TimelineMode::Layers, -8.)] {
+        let (_a, mut c) = client();
+        c.model.mode = mode;
+        block_on(c.begin_drag(DragKind::Layers {
+            ids: strings(&["a", "b"]),
+        }))
+        .unwrap();
+        block_on(c.drag(sample(-9.))).unwrap();
+        assert_eq!(c.model.index.layer("a").unwrap().from, expected);
+        assert_eq!(c.model.index.layer("b").unwrap().from, expected + 4.);
+        block_on(c.finish_drag(true)).unwrap();
+    }
+}
+
+#[test]
+fn g3_tracks_duplicate_drag_also_stops_at_zero() {
+    let (_a, mut c) = client();
+    c.model.mode = TimelineMode::Tracks;
+    block_on(c.begin_drag(DragKind::DuplicateLayers { ids: strings(&["a"]), new_ids: strings(&["copy-a"]) })).unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert_eq!(c.model.index.layer("copy-a").unwrap().from, 0.);
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+    block_on(c.finish_drag(true)).unwrap();
+}
+
+#[test]
+fn g3_layer_moves_keep_existing_absolute_frame_rounding() {
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let mut value = fixture();
+        layer_mut(&mut value, 0).insert("from", Value::from(0.125));
+        let (_a, mut c) = client_with(value);
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        block_on(c.begin_drag(DragKind::Layers { ids: strings(&["a"]) })).unwrap();
+        block_on(c.drag(sample(0.01))).unwrap();
+        assert!((c.model.index.layer("a").unwrap().from - 4. / 30.).abs() < 1e-9);
+        block_on(c.finish_drag(true)).unwrap();
+    }
+}
+
+#[test]
+fn g3_tracks_group_clamp_uses_member_span_not_container_metadata() {
+    let mut value = fixture();
+    layer_mut(&mut value, 0).insert("type", Value::from("group"));
+    layer_mut(&mut value, 0).insert("from", Value::from(0.));
+    layer_mut(&mut value, 1).insert("group", Value::from("a"));
+    let (_a, mut c) = client_with(value);
+    c.model.mode = TimelineMode::Tracks;
+    c.model.track_snap_disabled = true;
+    block_on(c.begin_drag(DragKind::Layers { ids: strings(&["a"]) })).unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().from, 0.);
+    block_on(c.finish_drag(true)).unwrap();
+}
+
+#[test]
+fn g6_split_keys_and_snapping() {
+    for (key, expected) in [
+        ("c", "timeline.tool:split"),
+        ("v", "timeline.tool:selection"),
+        ("escape", "deselect"),
+    ] {
+        assert_eq!(
+            resolve_key(&KeyInput {
+                key,
+                modifiers: mods(),
+                repeat: false,
+                in_field: false
+            })
+            .unwrap()
+            .command,
+            expected
+        );
+    }
+    let (_actor, mut c) = client();
+    command(&mut c, "timeline.tool:split", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Split);
+    command(&mut c, "timeline.tool:selection", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+    command(&mut c, "timeline.tool:split", 0.);
+    command(&mut c, "deselect", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+    assert!(resolve_key(&KeyInput { key: "c", modifiers: mods(), repeat: false, in_field: true }).is_none());
+    assert_eq!(c.model.split_time(3.97, 8., 0.05), 4.);
+    let mut m = c.model.clone();
+    m.track_snap_disabled = true;
+    assert_eq!(m.split_time(3.97, 8., 0.05), 119. / 30.);
+}
+
+#[test]
+fn g6_split_one_undo_and_edge_noop() {
+    let (_actor, mut c) = client();
+    assert!(
+        c.model
+            .split_at("a", 1. + 1. / 30., false)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    let p = c.model.split_at("a", 3., false).unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.layers.len(), 4);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, 2.);
+    command(&mut c, "undo", 3.);
+    assert_eq!(c.model.index.layers.len(), 3);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, 4.);
+}
+
+#[test]
+fn g6_shift_splits_overlapping_unlocked_layers_in_one_undo() {
+    let fixture = r##"{"id":"P","compId":"C","name":"Split","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+    {"id":"a","name":"A","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+    {"id":"b","name":"B","type":"shape","from":1,"dur":5,"on":true,"p":{}},
+    {"id":"c","name":"Locked","type":"shape","from":0,"dur":5,"on":true,"lock":true,"p":{}}]}"##;
+    let (_actor, mut c) = client_with(parse(fixture).unwrap());
+    assert!(c.model.split_at("c", 2., false).unwrap().calls.is_empty());
+    assert!(
+        c.model
+            .split_at("empty", 2., true)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    let p = c.model.split_at("a", 2., true).unwrap();
+    assert_eq!(p.calls.len(), 1);
+    assert!(
+        matches!(&p.calls[0], Call::Transact { label: Some(label), .. } if label == "Split 2 layers")
+    );
+    run(&mut c, p);
+    assert_eq!(c.model.index.layers.len(), 5);
+    assert_eq!(c.model.index.layer("c").unwrap().duration, 5.);
+    command(&mut c, "undo", 2.);
+    assert_eq!(c.model.index.layers.len(), 3);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, 5.);
+    assert_eq!(c.model.index.layer("b").unwrap().duration, 5.);
+}
+
+#[test]
+fn g6_pointer_and_playhead_split_use_identical_kernel_payload() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    let pointer = c.model.split_at("a", 3., false).unwrap();
+    let playhead = c
+        .model
+        .command("split", 3., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    let split = |p: &Plan| match &p.calls[0] {
+        Call::Transact {
+            body: WriteBody::Commands(commands),
+            ..
+        } => match &commands[0] {
+            Command::Timing(pm_kernel::TimingCommand::Split {
+                layer_ids,
+                time,
+                new_ids,
+            }) => (layer_ids.clone(), *time, new_ids.len()),
+            other => panic!("Unexpected split command: {other:?}"),
+        },
+        _ => panic!("Expected one transaction"),
+    };
+    assert_eq!(split(&pointer), split(&playhead));
+}
+
+#[test]
+fn effect_add_does_not_reopen_a_layer_with_existing_keys() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, EffectDefinition, EffectPatch};
+    let mut saved = fixture();
+    layer_mut(&mut saved, 2).insert("collapsed", Value::Bool(false));
+    let (_actor, mut c) = client_with(saved);
+    assert!(!has_property(&c, "b", "opacity"));
+    let add = |layer: &str, id: &str, enabled_animation| {
+        EffectCommand::Add(Box::new(AddEffect {
+            layer_id: layer.into(),
+            effect_id: id.into(),
+            definition: EffectDefinition {
+                effect_type: "test-effect".into(),
+                version: 1,
+                label: "Test Effect".into(),
+                params: vec![],
+                source_processing: false,
+                backdrop: false,
+            },
+            parameters: Default::default(),
+            inputs: None,
+            open: true,
+            enabled: true,
+            enabled_animation,
+            index: None,
+        }))
+        .into()
+    };
+    edit(&mut c, vec![add("b", "new-effect", None)]);
+    edit(
+        &mut c,
+        vec![add(
+            "b",
+            "animated-effect",
+            Some(parse(r#"{"v":true,"kf":[{"i":"old","t":0,"v":true}],"expr":null}"#).unwrap()),
+        )],
+    );
+    edit(
+        &mut c,
+        vec![EffectCommand::Set {
+            layer_id: "b".into(),
+            effect: "animated-effect".into(),
+            patch: EffectPatch {
+                enabled: Some(false),
+                time: 6.,
+                ..Default::default()
+            },
+        }
+        .into()],
+    );
+    assert_eq!(
+        c.model.index.channel("b", "animated-effect.$enabled").unwrap().keys.len(),
+        2
+    );
+    edit(
+        &mut c,
+        vec![add(
+            "c",
+            "saved-effect",
+            Some(parse(r#"{"v":true,"kf":[{"i":"old","t":2,"v":true}]}"#).unwrap()),
+        )],
+    );
+    assert_eq!(c.model.index.channel("c", "saved-effect.$enabled").unwrap().keys.len(), 1);
+    assert!(!c.model.layer_expanded("c"));
+    assert_eq!(c.model.index.layer("b").unwrap().effects.len(), 2);
+    assert!(!has_property(&c, "b", "opacity"));
+    assert_eq!(c.model.reveal_serial, 0);
+}
+
+#[test]
+fn adding_a_camera_position_key_preserves_the_open_property_rows() {
+    for shortcut in ['p', '*'] {
+        let (_actor, mut c) = client();
+        edit(
+            &mut c,
+            vec![pm_kernel::Scene3dCommand::Apply {
+                comp: None,
+                args: parse(r#"{"operation":"add_camera","id":"cam"}"#).unwrap(),
+                selection: vec![],
+                time: 0.,
+                autokey: false,
+            }
+            .into()],
+        );
+        add_reveal_key(&mut c, "cam", "position.x", "x-key", 1.);
+        assert!(has_property(&c, "cam", "position.x"));
+        c.model.toggle_disclosure("cam").unwrap();
+        select(&mut c, &["cam"]);
+        c.model
+            .reveal_property(shortcut, false, 100, &PropertyFacts::default())
+            .unwrap();
+        let paths = c.model.reveal.layers["cam"].paths.clone();
+        assert!(paths.is_some());
+        assert!(has_property(&c, "cam", "position.y"));
+        assert!(has_property(&c, "cam", "position.z"));
+        let property_rows = |c: &TimelineClient| {
+            c.model
+                .rows()
+                .iter()
+                .filter(|row| matches!(&row.id, RowId::Property { layer_id, .. } if layer_id == "cam"))
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let before = property_rows(&c);
+        let plan = c
+            .model
+            .property_diamond(&[("cam".into(), "position.y".into())], 2.)
+            .unwrap();
+        run(&mut c, plan);
+        assert_eq!(property_rows(&c), before, "shortcut {shortcut}");
+        assert_eq!(c.model.reveal.layers["cam"].paths, paths);
+        assert_eq!(
+            c.model.index.channel("cam", "position.y").unwrap().keys.len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn group_strips_track_live_edits_even_when_a_child_stays_put() {
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let viewport = Viewport {
+        width: 1600.,
+        height: 800.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 60.,
+        layer_column: 200.,
+    };
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        for locked in [false, true] {
+            for collapsed in [false, true] {
+                for duration in [0, 8] {
+                    let mut fixture = group_trim_fixture();
+                    layer_mut(&mut fixture, 0).insert("from", Value::from(if duration == 0 { 0 } else { 1 }));
+                    layer_mut(&mut fixture, 0).insert("dur", Value::from(duration));
+                    layer_mut(&mut fixture, 0).insert("groupCollapsed", Value::from(collapsed));
+                    layer_mut(&mut fixture, 3).insert("lock", Value::from(locked));
+                    let (_a, mut c) = client_with(fixture);
+                    c.model.mode = mode;
+                    c.model.track_snap_disabled = true;
+                    let build = |c: &TimelineClient| {
+                        Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap()
+                    };
+                    let span = |scene: &Scene| {
+                        let clip = scene.prepare(viewport, &tokens).unwrap().clip_nodes()
+                            .into_iter().find(|clip| clip.id == "g").unwrap();
+                        (clip.from, clip.duration)
+                    };
+                    let mut scene = build(&c);
+                    assert_eq!(span(&scene), (1., 8.), "{mode:?} {locked} {collapsed}");
+                    let kind = DragKind::Layers { ids: strings(&["g"]) };
+                    if mode == TimelineMode::Layers {
+                        c.begin_preview_drag(kind).unwrap();
+                    } else {
+                        block_on(c.begin_drag(kind)).unwrap();
+                    }
+                    block_on(c.drag(sample(-1.))).unwrap();
+                    if let Some(preview) = c.layer_preview() {
+                        scene.preview_times(&c.model, &preview.starts);
+                    } else {
+                        scene = build(&c);
+                    }
+                    // When `locked` stays at 1..9, moving unlocked members by
+                    // -1s spans min(0, 1)..max(7, 9) = 0..9; when unlocked,
+                    // every member moves to 0..8.
+                    assert_eq!(span(&scene), if locked { (0., 9.) } else { (0., 8.) });
+                    block_on(c.drag(sample(2.))).unwrap();
+                    if let Some(preview) = c.layer_preview() {
+                        scene.preview_times(&c.model, &preview.starts);
+                    } else {
+                        scene = build(&c);
+                    }
+                    // When `locked` stays at 1..9, unlocked members move to
+                    // 3..10, so the dynamic union is 1..10; when unlocked,
+                    // every member moves to 3..11.
+                    assert_eq!(span(&scene), if locked { (1., 9.) } else { (3., 8.) });
+                    block_on(c.finish_drag(true)).unwrap();
+                    assert_eq!(span(&build(&c)), if locked { (1., 9.) } else { (3., 8.) });
+                    assert_eq!(trim_spans(&c, &["locked"])[0].0, if locked { 1. } else { 3. });
+                    undo(&mut c);
+
+                    block_on(c.begin_drag(DragKind::TrimIn { ids: strings(&["g"]) })).unwrap();
+                    block_on(c.drag(sample(0.5))).unwrap();
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1.5, 7.5) });
+                    block_on(c.finish_drag(true)).unwrap();
+                    undo(&mut c);
+
+                    block_on(c.begin_drag(DragKind::TrimOut { ids: strings(&["g"]) })).unwrap();
+                    block_on(c.drag(sample(-2.))).unwrap();
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1., 6.) });
+                    block_on(c.finish_drag(true)).unwrap();
+                    undo(&mut c);
+
+                    // Edges every unlocked member can follow (late starts at
+                    // 6, early ends at 2).
+                    select(&mut c, &["g"]);
+                    command(&mut c, "trimOut", 7.);
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1., 6.) });
+                    undo(&mut c);
+                    command(&mut c, "trimIn", 1.5);
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1.5, 7.5) });
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn group_strip_hugs_members_dynamically_for_saved_groups_and_live_child_drags() {
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let viewport = Viewport {
+        width: 1600.,
+        height: 800.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 20.,
+        layer_column: 200.,
+    };
+    // Saved group with legacy full-comp from=0, dur=103 wrapping layers at 31..35
+    // and an opacity keyframe at comp time 32s (0 + 32).
+    let fixture = parse(
+        r#"{"id":"P","compId":"C","fps":30,"dur":103,"layers":[
+            {"id":"g","type":"group","name":"Group","on":true,"from":0,"dur":103,"collapsed":false,
+             "p":{"opacity":{"v":100,"kf":[{"i":"gk","t":32,"v":50}]}}},
+            {"id":"a","type":"shape","name":"A","on":true,"group":"g","from":31,"dur":2,"p":{}},
+            {"id":"b","type":"shape","name":"B","on":true,"group":"g","from":33,"dur":2,"p":{}}
+        ]}"#,
+    )
+    .unwrap();
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let (_a, mut c) = client_with(fixture.clone());
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        let clip_span = |scene: &Scene, id: &str| {
+            let clip = scene
+                .prepare(viewport, &tokens)
+                .unwrap()
+                .clip_nodes()
+                .into_iter()
+                .find(|clip| clip.id == id)
+                .unwrap();
+            (clip.from, clip.duration)
+        };
+        let mut scene = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        assert_eq!(clip_span(&scene, "g"), (31., 4.), "{mode:?}");
+
+        // Dragging a child expands the parent group bar live during preview and after commit.
+        let child_drag = DragKind::Layers {
+            ids: strings(&["b"]),
+        };
+        if mode == TimelineMode::Layers {
+            c.begin_preview_drag(child_drag).unwrap();
+        } else {
+            block_on(c.begin_drag(child_drag)).unwrap();
+        }
+        block_on(c.drag(sample(3.))).unwrap();
+        if let Some(preview) = c.layer_preview() {
+            scene.preview_times(&c.model, &preview.starts);
+        } else {
+            scene = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        }
+        assert_eq!(clip_span(&scene, "g"), (31., 7.), "{mode:?}");
+        block_on(c.finish_drag(true)).unwrap();
+        let after = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        assert_eq!(clip_span(&after, "g"), (31., 7.), "{mode:?}");
+        undo(&mut c);
+
+        // Dragging the saved full-comp group shifts its strip AND its own keyframe by exact delta
+        // without jumping `from` by +31s.
+        let group_drag = DragKind::Layers {
+            ids: strings(&["g"]),
+        };
+        block_on(c.begin_drag(group_drag)).unwrap();
+        block_on(c.drag(sample(2.))).unwrap();
+        block_on(c.finish_drag(true)).unwrap();
+        let after = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        assert_eq!(clip_span(&after, "g"), (33., 4.), "{mode:?}");
+        let g = c.model.index.layer("g").unwrap();
+        assert_eq!(g.from + key_time(&c, "gk"), 34., "{mode:?}");
+    }
+}
+
+#[test]
+fn three_d_switch_applies_to_all_selected_eligible_layers() {
+    let (_a, mut c) = client();
+    // Select all three layers (a, b, c) and toggle 3D on "a".
+    select(&mut c, &["a", "b", "c"]);
+    let p = c.model.switch("a", LayerSwitch::ThreeD).unwrap();
+    run(&mut c, p);
+    for id in ["a", "b", "c"] {
+        assert!(
+            c.model.index.layer(id).unwrap().three_d,
+            "{id} should become 3D when toggled while selected"
+        );
+    }
+    // Toggling off on "b" turns 3D off for all selected layers in one undoable step.
+    let p = c.model.switch("b", LayerSwitch::ThreeD).unwrap();
+    run(&mut c, p);
+    for id in ["a", "b", "c"] {
+        assert!(!c.model.index.layer(id).unwrap().three_d, "{id} should turn 2D");
+    }
+    undo(&mut c);
+    for id in ["a", "b", "c"] {
+        assert!(
+            c.model.index.layer(id).unwrap().three_d,
+            "one undo restores all 3 layers"
+        );
+    }
+    // Clicking 3D on an unselected layer only toggles that layer.
+    select(&mut c, &["a", "b"]);
+    let p = c.model.switch("c", LayerSwitch::ThreeD).unwrap();
+    run(&mut c, p);
+    assert!(c.model.index.layer("a").unwrap().three_d);
+    assert!(c.model.index.layer("b").unwrap().three_d);
+    assert!(!c.model.index.layer("c").unwrap().three_d);
+}
+
+#[test]
+fn standalone_camera_point_of_interest_keyframes_show_in_timeline() {
+    let (_actor, mut c) = client_with(
+        parse(
+            r#"{
+        "id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":10,"comps":{},"assets":{},
+        "layers":[{
+            "id":"cam","name":"Camera","type":"extension","threeD":true,"on":true,"from":0,"dur":10,
+            "p":{"position.z":{"v":6,"kf":[],"expr":null}},
+            "d":{"definition":"powermove.3d.camera","data":{
+                "camera":{"autoOrient":"target","p":{
+                    "targetX":{"v":0,"kf":[{"i":"tx0","t":0,"v":0},{"i":"tx1","t":2,"v":3}],"expr":null},
+                    "targetY":{"v":0,"kf":[{"i":"ty0","t":0,"v":0},{"i":"ty1","t":2,"v":1}],"expr":null},
+                    "targetZ":{"v":0,"kf":[{"i":"tz0","t":0,"v":0},{"i":"tz1","t":2,"v":-2}],"expr":null},
+                    "fov":{"v":45,"kf":[],"expr":null}
+                }},
+                "environment":{"p":{"ambient":{"v":0.4,"kf":[],"expr":null}}}
+            }}
+        }]
+    }"#,
+        )
+        .unwrap(),
+    );
+    let layer = c.model.index.layer("cam").expect("camera layer");
+    assert!(layer.channels.iter().any(|ch| !ch.keys.is_empty()));
+    for (path, label) in [
+        ("camera.targetX", "Point of Interest X"),
+        ("camera.targetY", "Point of Interest Y"),
+        ("camera.targetZ", "Point of Interest Z"),
+    ] {
+        let ch = c.model.index.channel("cam", path).expect(path);
+        assert_eq!(ch.keys.len(), 2, "{path} keyframes");
+        assert_eq!(pm_panel_timeline::property_label(path), label);
+    }
+    // Expanding the camera layer reveals its keyframed Point of Interest rows.
+    c.model.toggle_disclosure("cam").unwrap();
+    let props: Vec<_> = c
+        .model
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { layer_id, channel } if layer_id == "cam" => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(props.contains(&"camera.targetX"), "rows={props:?}");
+    assert!(props.contains(&"camera.targetY"), "rows={props:?}");
+    assert!(props.contains(&"camera.targetZ"), "rows={props:?}");
+}

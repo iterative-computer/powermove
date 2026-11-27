@@ -1,0 +1,2585 @@
+//! Native document close policy; the kernel remains the durability owner.
+use crate::session::Controller;
+use gpui::{App, Context, Entity, Window};
+use pm_kernel::{KernelHandle, Published, session::*};
+use std::sync::atomic::Ordering;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Intent {
+    Window,
+    Quit,
+    /// Close the project only: the window stays, on Home, or on the project
+    /// that replaces it (one project per window, opened in place).
+    Project,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseState {
+    Busy,
+    Saving,
+    Dirty,
+    Clean,
+    /// An internal error stopped the project: it closes without asking and
+    /// without saving; its journal is kept for the next open to recover.
+    Stopped,
+}
+pub fn close_state(p: Option<&Published>, opening: bool, saving: bool) -> CloseState {
+    if saving || p.is_some_and(|p| p.saving) {
+        CloseState::Saving
+    } else if p.is_some_and(|p| p.fault.is_some()) {
+        CloseState::Stopped
+    } else if opening || p.is_some_and(|p| p.entry.is_some()) {
+        CloseState::Busy
+    } else if p.is_some_and(|p| p.dirty) {
+        CloseState::Dirty
+    } else {
+        CloseState::Clean
+    }
+}
+/// The edit a close stops at: the kernel holds an entry open while the
+/// project is neither opening nor asking the person something else. The
+/// person is asked to finish it (`Controller::ask_finish_edit`); `None`:
+/// another reason holds the close, or nothing does.
+fn open_edit(p: Option<&Published>, opening: bool, asking: bool) -> Option<String> {
+    if opening || asking {
+        return None;
+    }
+    p?.entry.as_ref().map(|e| e.label.clone())
+}
+/// The window's status line when its close is held by something only the
+/// person can end: a question on screen, or an open the window is busy with.
+fn held_note(intent: Intent, asking: bool) -> &'static str {
+    match (intent, asking) {
+        (Intent::Quit, true) => "Powermove didn’t quit: answer this window’s question, then quit again.",
+        (Intent::Quit, false) => "Powermove didn’t quit: finish what this window is doing, then quit again.",
+        _ => "Finish the active edit, open or recovery decision before closing.",
+    }
+}
+/// What a quit's blocker is called: a file chooser (an open or save panel,
+/// wherever it is), the Recover question or the Export sheet on an editor, or
+/// any other question.
+fn blocker_name(file_chooser: bool, recovering: bool, export_open: bool) -> &'static str {
+    if file_chooser {
+        "a file chooser"
+    } else if recovering {
+        "the Recover question"
+    } else if export_open {
+        "the Export sheet"
+    } else {
+        "a question"
+    }
+}
+/// The status line of an editor whose sheet or question stopped a quit.
+fn held_by(what: &str) -> String {
+    format!("Powermove didn’t quit: {what} is open. Answer or close it, then quit again.")
+}
+/// The status line while a quit already under way waits on its question.
+fn quit_waits_on(what: &str) -> String {
+    format!("Powermove quits once {what} is answered.")
+}
+/// What a Quit waits for at a window that cannot close this moment, when
+/// that is work which ends on its own: a save in flight, a project still
+/// opening, another project operation. The quit goes on when it has ended
+/// (a second Quit offers to quit now meanwhile). `None`: nothing to wait
+/// for, or the window is asking the person something (a recovery choice, an
+/// alert, an open edit), which only they can end.
+fn quit_waits_for(
+    state: CloseState,
+    opening: bool,
+    asking: bool,
+    fenced: bool,
+) -> Option<&'static str> {
+    match state {
+        CloseState::Saving => Some("finishing the save"),
+        CloseState::Busy if opening && !asking => Some("finishing opening the project"),
+        CloseState::Busy | CloseState::Stopped => None,
+        CloseState::Dirty | CloseState::Clean if fenced => Some("finishing a project operation"),
+        CloseState::Dirty | CloseState::Clean => None,
+    }
+}
+/// Whether a close keeps the viewer's last picture
+/// (`Controller::keep_last_frame`, a copy of what it presented), and how
+/// long it waits for it to be written. A quit by signal (logout, shutdown,
+/// a script) has no time to give: it keeps only a picture already kept
+/// (the one that held still). A chosen quit waits up to `LAST_FRAME_WAIT`
+/// for the file, the process ending after it; a close of a window or a
+/// project waits for nothing, the write finishing on its own.
+fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Duration>> {
+    match (intent, signal) {
+        (Intent::Quit, true) => None,
+        (Intent::Quit, false) => Some(Some(LAST_FRAME_WAIT)),
+        _ => Some(None),
+    }
+}
+/// Whether a quit has begun and was not cancelled: its questions may be up
+/// (the running-export one comes before the quit starts), or it may be
+/// waiting on a stage (Keep Waiting keeps it going).
+pub(crate) fn quitting(cx: &App) -> bool {
+    cx.try_global::<QuitCoordinator>()
+        .is_some_and(|q| q.quitting || q.asking_exports)
+}
+/// The quits run so far: each start and each cancel moves to a new
+/// generation, so a window's close that finishes after its quit was cancelled
+/// (another window's close failed meanwhile) is told apart and does nothing
+/// for a quit that is over (Sol w57).
+#[derive(Debug, Default)]
+struct QuitRun {
+    generation: u64,
+    active: bool,
+}
+impl QuitRun {
+    fn start(&mut self) -> u64 {
+        self.generation += 1;
+        self.active = true;
+        self.generation
+    }
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.active = false;
+    }
+    /// Whether a close begun in `generation` still belongs to a running quit.
+    fn current(&self, generation: u64) -> bool {
+        self.active && self.generation == generation
+    }
+}
+struct QuitCoordinator {
+    _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
+    /// The viewers' last pictures still being written: a quit waits for
+    /// them once, at its end, not window by window (each answers by its
+    /// own deadline, `LAST_FRAME_WAIT`).
+    frames: Vec<async_channel::Receiver<()>>,
+    /// The stage the quit is in and its bound, renewed after Keep Waiting.
+    stage: Option<(&'static str, std::time::Duration)>,
+    controllers: Vec<gpui::WeakEntity<Controller>>,
+    queue: Vec<gpui::WeakEntity<Controller>>,
+    /// Windows a quit asked to close at once (none asks anything), until
+    /// each has let go of its project.
+    closing: Vec<gpui::WeakEntity<Controller>>,
+    /// The app was hidden for the quit (its windows gone at once); a
+    /// cancelled quit shows it again.
+    hidden: bool,
+    /// The library's last writing has begun: once only.
+    finishing: bool,
+    /// Which quit a window's close belongs to ([`QuitRun`]).
+    run: QuitRun,
+    quitting: bool,
+    /// The person chose Discard Changes for every project at once.
+    discard: bool,
+    /// The running-export question is on screen.
+    asking_exports: bool,
+    /// A SIGTERM (logout, shutdown, a script) started the quit: nobody is
+    /// there to answer, so an edit left open is finished, not asked about.
+    terminating: bool,
+    /// A second Quit's prompt is showing: the window and its sheet, ended
+    /// before the app terminates (AppKit refuses to while a sheet is up).
+    asking_now: Option<(
+        objc2::rc::Retained<objc2_app_kit::NSWindow>,
+        objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    )>,
+    host: std::sync::Arc<crate::mcp::Host>,
+}
+impl gpui::Global for QuitCoordinator {}
+pub fn allow_quit(cx: &App) {
+    let delegate = &cx.global::<QuitCoordinator>()._delegate;
+    delegate.allow();
+    delegate.resolve_quit_events(false);
+}
+/// Bounds the quit's stage `name` (`quit_limit`): one that makes no
+/// progress in `bound` asks the person, never ends the quit itself.
+fn arm(cx: &mut App, name: &'static str, bound: std::time::Duration) {
+    cx.global_mut::<QuitCoordinator>().stage = Some((name, bound));
+    crate::quit_limit::stage(name, bound);
+}
+fn cancel_quit(cx: &mut App) {
+    crate::quit_limit::cancel();
+    pm_shell::session::set_quitting(false);
+    crate::diag::line(serde_json::json!({"quit":"cancelled"}));
+    crate::recent_work::quit_cancelled();
+    cx.global::<QuitCoordinator>()
+        ._delegate
+        .resolve_quit_events(true);
+    let controllers = {
+        let q = cx.global_mut::<QuitCoordinator>();
+        q.quitting = false;
+        q.discard = false;
+        q.terminating = false;
+        q.asking_now = None;
+        q.queue.clear();
+        q.closing.clear();
+        q.finishing = false;
+        q.run.cancel();
+        let hidden = std::mem::take(&mut q.hidden);
+        if hidden {
+            show_app();
+        }
+        q.frames.clear();
+        q.stage = None;
+        q.host.closing.store(false, Ordering::Release);
+        q.controllers.clone()
+    };
+    // Extensions a hung one made the quit stop come back with the window,
+    // once the update that cancelled (a close sheet's answer, inside one
+    // controller) has ended: a controller can't be updated within itself.
+    cx.defer(move |cx| {
+        for weak in controllers {
+            let _ = weak.update(cx, |v, cx| {
+                if v.closing_note.take().is_some() {
+                    cx.notify();
+                }
+                // Let go of its project for the quit that is now cancelled:
+                // no project, not closing (a later quit is not held by it).
+                if v.closed_for_quit {
+                    v.show_no_project(cx);
+                    cx.notify();
+                }
+                if v.extensions.stopped_for_quit {
+                    v.start_extensions(cx);
+                }
+            });
+        }
+    });
+}
+/// The exports a quit would stop: every export that has not ended.
+fn running_exports(
+    tasks: &[pm_promedia::tasks::Task],
+) -> Vec<(pm_promedia::tasks::TaskId, String)> {
+    tasks
+        .iter()
+        .filter(|t| t.kind == pm_promedia::tasks::TaskKind::Export && !t.state.terminal())
+        .map(|t| (t.id, t.title.clone()))
+        .collect()
+}
+/// How long a quit waits for the exports it stopped to say they have ended.
+/// An export's worker removes its unfinished file before it reports that;
+/// quitting sooner killed the worker with that file still on disk.
+const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest a chosen quit waits for the viewer's last picture to be
+/// written (`Controller::keep_last_frame`): a read and a PNG, tens of
+/// milliseconds.
+const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Whether every export in `stopping` has ended (cancelled, failed or done).
+fn exports_ended(
+    tasks: &[pm_promedia::tasks::Task],
+    stopping: &[pm_promedia::tasks::TaskId],
+) -> bool {
+    !running_exports(tasks)
+        .iter()
+        .any(|(id, _)| stopping.contains(id))
+}
+/// The question a quit asks while an export runs: quitting would stop it.
+fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let (message, button) = match titles {
+        [one] if !one.is_empty() => (
+            format!("“{one}” is still exporting."),
+            "Stop Export and Quit",
+        ),
+        [_] => ("An export is still running.".into(), "Stop Export and Quit"),
+        many => (
+            format!("{} exports are still running.", many.len()),
+            "Stop Exports and Quit",
+        ),
+    };
+    Alert::new(
+        message,
+        "If you quit now, the export stops and its unfinished file is removed. Your projects are not affected.",
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new(button, true),
+        ],
+    )
+}
+/// Where a Quit goes.
+#[derive(Debug, PartialEq)]
+enum QuitEntry {
+    /// A quit signal: never held, never asks.
+    Signal,
+    /// A sheet or question is on screen: its window comes forward and says
+    /// so. `cancel`: no quit was under way yet, so this one ends here; a quit
+    /// already asking (its Save or Review Changes question, the running
+    /// export question) goes on once that is answered.
+    Hold { cancel: bool },
+    /// A quit is under way: offer to quit now (the Quit Now sheet's own
+    /// question is the answer while it is up).
+    QuitNow,
+    /// Nothing holds it: the quit starts.
+    Start,
+}
+fn quit_entry(terminating: bool, quitting: bool, asking_now: bool, blocked: bool) -> QuitEntry {
+    if terminating {
+        QuitEntry::Signal
+    } else if asking_now {
+        QuitEntry::QuitNow
+    } else if blocked {
+        QuitEntry::Hold { cancel: !quitting }
+    } else if quitting {
+        QuitEntry::QuitNow
+    } else {
+        QuitEntry::Start
+    }
+}
+/// What holds a quit: the window a sheet covers anywhere in the app (an
+/// editor, a popover, Settings, the Store, a pop-out viewer), the editor it
+/// belongs to when there is one, and what to call it.
+struct Blocker {
+    window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    owner: Option<Entity<Controller>>,
+    what: &'static str,
+}
+fn find_blocker(cx: &mut App) -> Option<Blocker> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    // Notices that ask nothing go first; a quit never stops at one.
+    for window in objc2_app_kit::NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isSheet() {
+            crate::alert::dismiss_notice(&window);
+        }
+    }
+    let (window, sheet) = pm_shell::quit_blocker_window()?;
+    let mut top = objc2::Message::retain(&*window);
+    while let Some(parent) = top.parentWindow() {
+        top = parent;
+    }
+    let owner = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .clone()
+        .into_iter()
+        .filter_map(|weak| weak.upgrade())
+        .find(|c| *c.read(cx).host.borrow().window == *top);
+    let on_editor = owner
+        .as_ref()
+        .is_some_and(|c| *c.read(cx).host.borrow().window == *window);
+    let what = blocker_name(
+        objc2_foundation::NSObjectProtocol::isKindOfClass(&*sheet, <objc2_app_kit::NSSavePanel as objc2::ClassType>::class()),
+        on_editor && owner.as_ref().is_some_and(|c| c.read(cx).recovery_pending),
+        on_editor && owner.as_ref().is_some_and(|c| c.read(cx).builtins.windows.contains_key("export")),
+    );
+    Some(Blocker { window, owner, what })
+}
+/// Brings the blocking window forward and says so in its editor.
+fn hold_quit(blocker: Blocker, quitting: bool, cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"held", "by":blocker.what, "quitting":quitting}));
+    if let Some(owner) = &blocker.owner {
+        owner.update(cx, |v, cx| {
+            v.message = if quitting { quit_waits_on(blocker.what) } else { held_by(blocker.what) };
+            cx.notify();
+        });
+    }
+    bring_forward(&blocker.window);
+}
+/// `pm_shell::bring_forward`, except a development lane launched in the
+/// background, which takes no focus.
+fn bring_forward(window: &objc2_app_kit::NSWindow) {
+    if !gpui_macos::child_window::would_hold() {
+        pm_shell::bring_forward(window);
+    }
+}
+pub fn begin_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"begin"}));
+    let q = cx.global::<QuitCoordinator>();
+    let (terminating, asking_now) = (q.terminating, q.asking_now.is_some());
+    // The running-export question belongs to a quit already asking.
+    let quitting = q.quitting || q.asking_exports;
+    // A sheet or question on screen holds the quit before anything closes:
+    // closing other windows first left them closed when it then stopped
+    // (PM-464), and a second Quit during the quit's own question went
+    // unanswered (Sol, w55).
+    let blocker = (!terminating && !asking_now).then(|| find_blocker(cx)).flatten();
+    match quit_entry(terminating, quitting, asking_now, blocker.is_some()) {
+        QuitEntry::Signal => {
+            if !cx.global::<QuitCoordinator>().quitting {
+                start_quit(cx);
+            }
+        }
+        QuitEntry::Hold { cancel } => {
+            hold_quit(blocker.expect("held by a blocker"), !cancel, cx);
+            if cancel {
+                cancel_quit(cx);
+            }
+        }
+        QuitEntry::QuitNow => ask_quit_now(cx),
+        QuitEntry::Start => ask_exports_then_start(cx),
+    }
+}
+/// An export that is running is asked about before anything closes; then
+/// the quit starts.
+fn ask_exports_then_start(cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
+    let exporting = running_exports(&crate::export_coordinator::tasks().lock().unwrap().all());
+    let window = q
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    if let (false, Some(window)) = (exporting.is_empty(), window) {
+        cx.global_mut::<QuitCoordinator>().asking_exports = true;
+        let titles: Vec<String> = exporting.iter().map(|(_, title)| title.clone()).collect();
+        let answer = export_quit_alert(&titles).sheet(&window);
+        cx.spawn(async move |cx| {
+            let stop = answer.recv().await.ok().flatten() == Some(true);
+            if stop {
+                let stopping: Vec<_> = exporting.iter().map(|(id, _)| *id).collect();
+                for id in &stopping {
+                    crate::export_coordinator::cancel_export(*id);
+                }
+                // The quit goes on once each stopped export has ended (its
+                // unfinished file is removed by then), or after a short
+                // wait if one never answers: a quit is never held for good.
+                let asked = std::time::Instant::now();
+                while asked.elapsed() < EXPORT_STOP_WAIT
+                    && !exports_ended(
+                        &crate::export_coordinator::tasks().lock().unwrap().all(),
+                        &stopping,
+                    )
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                }
+            }
+            cx.update(|cx| {
+                cx.global_mut::<QuitCoordinator>().asking_exports = false;
+                if stop {
+                    start_quit(cx);
+                } else {
+                    cancel_quit(cx);
+                }
+            });
+        })
+        .detach();
+        return;
+    }
+    start_quit(cx);
+}
+fn start_quit(cx: &mut App) {
+    // The window session keeps the windows open now and nothing else: the
+    // next launch reopens exactly these (PM-392). Windows keep their
+    // entries as they close for the quit.
+    if let Some(path) = pm_shell::view::session_path() {
+        pm_shell::session::write(
+            &path,
+            pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
+        );
+        if let Some(front) = pm_shell::front_window_id() {
+            pm_shell::session::write(&path, pm_shell::session::Change::Front(front));
+        }
+    }
+    pm_shell::session::set_quitting(true);
+    let q = cx.global_mut::<QuitCoordinator>();
+    q.quitting = true;
+    q.run.start();
+    q.queue = q.controllers.clone();
+    q.host.closing.store(true, Ordering::Release);
+    let controllers = q.controllers.clone();
+    let dirty: Vec<_> = controllers
+        .iter()
+        .filter_map(|weak| weak.upgrade())
+        .filter(|entity| entity.read(cx).dirty())
+        .collect();
+    let asked: Vec<_> = dirty.iter().map(Entity::entity_id).collect();
+    let q = cx.global_mut::<QuitCoordinator>();
+    q.queue = questions_first(std::mem::take(&mut q.queue), |weak| {
+        asked.contains(&weak.entity_id())
+    });
+    let unattended = cx.global::<QuitCoordinator>().terminating;
+    let ([first, _, ..], false) = (&dirty[..], cx.global::<QuitCoordinator>().discard || unattended) else {
+        return next_quit(cx);
+    };
+    // S002: two or more dirty projects get one question before any per-project sheet.
+    use crate::surfaces::documents::{Action, review_quit};
+    let rx = review_quit(dirty.len()).sheet(&first.read(cx).host.borrow().window);
+    cx.spawn(async move |cx| {
+        let choice = rx.recv().await.ok().flatten();
+        cx.update(|cx| match choice {
+            Some(Action::ReviewChanges) => next_quit(cx),
+            Some(Action::DiscardChanges) => {
+                cx.global_mut::<QuitCoordinator>().discard = true;
+                next_quit(cx);
+            }
+            _ => cancel_quit(cx),
+        });
+    })
+    .detach();
+}
+/// The order a quit takes its windows in (from the end of the list): those
+/// with unsaved changes before any clean one. Their Save question is then on
+/// screen at once instead of after every clean project has closed, and
+/// Cancel leaves every window as it was.
+fn questions_first<T>(windows: Vec<T>, unsaved: impl Fn(&T) -> bool) -> Vec<T> {
+    let (asked, clean): (Vec<T>, Vec<T>) = windows.into_iter().partition(|w| unsaved(w));
+    clean.into_iter().chain(asked).collect()
+}
+fn next_quit(cx: &mut App) {
+    // No quit running (cancelled meanwhile): nothing to arm, hide or close.
+    if !cx.global::<QuitCoordinator>().quitting {
+        return;
+    }
+    // Once no window left asks anything (unsaved ones go first), the quit is
+    // bounded: each window that closes renews it, so only a quit that stops
+    // making progress ends early (`quit_limit`).
+    let asks = {
+        let q = cx.global::<QuitCoordinator>();
+        !q.discard
+            && !q.terminating
+            && q.queue
+                .iter()
+                .filter_map(|weak| weak.upgrade())
+                .any(|c| c.read(cx).dirty())
+    };
+    if cx.global::<QuitCoordinator>().finishing {
+        return;
+    }
+    if asks {
+        // One window at a time while one may ask a question.
+        while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
+            if weak
+                .update(cx, |v, cx| v.request_close(Intent::Quit, cx))
+                .is_ok()
+            {
+                return;
+            }
+        }
+    } else {
+        arm(cx, "windows", crate::quit_limit::WINDOWS);
+        // Nothing is asked any more: the windows go at once (the app hides),
+        // and every one left closes together, not one after another (nine
+        // tabs took 6 s, run 24). Their writing finishes behind.
+        hide_for_quit(cx);
+        let rest = std::mem::take(&mut cx.global_mut::<QuitCoordinator>().queue);
+        for weak in rest.into_iter().rev() {
+            cx.global_mut::<QuitCoordinator>().closing.push(weak.clone());
+            let _ = weak.update(cx, |v, cx| v.request_close(Intent::Quit, cx));
+        }
+    }
+    // A window still closing calls this again once it has let go.
+    let closing = cx.global::<QuitCoordinator>().closing.clone();
+    if closing
+        .iter()
+        .filter_map(|weak| weak.upgrade())
+        .any(|c| !c.read(cx).closed_for_quit)
+    {
+        return;
+    }
+    if !cx.global::<QuitCoordinator>().quitting {
+        return;
+    }
+    cx.global_mut::<QuitCoordinator>().finishing = true;
+    // The window session's queued writes land first; a failed one is asked
+    // about while the library is still held, so Cancel leaves all as it was.
+    cx.spawn(async move |cx| {
+        let flushed = cx
+            .background_executor()
+            .spawn(async { pm_shell::session::flush() })
+            .await;
+        cx.update(|cx| match flushed {
+            Ok(()) => finish_quit(cx),
+            Err(error) => ask_session_failed(&error, cx),
+        });
+    })
+    .detach();
+}
+/// Hides the app for a quit that asks nothing more: its windows are gone at
+/// once while the projects close behind. Never for a quit signal (nobody is
+/// watching) or a development lane in the background.
+fn hide_for_quit(cx: &mut App) {
+    let q = cx.global_mut::<QuitCoordinator>();
+    if q.hidden || q.terminating || gpui_macos::child_window::would_hold() {
+        return;
+    }
+    q.hidden = true;
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).hide(None);
+    }
+}
+/// The app shown again after a quit hid it (cancelled, or about to ask).
+fn show_app() {
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).unhide(None);
+    }
+}
+/// What a second Quit does while the first one runs.
+#[derive(Debug, PartialEq)]
+enum SecondQuit {
+    /// The person is being asked something (a save question), or already
+    /// asked to quit now: the question on screen is the answer.
+    Ignore,
+    /// The quit waits for this work: offer to quit now.
+    Ask(String),
+}
+fn second_quit(asking_now: bool, waiting: Option<String>) -> SecondQuit {
+    match waiting {
+        Some(note) if !asking_now => SecondQuit::Ask(note),
+        _ => SecondQuit::Ignore,
+    }
+}
+/// The prompt of a second Quit while the first waits for `note`.
+fn quit_now_alert(note: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    let work = note.split_once(": ").map_or(note, |(_, work)| work);
+    let work = work.trim_end_matches('…');
+    Alert::new(
+        "Powermove is still finishing before it quits.",
+        format!(
+            "Still {work}. If you quit now, no work is lost: the next time you open the project, Powermove offers to recover your unsaved changes."
+        ),
+        vec![
+            Button::new("Keep Waiting", false)
+                .default()
+                .key(Key::Escape),
+            Button::new("Quit Now", true),
+        ],
+    )
+}
+/// A second Quit while the first waits on work (archiving, saving, the
+/// library): says what it waits for and offers to quit now. Quitting now
+/// flushes the journals and leaves everything as a crash would: the journal
+/// keeps unsaved work, consistent with whichever file a running save left,
+/// and the next open offers to recover it.
+fn ask_quit_now(cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
+    let waiting = q.controllers.iter().find_map(|weak| {
+        let c = weak.upgrade()?;
+        let note = c.read(cx).closing_note.clone()?;
+        Some((note, c.read(cx).host.borrow().window.clone()))
+    });
+    let (note, window) = match waiting {
+        Some((note, window)) => (Some(note), Some(window)),
+        None => (None, None),
+    };
+    let (SecondQuit::Ask(note), Some(window)) = (second_quit(q.asking_now.is_some(), note), window)
+    else {
+        return;
+    };
+    // Nobody is hurried while asked: the bound waits for the answer.
+    crate::quit_limit::cancel();
+    if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+        show_app();
+    }
+    let mut sheet = None;
+    let answer = quit_now_alert(&note).sheet_with(&window, |alert| sheet = Some(alert.window()));
+    cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
+    cx.spawn(async move |cx| {
+        let now = answer.recv().await.ok().flatten() == Some(true);
+        let quit_now = cx.update(|cx| {
+            let q = cx.global_mut::<QuitCoordinator>();
+            q.asking_now = None;
+            // Keep Waiting: the stage is bounded again from now.
+            if !now
+                && q.quitting
+                && let Some((name, bound)) = q.stage
+            {
+                crate::quit_limit::stage(name, bound);
+            }
+            now && q.quitting
+        });
+        if quit_now {
+            quit_as_is(note, cx).await;
+        }
+    })
+    .detach();
+}
+/// A stage of a chosen quit made no progress in its bound: the person is
+/// asked whether to keep waiting or quit now. Never while a window saves or
+/// asks something (that is waited for, and the stage bounded again).
+fn ask_stalled(stall: crate::quit_limit::Stall, cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
+    if !q.quitting || q.terminating || !stall.current() {
+        return;
+    }
+    let busy = q.asking_now.is_some()
+        || q.controllers
+            .iter()
+            .filter_map(|weak| weak.upgrade())
+            .any(|c| {
+                let c = c.read(cx);
+                c.save_pending || c.host.borrow().window.attachedSheet().is_some()
+            });
+    if busy {
+        if let Some((name, bound)) = q.stage {
+            crate::quit_limit::stage(name, bound);
+        }
+        return;
+    }
+    crate::diag::line(serde_json::json!({"quit":"ask_stalled","stage":stall.stage}));
+    ask_quit_now(cx);
+}
+/// Quits without the work the quit was waiting for, leaving everything as a
+/// crash would: every edit the kernel acknowledged is already written to its
+/// journal and is made durable here without waiting for the busy kernel.
+/// Saves journal their save point before replacing a file, so the journal
+/// replays onto whatever the disk holds, and the next open offers it.
+async fn quit_as_is(note: String, cx: &mut gpui::AsyncApp) {
+    crate::diag::line(serde_json::json!({"quit":"securing"}));
+    let secured = cx
+        .background_executor()
+        .spawn(async { crate::quit_limit::secure(crate::quit_limit::SECURE) })
+        .await;
+    cx.update(|cx| {
+        let q = cx.global_mut::<QuitCoordinator>();
+        // The quit may have been cancelled (a failed save) meanwhile.
+        if !q.quitting {
+            return;
+        }
+        match secured {
+            // The unsaved work is durable in the journals: the next open
+            // offers it back.
+            Ok(()) => {
+                q._delegate.resolve_quit_events(false);
+                crate::diag::line(serde_json::json!({"quit":"quit_now","note":note}));
+                crate::quit_limit::stop_jobs_and_exit(0);
+            }
+            // Not durable: ending now could lose it, so the app stays.
+            Err(reason) => cannot_quit_now(&reason, cx),
+        }
+    });
+}
+/// Quit Now could not make the unsaved work durable: says so, and the app
+/// keeps running with every window it still has.
+fn cannot_quit_now(reason: &str, cx: &mut App) {
+    use crate::alert::{Alert, Button, Key};
+    crate::error_log::shared(cx)
+        .borrow_mut()
+        .push("Quit", &format!("Quit Now stopped: {reason}"));
+    let window = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    cancel_quit(cx);
+    if let Some(window) = window {
+        let _ = Alert::new(
+            "Powermove couldn’t make your unsaved changes safe, so it didn’t quit.",
+            format!(
+                "Quitting now could lose them: {reason}. Reconnect or free up the disk, then quit again. Window ▸ Error Log has the details."
+            ),
+            vec![Button::new("OK", true).default().key(Key::Escape)],
+        )
+        .sheet(&window);
+    }
+}
+/// The quit alert when the project library could not be written or released.
+/// Nothing in a window can fix it by then (every project's own close was
+/// answered), so the person is never left with a quit that only refuses.
+fn quit_failed_alert(reason: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    // The kernel's account chooses the sentence and goes to the Error Log.
+    let why = crate::surfaces::documents::WriteFailure::of(reason).sentence();
+    Alert::new(
+        "Powermove couldn’t finish saving before quitting.",
+        format!(
+            "{why} If you quit anyway, no work is lost: the next time you open a project with unsaved changes, Powermove offers to recover them. Window ▸ Error Log has the details."
+        ),
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new("Quit Anyway", true),
+        ],
+    )
+}
+/// The quit alert for a window session that couldn't be written.
+fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button, Key};
+    Alert::new(
+        "Powermove couldn’t save your window arrangement.",
+        format!("{error}. If you quit anyway, your windows open as they were last saved."),
+        vec![
+            Button::new("Cancel", false).default().key(Key::Escape),
+            Button::new("Quit Anyway", true),
+        ],
+    )
+}
+fn ask_session_failed(error: &str, cx: &mut App) {
+    crate::quit_limit::cancel();
+    if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+        show_app();
+    }
+    let window = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    let Some(window) = window else {
+        return finish_quit(cx);
+    };
+    let answer = session_failed_alert(error).sheet(&window);
+    cx.spawn(async move |cx| {
+        let quit = answer.recv().await.ok().flatten() == Some(true);
+        cx.update(|cx| {
+            if quit {
+                finish_quit(cx)
+            } else {
+                cancel_quit(cx)
+            }
+        });
+    })
+    .detach();
+}
+/// How a quit ends the library's work before releasing it. A quit someone
+/// chose compacts (`PrepareQuit` saves library sessions and folds journals
+/// in). A quit signal (logout, shutdown, a script) has nobody to choose: it
+/// only makes every journal durable (`DurabilityBarrier`), and the release
+/// that follows keeps each open session's journal, so a library project's
+/// saved version stays as it was and its unsaved work is offered at the next
+/// open (Sol's P1, PM-347).
+fn quit_call(signal: bool) -> ShellCall {
+    if signal {
+        ShellCall::DurabilityBarrier
+    } else {
+        ShellCall::PrepareQuit
+    }
+}
+/// Compacts (or, after a quit signal, only flushes) and releases the
+/// library, then quits.
+fn finish_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
+    arm(cx, "library", crate::quit_limit::LIBRARY);
+    let host = cx.global::<QuitCoordinator>().host.clone();
+    let signal = cx.global::<QuitCoordinator>().terminating;
+    let frames = std::mem::take(&mut cx.global_mut::<QuitCoordinator>().frames);
+    for weak in cx.global::<QuitCoordinator>().controllers.clone() {
+        let _ = weak.update(cx, |v, cx| {
+            v.closing_note = Some("Quitting: writing the project library…".into());
+            cx.notify();
+        });
+    }
+    cx.spawn(async move |cx| {
+        let mut result = match host.kernel.shell(quit_call(signal)).await {
+            // A signal quit compacts nothing: its sessions' journals were
+            // made durable, and the library's release keeps them.
+            Some(Ok(ShellReply::Durable)) => Some(Ok(ShellReply::Compacted {
+                projects: 0,
+                recovery_copies: vec![],
+            })),
+            other => other,
+        };
+        crate::diag::line(serde_json::json!({"quit":"library_prepared","ok":matches!(result, Some(Ok(_)))}));
+        if let Some(Ok(ShellReply::Compacted { .. })) = &result {
+            // A clean quit leaves library.lock released, not to go stale.
+            if let Some(Err(e)) = host.kernel.shell(ShellCall::ReleaseLibrary).await {
+                result = Some(Err(e));
+            }
+        }
+        crate::diag::line(serde_json::json!({"quit":"library_released","ok":matches!(result, Some(Ok(_)))}));
+        if let Some(Ok(ShellReply::Compacted { .. })) = &result {
+            // The Error Log's store: this quit was not a crash.
+            crate::error_log::session_ended(signal).await;
+        }
+        crate::diag::line(serde_json::json!({"quit":"session_ended"}));
+        // The windows' last pictures, written meanwhile; each is bounded.
+        for frame in frames {
+            let _ = frame.recv().await;
+        }
+        crate::diag::line(serde_json::json!({"quit":"frames_kept"}));
+        cx.update(|cx| match result {
+            // Recovery copies are durable library entries; they show in the
+            // library next launch, so they never hold the quit.
+            Some(Ok(ShellReply::Compacted { .. })) => {
+                // A second Quit's prompt would hold the termination.
+                if let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
+                {
+                    window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+                }
+                allow_quit(cx);
+                if signal {
+                    // Unattended: everything is durable (journals flushed,
+                    // library released, the Error Log marked). AppKit's
+                    // terminate waits behind a sheet still up (a recovery
+                    // question, New Project), so they end first; the normal
+                    // teardown then stops what the app started (engine jobs).
+                    crate::diag::line(serde_json::json!({"quit":"end_sheets"}));
+                    crate::platform::end_all_sheets();
+                }
+                // The session's last events (a moment at most; what does not
+                // leave in time goes at the next launch).
+                pm_telemetry::quit(true);
+                // Restart and Bring In: Powermove opens again once this ends.
+                crate::recent_work::relaunch_if_requested();
+                // Everything is written and released: what is left is the
+                // app's own teardown, with no window left to ask from.
+                crate::quit_limit::cancel();
+                cx.quit();
+            }
+            other => {
+                // A question follows: nobody is hurried while asked, and the
+                // app the quit hid is shown to ask it.
+                crate::quit_limit::cancel();
+                if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+                    show_app();
+                }
+                cx.global_mut::<QuitCoordinator>().finishing = false;
+                let reason = reason(other);
+                eprintln!("Couldn’t quit: {reason}. Your work is kept.");
+                crate::error_log::shared(cx).borrow_mut().push(
+                    "Quit",
+                    &format!("The project library couldn’t be written before quitting: {reason}"),
+                );
+                let q = cx.global::<QuitCoordinator>();
+                let window = q
+                    .controllers
+                    .iter()
+                    .find_map(|weak| weak.upgrade())
+                    .map(|c| c.read(cx).host.borrow().window.clone());
+                let Some(window) = window else {
+                    return cancel_quit(cx);
+                };
+                let answer = quit_failed_alert(&reason).sheet(&window);
+                cx.spawn(async move |cx| {
+                    if answer.recv().await.ok().flatten() == Some(true) {
+                        quit_as_is(format!("Quitting: {reason}"), cx).await;
+                    } else {
+                        cx.update(cancel_quit);
+                    }
+                })
+                .detach();
+            }
+        });
+    })
+    .detach();
+}
+pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
+    if cx.try_global::<QuitCoordinator>().is_none() {
+        let (delegate, rx) = crate::platform::quit_guard();
+        // The Quit item and Cmd-Q come here from now on.
+        let chosen = delegate.clone();
+        pm_shell::set_quit_hook(move || chosen.chosen());
+        let host = entity.read(cx).mcp.clone();
+        crate::quit_limit::set_kernel(host.kernel.clone());
+        let stalls = crate::quit_limit::stalls();
+        cx.spawn(async move |cx| {
+            while let Ok(stall) = stalls.recv().await {
+                cx.update(|cx| ask_stalled(stall, cx));
+            }
+        })
+        .detach();
+        cx.set_global(QuitCoordinator {
+            _delegate: delegate,
+            frames: Vec::new(),
+            stage: None,
+            controllers: Vec::new(),
+            queue: Vec::new(),
+            closing: Vec::new(),
+            hidden: false,
+            finishing: false,
+            run: QuitRun::default(),
+            quitting: false,
+            discard: false,
+            asking_exports: false,
+            terminating: false,
+            asking_now: None,
+            host,
+        });
+        cx.spawn(async move |cx| {
+            while rx.recv().await.is_ok() {
+                cx.update(begin_quit);
+            }
+        })
+        .detach();
+        // SIGTERM (kill, logout, a shutdown script) quits like Quit does.
+        let terminations = crate::platform::terminations();
+        cx.spawn(async move |cx| {
+            // The orderly signal quit ends the process itself within a
+            // second or two; the thread that heard the signal bounds it
+            // (`quit_limit::signalled`) if a step is still busy (a long open,
+            // a large save) or the main thread is held, so a logout never
+            // waits on Powermove. The journals hold the work.
+            while terminations.recv().await.is_ok() {
+                cx.update(|cx| {
+                    cx.global_mut::<QuitCoordinator>().terminating = true;
+                    begin_quit(cx);
+                });
+            }
+        })
+        .detach();
+    }
+    cx.global_mut::<QuitCoordinator>()
+        .controllers
+        .push(entity.downgrade());
+    entity.update(cx, |v, cx| {
+        v.close_window = Some(window.window_handle());
+        cx.observe_window_activation(window, |v, window, cx| {
+            if !window.is_window_active()
+                && let Some(g) = v.builtins.gizmos.clone()
+            {
+                // It draws, which reads the controller: after this update.
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
+            }
+            // The key window is where MCP acts.
+            if window.is_window_active() {
+                v.mcp.activate_window(v.window_key);
+                // Its history names Undo and Redo now.
+                crate::session::set_menu_editor(cx.entity_id());
+                if let Some(published) = v
+                    .session
+                    .as_ref()
+                    .and_then(|s| v.kernel.published(&s.project))
+                {
+                    crate::session::history_menu(&published.history);
+                }
+            }
+            if window.is_window_active()
+                && !v.close_pending
+                && !v.opening
+                && v.session
+                    .as_ref()
+                    .is_some_and(|s| v.kernel.published(&s.project).is_some())
+            {
+                v.mcp.bind_window(v.window_key, v.session.clone());
+            }
+        })
+        .detach();
+    });
+    // A project's viewer draws only while its window can be seen: a tab
+    // behind another gives its drawing (and, idle, its memory) up and takes
+    // it back when selected, so any number of tabs can be open.
+    let watched = entity.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            if watched.update(cx, |v, cx| v.follow_shown(cx)).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+    let weak = entity.downgrade();
+    window.on_window_should_close(cx, move |_, cx| {
+        let _ = weak.update(cx, |v, cx| v.request_close(Intent::Window, cx));
+        false
+    });
+}
+/// The kernel archives rejected work and releases the session atomically.
+pub async fn discard_close(kernel: &KernelHandle, session: SessionHandle) -> Result<(), String> {
+    expect_closed(kernel.shell(ShellCall::DiscardClose(session)).await)
+}
+fn expect_closed(
+    reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>,
+) -> Result<(), String> {
+    match reply {
+        Some(Ok(ShellReply::Closed {
+            recovery_copy: None,
+        })) => Ok(()),
+        other => Err(format!(
+            "Couldn’t close: {}. Your work is kept.",
+            reason(other)
+        )),
+    }
+}
+/// A person-readable reason for a kernel reply that wasn't the expected one.
+pub(crate) fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String {
+    match reply {
+        Some(Err(e)) => e.to_string(),
+        Some(Ok(ShellReply::Closed {
+            recovery_copy: Some(_),
+        })) => "the file couldn’t be written, so a recovered copy is in the library".into(),
+        _ => "the project library didn’t answer".into(),
+    }
+}
+/// The status line while a close or quit waits for `work`.
+/// What opening a project in a window does (one project per window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenPlan {
+    /// The window shows no project: it opens here at once.
+    Here,
+    /// The window's project closes first (asking about unsaved work as any
+    /// close does), then the other opens in its place.
+    AfterClose,
+    /// A close is already under way here: the open waits for nothing and
+    /// says so.
+    Refuse,
+}
+pub fn open_plan(has_project: bool, opening: bool, closing: bool) -> OpenPlan {
+    if closing {
+        OpenPlan::Refuse
+    } else if has_project || opening {
+        OpenPlan::AfterClose
+    } else {
+        OpenPlan::Here
+    }
+}
+fn closing(intent: Intent, work: &str) -> String {
+    match intent {
+        Intent::Quit => format!("Quitting: {work}…"),
+        Intent::Window | Intent::Project => format!("Closing: {work}…"),
+    }
+}
+impl Controller {
+    /// A region pick over this editor ends with the project it was for (the
+    /// editor closing, its project closing or being replaced).
+    pub(crate) fn end_region_pick(&self) {
+        pm_shell::region_pick::cancel_over(&self.host.borrow().window);
+    }
+
+    fn dirty(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(|s| self.kernel.published(&s.project))
+            .is_some_and(|p| p.dirty)
+    }
+    pub fn cancel_close(&mut self, cx: &mut Context<Self>) {
+        // Cancelled: the project that was to replace this one does not open.
+        if let Some(next) = self.replace_with.take() {
+            self.dispose_pending(next, cx);
+        }
+        self.close_pending = false;
+        self.closing_note = None;
+        self.close_operation.take();
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| self.kernel.published(&s.project).is_none())
+        {
+            self.linked_sync = Default::default();
+            self.end_region_pick();
+            self.session = None;
+        }
+        self.mcp.bind_window(self.window_key, self.session.clone());
+        cancel_quit(cx);
+        self.mcp.closing.store(false, Ordering::Release);
+        cx.notify();
+    }
+    /// Commits an open text edit on the canvas, as v1 flushed edits before a
+    /// save or close; `then` runs once the project holds no open entry (or
+    /// after three seconds). `false` when nothing was being edited.
+    pub(crate) fn finish_edits_then(
+        &mut self,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) -> bool {
+        let Some(gizmos) = self.builtins.gizmos.clone() else {
+            return false;
+        };
+        if !gizmos.update(cx, |g, cx| g.finish_text(true, cx)) {
+            return false;
+        }
+        let kernel = self.kernel.clone();
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        cx.spawn(async move |this, cx| {
+            for _ in 0..60 {
+                let open = project
+                    .as_ref()
+                    .and_then(|p| kernel.published(p))
+                    .is_some_and(|p| p.entry.is_some());
+                let editing = this
+                    .update(cx, |v, cx| {
+                        v.builtins
+                            .gizmos
+                            .as_ref()
+                            .is_some_and(|g| g.read(cx).text_open().is_some())
+                    })
+                    .unwrap_or(false);
+                if !open && !editing {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            }
+            let _ = this.update(cx, |v, cx| then(v, cx));
+        })
+        .detach();
+        true
+    }
+    /// This window in front (its tab selected), so what a close waits on is
+    /// seen. Not in a development lane launch, which never takes the front.
+    fn show_window(&self) {
+        if !gpui_macos::child_window::would_hold() {
+            // Hidden (Hide Powermove): it comes forward when the person shows the app.
+            let window = objc2::rc::Weak::from(&*self.host.borrow().window);
+            gpui_macos::child_window::when_shown(move || {
+                if let Some(window) = window.load() {
+                    pm_shell::show_in_tab_group(&window);
+                    window.makeKeyAndOrderFront(None);
+                }
+            });
+        }
+    }
+    /// A quit stopped at a question in this window: the app comes forward
+    /// (unhidden, active) with this window key and its tab chosen, and beeps.
+    fn bring_forward(&self) {
+        bring_forward(&self.host.borrow().window.clone());
+    }
+    /// A close or quit met an edit the kernel still holds open (`label`):
+    /// the person finishes it (sealed as one step they can undo, then the
+    /// close goes on, asking about unsaved changes as usual) or cancels. A
+    /// quit from SIGTERM has nobody to ask and finishes it. Nothing is lost:
+    /// the recovery journal stays until a save succeeds.
+    fn ask_finish_edit(&mut self, intent: Intent, label: String, cx: &mut Context<Self>) {
+        use crate::alert::{Alert, Button, Key};
+        crate::quit_limit::cancel();
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let kernel = self.kernel.clone();
+        let terminating = intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating;
+        self.errors.borrow_mut().push(
+            "Project",
+            &format!("A close waited on an edit left open: “{label}”."),
+        );
+        let answer = (!terminating).then(|| {
+            self.show_window();
+            let name = self
+                .published
+                .as_ref()
+                .and_then(|p| p.snapshot.root()?.get("name").and_then(crate::node_string))
+                .unwrap_or("Untitled")
+                .to_owned();
+            Alert::new(
+                format!("“{name}” has an edit that hasn’t finished: {label}."),
+                "Finish it to keep it as one step you can undo, then close. Nothing is lost either way: your recovery copy stays until the project is saved.",
+                vec![
+                    Button::new(
+                        if intent == Intent::Quit {
+                            "Finish Edit and Quit"
+                        } else {
+                            "Finish Edit and Close"
+                        },
+                        true,
+                    )
+                    .default(),
+                    Button::new("Cancel", false).cancel().key(Key::Escape),
+                ],
+            )
+            .sheet(&self.host.borrow().window)
+        });
+        cx.spawn(async move |this, cx| {
+            let finish = match answer {
+                Some(rx) => rx.recv().await.ok().flatten() == Some(true),
+                None => true,
+            };
+            if finish {
+                let seal = pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::HistoryCall::Seal,
+                );
+                let _ = kernel.call(&project, seal).await;
+            }
+            let _ = this.update(cx, |v, cx| {
+                if finish {
+                    v.request_close(intent, cx);
+                } else if intent == Intent::Quit {
+                    cancel_quit(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        crate::diag::line(serde_json::json!({"quit":"request_close", "intent":format!("{intent:?}"), "pending":self.close_pending}));
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
+            // A quit signal (logout, shutdown, a script) never waits and never
+            // asks: not for a sheet or question on screen, a save, an open,
+            // an export, a close already under way or another window's
+            // operation. Nobody can answer, and waiting kept the app running
+            // through a logout. The window lets go of its project as after a
+            // crash: nothing is saved without the person's choice, the journal
+            // keeps the work (the quit makes it durable), and the next open
+            // offers it.
+            crate::diag::line(serde_json::json!({"quit":"let_go"}));
+            self.close_operation = self.mcp.try_operation();
+            self.close_pending = true;
+            self.mcp.closing.store(true, Ordering::Release);
+            self.end_region_pick();
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
+            return;
+        }
+        if intent == Intent::Quit && self.closed_for_quit {
+            // Already released for this quit: the quit goes on past it.
+            cx.defer(next_quit);
+            return;
+        }
+        if self.close_pending {
+            if intent == Intent::Quit {
+                // This window's close is asking (Save, Don't Save) or still
+                // finishing: the quit stops, and says so where it stopped.
+                let asking = self.host.borrow().window.attachedSheet().is_some();
+                self.message = held_note(intent, asking).into();
+                crate::diag::line(serde_json::json!({"quit":"held", "intent":"Quit", "asking":asking, "closing":true}));
+                self.bring_forward();
+                cancel_quit(cx);
+                cx.notify();
+            } else if self.host.borrow().window.attachedSheet().is_some() {
+                self.show_window();
+            }
+            return;
+        }
+        if self.finish_edits_then(cx, move |v, cx| v.request_close(intent, cx)) {
+            return;
+        }
+        if intent == Intent::Quit && self.stop_hung_extensions_for_quit() {
+            // The stopped realm's open entry is sealed on its owner thread;
+            // the quit goes on once it has gone (or after three seconds).
+            let kernel = self.kernel.clone();
+            let project = self.session.as_ref().map(|s| s.project.clone());
+            cx.spawn(async move |this, cx| {
+                for _ in 0..60 {
+                    let open = project
+                        .as_ref()
+                        .and_then(|p| kernel.published(p))
+                        .is_some_and(|p| p.entry.is_some());
+                    if !open {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                }
+                let _ = this.update(cx, |v, cx| v.request_close(Intent::Quit, cx));
+            })
+            .detach();
+            return;
+        }
+        if intent != Intent::Quit && cx.global::<QuitCoordinator>().quitting {
+            self.message = "Finish the quit decision first.".into();
+            cx.notify();
+            return;
+        }
+        let p = self
+            .session
+            .as_ref()
+            .and_then(|s| self.kernel.published(&s.project));
+        if p.is_none() {
+            self.linked_sync = Default::default();
+            self.end_region_pick();
+            self.session = None;
+        }
+        // A second Quit's own prompt on this window (Quit Now, while the
+        // quit waits) is not a question that holds the close: it goes once
+        // there is nothing left to wait for.
+        let quit_now_here = intent == Intent::Quit
+            && cx
+                .global::<QuitCoordinator>()
+                .asking_now
+                .as_ref()
+                .is_some_and(|(window, _)| **window == *self.host.borrow().window);
+        // An unanswered open has not adopted a session or any recovered edits.
+        // Cancel its ticket, not the quit; the open task releases its fence
+        // after the kernel acknowledges cancellation. Never cancel a save.
+        let cancelling_open = intent == Intent::Quit
+            && self.opening
+            && self.recovery_cancel.as_ref().is_some_and(|cancel| {
+                let _ = cancel.try_send(());
+                true
+            });
+        if cancelling_open {
+            let window = &self.host.borrow().window;
+            if let Some(sheet) = window.attachedSheet() {
+                window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+            }
+        }
+        let asking = !cancelling_open && (self.recovery_pending
+            || (!quit_now_here && !crate::alert::dismiss_notice(&self.host.borrow().window)));
+        let state = close_state(p.as_deref(), self.opening || asking, self.save_pending);
+        // A quit is not refused because of work that ends on its own: it
+        // waits (saying what for) and goes on when the work has ended.
+        crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
+        // The quit's own windows closing together (nothing asks any more)
+        // are not fenced by each other's operation: agents are already
+        // refused while quitting (`Host::closing`), and each close holding
+        // the one operation made nine tabs close one at a time (run 24).
+        let together = intent == Intent::Quit
+            && !cx.global::<QuitCoordinator>().closing.is_empty();
+        let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
+            && self.mcp.operation_in_progress()
+            && !together;
+        if intent == Intent::Quit
+            && let Some(work) = quit_waits_for(state, self.opening, asking, fenced)
+        {
+            // A save someone chose finishes, however long it takes.
+            if state == CloseState::Saving {
+                crate::quit_limit::cancel();
+            }
+            self.closing_note = Some(closing(Intent::Quit, work));
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let _ = this.update(cx, |v, cx| {
+                    // Cancelled meanwhile: nothing to go on with.
+                    if cx.global::<QuitCoordinator>().quitting {
+                        v.request_close(Intent::Quit, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        if quit_now_here
+            && let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
+        {
+            window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+        }
+        match state {
+            CloseState::Saving => {
+                self.message =
+                    "Saving in progress. Please wait for it to finish before closing.".into();
+                cancel_quit(cx);
+                cx.notify();
+                return;
+            }
+            // An edit still open in the kernel (one whose owner never ended
+            // it): the person is asked, in front, in this project's window.
+            CloseState::Busy if let Some(label) = open_edit(p.as_deref(), self.opening, asking) => {
+                self.ask_finish_edit(intent, label, cx);
+                return;
+            }
+            CloseState::Busy => {
+                self.message = held_note(intent, asking).into();
+                crate::diag::line(serde_json::json!({"quit":"held", "intent":format!("{intent:?}"), "asking":asking}));
+                // What holds the close is in this window: show it. A quit can
+                // come while the app is behind another (the Dock, a script):
+                // the app comes forward too, with this window's tab chosen,
+                // and the beep says the quit stopped.
+                if intent == Intent::Quit {
+                    self.bring_forward();
+                } else {
+                    self.show_window();
+                }
+                cancel_quit(cx);
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+        let operation = match self.mcp.try_operation() {
+            Some(operation) => Some(operation),
+            None if together => None,
+            None => {
+                self.message =
+                    "A project operation is in progress. Try closing again when it finishes."
+                        .into();
+                cancel_quit(cx);
+                cx.notify();
+                return;
+            }
+        };
+        self.close_operation = operation;
+        self.close_pending = true;
+        self.mcp.closing.store(true, Ordering::Release);
+        if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
+            self.complete_close(intent, cx);
+            return;
+        }
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().discard {
+            self.discard_and_close(intent, cx);
+            return;
+        }
+        use crate::surfaces::documents::{Action, unsaved};
+        let name = p
+            .as_ref()
+            .and_then(|p| {
+                p.snapshot
+                    .root()?
+                    .get("name")
+                    .and_then(crate::node_string)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "Untitled".into());
+        // Nobody is hurried while asked: the quit's bound waits for the answer.
+        crate::quit_limit::cancel();
+        self.show_window();
+        let rx = unsaved(&name).sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            let choice = rx.recv().await.ok().flatten();
+            let _ = this.update(cx, |v, cx| match choice {
+                Some(Action::Save) => {
+                    v.close_after_save = Some(intent);
+                    v.closing_note = Some(closing(intent, "saving"));
+                    v.save(None, cx);
+                }
+                Some(Action::DontSave) => v.discard_and_close(intent, cx),
+                _ => v.cancel_close(cx),
+            });
+        })
+        .detach();
+    }
+    fn discard_and_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            self.complete_close(intent, cx);
+            return;
+        };
+        let kernel = self.kernel.clone();
+        if intent == Intent::Quit {
+            // Don't Save is answered: archiving the changes is bounded too,
+            // and the windows go at once while it finishes behind (it took
+            // a second and more on a large project); the quit still waits
+            // for it before the process ends, and a failure shows the app.
+            arm(cx, "windows", crate::quit_limit::WINDOWS);
+            if cx.global::<QuitCoordinator>().queue.iter().all(|w| {
+                w.upgrade().is_none_or(|c| !c.read(cx).dirty())
+            }) {
+                hide_for_quit(cx);
+            }
+        }
+        self.closing_note = Some(closing(intent, "archiving changes"));
+        cx.spawn(async move |this, cx| {
+            let result = discard_close(&kernel, session).await;
+            let _ = this.update(cx, |v, cx| match result {
+                Ok(()) => {
+                    v.linked_sync = Default::default();
+                    v.session = None;
+                    v.mcp.bind_window(v.window_key, None);
+                    v.complete_close(intent, cx);
+                }
+                Err(e) => {
+                    // If a post-release step failed, retain the window and show the failure.
+                    v.message = e;
+                    if let Some(old) = v.session.as_ref()
+                        && let Some(p) = v.kernel.published(&old.project)
+                    {
+                        v.session = p.session.as_ref().map(|s| s.handle.clone());
+                    }
+                    v.mcp.bind_window(v.window_key, v.session.clone());
+                    v.cancel_close(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// The window after its project closed and nothing replaced it: no
+    /// project, not closing.
+    fn show_no_project(&mut self, cx: &mut Context<Self>) {
+        self.mcp.closing.store(false, Ordering::Release);
+        self.close_pending = false;
+        self.closed_for_quit = false;
+        self.closing_note = None;
+        self.home = false;
+        self.start_builtins(cx);
+        let layer = metal::MetalLayer::new();
+        if pm_engine_service::layers::configure_layer(
+            objc2::MainThreadMarker::new().unwrap(),
+            &layer,
+            &self.engine.metal_device(),
+        )
+        .is_ok()
+        {
+            self.host.borrow_mut().replace_viewer_layer(layer);
+            self.main_output.set(None);
+        }
+        self.message = "No project".into();
+        if let Some(shell) = self.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+            shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
+        }
+    }
+    pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        if let Some(g) = self.builtins.gizmos.clone() {
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
+        }
+        let kernel = self.kernel.clone();
+        let session = self.session.clone();
+        if intent == Intent::Quit {
+            // This window's questions are answered: its close is bounded.
+            arm(cx, "windows", crate::quit_limit::WINDOWS);
+        }
+        self.closing_note = Some(closing(intent, "finishing save and recovery data"));
+        // The picture the viewer shows now is what the next launch shows
+        // until its first frame: copied before the project goes; a chosen
+        // quit waits for the file (`last_frame_keep`), a quit signal keeps
+        // only the one already kept.
+        let signal = cx.global::<QuitCoordinator>().terminating;
+        // The quit this close belongs to (a later one does not adopt it).
+        let generation = cx.global::<QuitCoordinator>().run.generation;
+        let last_frame = session
+            .is_some()
+            .then(|| last_frame_keep(intent, signal))
+            .flatten()
+            .and_then(|wait| {
+                let written = self.keep_last_frame(wait, cx);
+                written.filter(|_| wait.is_some())
+            });
+        // A quit's windows close without waiting for their pictures: the quit
+        // waits for them all at once before it ends (`finish_quit`).
+        let last_frame = match last_frame {
+            Some(stored) if intent == Intent::Quit => {
+                cx.global_mut::<QuitCoordinator>().frames.push(stored);
+                None
+            }
+            other => other,
+        };
+        #[cfg(debug_assertions)]
+        let stalled_last = cx.global::<QuitCoordinator>().queue.is_empty();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let started = std::time::Instant::now();
+                if let Some(stored) = last_frame {
+                    let _ = stored.recv().await;
+                }
+                let framed = started.elapsed();
+                // A development build can hold the last window's close, as a
+                // close the kernel never answers does, to try the quit's
+                // stall question by hand (PM-425).
+                #[cfg(debug_assertions)]
+                if intent == Intent::Quit
+                    && std::env::var_os("PM_QUIT_TEST_STALL").is_some()
+                    && stalled_last
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                }
+                if let Some(session) = session {
+                    expect_closed(kernel.shell(ShellCall::Close(session)).await)?;
+                }
+                crate::diag::line(serde_json::json!({"quit":"window_closed",
+                    "last_frame_ms": framed.as_secs_f64() * 1000.,
+                    "kernel_ms": (started.elapsed() - framed).as_secs_f64() * 1000.}));
+                if intent != Intent::Quit {
+                    match kernel.shell(ShellCall::DurabilityBarrier).await {
+                        Some(Ok(ShellReply::Durable)) => {}
+                        other => {
+                            return Err(format!(
+                                "Couldn’t finish closing: {}. Your work is kept.",
+                                reason(other)
+                            ));
+                        }
+                    }
+                }
+                Ok::<_, String>(())
+            }
+            .await;
+            let _ = this.update(cx, |v, cx| match result {
+                Ok(()) => {
+                    if let Some(viewer) = v.viewer.take() {
+                        viewer.retire();
+                    }
+                    // The playback feed owns the viewer's placement binding,
+                    // whose drawableSize observer retains the layer and its
+                    // drawable pool. Nothing else wakes the feed now (the
+                    // display link is paused and the retired viewer sends
+                    // nothing), so tell it the viewer is gone.
+                    if let Some(wake) = &v.playback_wake {
+                        let _ = wake.try_send(());
+                    }
+                    if let Some(popout) = v.popout.take() {
+                        popout.shutdown();
+                    }
+                    v.close_studio_panes();
+                    v.linked_sync = Default::default();
+                    v.session = None;
+                    v.published = None;
+                    v.media_refresh.reset();
+                    v.media = Default::default();
+                    v.media_base = Default::default();
+                    v.rows.clear();
+                    v.saving_note = false;
+                    v.selected = None;
+                    v.path = None;
+                    v.host
+                        .borrow()
+                        .set_document_metadata("Untitled", "", false, None);
+                    v.mcp.bind_window(v.window_key, None);
+                    v.close_operation.take();
+                    // Panel owners dispose asynchronously, and GPUI keeps
+                    // the previous frame until the next draw. Collect on the
+                    // UI thread once those references have had time to go;
+                    // the render worker cannot collect this thread's heap.
+                    cx.spawn(async move |_, cx| {
+                        for delay in [250, 1750] {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay))
+                                .await;
+                            cx.update(|_| pm_engine_service::memory::pressure_relief());
+                        }
+                    })
+                    .detach();
+                    if intent == Intent::Quit
+                        && !cx.global::<QuitCoordinator>().run.current(generation)
+                    {
+                        // Its quit was cancelled while this close went on
+                        // (another window's close failed): no project here
+                        // now, not "closing" for a quit that is over.
+                        crate::diag::line(serde_json::json!({"quit":"late_release"}));
+                        v.show_no_project(cx);
+                        cx.notify();
+                    } else if intent == Intent::Quit {
+                        crate::diag::line(serde_json::json!({"quit":"window_released"}));
+                        v.closed_for_quit = true;
+                        v.closing_note = Some(closing(Intent::Quit, "finishing up"));
+                        cx.defer(next_quit);
+                    } else if intent == Intent::Project {
+                        // The window stays on Home and its session forgets
+                        // the project, regardless of other open windows.
+                        v.show_no_project(cx);
+                        v.leave_page(cx);
+                        // The project this one gave way to opens here.
+                        if let Some(next) = v.replace_with.take() {
+                            v.apply_pending(next, cx);
+                        }
+                        cx.notify();
+                    } else if let Some(handle) = v.close_window {
+                        // The integrated close guard owns this, after the
+                        // kernel close succeeds. A cancelled/failed close must
+                        // leave the restored window session intact.
+                        if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+                            shell.update(cx, |s, _| s.forget_session());
+                        }
+                        v.mcp.closing.store(false, Ordering::Release);
+                        cx.defer(move |cx| {
+                            let _ = handle.update(cx, |_, w, _| w.remove_window());
+                        });
+                    }
+                }
+                Err(e) => {
+                    v.message = e;
+                    v.cancel_close(cx);
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A quit by signal never keeps or waits for the last picture; a chosen
+    /// quit waits for its file; a close keeps it without waiting (PM-384).
+    #[test]
+    fn a_signal_quit_never_waits_on_the_last_frame() {
+        assert_eq!(super::last_frame_keep(Intent::Quit, true), None);
+        assert_eq!(super::last_frame_keep(Intent::Quit, false), Some(Some(LAST_FRAME_WAIT)));
+        for intent in [Intent::Window, Intent::Project] {
+            assert_eq!(super::last_frame_keep(intent, false), Some(None));
+            // Only the quit goes without it.
+            assert_eq!(super::last_frame_keep(intent, true), Some(None));
+        }
+    }
+    use super::*;
+    use pm_kernel::*;
+
+    /// One project per window: an open in a window that shows one closes
+    /// it first; a project with unsaved changes is asked about (Save, Don't
+    /// Save, Cancel) as any close is; a clean one closes without a question.
+    #[test]
+    fn an_open_replaces_the_project_shown_after_its_own_close() {
+        assert_eq!(open_plan(false, false, false), OpenPlan::Here);
+        assert_eq!(open_plan(true, false, false), OpenPlan::AfterClose);
+        assert_eq!(open_plan(false, true, false), OpenPlan::AfterClose);
+        assert_eq!(open_plan(true, false, true), OpenPlan::Refuse);
+        // The close that runs first is the ordinary one: Dirty asks, Clean
+        // closes at once, a save or an open in flight holds it.
+        assert_eq!(close_state(None, false, false), CloseState::Clean);
+        assert_eq!(close_state(None, false, true), CloseState::Saving);
+        assert_eq!(close_state(None, true, false), CloseState::Busy);
+        // A project close keeps the window: its note says closing, not quitting.
+        assert_eq!(closing(Intent::Project, "saving"), "Closing: saving…");
+    }
+
+    /// A second Quit while the first waits on work names that work and
+    /// offers to quit now; while a question is on screen it is the answer.
+    #[test]
+    fn a_second_quit_offers_to_quit_now_while_the_first_waits() {
+        assert_eq!(second_quit(false, None), SecondQuit::Ignore);
+        assert_eq!(
+            second_quit(true, Some("Quitting: saving…".into())),
+            SecondQuit::Ignore
+        );
+        let note = closing(Intent::Quit, "archiving changes");
+        assert_eq!(note, "Quitting: archiving changes…");
+        assert_eq!(
+            second_quit(false, Some(note.clone())),
+            SecondQuit::Ask(note.clone())
+        );
+        let alert = quit_now_alert(&note);
+        assert_eq!(alert.labels(), ["Keep Waiting", "Quit Now"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(
+            alert
+                .informative
+                .starts_with("Still archiving changes. If you quit now")
+        );
+        assert!(alert.informative.contains("no work is lost"));
+    }
+
+    #[test]
+    fn a_window_session_that_fails_to_save_asks_before_quitting() {
+        // A session file the writer must not overwrite (a newer version):
+        // the flush quit runs fails, and the quit alert carries why.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, br#"{"version":9,"windows":[]}"#).unwrap();
+        pm_shell::session::write(&path, pm_shell::session::Change::Remove(1));
+        let error = pm_shell::session::flush().unwrap_err();
+        let _ = pm_shell::session::take_error();
+        let alert = session_failed_alert(&error);
+        assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(alert.informative.contains("Unsupported window session"));
+    }
+    /// Two windows closing together; the first one's close fails and the
+    /// quit is cancelled; the second's success arrives after: it belongs to
+    /// no running quit, so it does nothing for it. A quit started again later
+    /// does not adopt it either.
+    #[test]
+    fn a_close_finishing_after_its_quit_was_cancelled_is_late() {
+        let mut run = QuitRun::default();
+        let quit = run.start();
+        let (first, second) = (quit, quit);
+        assert!(run.current(first) && run.current(second));
+        // The first window's close fails: the quit is cancelled.
+        run.cancel();
+        assert!(!run.current(second), "the second close's success is late");
+        // A new quit: the old close is still not one of its own.
+        let again = run.start();
+        assert!(!run.current(second) && run.current(again));
+    }
+    /// What holds a quit is named: a file chooser anywhere, the Recover
+    /// question and the Export sheet on an editor, any other question.
+    #[test]
+    fn a_quit_names_the_sheet_that_holds_it() {
+        assert_eq!(blocker_name(true, true, true), "a file chooser");
+        assert_eq!(blocker_name(false, true, true), "the Recover question");
+        assert_eq!(blocker_name(false, false, true), "the Export sheet");
+        assert_eq!(blocker_name(false, false, false), "a question");
+        assert!(held_by("the Export sheet").starts_with("Powermove didn’t quit: the Export sheet"));
+    }
+    /// A sheet on screen holds every chosen Quit before anything closes,
+    /// the second Quit of a quit asking its own question included (it goes on
+    /// after the answer, not cancelled); the Quit Now sheet answers a second
+    /// Quit itself; a signal is never held.
+    #[test]
+    fn a_sheet_holds_a_quit_before_anything_closes() {
+        assert_eq!(quit_entry(false, false, false, true), QuitEntry::Hold { cancel: true });
+        assert_eq!(quit_entry(false, true, false, true), QuitEntry::Hold { cancel: false });
+        assert_eq!(quit_entry(false, true, true, true), QuitEntry::QuitNow);
+        assert_eq!(quit_entry(true, false, false, true), QuitEntry::Signal);
+        assert_eq!(quit_entry(false, true, false, false), QuitEntry::QuitNow);
+        assert_eq!(quit_entry(false, false, false, false), QuitEntry::Start);
+    }
+    /// A quit a question stops says so in that window, by name: never the
+    /// generic close note, never nothing.
+    #[test]
+    fn a_quit_held_by_a_question_says_so() {
+        assert!(held_note(Intent::Quit, true).starts_with("Powermove didn’t quit"));
+        assert!(held_note(Intent::Quit, true).contains("question"));
+        assert!(held_note(Intent::Quit, false).starts_with("Powermove didn’t quit"));
+        assert!(!held_note(Intent::Window, true).contains("quit"));
+        // A question is not work that ends on its own: the quit stops at it.
+        assert_eq!(quit_waits_for(CloseState::Busy, true, true, true), None);
+    }
+    /// A Quit at a window that is opening a project, saving, or behind
+    /// another project operation waits for it; one at a window that asks
+    /// the person something, or has an edit open, does not.
+    #[test]
+    fn a_quit_waits_for_work_that_ends_on_its_own() {
+        use CloseState::*;
+        assert_eq!(
+            quit_waits_for(Busy, true, false, false),
+            Some("finishing opening the project")
+        );
+        assert_eq!(
+            quit_waits_for(Saving, false, false, false),
+            Some("finishing the save")
+        );
+        assert_eq!(
+            quit_waits_for(Clean, false, false, true),
+            Some("finishing a project operation")
+        );
+        assert_eq!(
+            quit_waits_for(Dirty, false, false, true),
+            Some("finishing a project operation")
+        );
+        // A recovery choice or an alert on screen, an open edit, a stopped
+        // project, and a window that can simply close.
+        assert_eq!(quit_waits_for(Busy, true, true, false), None);
+        assert_eq!(quit_waits_for(Busy, false, false, false), None);
+        assert_eq!(quit_waits_for(Stopped, false, false, false), None);
+        assert_eq!(quit_waits_for(Clean, false, false, false), None);
+        assert_eq!(quit_waits_for(Dirty, false, false, false), None);
+    }
+    /// A quit while an export runs asks first: Cancel is the default, and
+    /// only exports that have not ended count.
+    #[test]
+    fn a_quit_during_an_export_asks_before_stopping_it() {
+        use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec};
+        let mut tasks = BackgroundTasks::default();
+        let mut add = |kind, title: &str| {
+            tasks
+                .enqueue(
+                    "w".into(),
+                    "p".into(),
+                    TaskSpec {
+                        title: title.into(),
+                        kind,
+                        unit: ProgressUnit::Frames,
+                        priority: 0,
+                        total: 10,
+                    },
+                )
+                .unwrap()
+        };
+        let export = add(TaskKind::Export, "Launch Film");
+        add(TaskKind::Proxy, "clip");
+        let done = add(TaskKind::Export, "Old");
+        tasks.cancel(done).unwrap();
+        let running = running_exports(&tasks.all());
+        assert_eq!(running, [(export, "Launch Film".to_owned())]);
+        let alert = export_quit_alert(&["Launch Film".to_owned()]);
+        assert_eq!(alert.message, "“Launch Film” is still exporting.");
+        assert_eq!(alert.labels(), ["Cancel", "Stop Export and Quit"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        let two = export_quit_alert(&["a".to_owned(), "b".to_owned()]);
+        assert_eq!(two.labels(), ["Cancel", "Stop Exports and Quit"]);
+    }
+    /// "Stop Export and Quit" stops the export and then waits for it to have
+    /// ended: the request to stop is not the end (the worker still has its
+    /// unfinished file to remove), the settled task is.
+    #[test]
+    fn a_quit_goes_on_only_after_the_export_it_stopped_has_ended() {
+        use crate::export_coordinator::{AgentExport, cancel_export, tasks};
+        let export = AgentExport::start("Promo", "quit-stops-export", 120).unwrap();
+        let id = running_exports(&tasks().lock().unwrap().all())
+            .into_iter()
+            .find(|(_, title)| title == "Promo (Agent)")
+            .expect("it is running")
+            .0;
+        let ended = || exports_ended(&tasks().lock().unwrap().all(), &[id]);
+        assert!(!ended());
+        assert!(cancel_export(id));
+        assert!(!ended(), "asked to stop is not stopped");
+        // Its worker cleaned up and says so.
+        export.finish(Err("cancelled".into()));
+        assert!(ended());
+        // An export nobody stopped is not waited for.
+        assert!(exports_ended(&tasks().lock().unwrap().all(), &[]));
+    }
+    /// A quit asks every window with unsaved changes before it closes a
+    /// clean one (windows are taken from the end).
+    #[test]
+    fn a_quit_asks_about_unsaved_work_before_closing_clean_windows() {
+        let unsaved = |w: &&str| w.ends_with('*');
+        assert_eq!(
+            questions_first(vec!["a*", "b", "c", "d*"], unsaved),
+            ["b", "c", "a*", "d*"]
+        );
+        assert_eq!(questions_first(vec!["a", "b"], unsaved), ["a", "b"]);
+    }
+    /// A quit the project library refuses is asked about, never only
+    /// refused: Cancel is the default, and quitting anyway is offered with
+    /// what happens to unsaved work.
+    #[test]
+    fn a_quit_the_library_refuses_offers_to_quit_anyway() {
+        let alert = quit_failed_alert("Permission denied (os error 13)");
+        assert_eq!(alert.labels(), ["Cancel", "Quit Anyway"]);
+        assert!(alert.buttons[0].default && !alert.buttons[0].action);
+        assert!(alert.buttons[1].action);
+        assert!(
+            alert
+                .informative
+                .starts_with("Powermove isn’t allowed to write there. If you quit anyway")
+        );
+        assert!(!alert.informative.contains("os error"));
+        assert!(alert.informative.contains("offers to recover"));
+    }
+    use std::{
+        future::Future,
+        sync::Arc,
+        task::{Context as TaskContext, Poll, Wake, Waker},
+    };
+    fn wait<F: Future>(f: F) -> F::Output {
+        struct Notify(std::thread::Thread);
+        impl Wake for Notify {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let w = Waker::from(Arc::new(Notify(std::thread::current())));
+        let mut cx = TaskContext::from_waker(&w);
+        let mut f = std::pin::pin!(f);
+        loop {
+            match f.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+    fn answer(k: &KernelHandle, c: ShellCall) -> ShellReply {
+        k.shell(c).wait().unwrap().unwrap()
+    }
+    fn fixture() -> (tempfile::TempDir, KernelActor, SessionHandle) {
+        let dir = tempfile::tempdir().unwrap();
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(dir.path().join("journals")),
+            ..Default::default()
+        });
+        let k = actor.handle();
+        crate::mcp::attach(&k, dir.path()).unwrap();
+        let ShellReply::Opened {session,..}=answer(&k,ShellCall::Open {id:"test".into(),source:SessionSource::New(pm_model::json::parse(r##"{"id":"test","name":"Base","compId":"c","w":320,"h":180,"fps":30,"dur":1,"bg":"#000000","layers":[],"assets":{},"comps":{}}"##).unwrap()),electron_profile:None}) else{panic!()};
+        answer(&k, ShellCall::Save(session.clone()));
+        (dir, actor, session)
+    }
+    /// A quit that ends with a project no window shows still open in the
+    /// kernel (an agent's project nobody showed, an open nothing adopted)
+    /// is not refused: its file is not written without anyone asking, its
+    /// unsaved work stays in its journal for the next open to offer, and
+    /// the library and its file lock are released.
+    #[test]
+    fn a_quit_defers_a_project_no_window_shows_and_releases_the_library() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let file = dir.path().join("unshown.pmv");
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session,
+                path: file.clone(),
+                replace: false,
+            },
+        );
+        let saved = std::fs::read(&file).unwrap();
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        // What Quit sends once every window closed its project.
+        answer(&k, ShellCall::PrepareQuit);
+        answer(&k, ShellCall::ReleaseLibrary);
+        assert!(k.published("test").is_none(), "the session is released");
+        assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
+        drop(
+            pm_kernel::locks::lock_project(&pm_kernel::locks::user_lock_root(), &file)
+                .expect("its file lock is released"),
+        );
+        assert!(
+            !pm_kernel::journal::sessions(&dir.path().join("journals/test")).is_empty(),
+            "the unsaved edit is kept for recovery"
+        );
+        actor.shutdown();
+    }
+
+    /// SIGTERM never writes over the person's file: the window lets go of
+    /// its project unclosed, the quit defers it, the file is as saved and
+    /// the next launch's open of it offers the unsaved work.
+    #[test]
+    fn an_unattended_quit_leaves_the_file_and_the_next_launch_offers_the_work() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let file = dir.path().join("unattended.pmv");
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session,
+                path: file.clone(),
+                replace: false,
+            },
+        );
+        let saved = std::fs::read(&file).unwrap();
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        // The signal quit's steps once the window let go without a Close.
+        assert!(matches!(answer(&k, quit_call(true)), ShellReply::Durable));
+        answer(&k, ShellCall::ReleaseLibrary);
+        actor.shutdown();
+        assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
+        // The next launch: the work is there to offer.
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
+    }
+
+    /// Sol's P1: a library project (opened from Home, never saved to a
+    /// file) keeps its saved version through a quit signal: no compaction
+    /// saves it, and the next launch offers the unsaved edit. A quit the
+    /// person chose still compacts.
+    #[test]
+    fn a_signal_quit_never_saves_a_library_project_and_offers_its_work() {
+        assert!(matches!(quit_call(false), ShellCall::PrepareQuit));
+        let (dir, actor, _session) = fixture();
+        let k = actor.handle();
+        let slot = dir.path().join("store/project.test.json");
+        let saved = std::fs::read(&slot).expect("the library's saved version");
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        assert!(matches!(answer(&k, quit_call(true)), ShellReply::Durable));
+        answer(&k, ShellCall::ReleaseLibrary);
+        actor.shutdown();
+        assert_eq!(std::fs::read(&slot).unwrap(), saved, "the saved version is as it was");
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quit_cancels_unanswered_recovery_without_losing_saved_or_unsaved_work() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let file = dir.path().join("unanswered.pmv");
+        answer(&k, ShellCall::SaveAs {
+            session: session.clone(), path: file.clone(), replace: false,
+        });
+        let saved = std::fs::read(&file).unwrap();
+        edit(&k);
+        answer(&k, ShellCall::DeferClose(session));
+        let prepare = || ShellCall::PrepareOpen {
+            id: "test".into(), source: SessionSource::File(file.clone()), electron_profile: None,
+        };
+        let ShellReply::RecoveryRequired { ticket, .. } = answer(&k, prepare()) else {
+            panic!("fixture must stop at an unanswered recovery choice");
+        };
+        let (sheet, rx) = async_channel::bounded::<Option<crate::surfaces::recovery::Action>>(1);
+        let (cancel, cancellation) = async_channel::bounded(1);
+        let mut waiting = std::pin::pin!(crate::session::recovery_answer(&rx, &cancellation));
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(quit_waits_for(CloseState::Busy, true, false, true), Some("finishing opening the project"));
+        // Quit arrives before any answer, including an off-screen sheet.
+        cancel.try_send(()).unwrap();
+        assert!(wait(waiting).is_err());
+        assert!(matches!(answer(&k, ShellCall::CancelRecovery { ticket: ticket.clone() }), ShellReply::RecoveryCancelled));
+        assert_eq!(std::fs::read(&file).unwrap(), saved);
+        assert!(k.shell(ShellCall::DecideRecovery {
+            ticket, decision: RecoveryDecision::Recover,
+        }).wait().unwrap().is_err());
+        // The operation fence is no longer held by the UI wait; the kernel
+        // can finish a durable quit while leaving the journal recoverable.
+        assert!(matches!(answer(&k, ShellCall::PrepareQuit), ShellReply::Compacted { .. }));
+        // Preparing again still offers the unsaved edits: cancellation did
+        // not silently select Discard, Open Saved Version or Open as Copy.
+        let ShellReply::RecoveryRequired { ticket, .. } = answer(&k, prepare()) else {
+            panic!("the cancelled open must preserve its recoverable edits");
+        };
+        answer(&k, ShellCall::CancelRecovery { ticket });
+        answer(&k, ShellCall::ReleaseLibrary);
+        drop(sheet);
+        actor.shutdown();
+    }
+
+    #[test]
+    fn quit_cancellation_wins_over_a_simultaneous_sheet_answer() {
+        let (sheet, rx) = async_channel::bounded(1);
+        let (cancel, cancellation) = async_channel::bounded(1);
+        sheet.try_send(Some(crate::surfaces::recovery::Action::OpenAsCopy)).unwrap();
+        cancel.try_send(()).unwrap();
+        assert!(wait(crate::session::recovery_answer(&rx, &cancellation)).is_err());
+    }
+
+    fn edit(k: &KernelHandle) {
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some("Rename".into()),
+                    body: WriteBody::Commands(vec![
+                        CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                name: Some("Rejected edit".into()),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .unwrap();
+    }
+    /// An injected kernel panic stops the project mid-edit: the window
+    /// closes it without a save question (even with an edit open), nothing
+    /// is written over the saved project, and Reopen's calls bring back
+    /// exactly the acknowledged work through the recovery prompt.
+    #[test]
+    fn a_stopped_project_closes_unasked_and_reopens_to_its_journal() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let stored = || std::fs::read(dir.path().join("store/project.test.json")).unwrap();
+        let base = stored();
+        edit(&k);
+        let acknowledged = k.published("test").unwrap();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Drag".into(),
+                },
+            ),
+        )
+        .unwrap();
+        k.arm_fault(pm_kernel::fault_injection::Stage::AfterApply, "test");
+        assert!(
+            k.call(
+                "test",
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: Some("Opacity".into()),
+                        body: WriteBody::Commands(vec![
+                            CompCommand::Set {
+                                patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                    name: Some("Half applied".into()),
+                                    ..Default::default()
+                                }),
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: None,
+                    },
+                ),
+            )
+            .wait()
+            .is_none()
+        );
+        let p = k.published("test").unwrap();
+        assert!(p.fault.is_some());
+        assert!(
+            p.entry.is_some() && p.dirty,
+            "an edit is open, unsaved work"
+        );
+        assert_eq!(close_state(Some(&p), false, false), CloseState::Stopped);
+        let source = crate::session::reopen_source(&p, dir.path()).unwrap();
+        // complete_close's call.
+        assert!(matches!(
+            answer(&k, ShellCall::Close(session)),
+            ShellReply::Closed {
+                recovery_copy: None
+            }
+        ));
+        assert_eq!(
+            stored(),
+            base,
+            "closing wrote nothing of the stopped project"
+        );
+        // reopen_stopped → open_named → the recovery prompt's Recover.
+        let ShellReply::RecoveryRequired { ticket, .. } = answer(
+            &k,
+            ShellCall::PrepareOpen {
+                id: "test".into(),
+                source,
+                electron_profile: None,
+            },
+        ) else {
+            panic!("reopening offers recovery")
+        };
+        answer(
+            &k,
+            ShellCall::DecideRecovery {
+                ticket,
+                decision: RecoveryDecision::Recover,
+            },
+        );
+        let recovered = k.published("test").unwrap();
+        assert!(recovered.fault.is_none());
+        assert_eq!(
+            recovered.snapshot.document.to_value().unwrap(),
+            acknowledged.snapshot.document.to_value().unwrap()
+        );
+        assert_eq!(recovered.history.undo_label.as_deref(), Some("Rename"));
+        // Quitting after Later instead: compaction keeps only the
+        // acknowledged work, never the half-applied edit.
+        let reopened = recovered.session.as_ref().unwrap().handle.clone();
+        answer(&k, ShellCall::DeferClose(reopened));
+        answer(&k, ShellCall::PrepareQuit);
+        let text = String::from_utf8(stored()).unwrap();
+        assert!(
+            text.contains("Rejected edit") && !text.contains("Half applied"),
+            "{text}"
+        );
+        actor.shutdown();
+    }
+    #[test]
+    fn dont_save_library_archives_and_quit_never_resaves_rejected_work() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let base = std::fs::read(dir.path().join("store/project.test.json")).unwrap();
+        edit(&k);
+        wait(discard_close(&k, session)).unwrap();
+        assert!(
+            std::fs::read_dir(dir.path().join("journals/test/discarded"))
+                .unwrap()
+                .next()
+                .is_some()
+        );
+        answer(&k, ShellCall::PrepareQuit);
+        let stored = std::fs::read(dir.path().join("store/project.test.json")).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stored).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&base).unwrap()
+        );
+        actor.shutdown();
+    }
+    #[test]
+    fn dont_save_file_keeps_original_bytes_after_quit() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let path = dir.path().join("project.pmv");
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session: session.clone(),
+                path: path.clone(),
+                replace: false,
+            },
+        );
+        let base = std::fs::read(&path).unwrap();
+        edit(&k);
+        wait(discard_close(&k, session)).unwrap();
+        answer(&k, ShellCall::PrepareQuit);
+        assert_eq!(std::fs::read(path).unwrap(), base);
+        actor.shutdown();
+    }
+    #[test]
+    fn save_flight_refuses_close_and_quit_then_worker_completion_allows_them() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let path = dir.path().join("project.pmv");
+        edit(&k);
+        let save = k
+            .prepare_save(session.clone(), Some(path))
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            close_state(k.published("test").as_deref(), false, false),
+            CloseState::Saving
+        );
+        assert!(
+            k.shell(ShellCall::Close(session.clone()))
+                .wait()
+                .unwrap()
+                .is_err()
+        );
+        assert!(k.shell(ShellCall::PrepareQuit).wait().unwrap().is_err());
+        k.finish_save(save.run()).wait().unwrap().unwrap();
+        assert_eq!(
+            close_state(k.published("test").as_deref(), false, false),
+            CloseState::Clean
+        );
+        answer(&k, ShellCall::Close(session));
+        answer(&k, ShellCall::PrepareQuit);
+        actor.shutdown();
+    }
+    #[test]
+    fn dirty_and_active_edit_require_explicit_choice_or_deferral() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        edit(&k);
+        let p = k.published("test").unwrap();
+        assert_eq!(close_state(Some(&p), false, false), CloseState::Dirty);
+        assert_eq!(close_state(Some(&p), true, false), CloseState::Busy);
+        assert_eq!(close_state(Some(&p), false, true), CloseState::Saving);
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Drag".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            close_state(k.published("test").as_deref(), false, false),
+            CloseState::Busy
+        );
+        actor.shutdown();
+    }
+    /// A drag whose owner never ended it held the project's entry open: a
+    /// Quit was refused in a status line nobody saw and could never finish.
+    /// The close names that edit; finishing it (Seal) lets the close go on
+    /// with the usual Save question, and the edit is one step Undo takes back.
+    #[test]
+    fn an_edit_left_open_is_named_and_finishing_it_lets_the_close_go_on() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Move".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        let p = k.published("test");
+        assert_eq!(close_state(p.as_deref(), false, false), CloseState::Busy);
+        assert_eq!(
+            open_edit(p.as_deref(), false, false).as_deref(),
+            Some("Move")
+        );
+        // Opening, or another question on screen, holds the close instead.
+        assert_eq!(open_edit(p.as_deref(), true, false), None);
+        assert_eq!(open_edit(p.as_deref(), false, true), None);
+        k.call_blocking("test", Request::new(Caller::native(), HistoryCall::Seal))
+            .unwrap();
+        let p = k.published("test");
+        assert_eq!(close_state(p.as_deref(), false, false), CloseState::Dirty);
+        assert_eq!(open_edit(p.as_deref(), false, false), None);
+        assert!(
+            p.unwrap().history.can_undo,
+            "the finished edit is one undo step"
+        );
+        actor.shutdown();
+    }
+    /// Save with an edit left open (a drag whose release never ended it):
+    /// the kernel refuses it as it is; finished first, as Cmd-S now does,
+    /// the save goes through and keeps the edit.
+    #[test]
+    fn a_save_finishes_an_edit_left_open_and_keeps_it() {
+        let (_dir, actor, session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Scale".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        let refused = k.shell(ShellCall::Save(session.clone())).wait().unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| crate::surfaces::documents::WriteFailure::of(&format!("{e:?}"))
+                    == crate::surfaces::documents::WriteFailure::EditOpen),
+            "{refused:?}"
+        );
+        k.call_blocking("test", Request::new(Caller::native(), HistoryCall::Seal))
+            .unwrap();
+        answer(&k, ShellCall::Save(session));
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none() && !p.dirty, "saved");
+        assert!(p.history.can_undo, "the edit is kept, one undo step");
+        actor.shutdown();
+    }
+    /// Undo with an edit left open (a move whose drag never sent its end):
+    /// the move is what is undone, and the next edit is a step of its own.
+    #[test]
+    fn undo_after_an_edit_left_open_undoes_that_edit() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Move".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                HistoryCall::EditorUndo {
+                    seal_left_open: true,
+                },
+            ),
+        )
+        .unwrap();
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none(), "no edit is left open");
+        assert!(!p.history.can_undo, "the move was undone");
+        assert!(p.history.can_redo, "and can be redone");
+        actor.shutdown();
+    }
+    /// PM-718: the editor's Undo while an agent's edit is applying (an MCP
+    /// mutation lease, open across the agent's writes), sent as the editor
+    /// sends it when no button is down. The edit is not sealed half-way; the
+    /// Undo waits for it (the publication says so) and takes it back whole,
+    /// and the person's step below it stays.
+    #[test]
+    fn undo_while_an_agent_edit_applies_takes_it_back_whole_once_it_lands() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        edit(&k);
+        let agent = Caller::realm(41, 1, Origin::Mcp);
+        let name = |name: &str| Call::Transact {
+            label: Some("Agent rename".into()),
+            body: WriteBody::Commands(vec![
+                CompCommand::Set {
+                    patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                        name: Some(name.into()),
+                        ..Default::default()
+                    }),
+                }
+                .into(),
+            ]),
+            expected_revision: None,
+        };
+        let Reply::Mutation(lease) = k
+            .call_blocking(
+                "test",
+                Request::new(
+                    agent,
+                    EditCall::MutateBegin {
+                        label: "Agent edit".into(),
+                    },
+                ),
+            )
+            .unwrap()
+            .reply
+        else {
+            panic!("no lease")
+        };
+        k.call_blocking("test", Request::new(agent, name("Agent half")))
+            .unwrap();
+        let undo = k.call(
+            "test",
+            Request::new(
+                Caller::native(),
+                HistoryCall::EditorUndo {
+                    seal_left_open: true,
+                },
+            ),
+        );
+        k.call_blocking("test", Request::new(agent, name("Agent whole")))
+            .unwrap();
+        assert!(k.published("test").unwrap().history.waiting);
+        assert!(
+            undo.try_take().is_none(),
+            "Undo ran inside the agent's edit"
+        );
+        let finished = k
+            .call_blocking(
+                "test",
+                Request::new(
+                    agent,
+                    EditCall::MutateFinish {
+                        lease,
+                        ops: Vec::new(),
+                        label: None,
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(matches!(&finished.reply, Reply::Edit(r) if r.ok));
+        assert!(matches!(
+            undo.wait().unwrap().unwrap().reply,
+            Reply::Bool(true)
+        ));
+        let p = k.published("test").unwrap();
+        assert!(!p.history.waiting);
+        assert_eq!(p.history.undo_label.as_deref(), Some("Rename"));
+        assert_eq!(p.history.redo_label.as_deref(), Some("Agent edit"));
+        actor.shutdown();
+    }
+}

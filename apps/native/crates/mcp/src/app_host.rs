@@ -1,0 +1,728 @@
+//! The running app's windows and the project each one shows. The app owns the
+//! kernel actor; each editor window owns its project and reports it here, and
+//! the key window is where MCP acts. `Automation` attaches to this instead of
+//! opening a second kernel. All waits here belong on MCP workers, never main.
+use crate::{Error, Result};
+use pm_kernel::{
+    KernelHandle, Published,
+    session::{SessionHandle, SessionSource, ShellCall, ShellReply},
+};
+use serde_json::{Value, json};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicIsize, Ordering},
+    },
+};
+
+const EXCLUSIVE_OPERATION: isize = -1;
+
+pub struct Host {
+    pub kernel: KernelHandle,
+    pub profile: PathBuf,
+    windows: Mutex<Windows>,
+    presence: Mutex<
+        std::collections::HashMap<String, std::collections::VecDeque<crate::presence::Presence>>,
+    >,
+    /// 0 = idle, > 0 = active shared read/panel operations, -1 = exclusive session transition.
+    operations: Arc<AtomicIsize>,
+    /// The project whose open waits on a person's recovery choice.
+    deciding: Mutex<Option<String>>,
+    pending_opens: Mutex<crate::recovery::PendingOpens>,
+    pub closing: AtomicBool,
+    paused: Mutex<std::collections::HashSet<String>>,
+    held: Mutex<std::collections::HashSet<String>>,
+    recent_turn: Mutex<std::collections::HashMap<String, ProjectTurns>>,
+    pause_changed: std::sync::Condvar,
+    extension_state: Mutex<std::collections::BTreeMap<u64, ProjectExtensions>>,
+}
+/// A built-in run can reconnect during final verification. Each connection
+/// that changes the document contributes its own history writer.
+#[derive(Clone, Default)]
+pub struct RecentTurn {
+    pub writers: Vec<(pm_kernel::Writer, String)>,
+}
+#[derive(Default)]
+struct ProjectTurns {
+    document: u64,
+    builtin_run: Option<String>,
+    builtin: RecentTurn,
+    external: RecentTurn,
+    show_builtin: bool,
+    builtin_working: bool,
+}
+#[derive(Clone, Default)]
+pub struct ProjectExtensions {
+    pub root: Option<PathBuf>,
+    pub excluded: std::collections::BTreeSet<String>,
+    pub report: Value,
+}
+
+impl ProjectTurns {
+    fn bind_document(&mut self, document: u64) {
+        if self.document != document {
+            *self = Self { document, ..Self::default() };
+        }
+    }
+
+    fn begin_builtin(&mut self, run: &str) {
+        self.builtin_run = Some(run.into());
+        self.builtin = RecentTurn::default();
+        self.builtin_working = true;
+        self.show_builtin = true;
+    }
+}
+
+/// Slot 0 is a windowless host's (the headless MCP server): its only project.
+const WINDOWLESS: u64 = 0;
+#[derive(Default)]
+struct Windows {
+    /// Each editor window's project, and how to tell that window MCP changed it.
+    slots: std::collections::BTreeMap<u64, Slot>,
+    /// The key editor window: where MCP opens and which project it means by default.
+    active: Option<u64>,
+}
+#[derive(Default)]
+struct Slot {
+    /// What the window shows (it reports it).
+    shown: Option<SessionHandle>,
+    /// What MCP placed there and the window hasn't taken yet.
+    placed: Option<SessionHandle>,
+    changed: Option<async_channel::Sender<()>>,
+}
+impl Slot {
+    /// What the window shows, or is about to.
+    fn session(&self) -> Option<&SessionHandle> {
+        self.placed.as_ref().or(self.shown.as_ref())
+    }
+}
+impl Windows {
+    fn target(&self) -> u64 {
+        self.active
+            .filter(|w| self.slots.contains_key(w))
+            .or_else(|| self.slots.keys().copied().find(|w| *w != WINDOWLESS))
+            .unwrap_or(WINDOWLESS)
+    }
+    /// Where MCP opens a project: the key window if it's empty, else an empty
+    /// window, else the key window (whose project it replaces, as v1's one
+    /// window did).
+    fn open_target(&self) -> u64 {
+        let target = self.target();
+        let empty = |w: &u64| self.slots.get(w).is_some_and(|s| s.session().is_none());
+        if empty(&target) {
+            return target;
+        }
+        self.slots
+            .keys()
+            .copied()
+            .find(|w| *w != WINDOWLESS && empty(w))
+            .unwrap_or(target)
+    }
+    fn showing(&self, project: &str) -> Option<(u64, SessionHandle)> {
+        self.slots.iter().find_map(|(w, slot)| {
+            [&slot.placed, &slot.shown]
+                .into_iter()
+                .flatten()
+                .find(|s| s.project == project)
+                .map(|s| (*w, s.clone()))
+        })
+    }
+}
+/// An owned, nonblocking fence for app session transitions (exclusive) or
+/// concurrent non-transition tool calls (shared). Never held by a UI gesture.
+pub struct Operation {
+    counter: Arc<AtomicIsize>,
+    exclusive: bool,
+}
+impl Drop for Operation {
+    fn drop(&mut self) {
+        if self.exclusive {
+            self.counter.store(0, Ordering::Release);
+        } else {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+impl Host {
+    pub fn new(kernel: KernelHandle, profile: PathBuf) -> Arc<Self> {
+        let mut windows = Windows::default();
+        windows.slots.insert(WINDOWLESS, Slot::default());
+        Arc::new(Self {
+            kernel,
+            profile,
+            windows: Mutex::new(windows),
+            presence: Mutex::default(),
+            operations: Arc::new(AtomicIsize::new(0)),
+            deciding: Mutex::new(None),
+            pending_opens: Mutex::default(),
+            closing: AtomicBool::new(false),
+            paused: Mutex::default(),
+            recent_turn: Mutex::default(),
+            held: Mutex::default(),
+            pause_changed: std::sync::Condvar::new(),
+            extension_state: Mutex::default(),
+        })
+    }
+    pub fn begin_builtin_turn(&self, project: &str, run: &str) {
+        let mut recent = self.recent_turn.lock().unwrap();
+        let Some(view) = self.kernel.published(project) else {
+            return;
+        };
+        let turns = recent.entry(project.into()).or_default();
+        turns.bind_document(view.snapshot.doc_id);
+        if turns.builtin_run.as_deref() != Some(run) {
+            turns.begin_builtin(run);
+        }
+    }
+
+    pub fn finish_builtin_turn(&self, project: &str, document: u64) {
+        if let Some(turns) = self.recent_turn.lock().unwrap().get_mut(project)
+            && turns.document == document
+        {
+            turns.builtin_working = false;
+        }
+    }
+
+    pub fn record_turn(
+        &self,
+        project: &str,
+        document: u64,
+        owner: Option<&str>,
+        writer: pm_kernel::Writer,
+        label: &str,
+    ) {
+        let mut recent = self.recent_turn.lock().unwrap();
+        if self.kernel.published(project).is_none_or(|view| view.snapshot.doc_id != document) {
+            return;
+        }
+        let turns = recent.entry(project.into()).or_default();
+        turns.bind_document(document);
+        if let Some(run) = owner {
+            if turns.builtin_run.is_none() {
+                // An app-wide run can open its project after it starts.
+                turns.begin_builtin(run);
+            }
+            if turns.builtin_run.as_deref() == Some(run) {
+                if let Some((_, title)) = turns.builtin.writers.iter_mut().find(|(w, _)| *w == writer) {
+                    *title = label.into();
+                } else {
+                    turns.builtin.writers.push((writer, label.into()));
+                }
+            }
+        } else {
+            turns.external.writers = vec![(writer, label.into())];
+            if !turns.builtin_working {
+                turns.show_builtin = false;
+            }
+        }
+    }
+
+    pub fn latest_turn(&self, project: &str, document: u64) -> Option<RecentTurn> {
+        let recent = self.recent_turn.lock().unwrap();
+        let turns = recent.get(project).filter(|turns| turns.document == document)?;
+        let turn = if turns.show_builtin { &turns.builtin } else { &turns.external };
+        (!turn.writers.is_empty()).then(|| turn.clone())
+    }
+
+    /// Retire only the writer we actually processed. A newer session may have
+    /// published a different turn while the kernel was undoing this one.
+    pub fn forget_turn_writer(&self, project: &str, document: u64, writer: pm_kernel::Writer) {
+        if let Some(turns) = self.recent_turn.lock().unwrap().get_mut(project)
+            && turns.document == document
+        {
+            turns.builtin.writers.retain(|(owner, _)| *owner != writer);
+            turns.external.writers.retain(|(owner, _)| *owner != writer);
+        }
+    }
+    /// Pause gates the next tool admission on the MCP worker, never a
+    /// transaction in progress or the UI thread.
+    pub fn is_paused(&self, project: &str) -> bool {
+        self.paused.lock().unwrap().contains(project)
+    }
+    pub fn is_held(&self, project: &str) -> bool {
+        self.held.lock().unwrap().contains(project)
+    }
+    pub fn toggle_pause(&self, project: &str) -> bool {
+        let mut paused = self.paused.lock().unwrap();
+        let active = if paused.remove(project) {
+            false
+        } else {
+            paused.insert(project.into());
+            true
+        };
+        self.pause_changed.notify_all();
+        active
+    }
+    pub fn resume_project(&self, project: &str) {
+        self.paused.lock().unwrap().remove(project);
+        self.pause_changed.notify_all();
+    }
+    pub fn wait_if_paused(&self, project: &str, mut running: impl FnMut() -> bool) -> bool {
+        loop {
+            // Panel Stop revokes admission without going through the toolbar.
+            // Check it outside the pause lock and wake only this MCP worker.
+            if self.closing.load(Ordering::Acquire) || !running() {
+                return false;
+            }
+            let paused = self.paused.lock().unwrap();
+            if !paused.contains(project) {
+                return true;
+            }
+            drop(
+                self.pause_changed
+                    .wait_timeout(paused, std::time::Duration::from_millis(100))
+                    .unwrap(),
+            );
+        }
+    }
+    /// Presence is view-only. Hidden projects discard events; returning to a
+    /// tab never replays an old sketch. Wake the window without changing focus.
+    pub fn publish_presence(&self, event: crate::presence::Presence) {
+        match event.kind {
+            crate::presence::Kind::Held => {
+                self.held.lock().unwrap().insert(event.project.clone());
+            }
+            crate::presence::Kind::Landed
+            | crate::presence::Kind::Dropped
+            | crate::presence::Kind::RunEnd => {
+                self.held.lock().unwrap().remove(&event.project);
+            }
+            _ => {}
+        }
+        let tx = {
+            let windows = self.windows.lock().unwrap();
+            windows
+                .showing(&event.project)
+                .and_then(|(id, _)| windows.slots.get(&id)?.changed.clone())
+        };
+        let Some(tx) = tx else {
+            return;
+        };
+        let mut presence = self.presence.lock().unwrap();
+        let queue = presence.entry(event.project.clone()).or_default();
+        if let Some(old) = queue.iter_mut().find(|p| {
+            p.layer == event.layer && p.kind == event.kind && p.property == event.property
+        }) {
+            *old = event;
+        } else {
+            if queue.len() == 6 {
+                queue.pop_front();
+            }
+            queue.push_back(event);
+        }
+        drop(presence);
+        let _ = tx.try_send(());
+    }
+    pub fn take_presence(&self, project: &str) -> Vec<crate::presence::Presence> {
+        self.presence
+            .lock()
+            .unwrap()
+            .remove(project)
+            .map(|q| q.into_iter().collect())
+            .unwrap_or_default()
+    }
+    /// An editor window opened. The receiver wakes when MCP changes its project.
+    pub fn attach_window(&self, window: u64) -> async_channel::Receiver<()> {
+        assert_ne!(window, WINDOWLESS, "window ids start at 1");
+        let (tx, rx) = async_channel::bounded(1);
+        let mut windows = self.windows.lock().unwrap();
+        windows.slots.insert(
+            window,
+            Slot {
+                changed: Some(tx),
+                ..Slot::default()
+            },
+        );
+        windows.active.get_or_insert(window);
+        rx
+    }
+    /// An editor window closed; its project is no longer anyone's.
+    pub fn detach_window(&self, window: u64) {
+        let mut windows = self.windows.lock().unwrap();
+        if let Some(slot) = windows.slots.remove(&window) {
+            if let Some(session) = slot.session() {
+                self.resume_project(&session.project);
+            }
+        }
+        if windows.active == Some(window) {
+            windows.active = None;
+        }
+    }
+    /// The key editor window changed: MCP acts there from now on.
+    pub fn activate_window(&self, window: u64) {
+        let mut windows = self.windows.lock().unwrap();
+        if windows.slots.contains_key(&window) {
+            windows.active = Some(window);
+        }
+    }
+    /// What a window shows, as it reports it. Never notifies anyone: a window's
+    /// project is its own, and other windows don't follow it.
+    pub fn bind_window(&self, window: u64, session: Option<SessionHandle>) {
+        if let Some(slot) = self.windows.lock().unwrap().slots.get_mut(&window) {
+            slot.shown = session;
+        }
+    }
+    /// What `window` shows, or MCP placed there for it to show.
+    pub fn window_session(&self, window: u64) -> Option<SessionHandle> {
+        self.windows
+            .lock()
+            .unwrap()
+            .slots
+            .get(&window)
+            .and_then(|s| s.session().cloned())
+    }
+    /// The window takes the project MCP placed for it, before showing it: from
+    /// here on it is the window's, and a later MCP open can't displace it.
+    pub fn claim_placed(&self, window: u64) -> Option<SessionHandle> {
+        let mut windows = self.windows.lock().unwrap();
+        let slot = windows.slots.get_mut(&window)?;
+        let placed = slot.placed.take()?;
+        slot.shown = Some(placed.clone());
+        Some(placed)
+    }
+    /// The window showing `project`, if one does.
+    pub fn window_of(&self, project: &str) -> Option<u64> {
+        let windows = self.windows.lock().unwrap();
+        windows
+            .showing(project)
+            .map(|(w, _)| w)
+            .filter(|w| *w != WINDOWLESS)
+    }
+    /// The session of `project` in whichever window shows it.
+    pub fn session_of(&self, project: &str) -> Option<SessionHandle> {
+        self.windows
+            .lock()
+            .unwrap()
+            .showing(project)
+            .map(|(_, s)| s)
+    }
+    pub fn try_operation(&self) -> Option<Operation> {
+        self.operations
+            .compare_exchange(0, EXCLUSIVE_OPERATION, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Operation {
+                counter: self.operations.clone(),
+                exclusive: true,
+            })
+    }
+    /// Shared fence for non-transition MCP tools (reads, panel inspection,
+    /// captures, extension publishes). Unlimited shared callers can run
+    /// concurrently, while exclusive session transitions (open/close/import)
+    /// still fence them out cleanly.
+    pub fn try_shared_operation(&self) -> Option<Operation> {
+        let mut current = self.operations.load(Ordering::Acquire);
+        loop {
+            if current < 0 {
+                return None;
+            }
+            match self.operations.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Operation {
+                        counter: self.operations.clone(),
+                        exclusive: false,
+                    });
+                }
+                Err(next) => current = next,
+            }
+        }
+    }
+    /// Whether any session transition or active fenced operation holds the fence now.
+    pub fn operation_in_progress(&self) -> bool {
+        self.operations.load(Ordering::Acquire) != 0
+    }
+    /// Whether an open is currently paused waiting on a human recovery choice.
+    pub fn is_awaiting_recovery(&self) -> bool {
+        self.deciding.lock().unwrap().is_some()
+    }
+    /// While `project`'s open waits on a recovery choice in the window, tools
+    /// say so instead of reporting a bare operation in progress.
+    pub fn awaiting_recovery(&self, project: Option<String>) {
+        *self.deciding.lock().unwrap() = project;
+    }
+    /// The reply to a tool the open's fence turned away.
+    pub fn fenced(&self) -> Error {
+        match self.deciding.lock().unwrap().as_deref() {
+            Some(project) => Error::conflict(format!(
+                "“{project}” has unsaved work from a session that ended unexpectedly. \
+                 Powermove is waiting for someone to choose what to do with it in its \
+                 window, and nothing has changed yet. list_projects and the Store tools \
+                 still work. Ask them to choose, then try again."
+            )),
+            None => Error::conflict("A project operation is in progress. Inspect and retry."),
+        }
+    }
+    /// The project MCP means by default: the key window's.
+    pub fn current(&self) -> Option<SessionHandle> {
+        let windows = self.windows.lock().unwrap();
+        windows
+            .slots
+            .get(&windows.target())
+            .and_then(|s| s.session().cloned())
+    }
+    /// MCP places `session` in its window (see `open_target`), which then shows
+    /// it and becomes MCP's. Returns the session it displaces and nobody shows:
+    /// a windowless host's previous project, or a window's earlier placement it
+    /// never took (two opens before the window caught up).
+    fn place(&self, session: SessionHandle) -> (u64, Option<SessionHandle>) {
+        let mut windows = self.windows.lock().unwrap();
+        let target = windows.open_target();
+        if target != WINDOWLESS {
+            windows.active = Some(target);
+        }
+        let slot = windows.slots.get_mut(&target).expect("target slot");
+        let displaced = if target == WINDOWLESS {
+            slot.shown.replace(session.clone())
+        } else {
+            slot.placed.replace(session.clone())
+        };
+        if let Some(tx) = &slot.changed {
+            let _ = tx.try_send(());
+        }
+        let displaced = displaced.filter(|old| {
+            old != &session && windows.showing(&old.project).is_none_or(|(_, s)| &s != old)
+        });
+        (target, displaced)
+    }
+    pub fn shell(&self, call: ShellCall) -> Result<ShellReply> {
+        self.kernel
+            .shell(call)
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)
+    }
+    /// MCP open_project/create_project. A project a window already shows stays
+    /// there and that window becomes MCP's. Otherwise it opens in an empty
+    /// window, else in the key window, which closes what it showed itself: MCP
+    /// never closes a window's project underneath it.
+    pub fn open(&self, id: String, source: SessionSource) -> Result<Value> {
+        if let Some(window) = self.window_of(&id) {
+            self.activate_window(window);
+            let p = self.kernel.published(&id).ok_or_else(stopped)?;
+            return Ok(with_extensions(
+                identity(&p),
+                &self.project_extensions(p.snapshot.doc_id).report,
+            ));
+        }
+        let reply = self.shell(ShellCall::PrepareOpen {
+            id: id.clone(),
+            source,
+            electron_profile: None,
+        })?;
+        self.finish_open(&id, reply)
+    }
+    pub fn pending_recoveries(&self) -> Value {
+        self.pending_opens.lock().unwrap().list()
+    }
+    pub fn decide_recovery(&self, id: &str, choice: &Value) -> Result<Value> {
+        let (ticket, decision) = self.pending_opens.lock().unwrap().take(id, choice)?;
+        let reply = self.shell(ShellCall::DecideRecovery { ticket, decision })?;
+        self.finish_open(id, reply)
+    }
+    fn finish_open(&self, id: &str, reply: ShellReply) -> Result<Value> {
+        if let ShellReply::RecoveryRequired { ticket, recovery } = reply {
+            return Ok(self
+                .pending_opens
+                .lock()
+                .unwrap()
+                .required(id, ticket, recovery));
+        }
+        let ShellReply::Opened {
+            session,
+            decision: pm_kernel::locks::OpenDecision::Writable,
+            info,
+            ..
+        } = reply
+        else {
+            return Err(Error::kernel(reply));
+        };
+        let (report, excluded) =
+            crate::project_extensions::open_report(&info.extension_bundle, &self.profile);
+        if report.as_object().is_some_and(|report| !report.is_empty())
+            && let Some(published) = self.kernel.published(&session.project)
+        {
+            self.set_project_extensions(
+                published.snapshot.doc_id,
+                ProjectExtensions {
+                    root: None,
+                    excluded,
+                    report: report.clone(),
+                },
+            );
+        }
+        let (target, old) = self.place(session.clone());
+        // A window closes the project it showed once it shows the new one; MCP
+        // closes only what no window shows (see `place`).
+        if let Some(old) = old.filter(|s| {
+            self.kernel
+                .published(&s.project)
+                .is_some_and(|p| p.session.as_ref().map(|m| &m.handle) == Some(s))
+        }) {
+            match self.shell(ShellCall::Close(old.clone())) {
+                Ok(ShellReply::Closed {
+                    recovery_copy: None,
+                }) => {}
+                other if target == WINDOWLESS => {
+                    // Do not strand the newly opened project if replacing the old one fails.
+                    self.bind_window(WINDOWLESS, Some(old));
+                    let _ = self.shell(ShellCall::DeferClose(session));
+                    return Err(Error::kernel(other));
+                }
+                // The displaced placement keeps its recovery journal; the new
+                // project still opens in the window.
+                _ => {}
+            }
+        }
+        let p = self
+            .kernel
+            .published(&session.project)
+            .ok_or_else(stopped)?;
+        Ok(with_extensions(identity(&p), &report))
+    }
+    pub fn project_extensions(&self, document: u64) -> ProjectExtensions {
+        self.extension_state
+            .lock()
+            .unwrap()
+            .get(&document)
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn set_project_extensions(&self, document: u64, extensions: ProjectExtensions) {
+        self.extension_state
+            .lock()
+            .unwrap()
+            .insert(document, extensions);
+    }
+    pub fn extension_exclusions(&self, document: u64) -> std::collections::BTreeSet<String> {
+        self.project_extensions(document).excluded
+    }
+    /// EOF from a headless owner closes library projects durably. Unsaved
+    /// named files keep their journal, like a deferred close in the app.
+    /// A proxy disconnect must never call this on a windowed host.
+    pub fn close_headless(&self) -> Result<()> {
+        let current = {
+            let windows = self.windows.lock().unwrap();
+            if windows.slots.keys().any(|w| *w != WINDOWLESS) {
+                return Err(Error::invalid(
+                    "Cannot close a headless host with editor windows",
+                ));
+            }
+            windows
+                .slots
+                .get(&WINDOWLESS)
+                .and_then(|s| s.session())
+                .cloned()
+        };
+        if let Some(session) = current {
+            let p = self
+                .kernel
+                .published(&session.project)
+                .ok_or_else(stopped)?;
+            let call = if p.path.is_some() && p.dirty {
+                ShellCall::DeferClose(session)
+            } else {
+                ShellCall::Close(session)
+            };
+            match self.shell(call)? {
+                ShellReply::Closed {
+                    recovery_copy: None,
+                } => self.bind_window(WINDOWLESS, None),
+                other => return Err(Error::kernel(other)),
+            }
+        }
+        self.shell(ShellCall::ReleaseLibrary)?;
+        Ok(())
+    }
+    /// Save a project whose document has a named working file, in place.
+    pub(crate) fn save_document(&self, session: SessionHandle, document: u64) -> Result<()> {
+        let save = self
+            .kernel
+            .prepare_document_save(session, document)
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        let reply = self
+            .kernel
+            .finish_save(save.run())
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        match reply {
+            ShellReply::Saved {
+                recovery_copy: None,
+                ..
+            } => Ok(()),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub fn save(&self, session: SessionHandle, path: Option<PathBuf>) -> Result<Value> {
+        let p = self
+            .kernel
+            .published(&session.project)
+            .ok_or_else(stopped)?;
+        let file = path.is_some() || p.path.is_some();
+        let reply = if file {
+            let save = self
+                .kernel
+                .prepare_save(session, path)
+                .wait()
+                .ok_or_else(stopped)?
+                .map_err(Error::kernel)?;
+            self.kernel
+                .finish_save(save.run())
+                .wait()
+                .ok_or_else(stopped)?
+                .map_err(Error::kernel)?
+        } else {
+            self.shell(ShellCall::Save(session))?
+        };
+        match reply {
+            ShellReply::Saved {
+                session,
+                recovery_copy: None,
+                ..
+            } => {
+                let p = self
+                    .kernel
+                    .published(&session.project)
+                    .ok_or_else(stopped)?;
+                Ok(json!({"projectId":session.project,"path":p.path}))
+            }
+            other => Err(Error::kernel(other)),
+        }
+    }
+}
+/// The kernel dropped the call's answer: an internal error interrupted it
+/// (contained, in the Error Log; its project stops), or the app is quitting.
+pub(crate) fn stopped() -> Error {
+    Error {
+        code: "kernel_error".into(),
+        message: "The app kernel didn’t answer: an internal error interrupted this call (see the \
+                  Error Log), or the app is quitting."
+            .into(),
+        backing: Some("pm-kernel".into()),
+    }
+}
+fn with_extensions(mut identity: Value, report: &Value) -> Value {
+    if let Some(fields) = report.as_object() {
+        identity.as_object_mut().unwrap().extend(fields.clone());
+    }
+    identity
+}
+
+fn identity(p: &Published) -> Value {
+    let name = p
+        .snapshot
+        .root()
+        .and_then(|root| root.get("name"))
+        .and_then(|node| match node.kind() {
+            pm_model::NodeKind::String(text) => text.as_str(),
+            _ => None,
+        });
+    json!({"projectId":p.project,"name":name})
+}

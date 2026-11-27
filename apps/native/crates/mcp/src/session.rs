@@ -1,0 +1,2264 @@
+use crate::{Automation, Error, Result, catalog, commands, failure, json_value, success, views};
+use pm_kernel::session::{ShellCall, ShellReply};
+use pm_kernel::{ActorHistoryMark, Origin};
+use serde_json::{Value, json};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
+};
+
+mod hold;
+#[path = "aero_tools.rs"]
+pub mod aero_tools;
+use hold::PendingHold;
+
+/// Tools the running app answers on its main thread (`SurfaceHook`).
+const PANEL_TOOLS: &[&str] = &[
+    "panel_begin",
+    "panel_build",
+    "open_panel",
+    "get_panel_state",
+    "interact_panel",
+    "capture_panel",
+    "computer_use_panel",
+    "set_panel_layout",
+    "get_workspace_state",
+    "list_commands",
+    "run_command",
+];
+/// The shell's live docks and workspace replace the saved ones; panels the
+/// window registered natively join the kernel's registrations.
+fn live_layout(mut saved: Value, live: &Value) -> Value {
+    if !live.is_object() {
+        return saved;
+    }
+    for key in ["workspace", "docks"] {
+        if !live[key].is_null() {
+            saved[key] = live[key].clone();
+        }
+    }
+    let mut panels = saved["registeredPanels"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for panel in live["registeredPanels"].as_array().into_iter().flatten() {
+        if !panels.iter().any(|p| p["id"] == panel["id"]) {
+            panels.push(panel.clone());
+        }
+    }
+    saved["registeredPanels"] = json!(panels);
+    saved
+}
+/// The run (and its MCP access, "editor" or "project") a grant token names.
+fn agent(token: Option<&str>, host: &Automation) -> Option<(String, String)> {
+    (host.agent_grants.as_ref()?)(token?)
+}
+/// Main's orchestrator tools, answered by the window that runs the caller.
+const ORCHESTRATION_TOOLS: &[&str] = &[
+    "orchestrator_capabilities",
+    "delegate_task",
+    "task_status",
+    "task_send",
+    "task_cancel",
+    "thread_watch",
+    "thread_unwatch",
+];
+struct Transaction {
+    /// The document as the run found it (shared with the kernel's
+    /// publication, never copied), restored by a rollback.
+    snapshot: pm_kernel::Snapshot,
+    mark: ActorHistoryMark,
+    revision: u64,
+    changed: bool,
+    interleaved: bool,
+    label: String,
+}
+struct Active {
+    project: Option<String>,
+    document: Option<u64>,
+    access: String,
+    context: String,
+    /// Only a live host-issued Agent-panel grant enables internal editing.
+    internal: bool,
+    baseline: u64,
+    transaction: Option<Transaction>,
+    workspace: Option<PathBuf>,
+    /// The run's extension stage; renewed after each publication.
+    stage: Option<crate::extensions::Stage>,
+    run: String,
+    publications: u32,
+    owner: Option<String>,
+    committed: bool,
+    external_actions: bool,
+    /// Panel controls ran during this run (main's `panelActions`): their own
+    /// editor Undo applies, so the run never snapshot-restores over them.
+    panel_actions: bool,
+    /// Private agent focus; never publish this into Interface selection.
+    focus: Vec<String>,
+    time: f64,
+    default_comp: Option<String>,
+    focus_comp: Option<String>,
+    comp_focus: std::collections::HashMap<Option<String>, Vec<String>>,
+    known_layers: std::collections::HashSet<String>,
+    owned_scopes: Vec<Vec<pm_model::patch::PathPart>>,
+    observed_revision: u64,
+    steer_epoch: u64,
+}
+impl Active {
+    fn editor_permits(&self, name: &str) -> bool {
+        if self.internal {
+            catalog::composition_names().iter().any(|tool| tool == name)
+        } else {
+            catalog::permits("inspection", name)
+        }
+    }
+}
+/// One connection owns one session and workspace. No session credential is
+/// exposed in MCP results. Drop/disconnect attempts guarded rollback.
+pub struct McpSession {
+    host: Arc<Mutex<Automation>>,
+    active: Option<Active>,
+    /// The grant token of the provider run that launched this connection
+    /// (`--agent-run`), resolved through the host on every use: a token that
+    /// doesn't resolve (forged, or its run ended) refuses further calls.
+    agent_token: Option<String>,
+    writer: u32,
+    closed: bool,
+    pending: Option<PendingHold>,
+    bypass_hold: bool,
+    hold_note: Option<Value>,
+    /// Its close rolled the run's edits back ([`Self::take_rolled_back`]).
+    rolled_back: bool,
+    panel_lease: Option<crate::panel_lease::Lease>,
+    aero_project: Option<String>,
+    aero_revision: Option<u64>,
+}
+fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>) {
+    let Some(note) = pending.take() else {
+        return;
+    };
+    match result {
+        Value::Object(fields) => {
+            fields.insert("coeditNote".into(), note);
+        }
+        Value::Array(content)
+            if [
+                "render_frames",
+                "render_effect_lab",
+                "probe_media",
+                "sample_media_frames",
+                "media_contact_sheet",
+                "media_waveform",
+                "capture_panel",
+                "computer_use_panel",
+            ]
+            .contains(&name) =>
+        {
+            content.push(json!({"type":"text","text":note.to_string()}));
+        }
+        _ => *pending = Some(note),
+    }
+}
+#[cfg(test)]
+mod coedit_notes {
+    use super::*;
+    #[test]
+    fn image_results_keep_their_content_and_receive_a_text_note() {
+        let mut value = json!([{"type":"image","data":"synthetic","mimeType":"image/png"}]);
+        let original = value[0].clone();
+        let mut note = Some(json!({"status":"applied"}));
+        attach_hold_note("render_frames", &mut value, &mut note);
+        assert_eq!(value[0], original);
+        assert_eq!(value[1]["type"], "text");
+        assert!(note.is_none());
+    }
+    #[test]
+    fn plain_list_results_preserve_the_note_for_the_next_object_result() {
+        let mut list = json!(["asset"]);
+        let mut note = Some(json!({"status":"dropped"}));
+        attach_hold_note("list_media", &mut list, &mut note);
+        assert_eq!(list, json!(["asset"]));
+        assert!(note.is_some());
+        let mut next = json!({"revision":3});
+        attach_hold_note("get_project_state", &mut next, &mut note);
+        assert_eq!(next["coeditNote"]["status"], "dropped");
+        assert!(note.is_none());
+    }
+}
+fn next_writer() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1000);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+impl McpSession {
+    pub fn new(host: Arc<Mutex<Automation>>) -> Self {
+        Self {
+            host,
+            active: None,
+            agent_token: None,
+            writer: next_writer(),
+            closed: false,
+            pending: None,
+            bypass_hold: false,
+            hold_note: None,
+            panel_lease: None,
+            aero_project: None,
+            aero_revision: None,
+            rolled_back: false,
+        }
+    }
+    /// Whether this session's close rolled its edits back (the run ended
+    /// without keeping them): asked once, after `close`.
+    pub fn take_rolled_back(&mut self) -> bool {
+        std::mem::take(&mut self.rolled_back)
+    }
+    pub fn tools(&self) -> Value {
+        json!(catalog::served_tools())
+    }
+    pub(crate) fn note_eval_playhead(&mut self, time: f64) {
+        if let Some(active) = &mut self.active {
+            active.time = time;
+        }
+    }
+
+    pub fn set_agent_run(&mut self, token: &str) {
+        self.agent_token = Some(token.to_owned());
+    }
+    pub fn call(&mut self, name: &str, args: Value) -> Value {
+        if std::env::var_os("PM_MCP_TIMING").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return self.call_tool(name, args);
+        }
+        let started = std::time::Instant::now();
+        let result = self.call_tool(name, args);
+        let elapsed = started.elapsed();
+        let bytes = serde_json::to_vec(&result).map_or(0, |buf| buf.len());
+        let tool = if catalog::spec(name).is_some() {
+            name
+        } else {
+            "unknown"
+        };
+        eprintln!(
+            "pm_mcp tool={tool} elapsed_us={} result_bytes={bytes}",
+            elapsed.as_micros()
+        );
+        result
+    }
+    fn call_tool(&mut self, name: &str, args: Value) -> Value {
+        if name == "project_memory" && self.pending.is_none() {
+            return match self.project_memory(&args) {
+                Ok(value) => crate::success_model(&value),
+                Err(error) => failure(error),
+            };
+        }
+        match self.dispatch(name, &args) {
+            Ok(v) if name == "render_effect_lab" && v.is_array() => crate::effect_lab::result(v),
+            Ok(v)
+                if [
+                    "render_frames",
+                    "probe_media",
+                    "sample_media_frames",
+                    "media_contact_sheet",
+                    "media_waveform",
+                    "capture_panel",
+                    "computer_use_panel",
+                ]
+                .contains(&name) =>
+            {
+                json!({"content":v,"isError":false})
+            }
+            Ok(v) => success(v),
+            // Only new co-edit errors carry structured diagnostics. The
+            // generic stdio failure contract remains verbatim message text.
+            Err(e) if e.code == "target_removed" => json!({
+                "content":[{"type":"text","text":json!({
+                    "error":e.code,"status":"dropped","reason":e.message
+                }).to_string()}],"isError":true
+            }),
+            Err(e) => failure(e),
+        }
+    }
+    /// No schema admission, as on main: the session and memory switch refuse
+    /// first, and a JavaScript slice's lone surrogate is kept (tests/wave4.rs,
+    /// tests/main_memory.rs).
+    fn project_memory(&mut self, args: &Value) -> Result<pm_model::Value> {
+        self.check_agent_grant()?;
+        if self.closed {
+            return Err(Error::invalid("This MCP connection is closed."));
+        }
+        self.retire_replaced_document()?;
+        let session = self
+            .active
+            .as_ref()
+            .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
+        if session.access == "editor" && !session.editor_permits("project_memory") {
+            return Err(Error::invalid(
+                "This connection can only inspect the project.",
+            ));
+        }
+        if session.context == "app"
+            && session.project.is_none()
+            && !catalog::permits("app", "project_memory")
+        {
+            return Err(Error::invalid(
+                "This agent has no project attached. Open a project to use composition tools.",
+            ));
+        }
+        let id = session
+            .project
+            .as_deref()
+            .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+        let mut host = Automation::fenced(&self.host, session.document)?;
+        assert_project(session, &host, id)?;
+        host.project_memory(id, args, self.writer)
+    }
+    fn run_revoked(&self) -> bool {
+        self.agent_token.as_deref().is_some_and(|token| {
+            self.host.lock().map_or(true, |host| {
+                host.agent_grants
+                    .as_ref()
+                    .is_some_and(|grants| grants(token).is_none())
+            })
+        })
+    }
+    /// Called before the app acquires its session-transition fence.
+    pub fn wait_for_pause(&self) -> Result<()> {
+        if self.agent_token.is_none() {
+            return Ok(());
+        }
+        if let Some(project) = self.active.as_ref().and_then(|s| s.project.as_deref()) {
+            let gate = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("MCP host stopped"))?
+                .coedit_host();
+            if let Some(gate) = gate {
+                if !gate.wait_if_paused(project, || !self.run_revoked()) {
+                    return Err(Error {
+                        code: "agent_paused".into(),
+                        message:
+                            "The run is paused or stopped. Resume it before the next tool call."
+                                .into(),
+                        backing: None,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_agent_grant(&self) -> Result<()> {
+        if let Some(token) = self.agent_token.as_deref() {
+            let host = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("headless host stopped"))?;
+            if agent(Some(token), &host).is_none() {
+                return Err(Error::invalid("This agent run is no longer active."));
+            }
+        }
+        Ok(())
+    }
+    pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
+        self.check_agent_grant()?;
+        if !self.take_hold(name == "finish_session")? {
+            return Ok(
+                json!({"status":"held","reason":"Your previous write is still waiting; do not retry it."}),
+            );
+        }
+        if let Some(result) = self.defer_if_touched(name, args)? {
+            return Ok(result);
+        }
+        let mut result = self.dispatch_inner(name, args)?;
+        attach_hold_note(name, &mut result, &mut self.hold_note);
+        Ok(result)
+    }
+    fn dispatch_inner(&mut self, name: &str, args: &Value) -> Result<Value> {
+        if name == "project_memory" {
+            return self
+                .project_memory(args)
+                .and_then(crate::memory_admission::unicode);
+        }
+        if self.closed {
+            return Err(Error::invalid("This MCP connection is closed."));
+        }
+        self.retire_replaced_document()?;
+        if name == "start_session" {
+            return self.start(args);
+        }
+        if name == "finish_session" {
+            crate::validation::session(name, args)?;
+            if self.active.is_none() {
+                return Err(Error::invalid("No MCP session is active."));
+            }
+            return self.finish(args["commit"] == true);
+        }
+        let shared = self.host.clone();
+        let mut host = Automation::fenced(
+            &shared,
+            self.active.as_ref().and_then(|session| session.document),
+        )?;
+        if ["list_projects", "create_project", "open_project"].contains(&name) {
+            // An app session changes projects, then works in the new one.
+            if name != "list_projects" && self.active.as_ref().is_some_and(|s| s.context != "app") {
+                return Err(Error::invalid(
+                    "Finish the current session before changing projects.",
+                ));
+            }
+            catalog::validate(name, args)?;
+            if name != "list_projects"
+                && let Some(active) = self.active.as_mut()
+            {
+                library_boundary(active, &mut host)?;
+            }
+            let result = match name {
+                "list_projects" => host.list_projects(),
+                "create_project" => host.create_project(args),
+                _ => host
+                    .open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
+            }?;
+            let opened = match name {
+                "create_project" => result["projectId"].as_str(),
+                "open_project" if result["recoveryRequired"] != true => args["projectId"].as_str(),
+                _ => None,
+            };
+            if let (Some(id), Some(active)) = (opened, self.active.as_mut()) {
+                attach(
+                    active,
+                    &mut host,
+                    id,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
+            }
+            return Ok(result);
+        }
+        let session = self
+            .active
+            .as_mut()
+            .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
+        // External-session gates run before the bridge and body parsers in the tag.
+        if name == "publish_extensions" && session.access == "editor" && !session.internal {
+            return Err(Error::invalid(
+                "This connection can only inspect the project.",
+            ));
+        }
+        if name == "publish_extensions" {
+            crate::validation::extensions(args)?;
+            let extensions = host
+                .extensions
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            drop(host);
+            return publish(session, extensions.as_ref(), args, &self.host);
+        }
+        if name == "import_media_to_timeline"
+            && (session.access == "editor" || session.project.is_none())
+        {
+            return Err(Error::invalid(
+                "This tool requires project access and an attached project.",
+            ));
+        }
+        if catalog::spec(name).is_none() {
+            return Err(Error::invalid(format!("Unknown Powermove tool: {name}")));
+        }
+        if session.access == "editor" && !session.editor_permits(name) {
+            return Err(Error::invalid(
+                "This connection can only inspect the project.",
+            ));
+        }
+        if session.context == "app" && session.project.is_none() && !catalog::permits("app", name) {
+            return Err(Error::invalid(
+                "This agent has no project attached. Open a project to use composition tools.",
+            ));
+        }
+        let cancel_export = name == "task_cancel"
+            && args["taskId"].as_str().is_some_and(|id| id.starts_with("export"));
+        if name == "export_status" || cancel_export {
+            catalog::validate(name, args)?;
+            let id = session.project.as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+            assert_project(session, &host, id)?;
+            let job = args[if cancel_export { "taskId" } else { "jobId" }].as_str().unwrap();
+            let pending = host.export_jobs.find(id, session.document.unwrap(), job, false)?;
+            drop(host);
+            return if cancel_export { pending.cancel() } else { pending.status() };
+        }
+        if name == "manage_project" {
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            return self.manage(&mut host, args);
+        }
+        if name == "inspect_creative_workspace" {
+            return host.creative.workspace(args);
+        }
+        if name == "inspect_creative_extension" {
+            return host.creative.extension(args);
+        }
+        if name == "get_panel_layout" {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let project = session.project.clone();
+            let saved = host.panel_layout(project.as_deref())?;
+            let Some(surfaces) = host.surfaces.clone() else {
+                return Ok(saved);
+            };
+            drop(host);
+            let live = surfaces.call(name, project.as_deref(), args)?;
+            return Ok(live_layout(saved, &live));
+        }
+        if name == "render_effect_lab" {
+            use crate::effect_lab::{Backdrop, Context, Project, Request};
+            let permits = |access: &str| matches!(access, "editor" | "project");
+            let has_grant = self.agent_token.is_none()
+                || agent(self.agent_token.as_deref(), &host)
+                    .is_some_and(|(_, access)| permits(&access));
+            if !permits(&session.access) || !has_grant {
+                return Err(Error::invalid("The effect lab requires Editor access."));
+            }
+            let request = Request::parse(args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let project = session.project.clone().or_else(|| host.active_project());
+            let project = project
+                .map(|id| {
+                    let view = host.original_view(&id)?;
+                    Ok::<_, Error>(Project {
+                        id,
+                        document: view.document,
+                        revision: view.revision,
+                    })
+                })
+                .transpose()?;
+            if matches!(request.backdrop, Backdrop::Composition { .. }) && project.is_none() {
+                return Err(Error::invalid(
+                    "Open the project that contains the backdrop composition.",
+                ));
+            }
+            let engine = host
+                .engine
+                .clone()
+                .ok_or_else(|| Error::unavailable("native effect lab renderer"))?;
+            let context = Context {
+                project,
+                workspace: session.workspace.clone(),
+                agent_workspace: self
+                    .agent_token
+                    .as_deref()
+                    .zip(host.agent_workspace.as_ref())
+                    .and_then(|(token, workspace)| workspace(token)),
+                stage: session.stage.clone(),
+            };
+            let grants = host.agent_grants.clone();
+            let token = self.agent_token.clone();
+            drop(host);
+            let stop = || {
+                token
+                    .as_deref()
+                    .zip(grants.as_ref())
+                    .is_some_and(|(token, grants)| {
+                        grants(token).is_none_or(|(_, access)| !permits(&access))
+                    })
+            };
+            return engine.render_effect_lab(&request, &context, &stop)?.content();
+        }
+        if name == "validate_effect" {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            return crate::effect::validate(&args["definition"]);
+        }
+        if name == "fork_builtin_extension" || name == "stage_fork_rebase" {
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let extensions = host
+                .extensions
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            let staging = session
+                .stage
+                .as_ref()
+                .map(|stage| stage.staging.clone())
+                .ok_or_else(|| Error::invalid("Extension staging requires project access"))?;
+            drop(host);
+            let id = args["id"].as_str().unwrap_or_default();
+            return if name == "stage_fork_rebase" {
+                crate::extensions::rebase(extensions.as_ref(), id, &staging)
+            } else {
+                crate::extensions::fork(extensions.as_ref(), id, args["forkId"].as_str(), &staging)
+            };
+        }
+        if name == "run_command" && self.agent_token.is_some() {
+            catalog::validate(name, args)?;
+            let command = args["command"].as_str().unwrap_or_default();
+            if command == "transport.seek" {
+                let time = args["args"][0]
+                    .as_f64()
+                    .filter(|t| t.is_finite() && *t >= 0.)
+                    .ok_or_else(|| Error::invalid("Give a finite private evaluation time."))?;
+                self.active.as_mut().unwrap().time = time;
+                return Ok(json!({"ran":true,"scope":"agent","time":time}));
+            }
+            if command.starts_with("viewer.")
+                || command.starts_with("timeline.")
+                || command.starts_with("transport.")
+                || matches!(
+                    command,
+                    "play"
+                        | "pause"
+                        | "fitView"
+                        | "fitComposition"
+                        | "fitComp"
+                        | "selectAll"
+                        | "deselect"
+                        | "nextTab"
+                        | "previousTab"
+                )
+            {
+                return Ok(json!({"ran":false,"scope":"agent",
+                    "reason":"The user's view and transport stay where they left them. Use render_frames for private inspection."}));
+            }
+        }
+        if name == "run_command" && self.agent_token.is_some() {
+            return Err(Error::invalid(
+                "Use apply_commands or edit_video for edits in the agent's private focus. UI menu commands belong to the user during co-editing.",
+            ));
+        }
+        if PANEL_TOOLS.contains(&name) {
+            // As with the Store reads, a host without the capability says so
+            // before arguments are parsed.
+            if host.surfaces.is_none() {
+                return Err(Error::unavailable(catalog::backing(name)));
+            }
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            if ["interact_panel", "computer_use_panel"].contains(&name)
+                && matches!(args["panelId"].as_str(), Some("agent" | "library"))
+            {
+                return Err(Error::invalid(
+                    "The agent cannot operate its own conversation or permission controls.",
+                ));
+            }
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            let project = session.project.clone();
+            let acting = ["interact_panel", "computer_use_panel", "run_command"].contains(&name);
+            if name == "run_command" && project.is_none() {
+                return Err(Error::invalid(
+                    "This tool requires project access and an attached project.",
+                ));
+            }
+            if acting && let Some(id) = project.as_deref() {
+                let revision = host.revision(id)?;
+                if session.transaction.is_none() {
+                    session.transaction = Some(Transaction {
+                        snapshot: host.view(id)?.snapshot,
+                        mark: host.history_mark(id, self.writer)?,
+                        revision,
+                        changed: false,
+                        interleaved: false,
+                        label: "Use panel".into(),
+                    });
+                }
+                if session
+                    .transaction
+                    .as_ref()
+                    .is_some_and(|tx| tx.revision != revision)
+                {
+                    return Err(Error::invalid(
+                        "The project changed. Read get_project_state before using another panel control.",
+                    ));
+                }
+                session.panel_actions = true;
+            }
+            let base = match name {
+                "get_workspace_state" => Some(host.workspace_state(project.as_deref())?),
+                "set_panel_layout" => Some(host.panel_layout(project.as_deref())?),
+                _ => None,
+            };
+            let owner = agent(self.agent_token.as_deref(), &host).map(|(run, _)| run);
+            drop(host);
+            let mut surface_args = args.clone();
+            if ["panel_begin", "panel_build"].contains(&name) {
+                surface_args["_panel_owner"] = json!(owner);
+                surface_args["_panel_session"] =
+                    json!(self.panel_lease.as_ref().map(|lease| lease.id()));
+            }
+            let live = surfaces.call(name, project.as_deref(), &surface_args);
+            if acting && let Some(id) = project.as_deref() {
+                // Panel handlers may edit asynchronously; later reads see it.
+                let host = shared
+                    .lock()
+                    .map_err(|_| Error::unavailable("headless host stopped"))?;
+                let revision = host.revision(id)?;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.changed |= tx.snapshot.revision != revision;
+                    tx.revision = revision;
+                }
+            }
+            let live = live?;
+            return Ok(match (name, base) {
+                ("get_workspace_state", Some(mut state)) => {
+                    let layout = live_layout(state["layout"].take(), &live["layout"]);
+                    for (key, value) in live.as_object().into_iter().flatten() {
+                        if key == "project" {
+                            for (field, v) in value.as_object().into_iter().flatten() {
+                                state["project"][field] = v.clone();
+                            }
+                        } else {
+                            state[key] = value.clone();
+                        }
+                    }
+                    state["layout"] = layout;
+                    state
+                }
+                ("set_panel_layout", Some(saved)) => {
+                    let mut result = live;
+                    result["layout"] = live_layout(saved, &result["layout"]);
+                    result
+                }
+                _ => live,
+            });
+        }
+        if name == "publish_visual_reply" {
+            // The reply joins the calling run's thread in the app.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            let run = agent(self.agent_token.as_deref(), &host)
+                .map(|(run, _)| run)
+                .ok_or_else(|| {
+                    Error::invalid("The visualization’s agent run is no longer active.")
+                })?;
+            let project = session.project.clone();
+            drop(host);
+            let mut call = args.clone();
+            call["agentRunId"] = json!(run);
+            return surfaces.call(name, project.as_deref(), &call);
+        }
+        if ORCHESTRATION_TOOLS.contains(&name) {
+            // Tasks and watches belong to the window's Agent panel runs.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let run = agent(self.agent_token.as_deref(), &host)
+                .map(|(run, _)| run)
+                .ok_or_else(|| {
+                    Error::invalid(
+                        "Subagents and thread watches belong to a Powermove agent run. Ask in Powermove's Agent panel, or use thread_launch and thread_read.",
+                    )
+                })?;
+            let project = session.project.clone();
+            drop(host);
+            let mut call = args.clone();
+            call["agentRunId"] = json!(run);
+            return surfaces.call(name, project.as_deref(), &call);
+        }
+        if ["thread_launch", "thread_send", "thread_cancel"].contains(&name) {
+            // The window's Agent panel owns provider runs; only the app has one.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let project = session.project.clone();
+            let caller = agent(self.agent_token.as_deref(), &host);
+            drop(host);
+            let mut call = args.clone();
+            call["callerAccess"] = json!(session.access);
+            call["callerRunId"] = json!(session.run);
+            if let Some((run, _)) = caller {
+                call["agentRunId"] = json!(run);
+            }
+            return surfaces.call(name, project.as_deref(), &call);
+        }
+        if ["thread_list", "thread_read"].contains(&name) {
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let threads = host
+                .threads
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            let surfaces = host.surfaces.clone();
+            let caller = agent(self.agent_token.as_deref(), &host);
+            drop(host);
+            let project = session.project.clone();
+            let mut read = threads.read(name, project.as_deref(), args)?;
+            // Reading a finished run acknowledges this run's watch on it.
+            if name == "thread_read"
+                && let (Some(surfaces), Some((run, _))) = (&surfaces, caller)
+            {
+                let mut call = args.clone();
+                call["agentRunId"] = json!(run);
+                let _ = surfaces.call("thread_acknowledge", project.as_deref(), &call);
+            }
+            // A live run's trace and open questions come from the window's panel.
+            if name == "thread_read"
+                && let Some(surfaces) = surfaces
+                && let Ok(live) = surfaces.call("thread_live", project.as_deref(), args)
+                && live.is_object()
+            {
+                read["activity"] = live["activity"].clone();
+                read["questions"] = live["questions"].clone();
+                if live["busy"] == true {
+                    read["thread"]["busy"] = json!(true);
+                    read["thread"]["status"] = json!("running");
+                    read["thread"]["runId"] = live["runId"].clone();
+                }
+            }
+            return Ok(read);
+        }
+        if ["store_search", "store_extension", "store_source"].contains(&name) {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let store = host.store_reads.as_deref().ok_or_else(|| Error::unavailable(
+                "native Store same-origin bounded HTTP transport (search/detail/release/tree/file)"
+            ))?;
+            catalog::validate(name, args)?;
+            return match name {
+                "store_search" => crate::store::search(store, args),
+                "store_extension" => crate::store::detail(store, args),
+                _ => crate::store::source(store, args),
+            };
+        }
+        if !catalog::IMPLEMENTED.contains(&name) {
+            return Err(Error::unavailable(catalog::backing(name)));
+        }
+        if catalog::COMPOSITION_TOOLS.contains(&name) {
+            if self.agent_token.is_some() {
+                host.composition = session.default_comp.clone();
+            }
+            if let Some(value) = args.get("compositionId") {
+                let comp = value
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| Error::invalid("compositionId must be a nonempty string"))?;
+                host.composition = Some(comp.to_owned());
+                if let Some(id) = session.project.as_deref() {
+                    host.view(id)?;
+                }
+            }
+        }
+        if let Some(id) = session.project.as_deref() {
+            let view = host.view(id)?;
+            if self.agent_token.is_none() {
+                session.focus = view.selection.layers().to_vec();
+                session.time = host.playhead(id);
+            } else if catalog::COMPOSITION_TOOLS.contains(&name) {
+                let comp = view.snapshot.open_comp();
+                if session.focus_comp != comp {
+                    session.comp_focus.insert(
+                        session.focus_comp.clone(),
+                        std::mem::take(&mut session.focus),
+                    );
+                    session.focus = session.comp_focus.get(&comp).cloned().unwrap_or_default();
+                    session.focus_comp = comp;
+                }
+            }
+        }
+        if name == "export_video" {
+            let id = session
+                .project
+                .as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?
+                .to_owned();
+            assert_project(session, &host, &id)?;
+            let jobs = host.export_jobs.clone();
+            let pending = if let Some(job) = args.get("jobId") {
+                let job = job.as_str()
+                    .filter(|_| args.as_object().is_some_and(|o| o.len() == 1))
+                    .ok_or_else(|| Error::invalid("export_video with a jobId takes no other arguments."))?;
+                jobs.find(&id, session.document.unwrap(), job, true)?
+            } else {
+                catalog::validate(name, args)?;
+                let background = args["background"] == true || args["wait"] == false;
+                if args["background"].as_bool().zip(args["wait"].as_bool())
+                    .is_some_and(|(background, wait)| background == wait)
+                {
+                    return Err(Error::invalid("background and wait request opposite export modes."));
+                }
+                let request = host.video_request(&id, args)?;
+                let child = host.export_child.clone();
+                let pending = jobs.prepare(request, child, background, || {
+                    checkpoint(session, &mut host, &id, self.agent_token.is_some()).map(|_| ())
+                })?;
+                if background {
+                    return Ok(pending.submitted());
+                }
+                pending
+            };
+            drop(host);
+            let outcome = pending.wait();
+            let finished = !matches!(&outcome, Ok((_, false)));
+            if finished && !jobs.consume(&pending.id)? {
+                return Err(Error::invalid(
+                    "Unknown export job. A finished job is reported once; check the export folder.",
+                ));
+            }
+            let observed = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("headless host stopped"))?;
+            assert_project(session, &observed, &id)?;
+            return outcome.map(|(value, _)| value);
+        }
+        let prepared_selection = if name == "select_layers" {
+            let project = session
+                .project
+                .as_deref()
+                .map(|id| host.read_document(id))
+                .transpose()?;
+            let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
+                id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
+            })).ok_or_else(|| Error::invalid("Select existing layer IDs from get_project_state. No selection was changed."))?;
+            Some(
+                ids.iter()
+                    .map(|id| id.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        let command_edits = if name == "apply_commands" {
+            let mode = commands::EditMode::parse(args)?;
+            Some((mode, commands::prepare_edits(args, mode)?))
+        } else {
+            if name != "select_layers" {
+                catalog::validate(name, args)?;
+            }
+            None
+        };
+        let session = self.active.as_mut().unwrap();
+        let id = session
+            .project
+            .as_ref()
+            .ok_or_else(|| Error::invalid("This tool requires an attached project."))?
+            .clone();
+        assert_project(session, &host, &id)?;
+        // Publication validates in an isolated realm. A windowless project may
+        // not have a live realm yet, and reloads register asynchronously. Use
+        // the same loader as captures before reading the kernel's providers.
+        let needs_definitions = command_edits.as_ref().is_some_and(|(_, commands)| {
+            commands.iter().filter_map(|command| command.as_ref().ok()).any(|command| {
+                matches!(
+                    command["type"].as_str(),
+                    Some("add_effect" | "set_transition")
+                )
+            })
+        });
+        if needs_definitions && let Some(engine) = host.engine.clone() {
+            let view = host.view(&id)?;
+            drop(host);
+            engine.prepare_definitions(&id, view.document, view.revision)?;
+            host = Automation::fenced(&shared, session.document)?;
+            assert_project(session, &host, &id)?;
+        }
+        if ["get_project_state", "get_timeline", "list_media"].contains(&name) {
+            let result = if name == "get_project_state" {
+                views::project_state_at(
+                    &host,
+                    &id,
+                    args,
+                    json!({"layers":session.focus,"keys":[],"chan":null}),
+                    session.time,
+                )?
+            } else if name == "list_media" {
+                crate::media::list(
+                    &host.read_document(&id)?,
+                    &id,
+                    args,
+                    host.media_registry.as_deref(),
+                )
+            } else {
+                views::timeline(&host, &id, args)?
+            };
+            if name == "get_project_state" {
+                session.known_layers.extend(
+                    result["layers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|layer| layer["id"].as_str().map(str::to_owned)),
+                );
+            }
+            refresh(session, &mut host, &id, self.writer)?;
+            return Ok(result);
+        }
+        match name {
+            "get_3d_scene" => {
+                let result = crate::inspection::scene(&host, &id, args)?;
+                refresh(session, &mut host, &id, self.writer)?;
+                Ok(result)
+            }
+            "check_project" => crate::inspection::check(&host, &id),
+            "render_frames" => host.render(&id, args)?.content(),
+            "probe_media" | "sample_media_frames" | "media_contact_sheet" | "media_waveform" => {
+                use crate::services::MediaOperation;
+                let operation = match name {
+                    "probe_media" => MediaOperation::Probe,
+                    "sample_media_frames" => MediaOperation::SampleFrames,
+                    "media_contact_sheet" => MediaOperation::ContactSheet,
+                    _ => MediaOperation::Waveform,
+                };
+                host.media_tool(&id, operation, args)?.content()
+            }
+
+            "export_captions" => host.export_captions(&id, args),
+            "transcribe_media" => {
+                let speech = host
+                    .speech
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let frozen = host.freeze(&id)?;
+                drop(host);
+                speech.transcribe(&frozen, args)
+            }
+            "generate_captions" => {
+                let speech = host
+                    .speech
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let frozen = host.freeze(&id)?;
+                drop(host);
+                let mut result = speech.captions(&frozen, args, self.writer)?;
+                if result["status"] != "done" {
+                    return Ok(result);
+                }
+                // The captions land in this run's transaction, as one step.
+                let command = result["command"].take();
+                let label = args["label"].as_str().unwrap_or("Generate Captions");
+                let mut edit = json!({"commands":[command.clone()],"label":label});
+                if let Some(comp) = args.get("compositionId") {
+                    edit["compositionId"] = comp.clone();
+                }
+                self.dispatch("apply_commands", &edit)?;
+                Ok(json!({"status":"done","layerId":command["id"],
+                    "cues":result["cues"],"language":result["language"]}))
+            }
+            "import_media" | "replace_media" | "import_media_to_timeline" => {
+                let importer = host
+                    .media_importer
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let expected = session
+                    .transaction
+                    .as_ref()
+                    .map_or(session.baseline, |t| t.revision);
+                if host.revision(&id)? != expected {
+                    return Err(Error::conflict(
+                        "The project changed. Read get_project_state before retrying.",
+                    ));
+                }
+                let frozen = host.freeze(&id)?;
+                let replace = (name == "replace_media")
+                    .then(|| args["assetId"].as_str().unwrap_or_default().to_owned());
+                if let Some(asset) = replace.as_deref() {
+                    if crate::media::has_locked_reference(&frozen.project, asset) {
+                        return Err(Error::invalid(
+                            "Unlock layers using this media before replacing it.",
+                        ));
+                    }
+                    if args["missingOnly"] == true
+                        && host
+                            .media_registry
+                            .as_ref()
+                            .is_some_and(|registry| registry.state(&id, asset).available)
+                    {
+                        return Ok(json!({"status":"already_available","assetId":asset,
+                            "persisted":frozen.project["assets"][asset]["persisted"] == true}));
+                    }
+                }
+                let project = frozen.project.clone();
+                let imported = importer.import(&crate::services::MediaImport {
+                    frozen,
+                    path: args["path"].as_str().unwrap_or_default().into(),
+                    folder: args["folderId"].as_str().map(str::to_owned),
+                    replace,
+                    expected_fingerprint: args["expectedFingerprint"].as_str().map(str::to_owned),
+                    writer: self.writer,
+                    sequence: args["sequence"]["fps"].as_f64(),
+                })?;
+                // Media Undo is separate from run grouping, like manage_media.
+                session.external_actions = true;
+                session.committed |= imported.revision != expected;
+                session.baseline = imported.revision;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.revision = imported.revision;
+                }
+                let mut result = json!({"status":imported.status,"assetId":imported.asset,
+                    "name":imported.name,"persisted":true,"fingerprint":imported.fingerprint,
+                    "storage":"copied","revision":imported.revision});
+                if let Some(note) = &imported.note {
+                    result["missing"] = json!(note);
+                }
+                if name == "import_media_to_timeline" && imported.kind == "model" {
+                    drop(host);
+                    let layer = pm_kernel::new_id("layer");
+                    self.dispatch("edit_3d", &json!({"operation":"add_object","id":layer,"name":imported.name,"object":{"source":{"assetId":imported.asset},"useSourceMaterials":true}}))?;
+                    let at = args["at"].as_f64().unwrap_or(0.);
+                    let duration = (project["dur"].as_f64().unwrap_or(5.) - at).max(0.1);
+                    self.dispatch("apply_commands", &json!({"label":"Place 3D Model","commands":[{"type":"set_layer","target":layer,"patch":{"from":at,"duration":duration}}]}))?;
+                    result["layerId"] = json!(layer);
+                } else if name == "import_media_to_timeline" {
+                    let at = args["at"].as_f64().unwrap_or(0.);
+                    match crate::media::layer_for(&project, &imported, at) {
+                        Some((layer, command)) => {
+                            drop(host);
+                            let mut commands = json!({"commands":[command],"label":"Import Media"});
+                            if let Some(comp) = args.get("compositionId") {
+                                commands["compositionId"] = comp.clone();
+                            }
+                            self.dispatch("apply_commands", &commands)?;
+                            result["layerId"] = json!(layer);
+                        }
+                        None => {
+                            result["note"] = json!("Imported. Place 3D models with edit_3d.");
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            "manage_media" => {
+                let expected = session
+                    .transaction
+                    .as_ref()
+                    .map_or(session.baseline, |t| t.revision);
+                if host.revision(&id)? != expected {
+                    return Err(Error::conflict(
+                        "The project changed. Read get_project_state before managing media.",
+                    ));
+                }
+                let plan = crate::media::manage(&host.read_document(&id)?, args)?;
+                let ack = host.apply_body(
+                    &id,
+                    plan.body,
+                    "Manage media",
+                    expected,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
+                // Native media Undo is separate from run grouping and snapshot
+                // rollback, exactly as the frozen contract promises.
+                session.external_actions = true;
+                session.committed |= ack.revision != expected;
+                session.baseline = ack.revision;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.revision = ack.revision;
+                }
+                let selected = host
+                    .view(&id)?
+                    .selection
+                    .layers()
+                    .iter()
+                    .filter(|s| !plan.removed.contains(s))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if self.agent_token.is_none() {
+                    host.select_layers(&id, &selected, false, self.writer)?;
+                } else {
+                    session.focus = selected;
+                }
+                let mut result = plan.result;
+                result["changed"] = json!(ack.revision != expected);
+                result["revision"] = json!(ack.revision);
+                if let Some(notice) = ack.notice {
+                    result["notice"] = json!(format!("{notice:?}"));
+                }
+                Ok(result)
+            }
+            "select_layers" => {
+                if let Some(expected) = self.aero_revision
+                    && host.revision(&id)? != expected
+                {
+                    return Err(Error::conflict("Project revision changed. Read project state and retry."));
+                }
+                let ids = prepared_selection.unwrap();
+                if self.agent_token.is_none() && self.aero_project.is_none() {
+                    let selection =
+                        host.select_layers(&id, &ids, args["add"] == true, self.writer)?;
+                    return Ok(json!({"selection":selection}));
+                }
+                Ok({
+                    if args["add"] != true {
+                        session.focus.clear();
+                    }
+                    for id in ids {
+                        session.known_layers.insert(id.clone());
+                        if !session.focus.contains(&id) {
+                            session.focus.push(id);
+                        }
+                    }
+                    host.presence(
+                        &id,
+                        &session.run,
+                        crate::presence::Kind::Focus,
+                        session.focus.last().cloned(),
+                    );
+                    json!({"selection":{"layers":session.focus},"scope":"agent"})
+                })
+            }
+            "save_project" => host.save_project(&id),
+            "export_project" => host.export_project(&id),
+            "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
+                let expected = self.aero_revision.unwrap_or_else(|| {
+                    session.transaction.as_ref().map_or(session.baseline, |t| t.revision)
+                });
+                let revision = host.revision(&id)?;
+                if expected != revision {
+                    let current = host.read_document(&id)?;
+                    for command in args["commands"].as_array().into_iter().flatten() {
+                        let target = command["target"]
+                            .as_str()
+                            .filter(|t| !t.starts_with('$'))
+                            .or_else(|| session.focus.first().map(String::as_str));
+                        if let Some(target) = target
+                            && session.known_layers.contains(target)
+                            && !current["layers"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|l| l["id"] == target)
+                        {
+                            return Err(Error {
+                                code: "target_removed".into(),
+                                message: format!(
+                                    "The user deleted {target} while you were working. Skip it; do not recreate it unless asked. Mention the skipped target in your reply."
+                                ),
+                                backing: None,
+                            });
+                        }
+                    }
+
+                    return Err(Error::conflict(format!(
+                        "The project changed during the agent run (expected revision {expected}, found {revision}). No commands were applied. Read get_project_state, adjust the commands to the current state, and retry."
+                    )));
+                }
+                let default_label = if name == "edit_3d" {
+                    crate::scene3d::label(&args)
+                } else {
+                    "Agent composition edit".to_owned()
+                };
+                let label = args["label"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&default_label)
+                    .trim()
+                    .chars()
+                    .take(80)
+                    .collect::<String>();
+                // Whole-document JSON only for the planners that read it;
+                // apply_commands plans on the published snapshot.
+                let view = host.view(&id)?;
+                let p = if name == "apply_commands" {
+                    Value::Null
+                } else {
+                    host.read_document(&id)?
+                };
+                let selection = session.focus.clone();
+                let strips = if name == "edit_layer_strips" {
+                    Some(crate::strips::plan(&p, args, session.time)?)
+                } else {
+                    None
+                };
+                let video = if name == "edit_video" {
+                    Some(crate::video::plan(
+                        &p,
+                        &id,
+                        args,
+                        host.media_registry.as_deref(),
+                    )?)
+                } else {
+                    None
+                };
+                let scene_assets = if name == "edit_3d"
+                    && (pm_scene3d::geometry::needs_geometry(args)
+                        || args["keepRealWorldScale"] == true)
+                {
+                    Some(host.scene_geometry(&id)?)
+                } else {
+                    None
+                };
+                let mut edit_summary = None;
+                let mut compact_activity = None;
+                let batch = if name == "edit_3d" {
+                    Some(crate::scene3d::batch(
+                        &host.view(&id)?.snapshot,
+                        args,
+                        &selection,
+                        session.time,
+                        scene_assets
+                            .as_deref()
+                            .unwrap_or(&pm_scene3d::geometry::NoAssets),
+                    )?)
+                } else if let Some((mode, cleaned)) = command_edits {
+                    let edits = commands::plan_edits(
+                        &view.snapshot,
+                        &selection,
+                        cleaned,
+                        session.time,
+                        &host.state().for_project(&id),
+                        mode,
+                    )?;
+                    if edits.batch.commands.is_empty() {
+                        return Ok(json!({"results":edits.batch.results,"newIds":[],
+                            "changedLayerIds":[],"revision":revision}));
+                    }
+                    if !mode.verbose {
+                        compact_activity = Some(edits.activity);
+                    }
+                    edit_summary = Some((mode.verbose, edits.new_ids, edits.changed_layer_ids));
+                    Some(edits.batch)
+                } else {
+                    None
+                };
+                if session.transaction.is_none() {
+                    session.transaction = Some(Transaction {
+                        snapshot: host.original_view(&id)?.snapshot,
+                        mark: host.history_mark(&id, self.writer)?,
+                        revision,
+                        changed: false,
+                        interleaved: false,
+                        label: label.clone(),
+                    });
+                }
+                let mut clip = Value::Null;
+                let (ack, descriptions, results, strips_result) = if let Some(plan) = video {
+                    clip = plan.clip;
+                    let ack = host.apply_body(
+                        &id,
+                        plan.body,
+                        &label,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some() && self.aero_project.is_none(),
+                    )?;
+                    let applied = if ack.revision != revision {
+                        vec![crate::video::describe(args)]
+                    } else {
+                        vec![]
+                    };
+                    (ack, applied, vec![], None)
+                } else if let Some(plan) = strips {
+                    let ack = host.apply_body(
+                        &id,
+                        plan.body,
+                        &label,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some() && self.aero_project.is_none(),
+                    )?;
+                    let result = if plan.state {
+                        json!({"results":plan.results,"revision":ack.revision})
+                    } else {
+                        plan.result
+                    };
+                    (ack, vec![], plan.results, Some(result))
+                } else {
+                    let batch = batch.unwrap();
+                    let ack = host.apply_commands_guarded(
+                        &id,
+                        batch.commands,
+                        &label,
+                        Origin::Mcp,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some() && self.aero_project.is_none(),
+                    )?;
+                    if self.agent_token.is_none() && self.aero_project.is_none() {
+                        host.select_layers(&id, &batch.selection, false, self.writer)?;
+                    }
+                    session.focus = batch.selection;
+                    let activity: Box<dyn Iterator<Item = (&Value, Option<&str>)>> =
+                        if let Some(activity) = &compact_activity {
+                            Box::new(activity.iter().map(|(command, id)| (command, id.as_deref())))
+                        } else {
+                            Box::new(batch.results.iter()
+                                .filter(|result| result["ok"] != false)
+                                .map(|result| (&result["command"], result["data"]["id"].as_str())))
+                        };
+                    for (command, target) in activity {
+                        if let Some(target) = target {
+                            session.known_layers.insert(target.into());
+                        }
+                        if ack.revision != revision {
+                            let kind = match command["type"].as_str().unwrap_or("") {
+                                "add_layer" | "add_text" | "add_shape" | "add_captions" => {
+                                    crate::presence::Kind::Create
+                                }
+                                "replace_keyframes" => crate::presence::Kind::Key,
+                                "set_property" if command["mode"] != "static" => {
+                                    crate::presence::Kind::Key
+                                }
+                                "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
+                                _ => crate::presence::Kind::Set,
+                            };
+                            let offset = target
+                                .and_then(|target| {
+                                    host.view(&id).ok().and_then(|v| {
+                                        let root = v.snapshot.root()?;
+                                        let location = pm_kernel::model::find_layer(root, target)?;
+                                        let layer = pm_kernel::model::layer_at(root, &location)?;
+                                        match layer.get("from")?.kind() {
+                                            pm_model::NodeKind::Number(n) => Some(*n),
+                                            _ => None,
+                                        }
+                                    })
+                                })
+                                .unwrap_or(0.);
+                            let mut times: Vec<f64> = command["keyframes"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|k| k["time"].as_f64())
+                                .map(|t| t + offset)
+                                .collect();
+                            if kind == crate::presence::Kind::Key && times.is_empty() {
+                                times.push(
+                                    command["time"]
+                                        .as_f64()
+                                        .unwrap_or(session.time)
+                                        .max(offset),
+                                );
+                            }
+                            host.presence_detail(
+                                &id,
+                                &session.run,
+                                kind,
+                                target.map(str::to_owned),
+                                command["path"].as_str().map(str::to_owned),
+                                times,
+                            );
+                        }
+                    }
+                    (ack, batch.descriptions, batch.results, None)
+                };
+                let tx = session.transaction.as_mut().unwrap();
+                tx.revision = ack.revision;
+                tx.label = label.clone();
+                let changed = ack.revision != revision;
+                if changed
+                    && let (Some(app), Some(document)) = (host.coedit_host(), session.document)
+                {
+                    app.record_turn(
+                        &id,
+                        document,
+                        session.owner.as_deref(),
+                        pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
+                        &label,
+                    );
+                }
+                tx.changed |= changed;
+                // Folded foreign gestures retain their own normal undo entry.
+                tx.interleaved |= ack.folded.is_some();
+                observe_foreign(session, &host, &id);
+                if let Some(owner) = &session.owner {
+                    let interleaved = session.transaction.as_ref().is_some_and(|tx| tx.interleaved);
+                    host.completion_edit(owner, revision, ack.revision, interleaved);
+                }
+                let message = if name == "edit_video" && ack.revision == revision {
+                    "No source changes"
+                } else {
+                    &label
+                };
+                let mut result = if let Some((verbose, new_ids, changed_layer_ids)) = edit_summary {
+                    let mut result = json!({"results":results,"newIds":new_ids,
+                        "changedLayerIds":changed_layer_ids,"revision":ack.revision});
+                    if verbose {
+                        result["applied"] = json!(descriptions);
+                        result["clip"] = clip;
+                        result["message"] = json!(message);
+                    }
+                    result
+                } else {
+                    json!({"applied":descriptions,"clip":clip,"results":results,"message":message,"revision":ack.revision})
+                };
+                if let Some(notice) = ack.notice {
+                    result["notice"] = json!(format!("{notice:?}"));
+                }
+                if name == "edit_3d" {
+                    let after = host.read_document(&id)?;
+                    let target = crate::scene3d::result_id(&p, &after, args, &selection);
+                    if let Some(ref target) = target {
+                        session.focus = vec![target.clone()];
+                    }
+                    result["result"] = json!({"id":target,"layerId":target});
+                }
+                if let Some(strips) = strips_result {
+                    result["strips"] = strips;
+                }
+                Ok(result)
+            }
+            "rollback_changes" => {
+                rollback(session, &mut host, &id, self.writer)?;
+                Ok(json!({"rolledBack":true,"revision":host.revision(&id)?}))
+            }
+            _ => Err(Error::unavailable(catalog::backing(name))),
+        }
+    }
+    /// Renderer/document replacement ends the run, not the external connection.
+    /// Never restore an old snapshot into a replacement document. Preserve staged
+    /// files even when archival fails; cleanup cannot replace the primary loss.
+    fn retire_replaced_document(&mut self) -> Result<()> {
+        let replaced = if let Some(session) = self.active.as_ref() {
+            if let Some(id) = session.project.as_deref() {
+                let host = self
+                    .host
+                    .lock()
+                    .map_err(|_| Error::unavailable("headless host stopped"))?;
+                host.view(id).ok().map(|view| view.document) != session.document
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if replaced {
+            let session = self.active.take().expect("live replaced session");
+            if let Some(root) = session.workspace
+                && let Err(error) = archive_workspace(&root, false)
+            {
+                eprintln!(
+                    "MCP replaced-document workspace retained after archive failure: {error}"
+                );
+            }
+        }
+        Ok(())
+    }
+    fn start(&mut self, args: &Value) -> Result<Value> {
+        if self.active.is_some() {
+            return Err(Error::invalid("Finish the current MCP session first."));
+        }
+        crate::validation::session("start_session", args)?;
+        let mut host = self
+            .host
+            .lock()
+            .map_err(|_| Error::unavailable("headless host stopped"))?;
+        // A provider run's session never exceeds that run's access.
+        let granted = match self.agent_token.as_deref() {
+            Some(token) => Some(
+                agent(Some(token), &host)
+                    .map(|(_, access)| access)
+                    .ok_or_else(|| Error::invalid("This agent run is no longer active."))?,
+            ),
+            None => None,
+        };
+        let access = args["access"]
+            .as_str()
+            .or(granted.as_deref())
+            .unwrap_or("project");
+        if granted.as_deref() == Some("editor") && access != "editor" {
+            return Err(Error::invalid(
+                "This run has Editor access: start the session with access \"editor\".",
+            ));
+        }
+        let context = args["context"].as_str().unwrap_or("project");
+        // A run works in its thread's project, not whichever window is in front.
+        let pinned = self.aero_project.clone().or_else(|| {
+            self.agent_token
+                .as_deref()
+                .and_then(|token| (host.agent_projects.as_ref()?)(token))
+        });
+        if pinned.is_some() && context == "app" {
+            return Err(Error::invalid(
+                "This run belongs to a project's thread: start the session without context \"app\".",
+            ));
+        }
+        let project = match (context, pinned) {
+            ("project", Some(id)) => {
+                if host.view(&id).is_err() {
+                    return Err(Error::invalid(
+                        "This thread's project isn't open. Ask the user to open it, then start the session again.",
+                    ));
+                }
+                Some(id)
+            }
+            ("project", None) => Some(host.active_project().ok_or_else(|| {
+                Error::invalid("Create or open a project before starting a project session.")
+            })?),
+            _ => None,
+        };
+        let view = project
+            .as_ref()
+            .map(|id| host.view(id))
+            .transpose()?;
+        let baseline = view.as_ref().map_or(0, |view| view.revision);
+        let document = view.as_ref().map(|view| view.document);
+        let run_id = format!("mcp-{}", pm_kernel::new_id("run"));
+        let mut result = json!({"runId":run_id,"projectId":project.as_deref().unwrap_or("powermove-global"),"access":access});
+        if let Some(view) = &view {
+            result["summary"] = views::session_summary(view)?;
+        }
+        let full = args["detail"] == "full";
+        let include_extension_staging = args["includeExtensionStaging"] == true;
+        let has_workspace =
+            access != "editor" || context == "app" || granted.is_some() || include_extension_staging;
+        let has_workspace = has_workspace && self.aero_project.is_none();
+        let input = if (has_workspace || full) && let Some(id) = &project {
+            crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
+        } else {
+            pm_model::Value::Object(pm_model::Map::new())
+        };
+        if full && view.is_some() {
+            result["project"] = json_value(&input);
+        }
+        result["instructions"] = json!("Use get_project_state for detailed or paged reads, and tools/list for API docs.");
+        let workspace = if !has_workspace {
+            None
+        } else {
+            let root = host.profile.join("mcp-runs").join(&run_id);
+            for name in ["extensions", "api", "artifacts", "inputs"] {
+                std::fs::create_dir_all(root.join(name))?;
+            }
+            std::fs::write(
+                root.join("inputs/powermove-project.json"),
+                pm_model::json::to_canonical_string(&input),
+            )?;
+            static TOOL_DOCS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            std::fs::write(
+                root.join("api/mcp-tools.json"),
+                TOOL_DOCS.get_or_init(|| json!(catalog::served_tools()).to_string()),
+            )?;
+            result["workspace"] = json!(root);
+            result["artifactsDirectory"] = json!(root.join("artifacts"));
+            if include_extension_staging {
+                result["stagingDirectory"] = json!(root.join("extensions"));
+                result["apiPackDirectory"] = json!(root.join("api"));
+                result["extensionGuide"] = json!(if host.extensions.is_some() {
+                    "Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
+                } else {
+                    "Extension staging is inert: nothing here activates."
+                });
+            }
+            let instructions = if context == "app" {
+                "For effect work, iterate with render_effect_lab from the first draft. It works without a project. No project is open. Call create_project (or open_project), then you can add layers and use render_frames. Use finish_session commit:true to keep edits. api/mcp-tools.json lists the tool contract."
+            } else {
+                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. For effect work, iterate with render_effect_lab from the first draft."
+            };
+            result["instructions"] = Value::String(if project.is_some() && access != "editor" {
+                format!(
+                    "{instructions}\n\n{}",
+                    include_str!("../../../js/compat/api-pack/HANDOFF.md").trim_end(),
+                )
+            } else {
+                instructions.into()
+            });
+            Some(root)
+        };
+        let stage = match (&workspace, host.extensions.clone()) {
+            (Some(root), Some(extensions)) => {
+                for (name, text) in extensions.api_pack() {
+                    let path = root.join("api").join(&name);
+                    if name
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                    {
+                        continue;
+                    }
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, text)?;
+                    if name == "builtin-effects.json" {
+                        let mut permissions = std::fs::metadata(&path)?.permissions();
+                        permissions.set_readonly(true);
+                        std::fs::set_permissions(&path, permissions)?;
+                    }
+                }
+                let project = project.as_deref().unwrap_or("powermove-global");
+                Some(crate::extensions::prepare(
+                    extensions.as_ref(),
+                    &root.join("extensions"),
+                    project,
+                    &format!("{run_id}-1"),
+                )?)
+            }
+            _ => None,
+        };
+        let time = project.as_deref().map_or(0., |id| host.playhead(id));
+        let known_layers = view
+            .iter()
+            .flat_map(|v| v.snapshot.layers(None))
+            .map(|layer| layer.id)
+            .collect();
+        let focus = view.as_ref().map_or_else(Vec::new, |v| v.selection.layers().to_vec());
+        let default_comp = view.as_ref().and_then(|v| v.snapshot.open_comp());
+        self.writer = next_writer();
+        if self.agent_token.is_some()
+            && let Some(id) = project.as_deref()
+        {
+            host.agent_turn(id, self.writer, true)?;
+        }
+        let steer_epoch = project.as_deref().map_or(0, crate::coedit::steer_epoch);
+        self.panel_lease = Some(crate::panel_lease::Lease::new());
+        self.active = Some(Active {
+            project,
+            document,
+            access: access.into(),
+            context: context.into(),
+            internal: granted.is_some() || self.aero_project.is_some(),
+            baseline,
+            transaction: None,
+            workspace,
+            stage,
+            owner: agent(self.agent_token.as_deref(), &host).map(|(run, _)| run),
+            run: run_id,
+            publications: 1,
+            committed: false,
+            external_actions: false,
+            panel_actions: false,
+            time,
+            default_comp: default_comp.clone(),
+            focus_comp: default_comp,
+            comp_focus: Default::default(),
+            known_layers,
+            owned_scopes: Vec::new(),
+            observed_revision: baseline,
+            steer_epoch,
+            focus,
+        });
+        Ok(result)
+    }
+    pub fn finish(&mut self, commit: bool) -> Result<Value> {
+        if !self.take_hold(true)? {
+            return Ok(
+                json!({"status":"held","reason":"A write is still waiting for the user. The session remains open; finish again after it resolves."}),
+            );
+        }
+        self.panel_lease = None;
+        let Some(mut session) = self.active.take() else {
+            return Ok(json!({"changed":false}));
+        };
+        let result = (|| {
+            let mut host = Automation::fenced(&self.host, session.document)?;
+            let Some(id) = session.project.clone() else {
+                return Ok(json!({"changed":session.committed}));
+            };
+            assert_project(&session, &host, &id)?;
+            host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
+            let (agent, writer) = (self.agent_token.is_some(), self.writer);
+            let rolled_back = &mut self.rolled_back;
+            let ended = (|| {
+                if let Some(owner) = &session.owner
+                    && let Some(receipt) = host.completion_receipt_mut(owner)
+                {
+                    receipt.unsafe_undo |= session.external_actions || session.panel_actions;
+                    receipt.changed |= session.external_actions || session.panel_actions;
+                }
+                let Some(tx) = session.transaction.as_ref() else {
+                    return Ok(json!({"changed":session.committed}));
+                };
+                if commit {
+                    let history = checkpoint(&mut session, &mut host, &id, agent)?;
+                    return Ok(
+                        json!({"changed":session.committed,"historyId":history.map(|id| id.to_string())}),
+                    );
+                }
+                if session.panel_actions {
+                    let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
+                    if changed {
+                        return Err(Error::invalid(
+                            "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
+                        ));
+                    }
+                    return Ok(json!({"changed":session.committed || changed,"historyId":null}));
+                }
+                if tx.changed {
+                    rollback(&mut session, &mut host, &id, writer)?;
+                    if !session.committed
+                        && let (Some(app), Some(document)) = (host.coedit_host(), session.document)
+                    {
+                        app.forget_turn_writer(
+                            &id,
+                            document,
+                            pm_kernel::Caller::realm(writer, 1, Origin::Mcp).writer,
+                        );
+                    }
+                    *rolled_back = true;
+                }
+                Ok(json!({"changed":session.committed,"historyId":null}))
+            })();
+            // The run's steps are one step before its turn is unfenced: a
+            // person's Undo in between takes back their own newest step, never
+            // one tool call of the run (PM-718).
+            let unfenced = if agent {
+                host.agent_turn(&id, writer, false)
+            } else {
+                Ok(())
+            };
+            let value = ended?;
+            unfenced?;
+            Ok(value)
+        })();
+        if let Some(root) = session.workspace {
+            let cleanup = archive_workspace(&root, commit);
+            if let Err(e) = cleanup
+                && result.is_ok()
+            {
+                return Err(e);
+            }
+        }
+        result
+    }
+    fn manage(&mut self, host: &mut Automation, a: &Value) -> Result<Value> {
+        let operation = a["operation"].as_str().unwrap();
+        let id = a["projectId"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| host.active_project());
+        let active = self.active.as_mut().unwrap();
+        if ["create", "open"].contains(&operation) && active.context != "app" {
+            return Err(Error::invalid(
+                "Create or open projects from an app thread. This thread stays attached to its project.",
+            ));
+        }
+        if operation == "list" {
+            let projects = host.list_projects()?["projects"].clone();
+            let trash = pm_kernel::LibraryStore::open(&host.profile)
+                .read("projectTrash")
+                .map_err(Error::kernel)?
+                .map(|v| json_value(&v))
+                .unwrap_or(json!([]));
+            let rows = projects
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| json!({"id":p["id"],"name":p["name"],"w":p["w"],"h":p["h"],"at":p["at"]}))
+                .collect::<Vec<_>>();
+            let trash = trash
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|p| json!({"id":p["id"],"name":p["name"]}))
+                .collect::<Vec<_>>();
+            return Ok(
+                json!({"activeProjectId":host.active_project(),"projects":rows,"trash":trash}),
+            );
+        }
+        let name = || {
+            a["name"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::trim)
+                .ok_or_else(|| Error::invalid("name is required"))
+        };
+        library_boundary(active, host)?;
+        if operation == "create" {
+            let result=host.create_project(&json!({"name":name()?,"width":a["w"],"height":a["h"],"fps":a["fps"],"duration":a["dur"]}))?;
+            active.committed = true;
+            if let Some(created) = result["projectId"].as_str() {
+                attach(
+                    active,
+                    host,
+                    created,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
+            }
+            return Ok(
+                json!({"projectId":result["projectId"],"name":result["name"],"active":true}),
+            );
+        }
+        let id = id.ok_or_else(|| Error::invalid("projectId is required"))?;
+        match operation {
+            "open" => {
+                let opened = host.open_project(&id)?;
+                if opened["recoveryRequired"] == true {
+                    return Ok(opened);
+                }
+                attach(active, host, &id, self.writer, self.agent_token.is_some())?;
+            }
+            "save" => host.save_library(&id)?,
+            "rename" => {
+                if host.active_project().as_deref() != Some(&id) {
+                    return Err(Error::unavailable(
+                        "rename unopened library slot through kernel shell",
+                    ));
+                }
+                let revision = host.revision(&id)?;
+                host.apply_commands(
+                    &id,
+                    vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                name: Some(name()?.into()),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ],
+                    "Rename Project",
+                    Origin::Mcp,
+                    revision,
+                    self.writer,
+                )?;
+                host.save_library(&id)?;
+            }
+            "duplicate" => {
+                let new_id = pm_kernel::new_id("P");
+                let n = name()?.to_owned();
+                host.library_action(ShellCall::Duplicate {
+                    project: id,
+                    id: new_id.clone(),
+                    name: n.clone(),
+                })?;
+                active.committed = true;
+                return Ok(json!({"projectId":new_id,"name":n,"active":false}));
+            }
+            "trash" => match host.library_action(ShellCall::Trash(id.clone()))? {
+                ShellReply::Changed(true) => {}
+                other => return Err(Error::kernel(other)),
+            },
+            "restore" => match host.library_action(ShellCall::Restore(id.clone()))? {
+                ShellReply::Changed(true) => {}
+                other => return Err(Error::kernel(other)),
+            },
+            _ => return Err(Error::invalid("Unknown project operation")),
+        }
+        active.committed = true;
+        if let Some(project) = &active.project {
+            active.baseline = host.revision(project)?;
+        }
+        Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active_project()}))
+    }
+    pub fn close(&mut self) -> Result<()> {
+        self.cancel_hold();
+        // In-app Stop preserves every acknowledged edit. Explicit rollback
+        // and external MCP disconnect retain their existing contract.
+        let result = self.finish(self.agent_token.is_some()).map(|_| ());
+        self.closed = true;
+        result
+    }
+}
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        if !self.closed
+            && let Err(e) = self.close()
+        {
+            eprintln!("MCP disconnect rollback: {e}");
+        }
+    }
+}
+/// Library operations are immediate commit boundaries, outside rollback.
+fn library_boundary(active: &mut Active, host: &mut Automation) -> Result<()> {
+    if let (Some(project), Some(tx)) = (active.project.clone(), active.transaction.take()) {
+        if tx.changed
+            && !active.external_actions
+            && !tx.interleaved
+            && host.revision(&project)? == tx.revision
+        {
+            host.squash(&project, &tx.mark, &format!("Agent · {}", tx.label))?;
+        }
+        active.committed |= tx.changed;
+    }
+    Ok(())
+}
+/// An app session works in the project it created or opened, as a project
+/// session started there would; a project session keeps its own.
+fn attach(
+    active: &mut Active,
+    host: &mut Automation,
+    id: &str,
+    writer: u32,
+    agent: bool,
+) -> Result<()> {
+    if active.context != "app" {
+        return Ok(());
+    }
+    let view = host.view(id)?;
+    if active.project.as_deref() == Some(id) && active.document == Some(view.document) {
+        return Ok(());
+    }
+    if let Some(previous) = active.project.take() {
+        host.presence(&previous, &active.run, crate::presence::Kind::RunEnd, None);
+        if agent {
+            host.agent_turn(&previous, writer, false)?;
+        }
+    }
+    let baseline = host.revision(id)?;
+    let default_comp = view.snapshot.open_comp();
+    active.known_layers = host.read_document(id)?["layers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["id"].as_str().map(str::to_owned))
+        .collect();
+    active.document = Some(view.document);
+    active.baseline = baseline;
+    active.observed_revision = baseline;
+    active.time = host.playhead(id);
+    active.focus = view.selection.layers().to_vec();
+    active.focus_comp = default_comp.clone();
+    active.default_comp = default_comp;
+    active.comp_focus.clear();
+    active.owned_scopes.clear();
+    active.steer_epoch = crate::coedit::steer_epoch(id);
+    if agent {
+        host.agent_turn(id, writer, true)?;
+    }
+    active.project = Some(id.to_owned());
+    Ok(())
+}
+fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
+    if host.view(id).ok().map(|view| view.document) != session.document {
+        return Err(Error::conflict(
+            "The bound project closed or reopened. All work was preserved. Start a new agent run in this project.",
+        ));
+    }
+    Ok(())
+}
+fn observe_foreign(session: &mut Active, host: &Automation, id: &str) {
+    let Some(app) = host.coedit_host() else {
+        return;
+    };
+    let Some(publication) = app.kernel.published(id) else {
+        return;
+    };
+    // An open gesture is provisional. Its immutable starting revision is the
+    // committed frontier, even when another composition commits meanwhile.
+    let frontier = publication
+        .entry_before
+        .as_ref()
+        .map_or(publication.revision(), |before| before.revision);
+    let mut human_paths = Vec::new();
+    let mut gesture_paths: Vec<Vec<pm_model::patch::PathPart>> = Vec::new();
+    let mut entry_id = None;
+    for change in publication
+        .changes
+        .iter()
+        .filter(|c| c.revision > session.observed_revision && c.revision <= frontier)
+    {
+        match &change.cause {
+            pm_kernel::ChangeCause::Write {
+                origin: Origin::Interface,
+                entry: Some(entry),
+                ..
+            } => {
+                if entry_id != Some(*entry) {
+                    human_paths.append(&mut gesture_paths);
+                    entry_id = Some(*entry);
+                }
+                gesture_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            pm_kernel::ChangeCause::GestureStep { .. } => {
+                gesture_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            pm_kernel::ChangeCause::Revert { .. }
+            | pm_kernel::ChangeCause::GestureCancel { .. } => {
+                // Cancel erases only provisional ownership, never an earlier
+                // committed edit to that same path.
+                gesture_paths.retain(|path| {
+                    !change
+                        .ops
+                        .iter()
+                        .any(|op| path.starts_with(op.path()) || op.path().starts_with(path))
+                });
+            }
+            pm_kernel::ChangeCause::Write {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Edit {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Restore {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Undo { .. }
+            | pm_kernel::ChangeCause::Redo { .. } => {
+                human_paths.append(&mut gesture_paths);
+                entry_id = None;
+                human_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            _ => {}
+        }
+    }
+    human_paths.append(&mut gesture_paths);
+    session.owned_scopes.extend(human_paths);
+    session.observed_revision = frontier;
+}
+fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
+    observe_foreign(session, host, id);
+    let revision = host.revision(id)?;
+    session.baseline = revision;
+    if let Some(tx) = &mut session.transaction
+        && tx.revision != revision
+    {
+        if tx.changed {
+            tx.interleaved = true;
+        } else {
+            tx.snapshot = host.original_view(id)?.snapshot;
+            tx.mark = host.history_mark(id, writer)?;
+        }
+        tx.revision = revision;
+    }
+    Ok(())
+}
+/// Keep this segment's edits, leaving the workspace and connection live. A later
+/// edit opens a new transaction and can only roll back to this checkpoint.
+fn checkpoint(
+    session: &mut Active,
+    host: &mut Automation,
+    id: &str,
+    in_app_agent: bool,
+) -> Result<Option<u64>> {
+    let revision = host.revision(id)?;
+    let mut history_id = None;
+    if let Some(tx) = session.transaction.as_ref() {
+        if session.panel_actions {
+            session.committed |= tx.changed || tx.snapshot.revision != revision;
+        } else {
+            if tx.changed && !session.external_actions {
+                let label = format!("Agent · {}", tx.label);
+                if in_app_agent {
+                    history_id = host.squash_segments(id, &tx.mark, &label)?;
+                } else if !tx.interleaved && tx.revision == revision {
+                    history_id = host.squash(id, &tx.mark, &label)?;
+                }
+            }
+            session.committed |= tx.changed;
+        }
+    }
+    session.transaction = None;
+    session.baseline = revision;
+    session.panel_actions = false;
+    session.external_actions = false;
+    Ok(history_id)
+}
+fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
+    if session.external_actions {
+        return Err(Error::conflict(
+            "This run used media actions. Use the editor Undo command; media actions cannot be snapshot-rolled back.",
+        ));
+    }
+    let Some(tx) = session.transaction.as_mut() else {
+        return Ok(());
+    };
+    if tx.interleaved {
+        return Err(Error::conflict(
+            "Other edits occurred during this run. Use the editor Undo command to undo agent changes without restoring over that work.",
+        ));
+    }
+    if session.panel_actions {
+        return Err(Error::conflict(
+            "Panel controls use their normal editor Undo. Their actions cannot be automatically rolled back; use the editor Undo command.",
+        ));
+    }
+    if !tx.changed {
+        return Ok(());
+    }
+    host.restore(
+        id,
+        crate::automation::document_json(&tx.snapshot)?,
+        tx.revision,
+        writer,
+    )?;
+    tx.snapshot = host.original_view(id)?.snapshot;
+    tx.revision = host.revision(id)?;
+    tx.mark = host.history_mark(id, writer)?;
+    tx.changed = false;
+    session.baseline = tx.revision;
+    Ok(())
+}
+
+/// Main's publish_extensions: validate and promote, reload the app, then
+/// continue from the promoted baseline with a new run-private stage.
+fn publish(
+    session: &mut Active,
+    extensions: &dyn crate::extensions::ExtensionHost,
+    args: &Value,
+    receipts: &Arc<Mutex<Automation>>,
+) -> Result<Value> {
+    let stage = session
+        .stage
+        .as_ref()
+        .ok_or_else(|| Error::invalid("Extension staging requires project access"))?;
+    let declared = args["extensions"].as_array().cloned().unwrap_or_default();
+    let record = crate::extensions::publish(extensions, stage, &declared)?;
+    // Promotion is committed now. Record it before renewing staging: a
+    // subsequent staging/disk failure must not lose result recovery.
+    if let (Some(owner), Some(id)) = (
+        &session.owner,
+        record.as_ref().and_then(|record| record["id"].as_str()),
+    ) {
+        let mut host = receipts
+            .lock()
+            .map_err(|_| Error::unavailable("Extension recovery receipts"))?;
+        if let Some(receipt) = host.completion_receipt_mut(owner) {
+            receipt.extensions.push(id.into());
+            receipt
+                .extension_projects
+                .insert(id.into(), stage.project.clone());
+            for change in &declared {
+                if let Some(id) = change["id"].as_str() {
+                    let action = change["action"].as_str().unwrap_or("updated");
+                    if !(receipt.changes.get(id).is_some_and(|old| old == "created")
+                        && action == "updated")
+                    {
+                        receipt.changes.insert(id.into(), action.into());
+                    }
+                    receipt.health_ids.retain(|old| old != id);
+                    if action != "removed" {
+                        receipt.health_ids.push(id.into());
+                    }
+                }
+            }
+        }
+    }
+    session.publications += 1;
+    let run = format!("{}-{}", session.run, session.publications);
+    let next = crate::extensions::prepare(extensions, &stage.staging, &stage.project, &run)?;
+    let staging = next.staging.clone();
+    session.stage = Some(next);
+    Ok(
+        json!({"changeSetId":record.map(|r| r["id"].clone()),"extensions":declared,"stagingDirectory":staging}),
+    )
+}
+
+/// N4: retiring an agent workspace must preserve its authored files. Moving
+/// within the explicit profile is atomic and never follows staged symlinks.
+fn archive_workspace(root: &std::path::Path, commit: bool) -> Result<()> {
+    let profile = root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| Error::invalid("Invalid run workspace"))?;
+    let runs = profile.join("mcp-archives");
+    std::fs::create_dir_all(&runs)?;
+    let archive = runs.join(
+        root.file_name()
+            .ok_or_else(|| Error::invalid("Missing run identity"))?,
+    );
+    // Exclusive creation prevents overwriting an earlier archive on retry.
+    std::fs::create_dir(&archive)?;
+    if commit {
+        std::fs::rename(root.join("extensions"), archive.join("extensions"))?;
+    } else {
+        std::fs::rename(root, archive.join("workspace"))?;
+    }
+    Ok(())
+}

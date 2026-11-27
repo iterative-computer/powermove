@@ -1,0 +1,3473 @@
+//! The running app's v1–3 extensions. `ExtensionHost` owns V8 on its own thread;
+//! this side only reads published copies, routes page messages and places the
+//! one WebKit document below GPUI. Nothing here can wait on extension code.
+use crate::session::Controller;
+use gpui::{prelude::*, *};
+use objc2::MainThreadMarker;
+use pm_compat_host::{
+    DomPanelHost, Error as PageError, HostEvent, MacDomHost, PanelSlot, PanelSpec, Rect,
+    Result as PageResult, StoreDataStores, SyncHandler, Trust,
+};
+use pm_compat_runner::{
+    host::{ExtensionHost, HostConfig},
+    transport::{TransportOwner, TransportRequest},
+};
+use pm_engine_service::resources::ResourceSnapshot;
+use pm_protocol::{clock::TransportCommand, common::PlaybackRate};
+use pm_shell::{Command as ShellCommand, MenuEntry, keyboard::Binding, layout, transient::Choice};
+use pm_text::host::BrokerResolver;
+use serde_json::{Value, json};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
+const PAGE_PANEL: u64 = 1;
+/// The hidden page of an export's own realm (`compat-runner/src/host/export.rs`).
+const EXPORT_PAGE: &str = "export:";
+const COMMAND: &str = "extension.command:";
+const MENU: &str = "extension.menu:";
+const UNDO: &str = "extension.undo";
+/// Longer than the realm's own deadline; a hung realm never holds a menu back.
+/// How long a reloading extension may take to hand over `api.hot.data`.
+const HOT_HANDOFF: std::time::Duration = std::time::Duration::from_millis(500);
+const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
+const OWNER: &str = "extension:";
+/// Commands v4 extensions register at run time: `extension.v4:<panel>:<id>`.
+const V4_COMMAND: &str = "extension.v4:";
+const V4_OWNER: &str = "v4-extension:";
+/// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
+const V4_THEME: &str = "extension.v4theme:";
+/// Layer 1: toolbar buttons `extension.v4toolbar:<panel>:<id>`.
+const V4_TOOLBAR: &str = "extension.v4toolbar:";
+/// Layer 1: panel header pills `extension.v4header:<owner>:<key>`.
+const V4_HEADER: &str = "extension.v4header:";
+/// Layer 1: menu bar items `extension.v4menubar:<panel>:<key>`.
+const V4_MENUBAR: &str = "extension.v4menubar:";
+/// Layer 2: interactive viewer tools `extension.v4tool:<panel>:<id>`.
+pub(crate) const V4_TOOL: &str = "extension.v4tool:";
+/// `extension.choice:<token>:<index>`: a built-in row of a menu that also
+/// carries extension items; its own callback runs.
+const CHOICE: &str = "extension.choice:";
+/// Runs the row chosen from a menu (`target`: `token:index`) once the
+/// update that heard it returns: what a row does may read the entity that
+/// heard it (the timeline asks the Controller for the time), and reading an
+/// entity inside its own update is a double lease, a panic in any build.
+pub(crate) fn run_choice<T: 'static>(
+    pending: &mut Option<(u64, crate::timeline_surface::Choose)>,
+    target: &str,
+    cx: &mut Context<T>,
+) {
+    if let Some((token, index)) = target.split_once(':')
+        && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
+        && let Some((_, choose)) = pending.take_if(|(waiting, _)| *waiting == token)
+    {
+        cx.defer(move |cx| choose(Some(index), cx));
+    }
+}
+#[cfg(test)]
+mod choice_tests {
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+    struct Holder {
+        pending: Option<(u64, crate::timeline_surface::Choose)>,
+    }
+    /// A row chosen while the entity that holds the menu is updating runs
+    /// after that update: the row reads the entity (the timeline's rows ask
+    /// the Controller for the time), which inside its update panicked.
+    #[gpui::test]
+    fn a_chosen_row_may_read_the_entity_that_heard_it(cx: &mut TestAppContext) {
+        let holder = cx.new(|_| Holder { pending: None });
+        let ran = Rc::new(Cell::new(None));
+        let (weak, seen) = (holder.downgrade(), ran.clone());
+        holder.update(cx, |h, _| {
+            h.pending = Some((
+                7,
+                Box::new(move |index, cx| {
+                    // Reads the holder, as the timeline's rows read the Controller.
+                    let waiting = weak.upgrade().map(|h| h.read(cx).pending.is_some());
+                    seen.set(Some((index, waiting)));
+                }),
+            ));
+        });
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "7:2", cx));
+        cx.run_until_parked();
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+        // Another menu's token runs nothing.
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "8:0", cx));
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+    }
+}
+/// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
+const V4_MENU: &str = "extension.v4menu:";
+thread_local! {
+    /// The v4 theme the person chose (`panel:id`), for every window.
+    static ACTIVE_THEME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// The active v1–3 theme last applied, for every window: its translation
+    /// (as JSON text) and its dark and light patches. A v4 theme going away
+    /// shows this again.
+    static V1_THEME: std::cell::RefCell<Option<(String, Patches)>> = const { std::cell::RefCell::new(None) };
+}
+/// A document, its revision and a resource generation.
+type AwaitKey = (u64, u64, u64);
+/// A theme's patches for dark and for light windows.
+type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
+/// Page messages enter here on AppKit's main thread, so this only enqueues.
+struct PageEvents {
+    host: Arc<Mutex<Option<std::sync::mpsc::Sender<Value>>>>,
+    events: RefCell<Vec<HostEvent>>,
+    wake: Rc<dyn Fn()>,
+}
+impl SyncHandler for PageEvents {
+    fn event(&self, event: HostEvent) {
+        self.events.borrow_mut().push(event);
+        (self.wake)();
+    }
+    fn remote_dom(&self, payload: Value) -> PageResult<()> {
+        match &*self.host.lock().unwrap() {
+            Some(sender) if sender.send(payload).is_ok() => Ok(()),
+            _ => Err(PageError::StaleGeneration),
+        }
+    }
+}
+
+struct Page {
+    host: Rc<RefCell<MacDomHost>>,
+    events: Rc<PageEvents>,
+    panel_expiry: Option<std::time::Instant>,
+    panel_expiry_task: Option<gpui::Task<()>>,
+    ready: bool,
+    /// The run this page belongs to: a realm generation, or a Store helper's
+    /// writer. Batches of any other run never reach it.
+    view: u64,
+}
+
+/// The realm asks the one clock owner to move; the Controller answers on main.
+struct Clock(async_channel::Sender<TransportRequest>);
+impl TransportOwner for Clock {
+    fn request(&self, request: TransportRequest) {
+        let _ = self.0.try_send(request);
+    }
+}
+
+/// A tab menu waiting for the items extensions add to it.
+struct OpenMenu {
+    key: u64,
+    entries: Vec<MenuEntry>,
+    at: (f32, f32),
+}
+
+/// What an extension's menu items are in the native menu.
+fn menu_entries(items: &[Value], token: u64) -> Vec<MenuEntry> {
+    items
+        .iter()
+        .map(|item| {
+            if item["separator"] == true {
+                return MenuEntry::separator();
+            }
+            let label = item["label"].as_str().unwrap_or_default();
+            if let Some(children) = item["submenu"].as_array() {
+                return MenuEntry::submenu(label, menu_entries(children, token));
+            }
+            let command = item["run"]
+                .as_u64()
+                .map_or(String::new(), |run| format!("{MENU}{token}:{run}"));
+            let mut entry = MenuEntry::item(label, command).checked(item["on"] == true);
+            entry.enabled = item["disabled"] != true && item["run"].is_u64();
+            entry
+        })
+        .collect()
+}
+
+/// Only web links leave the app; nothing runs a local or custom scheme.
+fn external_link(url: &str) -> bool {
+    url.len() <= 2048 && (url.starts_with("https://") || url.starts_with("http://"))
+}
+
+pub struct Extensions {
+    /// Panels this window's extensions contribute: id and title, in menu order.
+    pub contributed: Vec<(String, String)>,
+    pub host: Option<ExtensionHost>,
+    /// This window's raster overrides; dropped with its host.
+    pub(crate) overrides: Option<crate::raster_overrides::Overrides>,
+    /// The document whose captures carry this window's definitions.
+    doc_id: Option<u64>,
+    /// The project the host was started for.
+    project: Option<String>,
+    /// One WebKit document per trust domain: the trusted realm's under the empty
+    /// key, then each Store extension's own. Never shared.
+    pages: BTreeMap<String, Page>,
+    views: Rc<RefCell<BTreeMap<String, Rc<RefCell<MacDomHost>>>>>,
+    panel_snapshots: pm_compat_host::PanelSnapshotCache,
+    data_stores: StoreDataStores,
+    /// Panels drawn by a Store helper, with its id and run.
+    pub(crate) stores: BTreeMap<String, (String, u64)>,
+    owners: Rc<RefCell<BTreeMap<String, String>>>,
+    /// Open contributed panels and where the shell placed their bodies.
+    panels: BTreeMap<String, layout::Rect>,
+    known_panels: BTreeSet<String>,
+    /// Panels whose definition went away while open. They return with it.
+    suspended: BTreeSet<String>,
+    /// Suspended panels the shell parked (their extension stayed away past
+    /// `PARK_GRACE`): a later registration shows them again in place.
+    parked: BTreeSet<String>,
+    /// The shell was last told the panels it lists are all in (`panels:ready`).
+    panels_ready: bool,
+    open_panels: BTreeSet<String>,
+    /// Open panels with no body right now: tabs behind another.
+    hidden: BTreeSet<String>,
+    menu: Option<OpenMenu>,
+    /// A built-in menu's callback while extensions answer for its menu.
+    choice: Option<(u64, crate::timeline_surface::Choose)>,
+    next_menu: u64,
+    /// Visibility sent to the realm. The page owns all subsequent geometry.
+    placed: BTreeSet<String>,
+    seen: u64,
+    commands: BTreeSet<String>,
+    /// Palette entries from v1–3 contributions and from v4 `commands.register`,
+    /// and the v4 registry revision they reflect.
+    compat_choices: Vec<Choice>,
+    v4_choices: Vec<Choice>,
+    v4_seen: u64,
+    v4_theme_choices: Vec<Choice>,
+    v4_tool_choices: Vec<Choice>,
+    v4_toolbar_seen: u64,
+    v4_headers_seen: u64,
+    v4_menubar_seen: u64,
+    v4_tools_seen: u64,
+    /// Layer 1: `(target_panel_id, button)` for `panelHeader.contribute`.
+    pub(crate) v4_panel_headers: Vec<(String, pm_shell::integration::PanelHeaderButton)>,
+    /// The active v1–3 theme's timeline surface inputs, per scheme.
+    pub v1_timeline: Value,
+    /// The viewport last sent to the compat realm.
+    viewport: Option<(f32, f32, f32)>,
+    /// The `themes.activate` request this window last acted on (its number).
+    v4_theme_requested: Option<u64>,
+    v4_themes: Vec<Value>,
+    v4_themes_seen: u64,
+    /// Mounted v4 surface extensions by title, with the source they run.
+    pub(crate) surfaces: BTreeMap<String, (String, String)>,
+    native_loading: usize,
+    native_epoch: Arc<()>,
+    native_seen: bool,
+    /// Forks drawing a built-in panel in its place: id to (panel, source).
+    forks: BTreeMap<String, (String, String)>,
+    /// Surface ids this window has mounted, and whether the first scan is done:
+    /// a panel published while the window is open is shown, not left in a menu.
+    mounted_once: BTreeSet<String>,
+    booted: bool,
+    pending_busy: Option<((u64, u64), crate::alert::Alert<bool>)>,
+    busy_attention: bool,
+    /// The D11 sheet is up for this task.
+    unresponsive: Option<(u64, u64)>,
+    /// Quit stopped this window's extensions (a hung one); a cancelled quit
+    /// starts them again.
+    pub stopped_for_quit: bool,
+    /// The engine's faces for the project's text, given to every page.
+    faces: Vec<pm_compat_host::PageFace>,
+    /// Faces asked for, resolved or not: each is resolved once.
+    face_keys: BTreeSet<(String, u16, bool)>,
+    /// Every face given to this window's pages: a page made again gets them.
+    page_faces: Vec<pm_compat_host::PageFace>,
+    /// When the window's page was last made again after it stopped.
+    page_rebuilds: Vec<std::time::Instant>,
+    /// Contributed definitions, pinned per generation for viewers and exports.
+    pub resources: Arc<ResourceSnapshot>,
+    /// Where the realm's viewer stage shows the page over the viewer, once an
+    /// extension made one (`viewer.stage`, `viewer.ov`). The viewer keeps the
+    /// pointer there.
+    stage: Rc<std::cell::Cell<Option<layout::Rect>>>,
+    stage_used: bool,
+    /// The viewer slot and composition frame last told to the realm.
+    stage_sent: Option<Option<[i64; 8]>>,
+    /// The viewer frame last told to the realm (its stamp's sequence).
+    presented: Option<u64>,
+    /// `inspector.focusText`'s layer, for Properties once its view exists.
+    pub(crate) focus_text: Option<String>,
+    /// The project whose open waits for effects its extensions are loading,
+    /// once its panels have mounted (`Controller::settled`).
+    pub(crate) settle_after: Option<String>,
+    /// Whether the open composition waits on such effects, for a document
+    /// revision and resource generation.
+    awaiting: std::cell::Cell<Option<(AwaitKey, bool)>>,
+    /// `(doc_id, revision, resource_generation)` last reconciled for stale
+    /// persisted `"missing": true` flags on effects and transitions.
+    reconciled: Option<(u64, u64, u64)>,
+}
+impl Default for Extensions {
+    fn default() -> Self {
+        // An extension's sheet goes through the app's gate, as the app's own do.
+        pm_compat_host::set_sheet_gate(pm_compat_host::SheetGate {
+            begin: |parent, sheet, begin, cancel| {
+                gpui_macos::child_window::sheet(parent, sheet, begin, cancel)
+            },
+            forget: gpui_macos::child_window::forget_sheet,
+        });
+        Self {
+            contributed: Vec::new(),
+            host: None,
+            overrides: None,
+            doc_id: None,
+            project: None,
+            pages: BTreeMap::new(),
+            views: Rc::default(),
+            panel_snapshots: Default::default(),
+            data_stores: StoreDataStores::default(),
+            stores: BTreeMap::new(),
+            owners: Rc::default(),
+            panels: BTreeMap::new(),
+            known_panels: BTreeSet::new(),
+            suspended: BTreeSet::new(),
+            parked: BTreeSet::new(),
+            panels_ready: false,
+            open_panels: BTreeSet::new(),
+            hidden: BTreeSet::new(),
+            menu: None,
+            choice: None,
+            next_menu: 0,
+            placed: BTreeSet::new(),
+            seen: 0,
+            commands: BTreeSet::new(),
+            compat_choices: vec![],
+            v4_choices: vec![],
+            v4_seen: 0,
+            v4_theme_choices: vec![],
+            v4_tool_choices: vec![],
+            v4_toolbar_seen: 0,
+            v4_headers_seen: 0,
+            v4_menubar_seen: 0,
+            v4_tools_seen: 0,
+            v4_panel_headers: vec![],
+            v4_theme_requested: None,
+            viewport: None,
+            v1_timeline: Value::Null,
+            v4_themes: vec![],
+            v4_themes_seen: 0,
+            faces: vec![],
+            face_keys: BTreeSet::new(),
+            page_faces: Vec::new(),
+            page_rebuilds: Vec::new(),
+            surfaces: BTreeMap::new(),
+            native_loading: 0,
+            native_epoch: Arc::new(()),
+            native_seen: false,
+            forks: BTreeMap::new(),
+            mounted_once: BTreeSet::new(),
+            booted: false,
+            pending_busy: None,
+            busy_attention: false,
+            unresponsive: None,
+            stopped_for_quit: false,
+            // Until the host says its first load pass is over, an effect the
+            // project uses may still be registered.
+            resources: Arc::new(ResourceSnapshot {
+                pending: true,
+                ..Default::default()
+            }),
+            stage: Rc::default(),
+            stage_used: false,
+            stage_sent: None,
+            presented: None,
+            focus_text: None,
+            settle_after: None,
+            awaiting: Default::default(),
+            reconciled: None,
+        }
+    }
+}
+impl Drop for Extensions {
+    fn drop(&mut self) {
+        if let Some(doc_id) = self.doc_id {
+            crate::mcp_services::set_resources(doc_id, None);
+        }
+    }
+}
+impl Extensions {
+    /// A new panel runtime has none of the old runtime's mounted surfaces.
+    pub(crate) fn panel_runtime_changed(&mut self) {
+        self.surfaces.clear();
+        self.forks.clear();
+        self.v4_seen = u64::MAX;
+        self.v4_themes_seen = u64::MAX;
+        self.v4_toolbar_seen = u64::MAX;
+        self.v4_headers_seen = u64::MAX;
+        self.v4_menubar_seen = u64::MAX;
+        self.v4_tools_seen = u64::MAX;
+        self.v4_theme_requested = None;
+        self.v4_choices.clear();
+        self.v4_theme_choices.clear();
+        self.v4_tool_choices.clear();
+        self.v4_panel_headers.clear();
+        self.seen = 0;
+    }
+    fn palette_choices(&self) -> Vec<Choice> {
+        self.compat_choices
+            .iter()
+            .chain(&self.v4_choices)
+            .chain(&self.v4_theme_choices)
+            .chain(&self.v4_tool_choices)
+            .cloned()
+            .collect()
+    }
+    pub(crate) fn result_panels(&self) -> Vec<Value> {
+        let mut pairs = BTreeSet::new();
+        for (panel, (extension, _)) in &self.stores {
+            pairs.insert((extension.clone(), panel.clone()));
+        }
+        for panel in self.surfaces.keys() {
+            pairs.insert((panel.clone(), panel.clone()));
+        }
+        for (extension, (panel, _)) in &self.forks {
+            pairs.insert((extension.clone(), panel.clone()));
+        }
+        pairs
+            .into_iter()
+            .map(|(extension, panel)| json!({"extensionId":extension,"panelId":panel}))
+            .collect()
+    }
+    pub fn owns_panel(&self, id: &str) -> bool {
+        self.known_panels.contains(id)
+    }
+    /// The WebKit page an extension panel draws in, when it is open there.
+    pub(crate) fn page_of(&self, id: &str) -> Option<Rc<RefCell<MacDomHost>>> {
+        if !self.open_panels.contains(id) {
+            return None;
+        }
+        let key = self.owners.borrow().get(id).cloned().unwrap_or_default();
+        self.views.borrow().get(&key).cloned()
+    }
+}
+/// The shipped app's extensions as first launch migrated them (its sealed
+/// checkpoint, kept current by each launch's delta pass), then this profile's
+/// own. The native folder wins when both have an id, and is the one agents
+/// publish into (last). The shipped app's live folder is never read: an
+/// isolated profile stays isolated.
+pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
+    vec![
+        profile.join("extensions-shared"),
+        profile.join("extensions"),
+    ]
+}
+/// How long an open waits for the effects its extensions are loading before
+/// the project opens without them (their frames keep waiting).
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The status note when an open stops waiting for extensions still loading.
+fn still_loading_note(names: &[&str]) -> Option<String> {
+    let (who, its) = match names {
+        [] => return None,
+        [one] => (format!("{one} is"), "its effects wait for it"),
+        [one, other] => (
+            format!("{one} and {other} are"),
+            "their effects wait for them",
+        ),
+        [one, rest @ ..] => (
+            format!("{one} and {} more are", rest.len()),
+            "their effects wait for them",
+        ),
+    };
+    Some(format!("{who} still loading. Frames that use {its}."))
+}
+/// The status line while `what` waits for this window's extensions to load.
+pub(crate) fn starts_once_loaded(what: &str, resources: &ResourceSnapshot) -> String {
+    match resources.loading.as_slice() {
+        [] => format!("{what} starts once extensions have loaded"),
+        [(_, one)] => format!("{what} starts once {one} has loaded"),
+        [(_, one), rest @ ..] => {
+            format!(
+                "{what} starts once {one} and {} more have loaded",
+                rest.len()
+            )
+        }
+    }
+}
+/// The resources one host publication pins after `current`, or `None` when
+/// it pins what `current` does. Definitions, the pending flag and the names
+/// of who is loading all come from that publication, never from the host
+/// again: a later look could pair these definitions with a load that has
+/// since finished, and the frame would draw a late effect as not installed.
+fn pinned(
+    current: &ResourceSnapshot,
+    publication: &pm_compat_runner::host::Publication,
+) -> Option<ResourceSnapshot> {
+    let definitions = publication
+        .contributions
+        .as_deref()
+        .map(definitions)
+        .unwrap_or_default();
+    let pending = !publication.settled;
+    let loading = if pending {
+        publication.loading.clone()
+    } else {
+        vec![]
+    };
+    let unavailable = unavailable(publication);
+    if definitions == current.definitions
+        && pending == current.pending
+        && loading == current.loading
+        && unavailable == current.unavailable
+    {
+        return None;
+    }
+    Some(ResourceSnapshot {
+        generation: current.generation + 1,
+        definitions,
+        pending,
+        loading,
+        unavailable,
+        ..Default::default()
+    })
+}
+/// The installed extensions that provide nothing now, with why, as the
+/// viewer and jobs name them beside the effects they would provide.
+pub(crate) fn unavailable(
+    publication: &pm_compat_runner::host::Publication,
+) -> Vec<pm_engine_service::resources::Unavailable> {
+    publication
+        .unavailable
+        .iter()
+        .map(
+            |(id, name, why)| pm_engine_service::resources::Unavailable {
+                id: id.clone(),
+                name: name.clone(),
+                why: why.clone(),
+                provides: publication.provides.get(id).cloned().unwrap_or_default(),
+            },
+        )
+        .collect()
+}
+/// Effect types the engine draws without any extension.
+fn builtin_effects() -> &'static BTreeSet<String> {
+    static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        pm_render::effects::versions::builtin_snapshot()
+            .definitions
+            .into_iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect)
+            .map(|d| d.id.as_str().to_owned())
+            .collect()
+    });
+    &BUILTIN
+}
+/// Transition types the engine draws without any extension.
+fn builtin_transitions() -> &'static BTreeSet<String> {
+    static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        pm_render::effects::versions::builtin_snapshot()
+            .definitions
+            .into_iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Transition)
+            .map(|d| d.id.as_str().to_owned())
+            .collect()
+    });
+    &BUILTIN
+}
+/// Fast check: does the document contain any persisted `"missing": true` flag
+/// on an effect or transition? Avoids queuing a kernel call for clean files.
+fn document_has_missing_flags(document: &pm_model::Document) -> bool {
+    use pm_model::{Node, NodeKind};
+    let Some(root) = document.root() else {
+        return false;
+    };
+    let layers_have_missing = |layers: &[Node]| {
+        layers.iter().any(|layer| {
+            let fx_missing = matches!(layer.get("fx").map(Node::kind), Some(NodeKind::Array(fxs))
+                if fxs.iter().any(|fx| matches!(fx.get("missing").map(Node::kind), Some(NodeKind::Bool(true)))));
+            fx_missing
+                || ["transitionIn", "transitionOut"].iter().any(|field| {
+                    layer.get(*field).is_some_and(|tr| {
+                        matches!(tr.get("missing").map(Node::kind), Some(NodeKind::Bool(true)))
+                    })
+                })
+        })
+    };
+    if let Some(NodeKind::Array(layers)) = root.get("layers").map(Node::kind)
+        && layers_have_missing(layers)
+    {
+        return true;
+    }
+    if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+        for (_, comp) in comps.iter() {
+            if let Some(NodeKind::Array(layers)) = comp.get("layers").map(Node::kind)
+                && layers_have_missing(layers)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+/// Canvas text for an extension realm, from the fonts `broker` knows: a
+/// window's host and a pageless one measure and draw text alike.
+pub(crate) fn canvas_text(
+    broker: pm_text::host::FontBroker,
+) -> Box<dyn Fn() -> pm_compat_runner::CanvasText + Send> {
+    Box::new(move || {
+        let resolver = BrokerResolver::new(broker.clone(), Default::default());
+        Box::new(pm_recorder::TextEngine::new(resolver)) as pm_compat_runner::CanvasText
+    })
+}
+/// The values entered for extensions' declared `vars` in `profile`, for a
+/// window's host and a pageless one alike: sealed ones only from this
+/// build's own Keychain service, read off the main thread.
+pub(crate) fn vars_source(profile: &std::path::Path) -> pm_compat_runner::VarsSource {
+    let profile = profile.to_owned();
+    let service = crate::extension_vars::own_service();
+    Arc::new(move |id: &str, keys: &[String]| {
+        let items = |service: &str, account: &str| {
+            crate::cloud::keychain::read(service, account)
+                .ok()
+                .flatten()
+        };
+        crate::extension_vars::values(&profile, id, keys, &service, &items)
+    })
+}
+/// Window viewers and headless jobs decode the same realm snapshot.
+pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
+    value["definitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| serde_json::from_value(d.clone()).ok())
+        .collect()
+}
+/// V4 providers carry the same wrapped snapshot as compat providers. Read
+/// winning registrations so an override never mixes source and controls.
+pub(crate) fn native_effect_definitions(
+    runtime: Option<&pm_builtins::Builtins>,
+    mut definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
+) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
+    for (_, snapshot) in runtime
+        .into_iter()
+        .flat_map(pm_builtins::Builtins::extension_effects)
+    {
+        definitions.retain(|d| d.kind != snapshot.kind || d.id != snapshot.id);
+        definitions.push(snapshot);
+    }
+    definitions
+}
+
+/// The app's one effect clipboard: Effect Controls in every window and v1–3
+/// extensions' inspector service copy and paste through it.
+pub(crate) fn effect_clipboard() -> pm_builtins::EffectClipboard {
+    static CLIPBOARD: std::sync::LazyLock<pm_builtins::EffectClipboard> =
+        std::sync::LazyLock::new(Default::default);
+    CLIPBOARD.clone()
+}
+fn extension_panel_verb(open: bool) -> &'static str {
+    if open { "restore" } else { "background-close" }
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn window_jumps_late_extension_panel_requests_are_passive() {
+    assert_eq!(extension_panel_verb(true), "restore");
+    assert_eq!(extension_panel_verb(false), "background-close");
+}
+
+const WAIT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(180);
+thread_local! {
+    static LAST_WAIT: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+fn watchdog_can_present(
+    front: bool,
+    long_operation: bool,
+    since_wait: Option<std::time::Duration>,
+) -> bool {
+    front && !long_operation && since_wait.is_none_or(|elapsed| elapsed >= WAIT_COOLDOWN)
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn window_jumps_watchdog_stays_quiet_during_work_and_after_wait() {
+    use std::time::Duration;
+    assert!(!watchdog_can_present(false, false, None));
+    assert!(!watchdog_can_present(true, true, None));
+    assert!(!watchdog_can_present(true, false, Some(Duration::from_secs(179))));
+    assert!(watchdog_can_present(true, false, Some(Duration::from_secs(180))));
+    assert!(watchdog_can_present(true, false, None));
+}
+
+impl Controller {
+    /// The realm's inspector service reaches this window's Effect Controls
+    /// once both run (the panels start after the extensions).
+    pub(crate) fn wire_effect_desk(&self) {
+        if let (Some(host), Some(runtime)) = (&self.extensions.host, &self.builtins.runtime) {
+            let desk = runtime.effect_desk();
+            host.set_effects(Some(Arc::new(move |op: &str| desk.run(op))));
+        }
+    }
+    pub(crate) fn present_busy_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(&(ticket, _)) = self.extensions.pending_busy.as_ref() else {
+            return;
+        };
+        let (view, execution) = ticket;
+        if !self.extensions.host.as_ref().is_some_and(|host| {
+            host.view() == view && host.unresponsive_execution() == Some(execution)
+        }) {
+            self.extensions.pending_busy = None;
+            self.clear_busy_attention();
+            return;
+        }
+        let working = |task: &pm_promedia::tasks::Task| {
+            use pm_promedia::tasks::TaskState::*;
+            matches!(task.state, Running | PauseRequested | CancelRequested)
+        };
+        let long_operation = self.mcp.operation_in_progress()
+            || pm_engine_service::jobs::exports_running()
+            || crate::export_coordinator::tasks()
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .any(working)
+            || self.pro_media.snapshot().iter().any(working);
+        let since_wait = LAST_WAIT.with(|last| last.get().map(|at| at.elapsed()));
+        if self.extensions.unresponsive.is_some() {
+            return;
+        }
+        let front = crate::alert::can_attach_background_sheet(&self.host.borrow().window);
+        if !watchdog_can_present(front, long_operation, since_wait) {
+            if watchdog_can_present(true, long_operation, since_wait)
+                && !self.extensions.busy_attention
+                && !self.host.borrow().window.isKeyWindow()
+            {
+                self.extensions.busy_attention = true;
+                self.host.borrow().set_attention(true);
+                let (asking, name) = (cx.entity_id(), self.project_name());
+                cx.defer(move |cx| crate::session::tell_front_waiting(asking, &name, cx));
+            }
+            return;
+        }
+        let Some((_, alert)) = self.extensions.pending_busy.take() else {
+            return;
+        };
+        self.clear_busy_attention();
+        let answer = alert.sheet(&self.host.borrow().window);
+        self.extensions.unresponsive = Some(ticket);
+        cx.spawn(async move |this, cx| {
+            let answer = answer.recv().await.ok().flatten();
+            if answer == Some(false) {
+                LAST_WAIT.with(|last| last.set(Some(std::time::Instant::now())));
+            }
+            let _ = this.update(cx, |v, _| {
+                if v.extensions.unresponsive == Some(ticket) {
+                    v.extensions.unresponsive = None;
+                    if let Some(host) = &v.extensions.host
+                        && host.view() == view
+                    {
+                        host.answer_unresponsive(execution, answer == Some(true));
+                    }
+                }
+            });
+        }).detach();
+    }
+    fn clear_busy_attention(&mut self) {
+        if std::mem::take(&mut self.extensions.busy_attention) {
+            self.host.borrow().set_attention(false);
+        }
+    }
+    /// Quitting while an extension isn't responding (D11): its sheet goes,
+    /// the realm is stopped without a restart (its open entry is sealed;
+    /// acknowledged kernel edits stay) and the quit goes on. `false` when no
+    /// extension in this window is hung.
+    pub fn stop_hung_extensions_for_quit(&mut self) -> bool {
+        if self.extensions.host.as_ref().and_then(ExtensionHost::unresponsive_execution).is_none() {
+            return false;
+        }
+        if self.extensions.unresponsive.is_some() {
+            let shell = self.host.borrow();
+            if let Some(sheet) = shell.window.attachedSheet() {
+                shell
+                    .window
+                    .endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+            }
+        }
+        let mut shell = self.host.borrow_mut();
+        shell.native_present = None;
+        shell.native_pending = None;
+        shell.native_accessibility = vec![];
+        drop(shell);
+        // Dropping the host closes the realm off the main thread.
+        self.reset_extensions();
+        self.extensions.stopped_for_quit = true;
+        true
+    }
+    /// A fresh extension state for this window. Resource generations keep
+    /// counting up, so the viewer takes the next definitions as newer.
+    pub(crate) fn reset_extensions(&mut self) {
+        let generation = self.extensions.resources.generation;
+        self.clear_busy_attention();
+        self.extensions = Extensions::default();
+        self.extensions.resources = Arc::new(ResourceSnapshot {
+            generation: generation + 1,
+            pending: true,
+            ..Default::default()
+        });
+        self.apply_extension_resources();
+    }
+    pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        // Started when the open was chosen (PM-384): its realm and bundle
+        // were made while the project opened; it now learns the document.
+        if let Some(project) = &project
+            && self.extensions.host.is_some()
+            && self.extensions.project.as_deref() == Some(project.as_str())
+        {
+            self.extensions_document(project);
+            self.wire_effect_desk();
+            self.sync_viewport();
+            return;
+        }
+        let Some(project) = project else {
+            // The window mounts while its project still opens: the
+            // extensions started for that open stay (PM-384).
+            if self.opening_name.is_some() && self.extensions.project.is_some() {
+                return;
+            }
+            let mut shell = self.host.borrow_mut();
+            shell.native_present = None;
+            shell.native_pending = None;
+            shell.native_accessibility = vec![];
+            drop(shell);
+            self.project_extension_scope = None;
+            self.reset_extensions();
+            return;
+        };
+        self.start_extensions_for(project, cx);
+    }
+    /// The document of the window's project, once the project has opened:
+    /// its captures and exports wait for this window's extensions.
+    fn extensions_document(&mut self, project: &str) {
+        if self.extensions.doc_id.is_some() {
+            return;
+        }
+        let Some(doc_id) = self.kernel.published(project).map(|p| p.snapshot.doc_id) else {
+            return;
+        };
+        self.extensions.doc_id = Some(doc_id);
+        crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+    }
+    /// Starts the extensions of `project`, even before its open finished
+    /// (the realm waits for the project's first publication to stage it).
+    pub(crate) fn start_extensions_for(&mut self, project: String, cx: &mut Context<Self>) {
+        let mut shell = self.host.borrow_mut();
+        shell.native_present = None;
+        shell.native_pending = None;
+        shell.native_accessibility = vec![];
+        drop(shell);
+        self.reset_extensions();
+        // Automatically 3-way rebase any user built-in forks when the shipped
+        // built-ins changed across a software update (zero-breakage updates).
+        crate::fork_auto_rebase::ensure_rebased_async(self.profile.clone());
+        let project_name = project.clone();
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        let (clock_tx, clock_rx) = async_channel::bounded(64);
+        let doc_id = self.kernel.published(&project).map(|p| p.snapshot.doc_id);
+        let rasters = crate::raster_overrides::Overrides::new(
+            &self.engine,
+            self.kernel.clone(),
+            project.clone(),
+            self.job_overrides.clone(),
+        );
+        let frames = crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+            self.job_overrides.clone(),
+            crate::mcp_services::Capture::ExtensionSnapshot,
+        )
+        .ok();
+        let scope = self
+            .project_extension_scope
+            .as_ref()
+            .filter(|(document, _)| Some(*document) == doc_id)
+            .map(|(_, scope)| scope.clone())
+            .unwrap_or_else(|| pm_compat_runner::host::ProjectScope {
+                excluded: doc_id
+                    .map(|id| self.mcp.extension_exclusions(id))
+                    .unwrap_or_default(),
+                ..Default::default()
+            });
+        let host = ExtensionHost::start_scoped(
+            HostConfig {
+                kernel: self.kernel.clone(),
+                frames,
+                rasters: Some(rasters.hooks()),
+                project,
+                roots: roots(&self.profile),
+                cache: self.profile.join("extensions-build"),
+                owner: Some(Arc::new(Clock(clock_tx))),
+                text: self.font_broker.clone().map(canvas_text),
+                wake: Arc::new(move || {
+                    let _ = wake_tx.try_send(());
+                }),
+                vars: Some(vars_source(&self.profile)),
+                clipboard: Some(crate::platform::text_clipboard()),
+            },
+            scope,
+        );
+        rasters.connect(host.raster_inbox());
+        self.extensions.doc_id = doc_id;
+        if let Some(doc_id) = doc_id {
+            // Captures and exports of this document wait for its extensions.
+            crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+        }
+        self.extensions.overrides = Some(rasters);
+        self.extensions.host = Some(host);
+        self.extensions.project = Some(project_name);
+        self.wire_effect_desk();
+        self.sync_viewport();
+        cx.spawn(async move |this, cx| {
+            while wake_rx.recv().await.is_ok() {
+                if this.update(cx, |v, cx| v.drain_extensions(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            while let Ok(request) = clock_rx.recv().await {
+                let moved = this.update(cx, |v, cx| {
+                    match request {
+                        TransportRequest::Seek(time) => v.seek(time),
+                        TransportRequest::Play | TransportRequest::Pause => {
+                            if let Some(viewer) = &v.viewer {
+                                let _ = viewer.command(if request == TransportRequest::Play {
+                                    TransportCommand::Play {
+                                        rate: PlaybackRate::NORMAL,
+                                    }
+                                } else {
+                                    TransportCommand::Pause
+                                });
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+                if moved.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Everything the host published since the last wake. Runs on main; never blocks.
+    pub fn drain_extensions(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        // Everything pinned below comes from this one publication.
+        let publication = host.publication();
+        let revision = publication.revision;
+        // A rebuilt realm is a new document: render again so open panels
+        // replace the page the old one drew into.
+        if self
+            .extensions
+            .pages
+            .get("")
+            .is_some_and(|page| host.view() != 0 && page.view != host.view())
+        {
+            cx.notify();
+        }
+        let toasts = host.take_toasts();
+        let requests = host.take_requests();
+        for toast in toasts {
+            self.note(toast, cx);
+        }
+        // The trusted realm's document gets its page as soon as the realm
+        // starts, not only when a panel shows: hidden elements extensions
+        // measure (a caret, a label) need real layout (plan 3.5.2).
+        let trusted_page = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
+            && !self.extensions.pages.contains_key("");
+        if trusted_page {
+            self.ensure_page("", cx);
+        }
+        self.sync_export_pages(cx);
+        self.mount_surfaces(cx);
+        if revision != self.extensions.seen {
+            self.extensions.seen = revision;
+            if publication.contributions.is_some() {
+                self.apply_contributions(&publication, cx);
+            } else {
+                // No extension to run, or none has published yet.
+                self.pin_definitions(&publication);
+            }
+        }
+        // A panel-open request can arrive with the publication registering
+        // it. Install the catalog first so the shell never sees Unknown panel.
+        for request in requests {
+            self.extension_request(request, cx);
+        }
+        if self.extensions.native_seen && let Some(document) = self.extensions.doc_id {
+            crate::mcp_services::admit_native(document, publication.revision);
+        }
+        self.present_page(cx);
+    }
+    /// The realm's questions for AppKit. Each answer returns through the inbox.
+    fn extension_request(&mut self, request: Value, cx: &mut Context<Self>) {
+        let token = request["token"].as_u64().unwrap_or_default();
+        match request["kind"].as_str() {
+            Some("panel") => {
+                let id = request["id"].as_str().unwrap_or_default();
+                // An asynchronous extension request carries no user activation.
+                let verb = extension_panel_verb(request["open"] == true);
+                self.host
+                    .borrow()
+                    .send_command(&format!("panel:{verb}:{id}"), vec![]);
+            }
+            // A text request can reach Properties when it is already shown.
+            Some("focusText") => {
+                let showing = self.host.borrow().window.isKeyWindow()
+                    && self.shell.as_ref().and_then(|shell| shell.upgrade())
+                        .is_some_and(|shell| shell.read(cx).panel_rect("inspector").is_some());
+                if !showing {
+                    return;
+                }
+                let layer = request["layer"].as_str().unwrap_or_default().to_owned();
+                match self.builtins.views.get("inspector") {
+                    Some(view) => view.update(cx, |v, cx| v.focus_text(layer, cx)),
+                    None => self.extensions.focus_text = Some(layer),
+                }
+            }
+            Some("confirm") => {
+                let Some(view) = self.extensions.host.as_ref().map(ExtensionHost::view) else {
+                    return;
+                };
+                let project = self.extensions.project.clone();
+                let title = request["title"].as_str().unwrap_or_default();
+                let body = request["body"].as_str().unwrap_or_default();
+                use crate::alert::{Alert, Button};
+                let answer = Alert::new(
+                    title,
+                    body,
+                    vec![
+                        Button::new("OK", true).default(),
+                        Button::new("Cancel", false).cancel(),
+                    ],
+                )
+                .background_sheet(&self.host.borrow().window, cx);
+                cx.spawn(async move |this, cx| {
+                    let confirmed = answer.recv().await == Ok(Some(true));
+                    let _ = this.update(cx, |v, _| {
+                        if let Some(host) = &v.extensions.host
+                            && host.view() == view
+                            && v.extensions.project == project
+                        {
+                            host.answer(token, confirmed.into());
+                        }
+                    });
+                })
+                .detach();
+            }
+            Some("unresponsive") => {
+                let (Some(view), Some(execution)) =
+                    (request["view"].as_u64(), request["execution"].as_u64())
+                else {
+                    return;
+                };
+                if !self.extensions.host.as_ref().is_some_and(|host| host.view() == view) {
+                    return;
+                }
+                let restart = "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.";
+                let (title, mut body) = match request["name"].as_str() {
+                    Some(name) if request["disables"] == true => (
+                        format!("“{name}” isn’t responding"),
+                        format!(
+                            "You can wait for it to finish, or stop it. A stopped extension stays off until you turn {name} back on in Extensions."
+                        ),
+                    ),
+                    Some(name) => (format!("“{name}” isn’t responding"), restart.to_owned()),
+                    // No extension's code was running: the extension host's
+                    // own work (a project change, its answers) ran long.
+                    None => (
+                        "Powermove’s extension host isn’t responding".to_owned(),
+                        restart.to_owned(),
+                    ),
+                };
+                // What it was doing, and for how long.
+                let busy = request["seconds"].as_f64().map(|s| format!("{s:.0} s"));
+                let place = request["where"].as_str();
+                if busy.is_some() || place.is_some() {
+                    body.push_str(&format!(
+                        "\n\nBusy{}{}.",
+                        busy.as_deref()
+                            .map_or_else(String::new, |b| format!(" for {b}")),
+                        place.map_or_else(String::new, |p| format!(" in {p}"))
+                    ));
+                }
+                crate::diag::line(serde_json::json!({"unresponsive": request["name"],
+                    "where": request["where"], "seconds": request["seconds"]}));
+                use crate::alert::{Alert, Button};
+                self.extensions.pending_busy = Some((
+                    (view, execution),
+                    Alert::new(
+                        title,
+                        body,
+                        vec![
+                            Button::new("Wait", false).default().cancel(),
+                            Button::new("Stop", true),
+                        ],
+                    ),
+                ));
+                self.present_busy_prompt(cx);
+            }
+            Some("import") => match request["file"].as_str().and_then(|t| t.parse::<u64>().ok()) {
+                Some(file) => {
+                    let definition = request["layerDefinition"].as_str().map(str::to_owned);
+                    self.import_for_extension(token, file, definition, cx)
+                }
+                None => {
+                    if let Some(host) = &self.extensions.host {
+                        host.answer(
+                            token,
+                            serde_json::json!({"error":"assets.import requires a File"}),
+                        );
+                    }
+                }
+            },
+            // The `tool` service's setTool: only the shell's tool commands.
+            Some("command") => {
+                if let Some(name) = request["name"].as_str().filter(|n| {
+                    n.starts_with("tool")
+                        && n.len() > 4
+                        && n.chars().all(|c| c.is_ascii_alphabetic())
+                }) {
+                    // A shape tool's shape rides along as the Shape tool's variant
+                    // (v1's rect, rounded, ellipse, polygon, star).
+                    let args = request["shape"]
+                        .as_str()
+                        .map(|shape| vec![serde_json::json!(shape)])
+                        .unwrap_or_default();
+                    self.host.borrow().send_command(name, args);
+                }
+            }
+            // The `viewer` service's writable showControls: the viewer's layer controls.
+            Some("viewerControls") => {
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    let shown = request["shown"] == true;
+                    gizmos.update(cx, |g, cx| {
+                        if g.controls() != shown {
+                            g.toggle_controls(cx)
+                        }
+                    });
+                }
+            }
+            // The `viewer` service's setZoom: the viewer leaves fit at that zoom
+            // (as far as the display can show it) and reports where it landed.
+            Some("viewerZoom") => {
+                use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+                if let Some(zoom) = request["zoom"].as_f64().filter(|z| z.is_finite()) {
+                    let pan = match request["pan"].as_array().map(Vec::as_slice) {
+                        Some([x, y]) => [x.as_f64().unwrap_or(0.), y.as_f64().unwrap_or(0.)],
+                        _ => self.view.pan,
+                    };
+                    let top = ZOOM_MAX.min(self.zoom_limit()).max(ZOOM_MIN);
+                    self.view.place(Some(zoom.clamp(ZOOM_MIN, top)), pan);
+                    self.write_view(None, cx);
+                }
+            }
+            // An extension made the viewer's stage: show the page over the viewer.
+            Some("viewerStage") => {
+                self.extensions.stage_used = true;
+                self.extensions.stage_sent = None;
+                self.sync_viewer_stage();
+                cx.notify();
+            }
+            // The `timeline` service's writable view and its actions.
+            Some("timeline") => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return;
+                };
+                timeline.update(cx, |t, cx| t.service_request(&request, cx));
+                // As the view switch does: the timeline panel's own view.
+                if let Some(shown) = request["graph"].as_bool()
+                    && let Some(runtime) = &self.builtins.runtime
+                    && let Err(error) =
+                        runtime.timeline_action(json!({"type": "graph", "shown": shown}))
+                {
+                    self.message = error.to_string();
+                }
+            }
+            Some("fonts") => self.ensure_page_fonts(&request["faces"], cx),
+            Some("download") => {
+                let url = request["url"].as_str().unwrap_or_default().to_owned();
+                self.download_for_extension(token, url, cx);
+            }
+            Some("mediaFile") => {
+                let asset = request["asset"].as_str().unwrap_or_default();
+                self.media_file_for_extension(token, asset, cx);
+            }
+            Some("pick") => {
+                let accept = request["accept"].as_str().unwrap_or_default().to_owned();
+                self.pick_for_extension(token, &accept, request["multiple"] == true, cx);
+            }
+            Some("openExternal") => {
+                let url = request["url"].as_str().unwrap_or_default();
+                let opened = external_link(url) && crate::platform::open_url(url);
+                if let Some(host) = &self.extensions.host {
+                    host.answer(token, opened.into());
+                }
+            }
+            Some("menu") => {
+                let items = menu_entries(request["items"].as_array().unwrap_or(&vec![]), token);
+                let open = self
+                    .extensions
+                    .menu
+                    .take_if(|menu| Some(menu.key) == request["key"].as_u64());
+                let shell = self.host.borrow();
+                match open {
+                    Some(OpenMenu {
+                        mut entries, at, ..
+                    }) => {
+                        if !items.is_empty() {
+                            entries.push(MenuEntry::separator());
+                            entries.extend(items);
+                        }
+                        shell.context_menu(&entries, at.0, at.1);
+                    }
+                    None if request["key"].is_null() => shell.context_menu(
+                        &items,
+                        request["x"].as_f64().unwrap_or_default() as f32,
+                        request["y"].as_f64().unwrap_or_default() as f32,
+                    ),
+                    None => (),
+                }
+            }
+            _ => (),
+        }
+    }
+    /// Extensions add to a tab's menu asynchronously: v4 realms answer first
+    /// (100 ms at most, off the main thread), then v1–3 within the deadline.
+    pub fn extension_panel_menu(
+        &mut self,
+        id: &str,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        self.extension_menu(
+            vec![("panel:context", json!({"panelId": id}))],
+            entries,
+            at,
+            cx,
+        )
+    }
+    /// A built-in context menu with what v4 and v1–3 extensions add for each
+    /// of `locations` (v1–3's `MenuLocation` and its context, gathered in
+    /// order). `None`: it opens once they answer.
+    pub fn extension_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        self.extension_menu_with_tail(locations, entries, vec![], at, cx)
+    }
+    /// As `extension_menu`, with `tail` after what extensions add (the
+    /// viewer's composition rows close its canvas menu, as viewer.ts).
+    pub fn extension_menu_with_tail(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        tail: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        let with_tail = |mut entries: Vec<MenuEntry>| {
+            if !tail.is_empty() {
+                entries.push(MenuEntry::separator());
+                entries.extend(tail);
+            }
+            entries
+        };
+        let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
+        let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
+        // With no realm nothing can add to it, so it opens right away.
+        if !compat && runtime.is_none() {
+            return Some(with_tail(entries));
+        }
+        cx.spawn(async move |this, cx| {
+            let (extra, locations) = match runtime {
+                Some(runtime) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            let extra = locations
+                                .iter()
+                                .flat_map(|(location, ctx)| v4_menu_items(&runtime, location, ctx))
+                                .collect::<Vec<_>>();
+                            (extra, locations)
+                        })
+                        .await
+                }
+                None => (vec![], locations),
+            };
+            let _ = this.update(cx, |v, cx| {
+                let mut entries = entries;
+                if !extra.is_empty() {
+                    entries.push(MenuEntry::separator());
+                    entries.extend(extra);
+                }
+                v.open_compat_menu(locations, with_tail(entries), at, cx);
+            });
+        })
+        .detach();
+        None
+    }
+    /// True when some extension can add to a context menu.
+    pub fn extensions_listen(&self) -> bool {
+        self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
+            || self
+                .builtins
+                .runtime
+                .as_ref()
+                .is_some_and(|r| r.has_extensions())
+    }
+    /// A built-in menu given as rows (`{id,label,disabled?,checked?}` or
+    /// `null` for a separator) with extension items after them. A built-in
+    /// row runs `choose` with its index, as the plain native menu would.
+    pub fn extension_rows_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        rows: &[Value],
+        at: (f32, f32),
+        choose: crate::timeline_surface::Choose,
+        cx: &mut Context<Self>,
+    ) {
+        self.extensions.next_menu += 1;
+        let token = self.extensions.next_menu;
+        // Rows are numbered in preorder, submenu rows included, as the
+        // plain native menu numbers them (`v4_native::menu_item`).
+        fn entries(rows: &[Value], token: u64, next: &mut usize) -> Vec<MenuEntry> {
+            rows.iter()
+                .map(|row| {
+                    let index = *next;
+                    *next += 1;
+                    if row.is_null() {
+                        return MenuEntry::separator();
+                    }
+                    let label = row["label"].as_str().unwrap_or_default();
+                    if row["separator"] == true {
+                        return MenuEntry::separator();
+                    }
+                    if row["header"] == true {
+                        return MenuEntry::header(label);
+                    }
+                    let mut entry = match row["children"].as_array() {
+                        Some(children) if !children.is_empty() => {
+                            MenuEntry::submenu(label, entries(children, token, next))
+                        }
+                        _ => MenuEntry::item(label, format!("{CHOICE}{token}:{index}")),
+                    }
+                    .checked(row["checked"] == true);
+                    entry.enabled &= row["disabled"] != true;
+                    entry.shortcut = row["id"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .and_then(pm_shell::menu::chord_for);
+                    entry
+                })
+                .collect()
+        }
+        let entries = entries(rows, token, &mut 0);
+        self.extensions.choice = Some((token, choose));
+        if let Some(entries) = self.extension_menu(locations, entries, at, cx) {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+        }
+    }
+    /// v1–3 realms add to the menu, which opens when they answer or the
+    /// deadline passes.
+    fn open_compat_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+            return;
+        };
+        self.extensions.next_menu += 1;
+        let key = self.extensions.next_menu;
+        let pairs = locations
+            .into_iter()
+            .map(|(location, ctx)| json!([location, ctx]))
+            .collect();
+        host.gather_menus(pairs, key);
+        self.extensions.menu = Some(OpenMenu { key, entries, at });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MENU_DEADLINE).await;
+            let _ = this.update(cx, |v, _| {
+                if let Some(menu) = v.extensions.menu.take_if(|menu| menu.key == key) {
+                    v.host
+                        .borrow()
+                        .context_menu(&menu.entries, menu.at.0, menu.at.1);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Each v4 extension gets its own realm and draws through the v4 panel path.
+    /// One that is disabled, removed or rebuilt loses that realm here. A fork
+    /// (`replaces` a built-in) draws that built-in's panel instead, and the
+    /// built-in comes back when the fork goes.
+    fn mount_surfaces(&mut self, cx: &mut Context<Self>) {
+        let (Some(host), Some(runtime)) = (&self.extensions.host, self.builtins.runtime.clone())
+        else {
+            return;
+        };
+        let wanted = host.surfaces();
+        self.extensions.native_seen |= !wanted.is_empty();
+        let ready = host.is_ready();
+        let source = |surface: &Value| surface["graph"]["hash"].as_str().map(str::to_owned);
+        let still = |id: &str, hash: &str| {
+            wanted
+                .iter()
+                .any(|s| s["id"] == id && source(s).as_deref() == Some(hash))
+        };
+        let gone: Vec<String> = self
+            .extensions
+            .surfaces
+            .iter()
+            .filter(|(id, (_, hash))| !still(id, hash))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &gone {
+            let Some(rebuilt) = wanted.iter().find(|s| s["id"] == id.as_str()) else {
+                self.builtins.forget_surface(id);
+                runtime.unmount_extension(id);
+                self.extensions.surfaces.remove(id);
+                let shell = self.host.borrow();
+                shell.send_command(&format!("panel:remove:{id}"), vec![]);
+                continue;
+            };
+            // A new version: the old one hands over `api.hot.data`, then goes.
+            let title = rebuilt["manifest"]["name"]
+                .as_str()
+                .unwrap_or(id)
+                .to_owned();
+            let hash = source(rebuilt).unwrap_or_default();
+            self.extensions.surfaces.insert(id.clone(), (title, hash));
+            self.builtins.keep_surface(id);
+            let (runtime, extension, graph) =
+                (runtime.clone(), id.clone(), rebuilt["graph"].clone());
+            let ticket = cx.background_executor().spawn(async move {
+                let hot = runtime.hot(&extension).ok().and_then(|ticket| {
+                    let deadline = std::time::Instant::now() + HOT_HANDOFF;
+                    crate::ticket::answer(ticket, deadline)?
+                        .ok()
+                        .map(|e| e.value)
+                });
+                runtime.unmount_extension(&extension);
+                runtime.mount_extension(&extension, &graph, hot.as_deref())
+            });
+            self.await_panel(id.clone(), id.clone(), ticket, cx);
+        }
+        let unforked: Vec<(String, String)> = self
+            .extensions
+            .forks
+            .iter()
+            .filter(|(id, (_, hash))| !still(id, hash))
+            .map(|(id, (panel, _))| (id.clone(), panel.clone()))
+            .collect();
+        for (id, panel) in unforked {
+            self.extensions.forks.remove(&id);
+            // A rebuilt fork takes its panel straight back below.
+            let refork = wanted.iter().any(|s| {
+                s["id"] == id.as_str()
+                    && crate::extension_authoring::replaced_panel(&s["manifest"])
+                        == Some(panel.as_str())
+            });
+            if !refork {
+                self.builtins.keep_surface(&panel);
+                let (runtime, built_in) = (runtime.clone(), panel.clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { runtime.restore(&built_in) });
+                self.await_panel(panel, id, ticket, cx);
+            }
+        }
+        for surface in wanted {
+            let Some(id) = surface["id"].as_str().map(str::to_owned) else {
+                continue;
+            };
+            if self.extensions.surfaces.contains_key(&id) || self.extensions.forks.contains_key(&id)
+            {
+                continue;
+            }
+            let hash = source(&surface).unwrap_or_default();
+            if let Some(panel) = crate::extension_authoring::replaced_panel(&surface["manifest"]) {
+                if let Some((other, _)) =
+                    self.extensions.forks.iter().find(|(_, (p, _))| p == panel)
+                {
+                    self.message =
+                        format!("{id} and {other} both replace {panel}; {other} is kept.");
+                    continue;
+                }
+                self.extensions
+                    .forks
+                    .insert(id.clone(), (panel.into(), hash));
+                self.builtins.keep_surface(panel);
+                let (runtime, fork, graph) =
+                    (runtime.clone(), id.clone(), surface["graph"].clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { runtime.replace(panel, &fork, &graph) });
+                self.await_panel(panel.into(), id, ticket, cx);
+                continue;
+            }
+            let title = surface["manifest"]["name"]
+                .as_str()
+                .unwrap_or(&id)
+                .to_owned();
+            self.extensions.surfaces.insert(id.clone(), (title, hash));
+            let ticket = runtime.mount_extension(&id, &surface["graph"], None);
+            self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
+            // Give a new panel a place without selecting it over the tab
+            // the user is working in.
+            if self.extensions.mounted_once.insert(id.clone())
+                && self.extensions.booted
+                && !self.extensions.open_panels.contains(&id)
+            {
+                self.host
+                    .borrow()
+                    .send_command(&format!("panel:restore:{id}"), vec![]);
+            }
+        }
+        self.extensions.booted |= ready;
+        if self.extensions.booted && self.extensions.suspended.is_empty() {
+            self.tell_panels_ready(true);
+        }
+    }
+    /// The panel shows once its first commit is accepted; a failure says whose.
+    fn await_panel(
+        &mut self,
+        panel: String,
+        source: String,
+        ticket: Task<pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel_builds.entry(panel.clone()).or_default();
+        let document = self.extensions.doc_id;
+        let epoch = self.extensions.native_epoch.clone();
+        self.extensions.native_loading += 1;
+        let native_load = document.map(crate::mcp_services::begin_native_load);
+        self.refresh_native_effects();
+        cx.spawn(async move |this, cx| {
+            let mounted = match ticket.await {
+                Ok(ticket) => ticket.await.map(|e| e.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                if Arc::ptr_eq(&v.extensions.native_epoch, &epoch) {
+                    v.extensions.native_loading = v.extensions.native_loading.saturating_sub(1);
+                }
+                match mounted {
+                    Ok(generation) => {
+                        if let Some(build) = v.panel_builds.get_mut(&panel) {
+                            build.published([0], true);
+                        }
+                        v.surface_ready(panel, generation)
+                    }
+                    Err(error) => {
+                        v.builtins.forget_surface(&panel);
+                        v.message = format!("{source} could not start: {error}");
+                    }
+                }
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+            drop(native_load);
+        })
+        .detach();
+    }
+    /// Tells the shell whether the extension panels it lists are all in:
+    /// until then a tab whose panel has not registered yet keeps a quiet body
+    /// instead of saying it is unavailable.
+    fn tell_panels_ready(&mut self, ready: bool) {
+        if self.extensions.panels_ready != ready {
+            self.extensions.panels_ready = ready;
+            self.host.borrow().send_command(
+                if ready {
+                    "panels:ready"
+                } else {
+                    "panels:waiting"
+                },
+                vec![],
+            );
+        }
+    }
+    fn apply_contributions(
+        &mut self,
+        publication: &pm_compat_runner::host::Publication,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(value) = publication.contributions.as_deref() else {
+            return;
+        };
+        let panels: Vec<(String, String)> = value["panels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|panel| {
+                let id = panel["id"].as_str()?.to_owned();
+                let title = panel["title"].as_str().unwrap_or(&id).to_owned();
+                Some((id, title))
+            })
+            .collect();
+        self.extensions.stores = value["panels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|panel| {
+                let store = panel["store"].as_str()?.to_owned();
+                let view = panel["view"].as_u64().unwrap_or_default();
+                Some((panel["id"].as_str()?.to_owned(), (store, view)))
+            })
+            .collect();
+        *self.extensions.owners.borrow_mut() = self
+            .extensions
+            .stores
+            .iter()
+            .map(|(panel, (store, _))| (panel.clone(), store.clone()))
+            .collect();
+        // A Store extension that stopped takes its document with it.
+        let running: BTreeSet<&String> = self.extensions.stores.values().map(|(s, _)| s).collect();
+        let stopped: Vec<String> = self
+            .extensions
+            .pages
+            .keys()
+            .filter(|key| {
+                !key.is_empty() && !key.starts_with(EXPORT_PAGE) && !running.contains(key)
+            })
+            .cloned()
+            .collect();
+        for key in stopped {
+            self.extensions.pages.remove(&key);
+            self.extensions.views.borrow_mut().remove(&key);
+        }
+        let known: BTreeSet<String> = panels.iter().map(|(id, _)| id.clone()).collect();
+        // As in the shipped app: the workspace keeps a retired panel's place, and
+        // it comes back if something registers the id again.
+        // A panel whose extension left the registry (they restart as a
+        // project opens) keeps its place and its stack's showing tab for
+        // `PARK_GRACE`, its body quiet: it is parked only if it stays away,
+        // so the dock never jumps to another tab and back (run 16).
+        let mut vanished = false;
+        for id in self.extensions.known_panels.difference(&known) {
+            if self.extensions.open_panels.contains(id) || self.extensions.panels.contains_key(id) {
+                vanished |= self.extensions.suspended.insert(id.clone());
+            }
+        }
+        {
+            let shell = self.host.borrow();
+            for id in known.intersection(&self.extensions.suspended.clone()) {
+                self.extensions.suspended.remove(id);
+                self.extensions.parked.remove(id);
+                shell.send_command(&format!("panel:registered:{id}"), vec![]);
+            }
+        }
+        self.extensions.known_panels = known;
+        if vanished {
+            self.tell_panels_ready(false);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PARK_GRACE).await;
+                let _ = this.update(cx, |v, _| {
+                    let gone: Vec<String> = v
+                        .extensions
+                        .suspended
+                        .iter()
+                        .filter(|id| !v.extensions.known_panels.contains(*id))
+                        .filter(|id| !v.extensions.parked.contains(*id))
+                        .cloned()
+                        .collect();
+                    for id in gone {
+                        v.extensions.parked.insert(id.clone());
+                        v.host
+                            .borrow()
+                            .send_command(&format!("panel:park:{id}"), vec![]);
+                    }
+                    v.tell_panels_ready(v.extensions.booted);
+                });
+            })
+            .detach();
+        } else if self.extensions.suspended.is_empty() {
+            self.tell_panels_ready(self.extensions.booted);
+        }
+        let surfaces = self
+            .extensions
+            .surfaces
+            .iter()
+            .map(|(id, (title, _))| (id.clone(), title.clone()));
+        let contributed: Vec<_> = panels.iter().cloned().chain(surfaces).collect();
+        remember_titles(&self.profile, &contributed);
+        self.extensions.contributed = contributed;
+        let undo = Choice {
+            label: "Undo Extension Change".into(),
+            command: UNDO.into(),
+            ..Default::default()
+        };
+        let choices: Vec<Choice> = value["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|command| {
+                let id = command["id"].as_str()?;
+                Some(Choice {
+                    label: command["label"]
+                        .as_str()
+                        .or(command["title"].as_str())
+                        .unwrap_or(id)
+                        .to_owned(),
+                    command: format!("{COMMAND}{id}"),
+                    ..Default::default()
+                })
+            })
+            .chain([undo])
+            .collect();
+        self.extensions.commands = choices
+            .iter()
+            .filter_map(|c| c.command.strip_prefix(COMMAND).map(str::to_owned))
+            .collect();
+        let bindings: Vec<Binding> = value["keybindings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|binding| {
+                let command = binding["command"].as_str()?;
+                Some(Binding {
+                    id: format!("{OWNER}{}", binding["id"].as_str()?),
+                    chord: binding["chord"].as_str()?.to_owned(),
+                    command: format!("{COMMAND}{command}"),
+                    args: binding["args"].as_array().cloned().unwrap_or_default(),
+                    priority: binding["priority"].as_i64().unwrap_or(0) as i32 + 300,
+                    in_fields: binding["inFields"] == true,
+                    repeat: binding["repeat"] == true,
+                    loose: binding["looseModifiers"] == true,
+                })
+            })
+            .collect();
+        self.extensions.compat_choices = choices;
+        let mut shell = self.host.borrow_mut();
+        shell.contributed_choices = self.extensions.palette_choices();
+        shell.set_contributed_bindings(OWNER, bindings);
+        drop(shell);
+        self.pin_definitions(publication);
+        self.apply_v1_theme(&value["nativeTheme"], cx);
+        self.update_builtins(cx);
+        cx.notify();
+    }
+    /// The active v1–3 theme, translated in the realm (plan 3.6.5), restyles
+    /// every window's chrome and native panels when it changes, in both
+    /// appearances. Choosing a v4 theme afterwards replaces it until this one
+    /// changes; another window publishing the same theme changes nothing.
+    fn apply_v1_theme(&mut self, theme: &Value, cx: &mut Context<Self>) {
+        if theme.is_null() {
+            return;
+        }
+        self.extensions.v1_timeline = theme["timeline"].clone();
+        let key = theme.to_string();
+        if V1_THEME.with(|t| t.borrow().as_ref().is_some_and(|(k, _)| *k == key)) {
+            return;
+        }
+        if let Some(error) = theme["error"].as_str() {
+            let name = theme["id"].as_str().unwrap_or("theme");
+            self.errors.borrow_mut().tell(
+                "Theme",
+                &format!("The theme “{name}” couldn’t be applied: {error}"),
+            );
+            V1_THEME.with(|t| *t.borrow_mut() = Some((key, Default::default())));
+            return;
+        }
+        let light = if theme["light"].is_object() {
+            &theme["light"]
+        } else {
+            &theme["dark"]
+        };
+        match theme_patch(&theme["dark"]).and_then(|dark| Ok((dark, theme_patch(light)?))) {
+            Ok(patches) => {
+                V1_THEME.with(|t| *t.borrow_mut() = Some((key, patches.clone())));
+                ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                apply_theme(patches, cx);
+            }
+            Err(message) => self.errors.borrow_mut().tell("Theme", &message),
+        }
+    }
+    /// The contributed definitions every viewer, capture and export of this
+    /// window draws with, and whether a load pass is still running (an effect
+    /// the project uses may yet arrive: `ResourceSnapshot::pending`), all from
+    /// one publication of the host.
+    fn pin_definitions(&mut self, publication: &pm_compat_runner::host::Publication) {
+        let mut publication = publication.clone();
+        publication.settled &= self.extensions.native_loading == 0;
+        if let Some(value) = publication.contributions.as_deref() {
+            let mut value = value.clone();
+            value["definitions"] = json!(native_effect_definitions(
+                self.builtins.runtime.as_deref(),
+                definitions(&value)
+            ));
+            publication.contributions = Some(Arc::new(value));
+        }
+        let current = &self.extensions.resources;
+        let Some(next) = pinned(current, &publication) else {
+            return;
+        };
+        if current.pending && !next.pending {
+            crate::diag::line(
+                json!({"extensions": "settled", "definitions": next.definitions.len()}),
+            );
+        }
+        self.extensions.resources = Arc::new(next);
+        if let Some(doc_id) = self.extensions.doc_id {
+            crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+        }
+        self.apply_extension_resources();
+        if let Some(project) = self.extensions.settle_after.take() {
+            self.settled(&project);
+        }
+    }
+    pub(crate) fn refresh_native_effects(&mut self) {
+        if let Some(host) = &self.extensions.host {
+            let publication = host.publication();
+            self.pin_definitions(&publication);
+        }
+    }
+    /// An open waiting for effects its extensions load waits [`OPEN_WAIT`] at
+    /// most: then the project opens, frames that need an effect still loading
+    /// stay held (the viewer's status line names who they wait for), and the
+    /// person is told which extensions are still loading.
+    pub(crate) fn bound_open_wait(&mut self, project: &str, cx: &mut Context<Self>) {
+        if self.extensions.settle_after.as_deref() != Some(project) {
+            return;
+        }
+        let project = project.to_owned();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPEN_WAIT).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.extensions.settle_after.as_deref() != Some(project.as_str()) {
+                    return;
+                }
+                v.extensions.settle_after = None;
+                v.finish_open(&project);
+                crate::diag::line(json!({"extensions": "open-released"}));
+                let names: Vec<&str> = v
+                    .extensions
+                    .resources
+                    .loading
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .collect();
+                if let Some(text) = still_loading_note(&names) {
+                    v.note(text, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// The open composition uses an effect no definition provides yet while
+    /// this window's extensions load: the viewer shows the open as still
+    /// loading, and nothing renders it, until they register it or fail.
+    pub(crate) fn awaiting_extension_effects(&self) -> bool {
+        let resources = &self.extensions.resources;
+        let Some(p) = self.published.as_ref().filter(|_| resources.pending) else {
+            return false;
+        };
+        let key = (p.snapshot.doc_id, p.snapshot.revision, resources.generation);
+        if let Some((at, awaiting)) = self.extensions.awaiting.get()
+            && at == key
+        {
+            return awaiting;
+        }
+        let effect = |d: &&pm_protocol::definitions::DefinitionSnapshot| {
+            d.kind == pm_protocol::definitions::DefinitionKind::Effect
+        };
+        let defined: BTreeSet<&str> = resources
+            .definitions
+            .iter()
+            .filter(effect)
+            .map(|d| d.id.as_str())
+            .collect();
+        let builtin = builtin_effects();
+        let unavailable = |ty: &str, _: Option<&pm_model::Node>| {
+            (!builtin.contains(ty) && !defined.contains(ty)).then_some(None)
+        };
+        let awaiting = !pm_render::effects::versions::missing_effects(
+            &p.snapshot.document,
+            &p.snapshot.render_comp(),
+            &unavailable,
+        )
+        .is_empty();
+        self.extensions.awaiting.set(Some((key, awaiting)));
+        awaiting
+    }
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is currently registered (matching Electron's hydrate pass).
+    pub(crate) fn reconcile_missing_definitions(&mut self) {
+        let (Some(session), Some(published)) = (&self.session, &self.published) else {
+            return;
+        };
+        let key = (
+            published.snapshot.doc_id,
+            published.revision(),
+            self.extensions.resources.generation,
+        );
+        if self.extensions.reconciled == Some(key) {
+            return;
+        }
+        self.extensions.reconciled = Some(key);
+        if !document_has_missing_flags(&published.snapshot.document) {
+            return;
+        }
+        let mut effects = BTreeSet::new();
+        let mut transitions = builtin_transitions().clone();
+        for def in &self.extensions.resources.definitions {
+            match def.kind {
+                pm_protocol::definitions::DefinitionKind::Effect => {
+                    effects.insert(def.id.as_str().to_owned());
+                }
+                pm_protocol::definitions::DefinitionKind::Transition => {
+                    transitions.insert(def.id.as_str().to_owned());
+                }
+                _ => {}
+            }
+        }
+        let _ = self.kernel.call(
+            &session.project,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::ReconcileMissingDefinitions {
+                    effects,
+                    builtin_effects: builtin_effects().clone(),
+                    transitions,
+                },
+            ),
+        );
+    }
+    /// Every live viewer of this window (the editor's, the popout's) renders
+    /// the same contributed definitions, now and after each change.
+    pub fn apply_extension_resources(&mut self) {
+        if let Err(error) = self
+            .resource_feed
+            .publish(self.extensions.resources.clone())
+        {
+            self.message = error.to_string();
+        }
+        self.reconcile_missing_definitions();
+    }
+    pub fn extension_command(&mut self, cmd: &ShellCommand, cx: &mut Context<Self>) -> bool {
+        if cmd.name == UNDO {
+            self.undo_extension_change(cx);
+            return true;
+        }
+        if let Some(choice) = cmd.name.strip_prefix(MENU) {
+            if let (Some(host), Some((token, run))) =
+                (&self.extensions.host, choice.split_once(':'))
+                && let (Ok(token), Ok(run)) = (token.parse(), run.parse::<u64>())
+            {
+                host.answer(token, run.into());
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(CHOICE) {
+            run_choice(&mut self.extensions.choice, target, cx);
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_MENU) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime
+                                .run_menu(&panel, &key)
+                                .map_err(|e| e.to_string())
+                                .and_then(|ticket| {
+                                    wait_ticket(
+                                        ticket,
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(30),
+                                    )
+                                })
+                        })
+                        .await;
+                    if let Err(message) = outcome {
+                        let _ = this
+                            .update(cx, |v, _| v.errors.borrow_mut().tell("Extension", &message));
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_THEME) {
+            let chosen = (target != "default").then(|| target.to_owned());
+            let tokens = chosen.as_deref().and_then(|key| self.v4_theme(key));
+            match (chosen, tokens) {
+                (None, _) => {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(base_look(), cx);
+                }
+                (Some(key), Some(tokens)) => match theme_patch(&tokens) {
+                    Ok(patch) => {
+                        ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(key));
+                        apply_theme((patch.clone(), patch), cx);
+                    }
+                    Err(message) => self.errors.borrow_mut().tell("Theme", &message),
+                },
+                (Some(_), None) => {}
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOLBAR) {
+            if let (Some(runtime), Some((panel, id))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, id) = (panel.to_owned(), id.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_toolbar(&panel, &id) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Toolbar action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_HEADER) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_panel_header(&panel, &key) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Panel header action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_MENUBAR) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_menu_bar(&panel, &key) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Menu action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOL) {
+            if let Some((panel, tool_id)) = target.split_once(':') {
+                self.tool = cmd.name.clone();
+                if let Some(runtime) = &self.builtins.runtime {
+                    runtime.set_active_tool(Some((panel, tool_id)));
+                    runtime.emit_event("tool", &json!({"tool": self.tool}));
+                }
+                cx.notify();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
+            if let (Some(runtime), Some((panel, id))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, id, args) = (panel.to_owned(), id.to_owned(), cmd.args.clone());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_command(&panel, &id, &args) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("The command failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        let Some(id) = cmd.name.strip_prefix(COMMAND) else {
+            return false;
+        };
+        if let Some(host) = &self.extensions.host {
+            host.run_command(id, Value::Array(cmd.args.clone()));
+        }
+        true
+    }
+    fn v4_theme(&self, key: &str) -> Option<Value> {
+        self.extensions
+            .v4_themes
+            .iter()
+            .find(|t| {
+                format!(
+                    "{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                ) == key
+            })
+            .map(|t| t["tokens"].clone())
+    }
+    /// Themes v4 extensions offer go into the palette ("Theme: <title>"). The
+    /// chosen one follows its extension: a reload restyles, a removal resets.
+    pub fn sync_v4_themes(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        let Some((revision, list)) = runtime.themes_since(self.extensions.v4_themes_seen) else {
+            return;
+        };
+        self.extensions.v4_themes_seen = revision;
+        self.extensions.v4_themes = list;
+        let mut choices: Vec<Choice> = self
+            .extensions
+            .v4_themes
+            .iter()
+            .map(|t| Choice {
+                label: format!("Theme: {}", t["title"].as_str().unwrap_or_default()),
+                command: format!(
+                    "{V4_THEME}{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                ),
+                ..Default::default()
+            })
+            .collect();
+        if !choices.is_empty() {
+            choices.push(Choice {
+                label: "Theme: Default".into(),
+                command: format!("{V4_THEME}default"),
+                ..Default::default()
+            });
+        }
+        self.extensions.v4_theme_choices = choices;
+        self.host.borrow_mut().contributed_choices = self.extensions.palette_choices();
+        // The latest `themes.activate` in the window shows its theme, as v1–3's
+        // `theme.activate`; a later palette choice still wins. Each request
+        // acts once, so activating the same theme again shows it again.
+        if let Some((number, panel, id)) = runtime.theme_request()
+            && self.extensions.v4_theme_requested != Some(number)
+        {
+            self.extensions.v4_theme_requested = Some(number);
+            let prefix = format!("{panel}:");
+            match id {
+                Some(id) => ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(format!("{prefix}{id}"))),
+                // `activate(null)` puts back what this extension's theme replaced.
+                None if ACTIVE_THEME
+                    .with(|a| a.borrow().as_ref().is_some_and(|k| k.starts_with(&prefix))) =>
+                {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(base_look(), cx);
+                }
+                None => {}
+            }
+        }
+        if let Some(active) = ACTIVE_THEME.with(|a| a.borrow().clone()) {
+            match self.v4_theme(&active).map(|tokens| theme_patch(&tokens)) {
+                Some(Ok(patch)) => apply_theme((patch.clone(), patch), cx),
+                Some(Err(message)) => self.errors.borrow_mut().tell("Theme", &message),
+                None => {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(base_look(), cx);
+                }
+            }
+        }
+    }
+    /// Commands v4 extensions registered since the last look go into the
+    /// palette and, with a `key`, the keymap.
+    pub fn sync_v4_commands(&mut self, runtime: &pm_builtins::Builtins) {
+        let Some((revision, list)) = runtime.commands_since(self.extensions.v4_seen) else {
+            return;
+        };
+        self.extensions.v4_seen = revision;
+        let target = |c: &Value| {
+            format!(
+                "{V4_COMMAND}{}:{}",
+                c["panel"].as_str().unwrap_or_default(),
+                c["id"].as_str().unwrap_or_default()
+            )
+        };
+        self.extensions.v4_choices = list
+            .iter()
+            .map(|c| Choice {
+                label: c["title"].as_str().unwrap_or_default().to_owned(),
+                command: target(c),
+                ..Default::default()
+            })
+            .collect();
+        let bindings: Vec<Binding> = list
+            .iter()
+            .filter_map(|c| {
+                Some(Binding {
+                    id: format!("{V4_OWNER}{}", target(c)),
+                    chord: c["key"].as_str()?.to_owned(),
+                    command: target(c),
+                    args: vec![],
+                    priority: 300,
+                    in_fields: false,
+                    repeat: false,
+                    loose: false,
+                })
+            })
+            .collect();
+        let mut shell = self.host.borrow_mut();
+        shell.contributed_choices = self.extensions.palette_choices();
+        shell.set_contributed_bindings(V4_OWNER, bindings);
+    }
+    /// Layer 1 & Layer 2: synchronizes v4 extension toolbar items, panel header
+    /// actions, macOS menu bar items, and interactive viewer tools.
+    pub fn sync_v4_chrome(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        if let Some((rev, list)) = runtime.toolbar_items_since(self.extensions.v4_toolbar_seen) {
+            self.extensions.v4_toolbar_seen = rev;
+            let items: Vec<pm_shell::ExtensionToolbarItem> = list
+                .iter()
+                .filter_map(|item| {
+                    let panel = item["panel"].as_str()?;
+                    let id = item["id"].as_str()?;
+                    let label = item["label"].as_str().unwrap_or(id).to_owned();
+                    Some(pm_shell::ExtensionToolbarItem {
+                        id: id.to_owned(),
+                        tooltip: item["tooltip"].as_str().unwrap_or(&label).to_owned(),
+                        label,
+                        icon: item["icon"].as_str().map(str::to_owned),
+                        active: item["active"] == true,
+                        badge: item["badge"].as_str().map(str::to_owned),
+                        command: format!("{V4_TOOLBAR}{panel}:{id}"),
+                    })
+                })
+                .collect();
+            self.host.borrow_mut().set_extension_toolbar(&items);
+        }
+        if let Some((rev, list)) = runtime.panel_headers_since(self.extensions.v4_headers_seen) {
+            self.extensions.v4_headers_seen = rev;
+            self.extensions.v4_panel_headers = list
+                .iter()
+                .filter_map(|item| {
+                    let owner = item["owner"].as_str()?;
+                    let target_panel = item["panelId"].as_str()?.to_owned();
+                    let key = item["key"].as_str()?;
+                    let id = item["id"].as_str()?.to_owned();
+                    let label = item["label"].as_str().map(str::to_owned);
+                    let tooltip = item["tooltip"]
+                        .as_str()
+                        .or(label.as_deref())
+                        .unwrap_or(&id)
+                        .to_owned();
+                    Some((
+                        target_panel,
+                        pm_shell::integration::PanelHeaderButton {
+                            id,
+                            label,
+                            icon: item["icon"].as_str().map(str::to_owned),
+                            tooltip,
+                            active: item["active"] == true,
+                            command: format!("{V4_HEADER}{owner}:{key}"),
+                        },
+                    ))
+                })
+                .collect();
+            cx.notify();
+        }
+        if let Some((rev, list)) = runtime.menu_bar_since(self.extensions.v4_menubar_seen) {
+            self.extensions.v4_menubar_seen = rev;
+            fn parse_items(panel: &str, arr: &[Value]) -> Vec<pm_shell::ExtensionMenuItem> {
+                arr.iter()
+                    .map(|raw| {
+                        if raw == "-" {
+                            return pm_shell::ExtensionMenuItem {
+                                separator: true,
+                                label: String::new(),
+                                key: None,
+                                checked: false,
+                                disabled: false,
+                                command: None,
+                                submenu: vec![],
+                            };
+                        }
+                        let submenu = raw["submenu"]
+                            .as_array()
+                            .map(|sub| parse_items(panel, sub))
+                            .unwrap_or_default();
+                        pm_shell::ExtensionMenuItem {
+                            separator: false,
+                            label: raw["label"].as_str().unwrap_or_default().to_owned(),
+                            key: raw["key"].as_str().map(str::to_owned),
+                            checked: raw["checked"] == true,
+                            disabled: raw["disabled"] == true,
+                            command: raw["actionKey"]
+                                .as_str()
+                                .map(|k| format!("{V4_MENUBAR}{panel}:{k}")),
+                            submenu,
+                        }
+                    })
+                    .collect()
+            }
+            let sections: Vec<pm_shell::ExtensionMenuSection> = list
+                .iter()
+                .filter_map(|entry| {
+                    let panel = entry["panel"].as_str()?;
+                    let menu_name = entry["menuName"].as_str()?.to_owned();
+                    let items = parse_items(panel, entry["items"].as_array()?);
+                    Some(pm_shell::ExtensionMenuSection { menu_name, items })
+                })
+                .collect();
+            pm_shell::set_extension_menus(&sections);
+        }
+        if let Some((rev, list)) = runtime.tools_since(self.extensions.v4_tools_seen) {
+            self.extensions.v4_tools_seen = rev;
+            let mut choices = Vec::new();
+            let mut bindings = Vec::new();
+            for tool in &list {
+                let (Some(panel), Some(id), Some(title)) = (
+                    tool["panel"].as_str(),
+                    tool["id"].as_str(),
+                    tool["title"].as_str(),
+                ) else {
+                    continue;
+                };
+                let cmd = format!("{V4_TOOL}{panel}:{id}");
+                choices.push(Choice {
+                    label: format!("Tool: {title}"),
+                    command: cmd.clone(),
+                    ..Default::default()
+                });
+                if let Some(chord) = tool["shortcut"].as_str().filter(|s| !s.is_empty()) {
+                    bindings.push(Binding {
+                        id: format!("{V4_OWNER}tool:{panel}:{id}"),
+                        chord: chord.to_owned(),
+                        command: cmd,
+                        args: vec![],
+                        priority: 300,
+                        in_fields: false,
+                        repeat: false,
+                        loose: false,
+                    });
+                }
+            }
+            self.extensions.v4_tool_choices = choices;
+            let mut shell = self.host.borrow_mut();
+            shell.contributed_choices = self.extensions.palette_choices();
+            shell.set_contributed_bindings("v4-tools:", bindings);
+        }
+    }
+    /// Layer 1: trailing panel header action buttons contributed for `panel_id`.
+    pub fn extension_panel_header_actions(
+        &self,
+        panel_id: &str,
+    ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        self.extensions
+            .v4_panel_headers
+            .iter()
+            .filter(|(target, _)| target == panel_id || target == "*")
+            .map(|(_, btn)| btn.clone())
+            .collect()
+    }
+    /// Puts back what the newest agent extension change replaced, for this
+    /// project or an app-wide run. Files move on a worker; windows reload.
+    fn undo_extension_change(&mut self, cx: &mut Context<Self>) {
+        let extensions = crate::extension_authoring::AppExtensions::new(self.profile.clone());
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        let task = cx.background_executor().spawn(async move {
+            use pm_mcp::extensions::{change_sets, history_for, restore};
+            let newest = [project.as_deref(), Some("powermove-global")]
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    let set = change_sets(&history_for(&extensions, p))
+                        .into_iter()
+                        .next()?;
+                    Some((p.to_owned(), set))
+                })
+                .max_by(|a, b| a.1["createdAt"].as_str().cmp(&b.1["createdAt"].as_str()));
+            let Some((project, set)) = newest else {
+                return "No extension change to undo.".to_owned();
+            };
+            match restore(
+                &extensions,
+                &project,
+                set["id"].as_str().unwrap_or_default(),
+            ) {
+                Ok(record) => {
+                    let names: Vec<&str> = record["changes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["id"].as_str())
+                        .collect();
+                    format!("Undid the change to {}.", names.join(", "))
+                }
+                Err(error) => error.message,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let message = task.await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = message;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// A panel body is a hole in GPUI; the shared document shows through it.
+    pub(crate) fn extension_build_rendered(&self, id: &str) -> bool {
+        let bodies = self.host.borrow().native_panels.clone();
+        let bodies = bodies.borrow();
+        let Some((_, body)) = bodies.iter().find(|(panel, _)| panel == id) else {
+            return false;
+        };
+        self.extensions.page_of(id).is_some_and(|page| {
+            page.borrow().panel_layout_applied(
+                id,
+                Rect::new(body.x as f64, body.y as f64, body.w as f64, body.h as f64),
+            )
+        })
+    }
+    pub fn extension_panel(
+        &mut self,
+        id: &str,
+        bounds: layout::Rect,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.extensions.owns_panel(id) {
+            return None;
+        }
+        let t = self.host.borrow().tokens.clone();
+        // Layout uses the same full-width body as native rows. Splitter
+        // grabs are protected separately by the shell's presentation mask.
+        let body = layout::Rect {
+            x: bounds.x,
+            y: bounds.y + t.metrics.header,
+            w: bounds.w.max(0.),
+            h: (bounds.h - t.metrics.header).max(0.),
+        };
+        self.extensions.hidden.remove(id);
+        if self.extensions.panels.insert(id.to_owned(), body).is_none()
+            && let Some(host) = &self.extensions.host
+        {
+            host.set_panel(id, true);
+        }
+        self.ensure_page(id, cx);
+        Some(
+            div()
+                .w_full()
+                .h(px(body.h))
+                .id(SharedString::from(format!("extension-panel-{id}")))
+                .into_any_element(),
+        )
+    }
+    /// The trusted realm's document, or a Store extension's own.
+    fn ensure_page(&mut self, id: &str, cx: &mut Context<Self>) {
+        let key = self
+            .extensions
+            .stores
+            .get(id)
+            .map_or(String::new(), |(store, _)| store.clone());
+        let trusted = self.extensions.host.as_ref().map_or(0, |h| h.view());
+        let view = self
+            .extensions
+            .stores
+            .get(id)
+            .map_or(trusted, |(_, view)| *view);
+        if self
+            .extensions
+            .pages
+            .get(&key)
+            .is_some_and(|page| page.view == view)
+        {
+            return;
+        }
+        self.open_page(key, view, cx);
+    }
+    /// A realm's project text uses these faces (`PM.Fonts.ensure` too): the
+    /// engine's own face for each goes to every page of the window.
+    fn ensure_page_fonts(&mut self, faces: &Value, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, u16, bool)> = faces
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|face| {
+                let family = face["family"].as_str()?.trim();
+                let weight = face["weight"].as_f64().unwrap_or(400.).clamp(1., 1000.) as u16;
+                (!family.is_empty() && family.len() <= 256)
+                    .then(|| (family.to_owned(), weight, face["italic"] == true))
+            })
+            .filter(|key| self.extensions.face_keys.insert(key.clone()))
+            .take(256)
+            .collect();
+
+        if wanted.is_empty() {
+            return;
+        }
+        let keys: Vec<String> = wanted
+            .iter()
+            .map(|(family, weight, italic)| format!("{family}|{weight}|{}", u8::from(*italic)))
+            .collect();
+        let resolved = cx
+            .background_executor()
+            .spawn(async move { crate::text_host::page_faces(&wanted) });
+        cx.spawn(async move |this, cx| {
+            let faces = resolved.await;
+            let _ = this.update(cx, |v, _| {
+                for page in v.extensions.views.borrow().values() {
+                    let _ = page.borrow_mut().add_fonts(&faces);
+                }
+                v.extensions.page_faces.extend(faces.iter().cloned());
+                // A face the registry could not give is settled now: no page
+                // will load it, and whoever waits for it stops waiting.
+                let unresolved: Vec<Value> = keys
+                    .iter()
+                    .filter(|key| !faces.iter().any(|f| &f.key() == *key))
+                    .map(|key| json!(key))
+                    .collect();
+                if let (false, Some(host)) = (unresolved.is_empty(), &v.extensions.host) {
+                    for key in v.extensions.pages.keys() {
+                        host.fonts_loaded(key, Value::Array(unresolved.clone()));
+                    }
+                }
+                v.extensions.faces.extend(faces);
+            });
+        })
+        .detach();
+    }
+    /// Each running export realm gets a page that is never shown: the layout
+    /// reads its overrides make are real; it goes when the export ends.
+    fn sync_export_pages(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        let running: BTreeMap<String, u64> = host
+            .export_pages()
+            .into_iter()
+            .map(|(job, view)| (format!("{EXPORT_PAGE}{job}"), view))
+            .collect();
+        let ended: Vec<String> = self
+            .extensions
+            .pages
+            .keys()
+            .filter(|key| key.starts_with(EXPORT_PAGE) && !running.contains_key(*key))
+            .cloned()
+            .collect();
+        for key in ended {
+            self.extensions.pages.remove(&key);
+            if let Some(view) = self.extensions.views.borrow_mut().remove(&key) {
+                view.borrow_mut().end_background_job();
+            }
+        }
+        for (key, view) in running {
+            if !self.extensions.pages.contains_key(&key) {
+                self.open_page(key, view, cx);
+            }
+        }
+    }
+    fn open_page(&mut self, key: String, view: u64, cx: &mut Context<Self>) {
+        // That run is over: its document goes, and its replacement starts empty.
+        self.extensions.pages.remove(&key);
+        self.extensions.views.borrow_mut().remove(&key);
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let (input, output) = std::sync::mpsc::channel::<Value>();
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        let events = Rc::new(PageEvents {
+            host: Arc::new(Mutex::new(Some(input))),
+            events: RefCell::default(),
+            wake: Rc::new(move || {
+                let _ = wake_tx.try_send(());
+            }),
+        });
+        let session = self
+            .extensions
+            .host
+            .as_ref()
+            .and_then(|h| h.store_session(&key));
+        let tokens = self.host.borrow().tokens.clone();
+        let bundle = pm_compat_runner::page_bundle(
+            tokens.scheme == pm_design::Scheme::Dark,
+            tokens.accessibility.increase_contrast,
+            tokens.accessibility.reduce_transparency,
+        );
+        let page_span = crate::diag::span("extensions.page");
+        let created = match &session {
+            Some(session) => MacDomHost::new_store_remote_dom(
+                mtm,
+                session,
+                events.clone(),
+                &mut self.extensions.data_stores,
+                &bundle,
+            ),
+            None if key.is_empty() || key.starts_with(EXPORT_PAGE) => MacDomHost::new_remote_dom(
+                mtm,
+                Trust::Trusted,
+                events.clone(),
+                &mut self.extensions.data_stores,
+                &bundle,
+            ),
+            None => return,
+        };
+        let mut host = match created {
+            Ok(host) => host,
+            Err(error) => {
+                self.message = format!("Extension panels could not start: {error}");
+                return;
+            }
+        };
+        let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
+        let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
+        let spec = PanelSpec {
+            id: PAGE_PANEL,
+            label: "Extension panels".into(),
+        };
+        if host.create(spec).is_err() {
+            return;
+        }
+        // An export's page is never shown: it runs for its job in a window of
+        // its own, whatever the editor's window does. In the editor's, a window
+        // behind others or hidden held the page back (its answers came 3 to 7
+        // times slower and the export took 2 to 4 times as long as in front).
+        // An explicit background review launch keeps WebKit working while the
+        // editor is occluded, in the editor's window.
+        let exporting = key.starts_with(EXPORT_PAGE);
+        let background_review = cfg!(debug_assertions)
+            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
+        if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
+            eprintln!("an export page could not keep running in the background");
+        }
+        if !exporting {
+            let shell = self.host.borrow();
+            host.install_below(&shell.native_container(), &shell.gpui);
+            host.enable_panel_renderers(
+                &shell.native_container(),
+                &shell.gpui,
+                self.extensions.panel_snapshots.clone(),
+            );
+            host.set_panel_document_revision(
+                self.published
+                    .as_ref()
+                    .map(|p| (p.snapshot.doc_id, p.snapshot.revision)),
+            );
+        }
+        let css = pm_compat_host::native_style::stylesheet(&light, &dark);
+        host.update_renderer_style(&css, tokens.scheme);
+        let _ = host.add_fonts(&self.extensions.faces);
+        drop(page_span);
+        let page = Rc::new(RefCell::new(host));
+        self.extensions
+            .views
+            .borrow_mut()
+            .insert(key.clone(), page.clone());
+        let views = self.extensions.views.clone();
+        let owners = self.extensions.owners.clone();
+        let mut shell = self.host.borrow_mut();
+        let bodies = shell.native_panels.clone();
+        let clips = shell.native_panel_clips.clone();
+        let fades = shell.native_panel_fades.clone();
+        let stage = self.extensions.stage.clone();
+        // Native panel over native window tint, over the shared material.
+        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(
+            &shell.tokens,
+        )));
+        let themed_fill = fill.clone();
+        let themed_views = self.extensions.views.clone();
+        shell.native_style = Some(Rc::new(move |tokens| {
+            themed_fill.set(pm_compat_host::native_style::panel_backing(tokens));
+            let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
+            let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
+            let css = pm_compat_host::native_style::stylesheet(&light, &dark);
+            for page in themed_views.borrow().values() {
+                page.borrow_mut().update_renderer_style(&css, tokens.scheme);
+            }
+        }));
+        // A body stops short of its panel's sides and bottom (the shell's
+        // native body inset), so its corners are the panel's less that inset.
+        let corner = {
+            let m = &shell.tokens.metrics;
+            f64::from((m.panel_radius - m.border.max(m.splitter_reach)).max(0.))
+        };
+        let pending_views = views.clone();
+        shell.native_pending = Some(Rc::new(move || {
+            pending_views
+                .borrow()
+                .values()
+                .any(|page| page.try_borrow().is_ok_and(|host| host.composition_dirty()))
+        }));
+        shell.native_present = Some(Rc::new(move |width, height| {
+            let viewport = Rect::new(0., 0., width, height);
+            let bodies = bodies.borrow();
+            let owners = owners.borrow();
+            let mut dirty = false;
+            for (key, page) in views.borrow().iter() {
+                let mut host = page.borrow_mut();
+                let stage = stage.get().filter(|_| key.is_empty());
+                let to_rect =
+                    |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+                let mine: Vec<(&String, Rect)> = bodies
+                    .iter()
+                    .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
+                    .map(|(id, r)| (id, to_rect(r)))
+                    .collect();
+                // The page shows through each panel's whole body, on the
+                // panels' ground ...
+                let clips = clips.borrow();
+                let clipped = |id: &String, r: Rect| {
+                    clips
+                        .iter()
+                        .find(|(key, _)| key == id)
+                        .map_or(r, |(_, clip)| to_rect(clip))
+                };
+                let placements: Vec<_> = mine
+                    .iter()
+                    .map(|(id, rect)| ((*id).clone(), *rect, clipped(id, *rect)))
+                    .collect();
+                let stage: Vec<_> = stage.as_ref().map(to_rect).into_iter().collect();
+                let _ = host.set_regions_with_transparent_overlays(Vec::new(), stage.clone());
+                let _ = host.set_content_regions(Some(stage));
+                dirty |= host.present_dock_panel_renderers(
+                    &placements, &fades.borrow(), Some(fill.get()), corner,
+                );
+                let _ = host.attach(
+                    PAGE_PANEL,
+                    PanelSlot {
+                        bounds: viewport,
+                        clip: viewport,
+                    },
+                );
+                if host.composition_dirty() {
+                    dirty = true;
+                    let _ = host.present(viewport);
+                }
+            }
+            // Keep recently scrolled-off renderers warm across extension realms.
+            let views = views.borrow();
+            let mut warm = Vec::new();
+            for (key, page) in views.iter() {
+                warm.extend(
+                    page.borrow()
+                        .warm_panels()
+                        .into_iter()
+                        .map(|(id, expires)| (expires, key, id)),
+                );
+            }
+            warm.sort_unstable();
+            let excess = warm.len().saturating_sub(pm_compat_host::WARM_PANEL_LIMIT);
+            for (_, realm, id) in warm.into_iter().take(excess) {
+                views[realm].borrow_mut().evict_warm_panel(&id);
+            }
+            dirty
+        }));
+        // An export realm's page is never shown, so VoiceOver never meets it.
+        shell.native_accessibility = self
+            .extensions
+            .views
+            .borrow()
+            .iter()
+            .filter(|(key, _)| !key.starts_with(EXPORT_PAGE))
+            .map(|(_, page)| page.borrow().accessibility_view())
+            .collect();
+        drop(shell);
+        self.extensions.pages.insert(
+            key.clone(),
+            Page {
+                host: page,
+                events,
+                panel_expiry: None,
+                panel_expiry_task: None,
+                ready: false,
+                view,
+            },
+        );
+        // Feedback reaches its realm on a worker, never inside the page's callback.
+        let host = self.extensions.host.as_ref();
+        let sink: Option<Box<dyn Fn(Value) + Send>> = if key.is_empty() {
+            host.map(|h| Box::new(h.page_sink(view)) as _)
+        } else if let Some(job) = key.strip_prefix(EXPORT_PAGE) {
+            host.map(|h| Box::new(h.export_page_sink(job)) as _)
+        } else {
+            host.map(|h| Box::new(h.store_page_sink(&key, view)) as _)
+        };
+        std::thread::spawn(move || {
+            while let Ok(message) = output.recv() {
+                if let Some(sink) = &sink {
+                    sink(message);
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            while wake_rx.recv().await.is_ok() {
+                if this.update(cx, |v, cx| v.present_page(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Sends placement after layout: positions live in the realm's document.
+    /// v1–3's `window.innerWidth` & co. follow the editor window's content.
+    fn sync_viewport(&mut self) {
+        let (size, scale) = {
+            let shell = self.host.borrow();
+            let view = &shell.gpui;
+            let scale = view.window().map_or(2., |w| w.backingScaleFactor()) as f32;
+            (view.frame().size, scale)
+        };
+        let viewport = (size.width as f32, size.height as f32, scale);
+        if viewport.0 > 0.
+            && self.extensions.viewport != Some(viewport)
+            && let Some(host) = &self.extensions.host
+        {
+            host.set_viewport(viewport.0, viewport.1, viewport.2);
+            self.extensions.viewport = Some(viewport);
+        }
+    }
+    /// v1–3's viewer stage follows the viewer slot and its composition frame,
+    /// in window points; the realm hears only when either moved.
+    pub(crate) fn sync_viewer_stage(&mut self) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        let slot = self.host.borrow().viewer_rect.get();
+        let zoom = self.view.scale.get();
+        let placed = slot.filter(|s| s.w > 0. && s.h > 0.).map(|s| {
+            let (w, h) = (
+                (self.dimensions[0] * zoom) as f32,
+                (self.dimensions[1] * zoom) as f32,
+            );
+            let x = s.x + (s.w - w) / 2. + self.view.shown_pan()[0] as f32;
+            let y = s.y + (s.h - h) / 2. + self.view.shown_pan()[1] as f32;
+            ([s.x, s.y, s.w, s.h], [x, y, w, h])
+        });
+        let key = placed.map(|(a, b)| {
+            let mut key = [0; 8];
+            for (k, v) in key.iter_mut().zip(a.iter().chain(&b)) {
+                *k = (v * 100.).round() as i64;
+            }
+            key
+        });
+        if self.extensions.stage_sent == Some(key) {
+            return;
+        }
+        self.extensions.stage_sent = Some(key);
+        let shown = slot.filter(|_| self.extensions.stage_used && placed.is_some());
+        self.extensions.stage.set(shown);
+        let (stage, frame) =
+            placed.map_or((Value::Null, Value::Null), |(a, b)| (json!(a), json!(b)));
+        host.shell_state(json!({ "stage": stage, "frame": frame }));
+    }
+    /// A new viewer frame on screen: v1–3's `frame:rendered` and overlay pass.
+    pub(crate) fn tell_presented(&mut self, frame: Option<&pm_engine_service::FrameReport>) {
+        let (Some(host), Some(frame)) = (&self.extensions.host, frame) else {
+            return;
+        };
+        if self.extensions.presented == Some(frame.stamp.sequence) {
+            return;
+        }
+        self.extensions.presented = Some(frame.stamp.sequence);
+        let time = frame.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        host.frame_presented(json!({
+            "time": time,
+            "version": frame.stamp.revision,
+            "quality": frame.scale,
+        }));
+    }
+    /// The realm needs to hear when a body becomes visible, but never gets
+    /// a second stream of moving rects alongside the page's placement batch.
+    pub fn finish_extension_layout(&mut self, shown: &[&str]) {
+        self.sync_viewport();
+        self.sync_viewer_stage();
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        for (id, rect) in &self.extensions.panels {
+            if shown.contains(&id.as_str()) {
+                self.extensions.hidden.remove(id);
+                if !self.extensions.placed.insert(id.clone()) {
+                    continue;
+                }
+                host.place_panel(id, Some([rect.x, rect.y, rect.w, rect.h]));
+            } else if self.extensions.hidden.insert(id.clone()) {
+                self.extensions.placed.remove(id);
+                host.place_panel(id, None);
+            }
+        }
+    }
+    /// The workspace closed a contributed panel: unmount it in the realm.
+    pub fn sync_extension_panels(&mut self, open: &[&str]) {
+        self.extensions.open_panels = open.iter().map(|id| (*id).to_owned()).collect();
+        let closed: Vec<String> = self
+            .extensions
+            .panels
+            .keys()
+            .filter(|id| !open.contains(&id.as_str()))
+            .cloned()
+            .collect();
+        for id in closed {
+            self.close_extension_panel(&id);
+        }
+    }
+    fn close_extension_panel(&mut self, id: &str) {
+        if let Some(page) = self.extensions.page_of(id) {
+            page.borrow_mut().forget_panel_snapshot(id);
+        }
+        self.extensions.placed.remove(id);
+        self.extensions.hidden.remove(id);
+        if self.extensions.panels.remove(id).is_some()
+            && let Some(host) = &self.extensions.host
+        {
+            host.set_panel(id, false);
+        }
+    }
+    fn present_page(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        // The window's page that stopped applying, or whose process went.
+        let mut stopped = None;
+        let revision = self
+            .published
+            .as_ref()
+            .map(|p| (p.snapshot.doc_id, p.snapshot.revision));
+        for (key, page) in &mut self.extensions.pages {
+            page.host.borrow_mut().set_panel_document_revision(revision);
+            for event in page.events.events.borrow_mut().drain(..) {
+                match event {
+                    HostEvent::DockContent { id, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockContent:{id}"), vec![json!(height)]),
+                    HostEvent::DockScroll { id, delta } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockScroll:{id}"), vec![json!(delta)]),
+                    HostEvent::DockReveal { id, top, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
+                    HostEvent::GeometryChanged => {
+                        if !key.starts_with(EXPORT_PAGE) {
+                            cx.notify();
+                        }
+                    }
+                    HostEvent::Ready { .. } => page.ready = true,
+                    HostEvent::ProcessTerminated => {
+                        eprintln!("extension page: its process ended");
+                        page.ready = false;
+                        if key.is_empty() {
+                            stopped = Some(page.view);
+                        }
+                    }
+                    HostEvent::Failure(code) => {
+                        eprintln!("extension page: {code}");
+                        if key.is_empty() && STOPS_PAGE.contains(&code) {
+                            page.ready = false;
+                            stopped = Some(page.view);
+                        }
+                    }
+                    HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),
+                }
+            }
+            if !page.ready {
+                continue;
+            }
+            let export = key.strip_prefix(EXPORT_PAGE);
+            let mut batches = if key.is_empty() {
+                host.take_batches(page.view)
+            } else if let Some(job) = export {
+                host.take_export_batches(job)
+            } else {
+                host.take_store_batches(key, page.view)
+            };
+            let mut web = page.host.borrow_mut();
+            while let Some(batch) = batches.front() {
+                if batch.present(&mut *web).is_err() {
+                    break;
+                }
+                batches.pop_front();
+            }
+            web.service_panel_renderers();
+            let expiry = web.next_panel_expiry();
+            if expiry != page.panel_expiry {
+                page.panel_expiry = expiry;
+                page.panel_expiry_task = expiry.map(|deadline| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(deadline.saturating_duration_since(std::time::Instant::now()))
+                            .await;
+                        let _ = this.update(cx, |view, cx| view.present_page(cx));
+                    })
+                });
+            }
+            if key.is_empty() {
+                host.return_batches(page.view, batches);
+                if page.view == host.view() {
+                    for frame in host.take_canvases() {
+                        let _ = web.present_canvas(PAGE_PANEL, &frame);
+                    }
+                }
+            } else if let Some(job) = export {
+                host.return_export_batches(job, batches);
+            } else {
+                host.return_store_batches(key, page.view, batches);
+            }
+        }
+        if let Some(view) = stopped {
+            self.rebuild_page(view, cx);
+        }
+    }
+    /// The window's page stopped applying the realm's document, or its
+    /// process went: every extension panel in the window would stay blank
+    /// until extensions restarted (PM-509). A new page takes its place, gets
+    /// the faces the old one had, and the realm sends it its whole document
+    /// and every canvas. A page that keeps stopping is made again at most
+    /// `PAGE_REBUILDS` times a minute.
+    fn rebuild_page(&mut self, view: u64, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let rebuilds = &mut self.extensions.page_rebuilds;
+        rebuilds.retain(|at| now.duration_since(*at) < std::time::Duration::from_secs(60));
+        if rebuilds.len() >= PAGE_REBUILDS {
+            eprintln!("extension page: stopped again; not made again for a minute");
+            return;
+        }
+        rebuilds.push(now);
+        if self.extensions.host.as_ref().map(|h| h.view()) != Some(view) {
+            return;
+        }
+        eprintln!("extension page: made again, its panels replayed");
+        self.open_page(String::new(), view, cx);
+        if let Some(page) = self.extensions.views.borrow().get("") {
+            let _ = page.borrow_mut().add_fonts(&self.extensions.page_faces);
+        }
+        if let Some(host) = &self.extensions.host {
+            host.replay_page(view);
+        }
+        self.sync_viewport();
+        cx.notify();
+    }
+}
+/// The page events that mean the window's page applies nothing more.
+const STOPS_PAGE: &[&str] = &["compat_applier_stopped"];
+/// How often a minute a stopped page is made again.
+const PAGE_REBUILDS: usize = 3;
+
+#[cfg(test)]
+mod tests {
+    /// What a window pins comes from one publication of the host: the
+    /// definitions published while an extension was still loading stay a
+    /// load in progress however far the host has moved on since, so a frame
+    /// never pairs them with "everything has loaded".
+    #[test]
+    fn a_window_pins_definitions_and_their_flag_from_one_publication() {
+        use super::{ResourceSnapshot, pinned};
+        use pm_compat_runner::host::Publication;
+        use serde_json::json;
+        use std::sync::Arc;
+        let effect = |id: &str| {
+            let mut definition = serde_json::to_value(
+                pm_render::all_builtin_definitions()
+                    .definitions
+                    .into_iter()
+                    .find(|d| d.id.as_str() == "invert")
+                    .unwrap(),
+            )
+            .unwrap();
+            definition["id"] = json!(id);
+            definition
+        };
+        let early = Publication {
+            native_surfaces: false,
+            revision: 3,
+            contributions: Some(Arc::new(json!({"definitions": [effect("fast.tint")]}))),
+            settled: false,
+            loading: vec![("b-slow".into(), "Slow".into())],
+            unavailable: vec![],
+            provides: Default::default(),
+        };
+        // The host settles (with the late effect) before the window pins.
+        let late = Publication {
+            native_surfaces: false,
+            revision: 4,
+            contributions: Some(Arc::new(
+                json!({"definitions": [effect("fast.tint"), effect("slow.tint")]}),
+            )),
+            settled: true,
+            loading: vec![],
+            unavailable: vec![],
+            provides: Default::default(),
+        };
+        let start = ResourceSnapshot {
+            pending: true,
+            ..Default::default()
+        };
+        let first = pinned(&start, &early).unwrap();
+        assert!(
+            first.pending,
+            "the early definitions are a load in progress"
+        );
+        assert_eq!(first.loading, early.loading);
+        assert_eq!(first.definitions.len(), 1);
+        assert!(pinned(&first, &early).is_none(), "the same pins again");
+        let second = pinned(&first, &late).unwrap();
+        assert!(!second.pending && second.loading.is_empty());
+        assert_eq!(second.definitions.len(), 2);
+        assert!(second.generation > first.generation);
+    }
+    #[test]
+    fn a_job_waiting_for_extensions_names_them() {
+        use super::{ResourceSnapshot, starts_once_loaded};
+        let waiting = |names: &[&str]| {
+            starts_once_loaded(
+                "Export",
+                &ResourceSnapshot {
+                    pending: true,
+                    loading: names
+                        .iter()
+                        .map(|n| (n.to_lowercase(), (*n).into()))
+                        .collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            waiting(&["Deep Glow"]),
+            "Export starts once Deep Glow has loaded"
+        );
+        assert_eq!(
+            waiting(&["Deep Glow", "Blur", "Grain"]),
+            "Export starts once Deep Glow and 2 more have loaded"
+        );
+        assert_eq!(waiting(&[]), "Export starts once extensions have loaded");
+    }
+    #[test]
+    fn an_open_that_stops_waiting_says_who_is_still_loading() {
+        use super::still_loading_note as note;
+        assert_eq!(note(&[]), None);
+        assert_eq!(
+            note(&["Deep Glow"]).as_deref(),
+            Some("Deep Glow is still loading. Frames that use its effects wait for it.")
+        );
+        assert_eq!(
+            note(&["Deep Glow", "Grain"]).as_deref(),
+            Some(
+                "Deep Glow and Grain are still loading. Frames that use their effects wait for them."
+            )
+        );
+        assert_eq!(
+            note(&["A", "B", "C"]).as_deref(),
+            Some("A and 2 more are still loading. Frames that use their effects wait for them.")
+        );
+    }
+    use super::{external_link, menu_entries};
+    use serde_json::json;
+
+    #[test]
+    fn discovery_loads_a_migrated_effect_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("electron");
+        let native = pm_first_launch::beta_profile(temp.path());
+        let extension = source.join("extensions/synthetic-effect");
+        std::fs::create_dir_all(&extension).unwrap();
+        std::fs::write(
+            extension.join("manifest.json"),
+            json!({
+                "id":"synthetic-effect", "name":"Synthetic effect", "version":"1.0.0",
+                "apiVersion":1, "entry":"index.ts", "contributes":["effects"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            extension.join("index.ts"),
+            "export function activate(api) {};",
+        )
+        .unwrap();
+        assert!(matches!(
+            pm_first_launch::run(
+                &pm_first_launch::Config {
+                    electron_profile: source,
+                    native_profile: native.clone()
+                },
+                |_| Ok(())
+            )
+            .unwrap(),
+            pm_first_launch::Outcome::Complete { .. }
+        ));
+        let found = pm_compat_runner::discovery::scan(&super::roots(&native));
+        let effect = found.iter().find(|f| f.id == "synthetic-effect").unwrap();
+        assert!(effect.manifest.is_ok(), "{:?}", effect.manifest);
+        assert_eq!(effect.directory, native.join("extensions/synthetic-effect"));
+        assert!(effect.store.is_none());
+    }
+
+    #[test]
+    fn extension_menus_keep_their_choice_tokens_and_only_web_links_open() {
+        let items = menu_entries(
+            &[
+                json!({"label":"Run","run":3,"on":true}),
+                json!({"separator":true}),
+                json!({"label":"Header","disabled":true}),
+                json!({"label":"More","submenu":[{"label":"Nested","run":4}]}),
+            ],
+            9,
+        );
+        assert_eq!(items[0].command, "extension.menu:9:3");
+        assert!(items[0].checked && items[0].enabled);
+        assert!(items[1].label.is_empty());
+        assert!(!items[2].enabled);
+        assert_eq!(items[3].children[0].command, "extension.menu:9:4");
+        assert!(external_link("https://example.com/a"));
+        assert!(!external_link("file:///etc/passwd") && !external_link("powermove://x"));
+    }
+}
+
+/// A v4 theme's tokens as the shell's patch: colours `"#rrggbb"`, the rest
+/// numbers. Unknown tokens are refused by the shell when it applies the patch.
+fn theme_patch(tokens: &Value) -> Result<pm_shell::theme::Patch, String> {
+    let fields = tokens.as_object().ok_or("A theme needs a tokens object.")?;
+    fields
+        .iter()
+        .map(|(name, value)| {
+            let number = match value {
+                Value::Number(n) => n.as_f64(),
+                Value::String(hex) => hex
+                    .strip_prefix('#')
+                    .filter(|h| h.len() == 6)
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .map(f64::from),
+                _ => None,
+            };
+            number
+                .map(|n| (name.clone(), n))
+                .ok_or_else(|| format!("Theme token {name} needs a number or a #rrggbb colour."))
+        })
+        .collect()
+}
+/// Restyles every window with a dark and a light patch (empty: the built-in
+/// look), after the current update so each window's editor updates in turn.
+fn apply_theme((dark, light): Patches, cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            let Some(editor) = window.downcast::<pm_shell::view::Editor>() else {
+                continue;
+            };
+            let (dark, light) = (dark.clone(), light.clone());
+            let _ = editor.update(cx, |e, _, cx| e.apply_themes(dark, light, cx));
+        }
+    });
+}
+/// What shows without a v4 theme: the active v1–3 theme, or the built-in look.
+fn base_look() -> Patches {
+    V1_THEME.with(|t| {
+        t.borrow()
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::theme_patch;
+    use serde_json::json;
+    #[::core::prelude::v1::test]
+    fn a_v4_theme_becomes_the_shell_patch() {
+        let patch = theme_patch(&json!({"colors.accent":"#ff8800","metrics.gap":8})).unwrap();
+        assert!(patch.contains(&("colors.accent".into(), f64::from(0xff8800u32))));
+        assert!(patch.contains(&("metrics.gap".into(), 8.)));
+        pm_shell::theme::set(patch).unwrap();
+        pm_shell::theme::clear();
+        assert!(theme_patch(&json!({"colors.accent":"orange"})).is_err());
+        let unknown = theme_patch(&json!({"colors.nonsense":"#000000"})).unwrap();
+        assert!(
+            pm_shell::theme::set(unknown).is_err(),
+            "unknown tokens are refused"
+        );
+    }
+}
+
+/// Waits for a realm evaluation on a worker until `deadline`.
+fn wait_ticket(
+    ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>,
+    deadline: std::time::Instant,
+) -> Result<String, String> {
+    crate::ticket::answer(ticket, deadline)
+        .ok_or_else(|| "The extension didn't answer in time.".to_owned())?
+        .map(|e| e.value)
+        .map_err(|e| e.to_string())
+}
+/// Every v4 extension's items for a menu, as native entries (off the main
+/// thread). Realms gather in parallel, each giving its contributions 100 ms;
+/// one 150 ms deadline covers them all.
+fn v4_menu_items(runtime: &pm_builtins::Builtins, location: &str, ctx: &Value) -> Vec<MenuEntry> {
+    let mut entries = vec![];
+    let tickets = runtime.gather_menus(location, ctx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+    for (panel, ticket) in tickets {
+        let Some(text) = ticket.ok().and_then(|t| wait_ticket(t, deadline).ok()) else {
+            continue;
+        };
+        // The realm returns the items as JSON text.
+        let items = serde_json::from_str::<Value>(&text)
+            .ok()
+            .map(|v| match v {
+                Value::String(inner) => serde_json::from_str(&inner).unwrap_or(Value::Null),
+                other => other,
+            })
+            .unwrap_or(Value::Null);
+        entries.extend(v4_entries(&panel, &items));
+    }
+    entries
+}
+fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if item == "-" {
+                return Some(MenuEntry::separator());
+            }
+            if let Some(header) = item["header"].as_str() {
+                let mut entry = MenuEntry::item(header, "");
+                entry.enabled = false;
+                return Some(entry);
+            }
+            let label = item["label"].as_str()?;
+            if let Some(children) = item["submenu"].as_array() {
+                return Some(MenuEntry::submenu(
+                    label,
+                    v4_entries(panel, &Value::Array(children.clone())),
+                ));
+            }
+            let command = match (item["key"].as_str(), item["disabled"] == true) {
+                (Some(key), false) => format!("{V4_MENU}{panel}:{key}"),
+                _ => String::new(),
+            };
+            let mut entry = MenuEntry::item(label, command);
+            if item["on"] == true {
+                entry = entry.checked(true);
+            }
+            entry.enabled = !entry.command.is_empty();
+            Some(entry)
+        })
+        .collect()
+}
+
+/// How long a panel whose extension left the registry keeps its place before
+/// it is parked (an extension restarting for a project open comes back sooner).
+const PARK_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+mod recovered_runtime_tests {
+    use super::Extensions;
+    #[test]
+    fn recovery_replays_discovery_when_the_panel_runtime_arrives_or_restarts() {
+        let mut extensions = Extensions::default();
+        // Discovery can publish while Recover is awaiting the person's answer.
+        extensions.seen = 7;
+        extensions.surfaces.insert("motion-notes".into(), ("Motion Notes".into(), "hash".into()));
+        extensions.forks.insert("custom-timeline".into(), ("timeline".into(), "hash".into()));
+        extensions.panel_runtime_changed();
+        assert!(extensions.forks.is_empty());
+        assert_eq!(extensions.v4_seen, u64::MAX);
+        assert_eq!(extensions.v4_themes_seen, u64::MAX);
+        assert_eq!(extensions.seen, 0, "the same publication must be applied again");
+        assert!(extensions.surfaces.is_empty(), "mounts belonged to the retired runtime");
+        assert_ne!(extensions.seen, 7);
+        // The next project-runtime rebuild must retry these same definitions.
+        extensions.seen = 7;
+        extensions.surfaces.insert("pexels".into(), ("Pexels".into(), "hash".into()));
+        extensions.panel_runtime_changed();
+        assert_eq!(extensions.seen, 0);
+        assert!(extensions.surfaces.is_empty());
+    }
+}
+/// The titles of extension panels as they last registered, kept in the
+/// profile: while a project opens, a panel whose extension is still starting
+/// shows its name in its tab (PM-427), not its id. Read once per process.
+fn titles_file(profile: &std::path::Path) -> std::path::PathBuf {
+    profile.join("caches").join("panel-titles.json")
+}
+thread_local! {
+    static TITLES: RefCell<Option<BTreeMap<String, String>>> = const { RefCell::new(None) };
+}
+fn with_titles<R>(
+    profile: &std::path::Path,
+    f: impl FnOnce(&mut BTreeMap<String, String>) -> R,
+) -> R {
+    TITLES.with(|t| {
+        let mut t = t.borrow_mut();
+        let titles = t.get_or_insert_with(|| {
+            std::fs::read(titles_file(profile))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        });
+        f(titles)
+    })
+}
+pub(crate) fn remembered_titles(profile: &std::path::Path) -> Vec<(String, String)> {
+    with_titles(profile, |t| {
+        t.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    })
+}
+fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
+    let changed = with_titles(profile, |t| {
+        let mut changed = false;
+        for (id, title) in panels {
+            if t.get(id) != Some(title) {
+                t.insert(id.clone(), title.clone());
+                changed = true;
+            }
+        }
+        changed.then(|| serde_json::to_vec(t).ok()).flatten()
+    });
+    if let Some(bytes) = changed {
+        let file = titles_file(profile);
+        let _ = std::fs::create_dir_all(file.parent().unwrap());
+        let _ = std::fs::write(file, bytes);
+    }
+}

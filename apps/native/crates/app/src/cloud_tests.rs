@@ -1,0 +1,1316 @@
+//! The Powermove Cloud host against the fixture registry, through the same
+//! `pm-services` work the sign-in sheets submit. The session lives in a
+//! memory vault here; the app's is the Keychain.
+use crate::cloud::{Http, Vault};
+use crate::store_window_tests::{Account as Fixture, CODE, serve_with};
+use pm_services::surfaces::{
+    Flight,
+    agent_auth::{Account, BrowserAuth, CloudReply, CloudTask, CloudWork, Secret},
+};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
+#[derive(Clone, Default)]
+struct Memory(Arc<Mutex<Option<Vec<u8>>>>);
+impl Vault for Memory {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&mut self) -> Result<(), String> {
+        *self.0.lock().unwrap() = None;
+        Ok(())
+    }
+}
+struct Setup {
+    origin: &'static str,
+    host: Http,
+    vault: Memory,
+    fixture: Arc<Mutex<Fixture>>,
+    _profile: tempfile::TempDir,
+}
+fn setup() -> Setup {
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture.clone()).into_boxed_str());
+    let vault = Memory::default();
+    let profile = tempfile::tempdir().unwrap();
+    Setup {
+        origin,
+        host: Http::new(origin, Box::new(vault.clone()), profile.path().to_owned()),
+        vault,
+        fixture,
+        _profile: profile,
+    }
+}
+fn run(s: &mut Setup, work: CloudWork) -> pm_services::Result<CloudReply> {
+    let task = CloudTask::new(Flight::default().start(), s.origin, work).unwrap();
+    task.run(&mut s.host).result
+}
+fn account(reply: pm_services::Result<CloudReply>) -> Option<Account> {
+    match reply.unwrap() {
+        CloudReply::Account(account) => account,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn email_sign_in_handle_remember_and_sign_out() {
+    let mut s = setup();
+    run(
+        &mut s,
+        CloudWork::SendEmail {
+            email: "person@example.com".into(),
+        },
+    )
+    .unwrap();
+    // A wrong code is the registry's `unauthorized`, which the sheet words.
+    let wrong = run(
+        &mut s,
+        CloudWork::VerifyEmail {
+            email: "person@example.com".into(),
+            code: Secret::new("000000".into()),
+        },
+    );
+    assert_eq!(wrong.unwrap_err().to_string(), "api:unauthorized");
+    let signed = account(run(
+        &mut s,
+        CloudWork::VerifyEmail {
+            email: "person@example.com".into(),
+            code: Secret::new(CODE.into()),
+        },
+    ))
+    .unwrap();
+    assert_eq!(signed.email, "person@example.com");
+    assert_eq!(signed.handle, None);
+    // The session is sealed with its origin, and never in the account facts.
+    let sealed: serde_json::Value =
+        serde_json::from_slice(&s.vault.read().unwrap().unwrap()).unwrap();
+    assert_eq!(sealed["origin"], s.origin.trim_end_matches('/'));
+    assert!(!format!("{signed:?}").contains("fixture-session"));
+    let taken = run(
+        &mut s,
+        CloudWork::ClaimHandle {
+            handle: "taken".into(),
+        },
+    );
+    assert_eq!(taken.unwrap_err().to_string(), "api:handle_taken");
+    let named = account(run(
+        &mut s,
+        CloudWork::ClaimHandle {
+            handle: "maker".into(),
+        },
+    ))
+    .unwrap();
+    assert_eq!(named.identity(), "@maker");
+    let remembered = account(run(&mut s, CloudWork::RememberInstalls(true))).unwrap();
+    assert!(remembered.remember_installs);
+    s.host
+        .record_install(
+            "5a1c0000-0000-4000-8000-000000000001",
+            Some("5a1c0000-0000-4000-8000-0000000000a2"),
+        )
+        .unwrap();
+    assert_eq!(s.fixture.lock().unwrap().installs.len(), 1);
+    s.host
+        .record_install("5a1c0000-0000-4000-8000-000000000001", None)
+        .unwrap();
+    assert!(s.fixture.lock().unwrap().installs.is_empty());
+    assert!(matches!(
+        run(&mut s, CloudWork::SignOut),
+        Ok(CloudReply::SignedOut)
+    ));
+    assert!(s.vault.read().unwrap().is_none());
+    assert!(!s.host.signed_in());
+}
+
+#[test]
+fn browser_sign_in_exchanges_the_return_link_with_its_verifier_once() {
+    let mut s = setup();
+    let mut auth = BrowserAuth::default();
+    let url = auth.begin(s.origin, [3; 32], [4; 16], 0).unwrap();
+    assert!(
+        url.as_str()
+            .starts_with(&format!("{}v1/auth/desktop?", s.origin))
+    );
+    // The registry's page answers with the return link a browser follows.
+    let page = pm_compat_runner::net::send(
+        pm_runtime_v8::FetchRequest {
+            url: url.to_string(),
+            method: "GET".into(),
+            headers: vec![],
+            body: vec![],
+            max_response_bytes: 4096,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        },
+        pm_compat_runner::net::Reach::Origin(s.origin),
+    );
+    // NSURLSession may refuse the custom-scheme hop; the fixture recorded the
+    // challenge either way, and its link is state + browser token.
+    drop(page);
+    let state = url
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let link = format!("powermove://auth?state={state}&token=browser-{state}");
+    // A link for another sign-in leaves this one waiting.
+    assert!(
+        auth.receive("powermove://auth?state=00&token=x", s.origin, 1)
+            .is_none()
+    );
+    let exchange = auth.receive(&link, s.origin, 1).unwrap();
+    assert!(auth.receive(&link, s.origin, 2).is_none());
+    let signed = account(run(&mut s, CloudWork::Exchange(exchange))).unwrap();
+    assert_eq!(signed.email, "fixture@example.com");
+    // Delete Account ends every session.
+    s.host.delete_account().unwrap();
+    assert!(s.fixture.lock().unwrap().deleted);
+    assert!(!s.host.signed_in());
+}
+
+#[test]
+fn an_ended_session_reads_as_signed_out_and_is_forgotten() {
+    let mut s = setup();
+    run(
+        &mut s,
+        CloudWork::SendEmail {
+            email: "person@example.com".into(),
+        },
+    )
+    .unwrap();
+    account(run(
+        &mut s,
+        CloudWork::VerifyEmail {
+            email: "person@example.com".into(),
+            code: Secret::new(CODE.into()),
+        },
+    ));
+    // The registry forgets every session (another Mac deleted the account).
+    s.fixture.lock().unwrap().sessions_clear();
+    assert!(
+        account(Ok(CloudReply::Account(
+            pm_services::surfaces::agent_auth::CloudHost::refresh_account(&mut s.host).unwrap()
+        )))
+        .is_none()
+    );
+    assert!(s.vault.read().unwrap().is_none());
+}
+
+/// Keychain items in memory; `refuse` makes deletes fail as a locked or
+/// denied Keychain does.
+type ItemMap = std::collections::BTreeMap<(String, String), Vec<u8>>;
+#[derive(Clone, Default)]
+struct Items {
+    map: Arc<Mutex<ItemMap>>,
+    refuse: Arc<Mutex<bool>>,
+}
+impl crate::cloud::Items for Items {
+    fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        let key = (service.to_owned(), account.to_owned());
+        Ok(self.map.lock().unwrap().get(&key).cloned())
+    }
+    fn write(&mut self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        let key = (service.to_owned(), account.to_owned());
+        self.map.lock().unwrap().insert(key, bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&mut self, service: &str, account: &str) -> Result<(), String> {
+        if *self.refuse.lock().unwrap() {
+            return Err("Keychain delete failed (-25293)".into());
+        }
+        let key = (service.to_owned(), account.to_owned());
+        self.map.lock().unwrap().remove(&key);
+        Ok(())
+    }
+}
+
+#[test]
+fn offline_sign_out_forgets_the_native_and_migrated_sessions_and_reports_a_keychain_failure() {
+    // No registry answers here: the sign-out call fails as it does offline.
+    let origin = "http://127.0.0.1:9/";
+    let sealed = serde_json::json!({"origin":"http://127.0.0.1:9","token":"t",
+        "expiresAt":"2999-01-01T00:00:00Z"})
+    .to_string();
+    let items = Items::default();
+    let profile = tempfile::tempdir().unwrap();
+    // The first launch migrated two versions of the shipped app's session,
+    // each at `hash("cloud/session:<version>")`, and registered both.
+    let migrated: Vec<(String, String)> = ["v1", "v2"]
+        .iter()
+        .map(|version| {
+            let service = format!("{} migration secrets", pm_first_launch::BETA_BUNDLE_ID);
+            let account = blake3::hash(format!("cloud/session:{version}").as_bytes())
+                .to_hex()
+                .to_string();
+            let writer = pm_kernel::persistence::LibraryWriter::open(
+                profile.path(),
+                pm_kernel::persistence::DiskFormat::V1_2,
+                None,
+            )
+            .unwrap();
+            pm_kernel::profile::ProfileStorage::new(&writer)
+                .register_secret(&pm_kernel::profile::SecretLocator {
+                    id: "cloud/session".into(),
+                    version: (*version).into(),
+                    service: service.clone(),
+                    account: account.clone(),
+                })
+                .unwrap();
+            (service, account)
+        })
+        .collect();
+    let native = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    // Only the oldest migrated item holds a session: it is still read.
+    items
+        .map
+        .lock()
+        .unwrap()
+        .insert(migrated[0].clone(), sealed.clone().into_bytes());
+    let vault = || {
+        Box::new(crate::cloud::Keychain::with_items(
+            native.0.clone(),
+            native.1.clone(),
+            Some(profile.path().to_owned()),
+            Box::new(items.clone()),
+        ))
+    };
+    {
+        let host = Http::new(origin, vault(), profile.path().to_owned());
+        assert!(host.signed_in());
+    }
+    for key in [native.clone(), migrated[1].clone()] {
+        items
+            .map
+            .lock()
+            .unwrap()
+            .insert(key, sealed.clone().into_bytes());
+    }
+    let mut host = Http::new(origin, vault(), profile.path().to_owned());
+    assert!(host.signed_in());
+    let sign_out = |host: &mut Http| {
+        let task = CloudTask::new(Flight::default().start(), origin, CloudWork::SignOut).unwrap();
+        task.run(host).result
+    };
+    // A Keychain that refuses the delete is an error the person sees, and
+    // the session is still there to sign out again.
+    *items.refuse.lock().unwrap() = true;
+    assert_eq!(sign_out(&mut host).unwrap_err().to_string(), "keychain");
+    assert!(host.signed_in());
+    *items.refuse.lock().unwrap() = false;
+    assert!(matches!(sign_out(&mut host), Ok(CloudReply::SignedOut)));
+    assert!(items.map.lock().unwrap().is_empty());
+    // Relaunch: a new vault over the same Keychain finds nothing.
+    let relaunched = Http::new(origin, vault(), profile.path().to_owned());
+    assert!(!relaunched.signed_in());
+}
+
+/// A signed-in maker with a handle, and an extension made on this Mac.
+fn maker() -> (Setup, std::path::PathBuf) {
+    let mut s = setup();
+    run(
+        &mut s,
+        CloudWork::SendEmail {
+            email: "maker@example.com".into(),
+        },
+    )
+    .unwrap();
+    account(run(
+        &mut s,
+        CloudWork::VerifyEmail {
+            email: "maker@example.com".into(),
+            code: Secret::new(CODE.into()),
+        },
+    ));
+    account(run(
+        &mut s,
+        CloudWork::ClaimHandle {
+            handle: "maker".into(),
+        },
+    ));
+    let profile = s._profile.path().to_owned();
+    let folder = profile.join("extensions/my-glow");
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        "{\n  \"id\": \"my-glow\",\n  \"name\": \"My Glow\",\n  \"version\": \"0.9.0\",\n  \"apiVersion\": 3,\n  \"permissions\": []\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("src/index.ts"),
+        "export default function () {}\n",
+    )
+    .unwrap();
+    std::fs::write(folder.join(".DS_Store"), "never published").unwrap();
+    (s, profile)
+}
+fn publish(s: &mut Setup, profile: &std::path::Path, version: &str) -> Result<String, String> {
+    use pm_services::surfaces::publishing::Draft;
+    let prepared = crate::publish::prepare(&mut s.host, profile, "my-glow", true)?;
+    let mut draft = Draft::for_plan(&prepared.plan);
+    draft.version = version.into();
+    draft.name = "My Glow".into();
+    draft.category = "effects".into();
+    crate::publish::draft_reasons(&prepared, &mut draft);
+    let form = draft
+        .form(&prepared.plan)
+        .map_err(|p| format!("{:?}", p[0].problem))?;
+    let frozen = crate::publish::freeze(&prepared, &form, 1_800_000_000)?;
+    assert_eq!(
+        frozen.confirmation().0,
+        format!("Publish maker/my-glow {version}?")
+    );
+    crate::publish::upload(&mut s.host, profile, &prepared, frozen)
+}
+
+#[test]
+fn publish_uploads_verified_objects_then_an_update_follows_its_commit() {
+    let (mut s, profile) = maker();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(plan.first_publish);
+    assert_eq!(plan.coordinate, "maker/my-glow");
+    assert_eq!(plan.suggested_version, "0.9.0");
+    assert_eq!(
+        publish(&mut s, &profile, "0.9.0").unwrap(),
+        "Published maker/my-glow 0.9.0."
+    );
+    {
+        let fixture = s.fixture.lock().unwrap();
+        let releases = &fixture.releases["maker/my-glow"];
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].3, None);
+        // Two blobs, two trees and the commit, each inflated and verified.
+        assert_eq!(fixture.objects.len(), 5);
+        assert!(
+            !fixture
+                .objects
+                .values()
+                .any(|o| o.ends_with(b"never published"))
+        );
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(profile.join("extensions-provenance.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["my-glow"]["published"]["version"], "0.9.0");
+    // An update: the Store's version is the floor, the commit follows the last.
+    std::fs::write(
+        profile.join("extensions/my-glow/src/index.ts"),
+        "export default 2;\n",
+    )
+    .unwrap();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(!plan.first_publish);
+    assert_eq!(plan.last_version.as_deref(), Some("0.9.0"));
+    assert_eq!(plan.suggested_version, "0.9.1");
+    assert_eq!(
+        publish(&mut s, &profile, "0.9.0").unwrap_err(),
+        "VersionNotHigher"
+    );
+    assert_eq!(
+        publish(&mut s, &profile, "0.9.1").unwrap(),
+        "Published maker/my-glow 0.9.1."
+    );
+    let fixture = s.fixture.lock().unwrap();
+    let releases = &fixture.releases["maker/my-glow"];
+    assert_eq!(releases[1].3.as_deref(), Some(releases[0].1.as_str()));
+    // The published version went back into the folder's manifest.json.
+    let manifest =
+        std::fs::read_to_string(profile.join("extensions/my-glow/manifest.json")).unwrap();
+    assert!(manifest.contains("\"version\": \"0.9.1\""));
+    assert!(manifest.find("\"id\"").unwrap() < manifest.find("\"version\"").unwrap());
+}
+
+/// Publishes `prepared` as `version` the way the sheet and confirmation do.
+fn finish(
+    s: &mut Setup,
+    profile: &std::path::Path,
+    prepared: &crate::publish::Prepared,
+    version: &str,
+) -> Result<String, String> {
+    use pm_services::surfaces::publishing::Draft;
+    let mut draft = Draft::for_plan(&prepared.plan);
+    draft.version = version.into();
+    draft.name = "My Glow".into();
+    draft.category = "effects".into();
+    crate::publish::draft_reasons(prepared, &mut draft);
+    let form = draft.form(&prepared.plan).unwrap();
+    let frozen = crate::publish::freeze(prepared, &form, 1_800_000_000)?;
+    assert!(frozen.confirmation().1.contains("2 files"));
+    crate::publish::upload(&mut s.host, profile, prepared, frozen)
+}
+fn uploaded(s: &Setup, needle: &[u8]) -> bool {
+    s.fixture
+        .lock()
+        .unwrap()
+        .objects
+        .values()
+        .any(|o| o.windows(needle.len()).any(|w| w == needle))
+}
+
+#[test]
+fn publish_uploads_the_files_it_checked_not_ones_added_while_the_sheet_was_open() {
+    let (mut s, profile) = maker();
+    let folder = profile.join("extensions/my-glow");
+    let prepared = crate::publish::prepare(&mut s.host, &profile, "my-glow", true).unwrap();
+    assert_eq!(crate::publish::plan_problem(&prepared.plan), None);
+    // While the sheet is open, a credential lands in a new file and an old one.
+    let key = format!("AKIA{}", "B".repeat(16));
+    std::fs::write(folder.join("src/key.ts"), format!("const k = \"{key}\";\n")).unwrap();
+    std::fs::write(folder.join("src/index.ts"), format!("// {key}\n")).unwrap();
+    assert_eq!(
+        finish(&mut s, &profile, &prepared, "0.9.0").unwrap(),
+        "Published maker/my-glow 0.9.0."
+    );
+    assert!(!uploaded(&s, key.as_bytes()));
+    assert!(uploaded(&s, b"export default function () {}"));
+}
+
+#[test]
+fn publish_refuses_a_linked_folder_and_never_follows_a_swapped_one() {
+    let (mut s, profile) = maker();
+    let folder = profile.join("extensions/my-glow");
+    let outside = profile.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("manifest.json"),
+        "{\"id\":\"my-glow\",\"name\":\"Elsewhere\",\"version\":\"0.1.0\",\"permissions\":[]}",
+    )
+    .unwrap();
+    std::fs::write(outside.join("private.txt"), "outside the extension").unwrap();
+    // The folder itself a link: refused before anything is read.
+    let real = profile.join("extensions/real-glow");
+    std::fs::rename(&folder, &real).unwrap();
+    std::os::unix::fs::symlink(&outside, &folder).unwrap();
+    assert_eq!(
+        crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+            .err()
+            .as_deref(),
+        Some("This extension’s folder is a link. Only a real folder can be published.")
+    );
+    // Swapped for a link after the sheet opened: the held folder publishes,
+    // and the version goes back into it, not into what the link names.
+    std::fs::remove_file(&folder).unwrap();
+    std::fs::rename(&real, &folder).unwrap();
+    let prepared = crate::publish::prepare(&mut s.host, &profile, "my-glow", true).unwrap();
+    std::fs::rename(&folder, &real).unwrap();
+    std::os::unix::fs::symlink(&outside, &folder).unwrap();
+    assert!(finish(&mut s, &profile, &prepared, "1.0.0").is_ok());
+    assert!(!uploaded(&s, b"outside the extension"));
+    assert!(!uploaded(&s, b"Elsewhere"));
+    assert!(
+        std::fs::read_to_string(outside.join("manifest.json"))
+            .unwrap()
+            .contains("0.1.0")
+    );
+    assert!(
+        std::fs::read_to_string(real.join("manifest.json"))
+            .unwrap()
+            .contains("\"version\": \"1.0.0\"")
+    );
+}
+
+#[test]
+fn publish_refuses_secrets_undeclared_permissions_store_installs_and_a_signed_out_mac() {
+    let (mut s, profile) = maker();
+    let folder = profile.join("extensions/my-glow");
+    std::fs::write(
+        folder.join("src/key.ts"),
+        format!("const k = \"AKIA{}\";\n", "A".repeat(16)),
+    )
+    .unwrap();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(
+        crate::publish::plan_problem(&plan)
+            .unwrap()
+            .contains("looks like a secret")
+    );
+    std::fs::write(folder.join("src/key.ts"), "await fetch(url)\n").unwrap();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(
+        crate::publish::plan_problem(&plan)
+            .unwrap()
+            .contains("network permission")
+    );
+    // A random-looking value with its reason in the code publishes as a waiver.
+    std::fs::write(
+        folder.join("src/key.ts"),
+        "const id = \"Zq8Xw2Lp9Rt4Vn7Ks1Mb6Jh3Gf5Dc0Ae2Bq9Wy\"; // powermove-secret-ok: public sample id\n",
+    )
+    .unwrap();
+    assert!(publish(&mut s, &profile, "0.9.0").is_ok());
+    // Never an extension the Store installed, and never signed out.
+    let store = profile.join("extensions/from-store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(".powermove-store.json"), "{}").unwrap();
+    assert!(crate::publish::prepare(&mut s.host, &profile, "from-store", true).is_err());
+    assert!(matches!(
+        run(&mut s, CloudWork::SignOut),
+        Ok(CloudReply::SignedOut)
+    ));
+    assert_eq!(
+        crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+            .err()
+            .as_deref(),
+        Some("Sign in to publish.")
+    );
+}
+
+#[test]
+fn a_model_provider_is_discovered_tested_and_saved_with_its_key_in_the_vault() {
+    use crate::providers::Host;
+    use crate::store_window_tests::MODEL_KEY;
+    use pm_services::surfaces::{
+        agent_auth::ProviderInput,
+        providers::{ConfigureWork, DiscoveryWork},
+    };
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin = serve_with(0, fixture);
+    let endpoint = format!("{origin}v1");
+    let profile = tempfile::tempdir().unwrap();
+    let vault = Memory::default();
+    let keys = vault.clone();
+    let mut host = Host {
+        profile: profile.path().to_owned(),
+        keys: Box::new(move |_| Box::new(keys.clone())),
+    };
+    let ticket = || Flight::default().start();
+    // Discovery lists models that can call tools, with what they read.
+    let found = DiscoveryWork {
+        ticket: ticket(),
+        endpoint: endpoint.clone(),
+        key: None,
+        has_saved_key: false,
+    }
+    .run(&mut host)
+    .result
+    .unwrap();
+    let ids: Vec<_> = found.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["fixture-chat", "fixture-vision"]);
+    assert_eq!(found.hidden, 1);
+    assert_eq!(found.models[1].vision, Some(true));
+    // A wrong key is refused and nothing is saved.
+    let input = ProviderInput::prepare(&endpoint, "fixture-chat", false, "wrong", None).unwrap();
+    let refused = ConfigureWork {
+        ticket: ticket(),
+        input,
+    }
+    .run(&mut host)
+    .result;
+    assert_eq!(
+        refused.unwrap_err().code,
+        pm_services::ServiceErrorCode::PermissionDenied
+    );
+    assert!(host.saved().is_none());
+    // The right one connects after a real chat completion.
+    let input = ProviderInput::prepare(&endpoint, "fixture-vision", true, MODEL_KEY, None).unwrap();
+    let config = ConfigureWork {
+        ticket: ticket(),
+        input,
+    }
+    .run(&mut host)
+    .result
+    .unwrap();
+    assert!(config.has_key);
+    let saved = host.saved().unwrap();
+    assert_eq!(saved["model"], "fixture-vision");
+    assert_eq!(saved["vision"], true);
+    // The key is in the vault, never in the saved connection.
+    assert_eq!(host.saved_key(&endpoint).as_deref(), Some(MODEL_KEY));
+    let file = std::fs::read_to_string(profile.path().join("agent-provider.json")).unwrap();
+    assert!(!file.contains(MODEL_KEY));
+    // Keeping the saved key: a blank entry reuses it for the same address only.
+    let input = ProviderInput::prepare(
+        &endpoint,
+        "fixture-chat",
+        false,
+        "",
+        Some((&endpoint, MODEL_KEY)),
+    )
+    .unwrap();
+    assert!(
+        ConfigureWork {
+            ticket: ticket(),
+            input
+        }
+        .run(&mut host)
+        .result
+        .is_ok()
+    );
+    host.disconnect().unwrap();
+    assert!(host.saved().is_none());
+    assert_eq!(host.saved_key(&endpoint).as_deref(), Some(MODEL_KEY));
+}
+
+#[test]
+fn agent_apps_get_powermove_added_and_removed_in_their_own_settings_only() {
+    use crate::agent_clients::{ProfileConsent, change, registration};
+    use pm_services::surfaces::client_consent::{Answer, ConsentStore, STORE_KEY};
+    let home = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let applications = home.path().join("Applications");
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.path().join("Library/Application Support/Claude")).unwrap();
+    // A hand-made server in Claude's settings must survive.
+    let claude = home
+        .path()
+        .join("Library/Application Support/Claude/claude_desktop_config.json");
+    std::fs::write(
+        &claude,
+        r#"{"mcpServers":{"mine":{"command":"/usr/bin/true"}}}"#,
+    )
+    .unwrap();
+    let app = PathBuf::from("/Applications/Powermove.app/Contents/MacOS/powermove-native");
+    let r = registration(profile.path(), home.path(), &applications, app).unwrap();
+    let state = |r: &pm_mcp::registration::Registration, id: &str| {
+        r.inspect()["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state(&r, "cursor"), "available");
+    assert_eq!(state(&r, "codex"), "not-installed");
+    assert_eq!(
+        change(&r, "cursor", true).unwrap(),
+        "Restart Cursor to use it."
+    );
+    let cursor: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join(".cursor/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        cursor["mcpServers"]["powermove"]["args"][0],
+        "--powermove-mcp"
+    );
+    assert_eq!(state(&r, "cursor"), "connected");
+    change(&r, "claude-desktop", true).unwrap();
+    let claude: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claude).unwrap()).unwrap();
+    assert!(claude["mcpServers"]["mine"].is_object());
+    assert!(claude["mcpServers"]["powermove"].is_object());
+    assert_eq!(change(&r, "cursor", false).unwrap(), "Removed.");
+    assert_eq!(state(&r, "cursor"), "available");
+    // Claude's question is answered once per profile.
+    let mut store = ProfileConsent(profile.path().to_owned());
+    assert!(store.record_once(STORE_KEY, Answer::Added).unwrap().fresh);
+    let again = store.record_once(STORE_KEY, Answer::Declined).unwrap();
+    assert!(!again.fresh);
+    assert_eq!(again.answer, Answer::Added);
+}
+
+/// Signs in at the fixture registry with an emailed code; the sealed session.
+fn fixture_session(origin: &'static str) -> Vec<u8> {
+    let vault = Memory::default();
+    let profile = tempfile::tempdir().unwrap();
+    let mut host = Http::new(origin, Box::new(vault.clone()), profile.path().to_owned());
+    let mut run = |work| {
+        CloudTask::new(Flight::default().start(), origin, work)
+            .unwrap()
+            .run(&mut host)
+            .result
+            .unwrap()
+    };
+    run(CloudWork::SendEmail {
+        email: "person@example.com".into(),
+    });
+    run(CloudWork::VerifyEmail {
+        email: "person@example.com".into(),
+        code: Secret::new(CODE.into()),
+    });
+    vault.read().unwrap().unwrap()
+}
+
+/// Runs the app's tasks until `done` holds of it (the account worker is a
+/// real thread; the app polls it on timers).
+fn settle(cx: &mut gpui::TestAppContext, done: impl Fn(&gpui::App) -> bool) {
+    for _ in 0..600 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+        if cx.update(|cx| done(cx)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the account never settled");
+}
+fn signed_in(cx: &gpui::App) -> bool {
+    crate::cloud::fact(cx)["signedIn"] == true
+}
+/// What Aero runs on: the session the account's worker holds now.
+fn aero_session(cx: &mut gpui::TestAppContext) -> bool {
+    cx.update(|cx| crate::cloud::aero_account(cx))
+        .and_then(|account| account.session())
+        .is_some()
+}
+
+/// The owner's Sandbox on a local stack: the session `PM_CLOUD_SESSION`
+/// gave at launch. Sign Out (Home's menu and Settings both run
+/// `cloud::sign_out`) leaves the app signed out everywhere (the account
+/// fact Home and Settings read, Aero's session), tells the registry, and the
+/// env session never comes back in this process.
+#[gpui::test]
+fn sign_out_drops_the_env_session_for_the_life_of_the_process(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture).into_boxed_str());
+    let sealed = fixture_session(origin);
+    let token = serde_json::from_slice::<serde_json::Value>(&sealed).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The worker's host, as `init` makes it for `PM_CLOUD_SESSION`.
+    let env = crate::cloud::local_session_from(origin, Some(token)).expect("a local stack");
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, Box::new(crate::cloud::Memory(Some(env))), path),
+            cx,
+        )
+    });
+    settle(cx, signed_in);
+    assert!(aero_session(cx));
+    assert_eq!(
+        cx.update(|cx| crate::cloud::fact(cx))["email"],
+        "person@example.com"
+    );
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        !signed_in(cx) && crate::cloud::fact(cx)["busy"] == false
+    });
+    let fact = cx.update(|cx| crate::cloud::fact(cx));
+    assert_eq!(fact["identity"], serde_json::Value::Null);
+    assert_eq!(fact["email"], serde_json::Value::Null);
+    assert_eq!(fact["billing"], serde_json::Value::Null);
+    assert!(!aero_session(cx), "Aero still had the env session");
+    // The registry was told: the old token no longer works there.
+    let mut old = Http::new(
+        origin,
+        Box::new(Memory(Arc::new(Mutex::new(Some(sealed))))),
+        profile.path().to_owned(),
+    );
+    assert!(matches!(
+        pm_services::surfaces::agent_auth::CloudHost::refresh_account(&mut old),
+        Ok(None)
+    ));
+    // Still signed out after the account is read again.
+    cx.update(crate::cloud::refresh_billing);
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| signed_in(cx)));
+    assert!(!aero_session(cx));
+}
+
+/// A release build's own sign-in, in the Keychain (here a fake that never
+/// touches the login Keychain): Sign Out deletes it, the app is signed out
+/// everywhere, and a relaunch over the same Keychain finds nothing.
+#[gpui::test]
+fn sign_out_deletes_a_keychain_session(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture).into_boxed_str());
+    let sealed = fixture_session(origin);
+    let items = Items::default();
+    let key = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    items.map.lock().unwrap().insert(key.clone(), sealed);
+    let keychain = {
+        let items = items.clone();
+        move || {
+            Box::new(crate::cloud::Keychain::with_items(
+                key.0.clone(),
+                key.1.clone(),
+                None,
+                Box::new(items.clone()),
+            ))
+        }
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    let vault = keychain.clone();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, vault(), path),
+            cx,
+        )
+    });
+    settle(cx, signed_in);
+    assert!(aero_session(cx));
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        !signed_in(cx) && crate::cloud::fact(cx)["busy"] == false
+    });
+    assert!(!aero_session(cx));
+    assert!(
+        items.map.lock().unwrap().is_empty(),
+        "the Keychain item stayed"
+    );
+    let relaunched = Http::new(origin, keychain(), profile.path().to_owned());
+    assert!(!relaunched.signed_in());
+}
+
+// ---- Human verification (v1 client.test.ts) ----
+
+/// One request as the scripted registry saw it.
+#[derive(Clone, Debug)]
+struct Seen {
+    path: String,
+    human: Option<String>,
+    bearer: bool,
+}
+type Script = dyn Fn(&str, Option<&str>, usize) -> (u16, String) + Send + Sync;
+/// A registry on this Mac that answers each request from `script` (path,
+/// the X-Powermove-Human header, how many times that path was asked) and
+/// records what it was sent.
+fn scripted(script: Arc<Script>) -> (&'static str, Arc<Mutex<Vec<Seen>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin: &'static str = Box::leak(
+        format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port()).into_boxed_str(),
+    );
+    let seen = Arc::new(Mutex::new(Vec::<Seen>::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+            let (mut length, mut human, mut bearer) = (0usize, None, false);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                let (name, value) = header.split_once(':').unwrap_or((&header, ""));
+                match name.to_ascii_lowercase().as_str() {
+                    "content-length" => length = value.trim().parse().unwrap_or(0),
+                    "x-powermove-human" => human = Some(value.trim().to_owned()),
+                    "authorization" => bearer = true,
+                    _ => {}
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let count = {
+                let mut log = log.lock().unwrap();
+                log.push(Seen {
+                    path: path.clone(),
+                    human: human.clone(),
+                    bearer,
+                });
+                log.iter().filter(|s| s.path == path).count()
+            };
+            let (status, body) = script(&path, human.as_deref(), count);
+            let mut stream = stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (origin, seen)
+}
+const CHALLENGE: &str = r#"{"error":"human_verification_required","ticket":"signed-ticket","scope":"email_send:alice"}"#;
+fn send_email(host: &mut Http, origin: &'static str) -> pm_services::Result<CloudReply> {
+    CloudTask::new(
+        Flight::default().start(),
+        origin,
+        CloudWork::SendEmail {
+            email: "alice@example.com".into(),
+        },
+    )
+    .unwrap()
+    .run(host)
+    .result
+}
+fn browser(host: Http, opened: &Arc<Mutex<Vec<String>>>) -> Http {
+    let opened = opened.clone();
+    host.with_browser(
+        move |url| {
+            opened.lock().unwrap().push(url.to_owned());
+            true
+        },
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(5),
+    )
+}
+
+/// A protected route's 403 opens the check with the ticket only, waits for
+/// its result, retries once with the clearance, and the clearance is kept
+/// under the profile for the next request; it never goes to another origin.
+#[test]
+fn a_human_check_opens_the_page_retries_once_and_keeps_the_clearance() {
+    let (origin, seen) = scripted(Arc::new(|path, human, count| match path {
+        "/v1/auth/email/send" if human == Some("clr") => (200, r#"{"ok":true}"#.into()),
+        "/v1/auth/email/send" => (403, CHALLENGE.into()),
+        "/v1/human/result" if count < 2 => (204, String::new()),
+        "/v1/human/result" => (200, r#"{"clearance":"clr"}"#.into()),
+        _ => (404, "{}".into()),
+    }));
+    let profile = tempfile::tempdir().unwrap();
+    let opened = Arc::new(Mutex::new(vec![]));
+    let mut host = browser(
+        Http::new(
+            origin,
+            Box::new(Memory::default()),
+            profile.path().to_owned(),
+        ),
+        &opened,
+    );
+    assert!(matches!(
+        send_email(&mut host, origin),
+        Ok(CloudReply::Sent)
+    ));
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [format!("{origin}/v1/human?ticket=signed-ticket")]
+    );
+    let paths: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| (s.path.clone(), s.human.clone()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ("/v1/auth/email/send".to_owned(), None),
+            ("/v1/human/result".to_owned(), None),
+            ("/v1/human/result".to_owned(), None),
+            ("/v1/auth/email/send".to_owned(), Some("clr".to_owned())),
+        ]
+    );
+    assert!(
+        seen.lock().unwrap().iter().all(|s| !s.bearer),
+        "no session to the check"
+    );
+    // The next one reuses the clearance it kept: no page, no wait.
+    assert!(matches!(
+        send_email(&mut host, origin),
+        Ok(CloudReply::Sent)
+    ));
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    assert!(
+        profile
+            .path()
+            .join("cloud/human")
+            .read_dir()
+            .unwrap()
+            .count()
+            == 1
+    );
+    // Another origin, same profile: it is never sent there.
+    let (other, other_seen) = scripted(Arc::new(|_, _, _| (403, CHALLENGE.into())));
+    let mut elsewhere = Http::new(
+        other,
+        Box::new(Memory::default()),
+        profile.path().to_owned(),
+    )
+    .with_browser(
+        |_| false,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(1),
+    );
+    assert_eq!(
+        send_email(&mut elsewhere, other).unwrap_err().to_string(),
+        "api:human_unverified"
+    );
+    assert!(other_seen.lock().unwrap().iter().all(|s| s.human.is_none()));
+}
+
+/// A clearance the registry rejects is not retried in a loop: one check,
+/// two requests, and the kept clearance is dropped.
+#[test]
+fn a_rejected_clearance_is_not_retried_in_a_loop() {
+    let (origin, seen) = scripted(Arc::new(|path, _, _| match path {
+        "/v1/human/result" => (200, r#"{"clearance":"invalid"}"#.into()),
+        _ => (403, CHALLENGE.into()),
+    }));
+    let profile = tempfile::tempdir().unwrap();
+    let opened = Arc::new(Mutex::new(vec![]));
+    let mut host = browser(
+        Http::new(
+            origin,
+            Box::new(Memory::default()),
+            profile.path().to_owned(),
+        ),
+        &opened,
+    );
+    assert_eq!(
+        send_email(&mut host, origin).unwrap_err().to_string(),
+        "api:human_verification_required"
+    );
+    let sends = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.path == "/v1/auth/email/send")
+        .count();
+    assert_eq!(sends, 2);
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    assert_eq!(
+        profile
+            .path()
+            .join("cloud/human")
+            .read_dir()
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+/// The sheet's Cancel stops the wait at once, and the gate says it is over.
+#[test]
+fn cancel_stops_waiting_for_the_browser_check() {
+    let (origin, _) = scripted(Arc::new(|path, _, _| match path {
+        "/v1/human/result" => (204, String::new()),
+        _ => (403, CHALLENGE.into()),
+    }));
+    let profile = tempfile::tempdir().unwrap();
+    let gate = Arc::new(crate::cloud_human::HumanGate::default());
+    let mut host = Http::new(
+        origin,
+        Box::new(Memory::default()),
+        profile.path().to_owned(),
+    )
+    .with_gate(gate.clone())
+    .with_browser(
+        |_| true,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_secs(60),
+    );
+    let canceller = gate.clone();
+    std::thread::spawn(move || {
+        while !canceller.verifying() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        canceller.cancel();
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(
+        send_email(&mut host, origin).unwrap_err().to_string(),
+        "api:human_cancelled"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!gate.verifying());
+}
+
+#[test]
+fn a_clearance_is_kept_until_its_own_expiry() {
+    use base64::Engine as _;
+    let profile = tempfile::tempdir().unwrap();
+    let store = crate::cloud_human::Clearances::new(profile.path());
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(br#"{"kind":"clearance","expires":5000000}"#);
+    let clearance = format!("{payload}.sig");
+    store.put("http://a", "email_send:x", &clearance, 1_000_000);
+    assert_eq!(
+        store.get("http://a", "email_send:x", 1_000_000).as_deref(),
+        Some(clearance.as_str())
+    );
+    assert_eq!(store.get("http://b", "email_send:x", 1_000_000), None);
+    assert_eq!(
+        store.get("http://a", "email_send:x", 4_990_000),
+        None,
+        "under a minute left"
+    );
+    store.forget("http://a", "email_send:x");
+    assert_eq!(store.get("http://a", "email_send:x", 1_000_000), None);
+}
+
+/// One click, one Checkout: clicks while the request is in flight, and
+/// after the page is open in the browser, make no second Checkout (the open
+/// page is opened again).
+#[gpui::test]
+fn a_click_starts_exactly_one_checkout(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, seen) = scripted(Arc::new(|path, _, _| {
+        match path {
+        "/v1/me" => (200, r#"{"user":{"id":"u","email":"person@example.com"},"publisher":{"handle":"person"},"settings":{"rememberInstalls":true}}"#.into()),
+        "/v2/billing" => (200, r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,"credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#.into()),
+        "/v2/billing/checkout" => (200, r#"{"url":"http://127.0.0.1:9/v2/dev/checkout?s=1"}"#.into()),
+        _ => (404, "{}".into()),
+    }
+    }));
+    let sealed = serde_json::json!({"origin":origin,"token":"session","expiresAt":"2099-01-01T00:00:00.000Z"})
+        .to_string()
+        .into_bytes();
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, Box::new(crate::cloud::Memory(Some(sealed))), path),
+            cx,
+        )
+    });
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["state"] == "ready"
+    });
+    let checkouts = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.path == "/v2/billing/checkout")
+            .count()
+    };
+    // Two clicks in a row: the second finds the first in flight.
+    cx.update(crate::cloud::subscribe_offered);
+    cx.update(crate::cloud::subscribe_offered);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["waiting"] == "checkout"
+    });
+    assert_eq!(checkouts(), 1);
+    // A click later, while Checkout is open in the browser: the same page.
+    cx.update(crate::cloud::subscribe_offered);
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(checkouts(), 1);
+}
+
+/// A registry whose session can be ended mid-test: while `dead`, every
+/// authenticated route answers 401.
+fn ending_registry() -> (
+    &'static str,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<Mutex<Vec<Seen>>>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dead = Arc::new(AtomicBool::new(false));
+    let flag = dead.clone();
+    let (origin, seen) = scripted(Arc::new(move |path, _, _| {
+        if flag.load(Ordering::Relaxed) && path != "/v1/auth/email/send" {
+            return (401, r#"{"error":"unauthorized"}"#.into());
+        }
+        match path {
+            "/v1/me" => (200, r#"{"user":{"id":"u","email":"test@test.com"},"publisher":{"handle":"person"},"settings":{"rememberInstalls":true}}"#.into()),
+            "/v2/billing" => (200, r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,"credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#.into()),
+            "/v1/auth/sign-out" => (200, "{}".into()),
+            _ => (404, "{}".into()),
+        }
+    }));
+    (origin, dead, seen)
+}
+fn start(cx: &mut gpui::TestAppContext, origin: &'static str, items: &Items) -> tempfile::TempDir {
+    let sealed = serde_json::json!({"origin":origin.trim_end_matches('/'),"token":"session","expiresAt":"2099-01-01T00:00:00.000Z"});
+    let key = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    items
+        .map
+        .lock()
+        .unwrap()
+        .insert(key.clone(), sealed.to_string().into_bytes());
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    let items = items.clone();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || {
+                let vault = crate::cloud::Keychain::with_items(key.0, key.1, None, Box::new(items));
+                Http::new(origin, Box::new(vault), path)
+            },
+            cx,
+        )
+    });
+    profile
+}
+fn signed_out_with_notice(cx: &gpui::App) -> bool {
+    let fact = crate::cloud::fact(cx);
+    fact["signedIn"] == false && fact["identity"].is_null() && fact["sessionEnded"] == true
+}
+
+/// The session ended on the server (its database reset): the launch's
+/// account read gets 401, and the app is signed out everywhere with the one
+/// notice, the stored session forgotten, never the cached account.
+#[gpui::test]
+fn a_session_refused_at_launch_signs_out_everywhere(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, signed_out_with_notice);
+    assert!(
+        items.map.lock().unwrap().is_empty(),
+        "the session stayed stored"
+    );
+    assert!(!aero_session(cx));
+}
+
+/// Signed in, then the server refuses the session on any later call
+/// (billing here, or Aero): signed out everywhere with the notice; signing
+/// in again would clear it. Sign Out when the server answers 401 to the
+/// sign-out itself still signs out, with no notice.
+#[gpui::test]
+fn a_session_refused_later_signs_out_everywhere(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["state"] == "ready"
+    });
+    assert_eq!(cx.update(|cx| crate::cloud::fact(cx))["signedIn"], true);
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    cx.update(crate::cloud::refresh_billing);
+    settle(cx, signed_out_with_notice);
+    assert!(items.map.lock().unwrap().is_empty());
+}
+
+/// Aero hears 401 for its bearer: the account forgets the session too.
+#[gpui::test]
+fn aero_refused_ends_the_session_for_the_whole_app(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, _, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| crate::cloud::fact(cx)["signedIn"] == true);
+    let account = cx.update(|cx| crate::cloud::aero_account(cx)).unwrap();
+    account.ended();
+    settle(cx, signed_out_with_notice);
+}
+
+/// Sign Out while the server answers 401 to everything (the sign-out call
+/// too): signed out, the session forgotten, and no "session ended" notice.
+#[gpui::test]
+fn sign_out_against_a_refusing_server_still_signs_out(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| crate::cloud::fact(cx)["signedIn"] == true);
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["signedIn"] == false && crate::cloud::fact(cx)["busy"] == false
+    });
+    assert_eq!(
+        cx.update(|cx| crate::cloud::fact(cx))["sessionEnded"],
+        false
+    );
+    assert!(items.map.lock().unwrap().is_empty());
+}

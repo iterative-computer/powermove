@@ -1,0 +1,1428 @@
+import { EffectControls } from "../effect-controls/panel";
+import type { EffectsController } from "../effect-controls/controller";
+import { useLayoutEffect, useState } from "preact/hooks";
+import type { ComponentChildren } from "preact";
+import {
+  Checkbox,
+  ColourWell,
+  DisclosureGroup,
+  EmptyState,
+  InspectorRow,
+  NumberField,
+  PopUpButton,
+  SegmentedControl,
+  TextField,
+  ToolbarItem,
+  TreeItem,
+  token,
+} from "../../src/components";
+import type { SurfaceProps } from "../../src/jsx-runtime";
+import type { SurfaceEvent } from "../../src/protocol";
+import type {
+  Alignment,
+  Finish,
+  Binding,
+  MenuItem,
+  PartsSectionData,
+  Row,
+  RowAction,
+  SectionAction,
+} from "./contracts";
+import { InspectorSession } from "./session";
+
+const well = {
+  background: token("colors.field"),
+  borderRadius: token("metrics.inner_radius"),
+};
+const menuWell = {
+  ...well,
+  color: token("colors.text"),
+  fontSize: token("typography.body"),
+};
+/** What a well that opens a menu shows: its value, then the pop-up's
+ * chevrons at the trailing end. */
+function menuValue(value: string | null) {
+  return [
+    <text
+      key="value"
+      style={{
+        flexGrow: 1,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {value ?? ""}
+    </text>,
+    <text
+      key="chevrons"
+      attr={{ symbol: "chevron.up.chevron.down" }}
+      style={{
+        color: token("colors.text"),
+        symbolSize: token("metrics.symbol_inline"),
+      }}
+    />,
+  ];
+}
+const problem = {
+  color: token("colors.danger"),
+  fontSize: token("typography.minimum"),
+};
+/** The gutter a row's keyframe mark stands in, kept by rows that have none,
+ * so every label of the panel starts on one x. */
+const gutter = <div role="presentation" />;
+const column = { display: "flex", flexDirection: "column" };
+const horizontal = {
+  display: "flex",
+  flexDirection: "row",
+  alignItems: "center",
+};
+const sectionActions: Partial<Record<SectionAction, string>> = {
+  mask: "Add Mask",
+  animator: "Add Text Animator",
+  "release-precomp": "Release Pre-comp",
+  "refresh-fonts": "Refresh Fonts",
+  "time-remap": "Time Remap",
+  "freeze-frame": "Freeze Frame",
+  reverse: "Reverse",
+  "remove-transition": "Remove Transition",
+};
+const sectionSymbols: Partial<Record<SectionAction, string>> = {
+  "refresh-fonts": "arrow.clockwise",
+  // Time's three share the heading row: short words, no glyph, so they fit
+  // beside "Time" in a narrow panel (their labels keep the full names).
+  "time-remap": "",
+  "freeze-frame": "",
+  reverse: "",
+  "remove-transition": "",
+};
+/** What a heading action shows when its full name would not fit. */
+const sectionShort: Partial<Record<SectionAction, string>> = {
+  "time-remap": "Remap",
+  "freeze-frame": "Freeze",
+  reverse: "Reverse",
+  "remove-transition": "Remove",
+};
+export const alignmentButtons: {
+  id: Alignment;
+  label: string;
+  symbol: string;
+}[] = [
+  { id: "left", label: "Align Left", symbol: "align.horizontal.left" },
+  {
+    id: "hcenter",
+    label: "Align Horizontal Centres",
+    symbol: "align.horizontal.center",
+  },
+  { id: "right", label: "Align Right", symbol: "align.horizontal.right" },
+  { id: "top", label: "Align Top", symbol: "align.vertical.top" },
+  {
+    id: "vcenter",
+    label: "Align Vertical Centres",
+    symbol: "align.vertical.center",
+  },
+  { id: "bottom", label: "Align Bottom", symbol: "align.vertical.bottom" },
+];
+/** Evenly space the anchors of three or more selected layers. */
+export const distributeButtons: {
+  id: "horizontal" | "vertical";
+  label: string;
+  symbol: string;
+}[] = [
+  {
+    id: "horizontal",
+    label: "Distribute Horizontally",
+    symbol: "distribute.horizontal.center",
+  },
+  {
+    id: "vertical",
+    label: "Distribute Vertically",
+    symbol: "distribute.vertical.center",
+  },
+];
+export { rowMenu } from "./property-menu";
+import { rowMenu } from "./property-menu";
+
+function activate(event: SurfaceEvent, run: () => void) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.stopPropagation();
+    run();
+  }
+}
+/** Keyboard callbacks are for v4 semantic buttons only. Native bound fields are
+ * driven by Rust Controls/Bindings; duplicating their key routes here edits twice.
+ */
+function Action(props: {
+  key?: string;
+  id: string;
+  label: string;
+  disabled?: boolean;
+  active?: boolean;
+  onActivate: (event: SurfaceEvent) => void;
+  value?: string;
+  children?: ComponentChildren;
+  tooltip?: string;
+  symbol?: string;
+  tabIndex?: number;
+  style?: SurfaceProps["style"];
+  onFocus?: SurfaceProps["onFocus"];
+  onBlur?: SurfaceProps["onBlur"];
+  /** It opens a menu: VoiceOver says so, and the menu hangs from it. */
+  menu?: boolean;
+}) {
+  const { onActivate, tooltip, symbol, menu, ...rest } = props;
+  return (
+    <ToolbarItem
+      {...rest}
+      {...(menu ? { "aria-haspopup": "menu" } : {})}
+      metadata={{
+        symbol:
+          symbol ??
+          (props.id === "inspector:add-effect"
+            ? "wand.and.rays"
+            : props.id.startsWith("key:")
+              ? "diamond"
+              : ""),
+      }}
+      title={tooltip ?? props.label}
+      onClick={(event) => {
+        if (!props.disabled) onActivate(event);
+      }}
+      preventDefault={{ keydown: ["Enter", " "] }}
+      onKeyDown={(event) => {
+        if (!props.disabled) activate(event, () => onActivate(event));
+      }}
+    />
+  );
+}
+function AlignmentStrip({
+  session,
+}: {
+  session: InspectorSession;
+  key?: string;
+}) {
+  const [focused, setFocused] = useState(0);
+  const [focusRequest, setFocusRequest] = useState<string>();
+  const target = session.inspect().target;
+  if (target.kind !== "layers" || target.first.audio) return null;
+  return (
+    <div
+      role="group"
+      label="Align"
+      focusRequest={focusRequest}
+      style={{
+        ...horizontal,
+        // In a dock too narrow for its three wells a well moves to a second
+        // line, which the row's one-line height hides, instead of standing
+        // over the next (each cell keeps the pointer's least target;
+        // distribute is also in the palette).
+        flexWrap: "wrap",
+        gap: token("metrics.gap"),
+        height: token("metrics.row"),
+        minHeight: token("metrics.row"),
+        overflow: "hidden",
+        paddingLeft: token("metrics.inset"),
+        paddingRight: token("metrics.inset"),
+      }}
+      preventDefault={{ keydown: ["ArrowLeft", "ArrowRight"] }}
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.stopPropagation();
+        const next =
+          (focused +
+            (event.key === "ArrowLeft" ? -1 : 1) +
+            alignmentButtons.length) %
+          alignmentButtons.length;
+        setFocused(next);
+        setFocusRequest(`align:${alignmentButtons[next].id}`);
+      }}
+    >
+      {[alignmentButtons.slice(0, 3), alignmentButtons.slice(3)].map(
+        (group, index) => (
+          // Two wells of three equal cells, sharing the row (v1's two
+          // button groups).
+          <div
+            key={index}
+            style={{
+              ...horizontal,
+              ...well,
+              flexGrow: 1,
+              // Never narrower than its three cells: a narrower dock wraps
+              // the strip instead.
+              minWidth: token("metrics.align_well"),
+              // Cells keep the pointer's least target, so the strip's
+              // wells are that high.
+              height: token("metrics.hit"),
+            }}
+          >
+            {group.map((button) => (
+              <Action
+                key={button.id}
+                id={`align:${button.id}`}
+                label={button.label}
+                tooltip={`${button.label}\nAnchor points · ${target.count === 1 ? "To composition" : "To selection"}`}
+                symbol={button.symbol}
+                style={{
+                  flexGrow: 1,
+                  symbolSize: token("metrics.symbol_inline"),
+                }}
+                disabled={target.first.locked && target.count === 1}
+                tabIndex={alignmentButtons[focused].id === button.id ? 0 : -1}
+                onActivate={() =>
+                  session.send({ type: "align", alignment: button.id })
+                }
+              />
+            ))}
+          </div>
+        ),
+      )}
+      {/* Evenly spaced anchors, the outermost staying
+          put. The well keeps its place with fewer, its buttons dimmed. */}
+      <div style={{ ...horizontal, ...well, gap: token("metrics.gap") }}>
+        {distributeButtons.map((button) => (
+          <Action
+            key={button.id}
+            id={`distribute:${button.id}`}
+            label={button.label}
+            tooltip={`${button.label}\nEvenly space anchor points`}
+            symbol={button.symbol}
+            disabled={target.count < 3}
+            tabIndex={-1}
+            onActivate={() =>
+              session.send({ type: "distribute", axis: button.id })
+            }
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+function Field({
+  row,
+  session,
+}: {
+  row: Row;
+  session: InspectorSession;
+  key?: string;
+}) {
+  const control = row.control;
+  const blocked = !!row.disabled || !!row.locked;
+  const disabled = (binding: Binding, local?: boolean) =>
+    blocked || local || !session.ready(binding.handle);
+  const fields =
+    control.kind === "number" || control.kind === "point" ? control.axes : null;
+  const common = { id: `value:${row.id}`, label: row.label, disabled: blocked };
+  const style: NonNullable<SurfaceProps["style"]> = row.expression
+    ? { color: token("colors.accent_text") }
+    : {};
+  if (fields)
+    return (
+      <>
+        {fields.map((axis, index) => (
+          <NumberField
+            key={axis.axis ?? index}
+            id={`value:${row.id}:${axis.axis ?? index}`}
+            label={axis.axis ? `${row.label} ${axis.axis}` : row.label}
+            binding={axis.binding.handle}
+            value={axis.value}
+            mixed={axis.mixed}
+            disabled={disabled(axis.binding, axis.disabled)}
+            unit={axis.unit}
+            step={axis.step}
+            precision={axis.precision}
+            min={axis.min}
+            max={axis.max}
+            style={style}
+          />
+        ))}
+        {control.kind === "point" ? (
+          <Action
+            id={`pad:${row.id}`}
+            label={`${row.label} Pad`}
+            disabled={blocked}
+            onActivate={(event) =>
+              session.nativeRequest({
+                type: "point-pad",
+                row: row.id,
+                anchor: event.currentTarget,
+              })
+            }
+          />
+        ) : null}
+      </>
+    );
+  // Narrow the number/point union explicitly for strict TypeScript.
+  if ("axes" in control) return null;
+  if (control.kind === "status")
+    return (
+      <text
+        style={{
+          color: token("colors.muted"),
+          fontSize: token("typography.label"),
+        }}
+      >
+        {control.value}
+      </text>
+    );
+  const bound = {
+    ...common,
+    binding: control.binding.handle,
+    mixed: control.mixed,
+    disabled: disabled(control.binding, control.disabled),
+    style,
+  };
+  switch (control.kind) {
+    case "text":
+      return (
+        <TextField
+          {...bound}
+          value={control.value}
+          multiline={control.multiline}
+        />
+      );
+    case "choice":
+      return (
+        <PopUpButton
+          {...bound}
+          value={control.value}
+          options={control.options}
+          rows={control.rows}
+        />
+      );
+    case "font":
+      // Font search/menu is a host request, never substitute an ordinary menu.
+      return (
+        <Action
+          {...common}
+          disabled={bound.disabled}
+          // A well that opens a menu: the value in the text ink and the
+          // pop-up's chevrons at its trailing end.
+          style={menuWell}
+          menu
+          children={menuValue(
+            typeof control.value === "string" && control.value
+              ? control.value
+              : null,
+          )}
+          onActivate={(event) =>
+            session.nativeRequest({
+              type: "font-menu",
+              row: row.id,
+              anchor: event.currentTarget,
+              current:
+                typeof control.value === "string" ? control.value : undefined,
+            })
+          }
+        />
+      );
+    case "toggle":
+      return <Checkbox {...bound} value={control.value} />;
+    case "colour":
+      return (
+        <>
+          <ColourWell {...bound} value={control.value} />
+          {control.hexBinding && control.hex !== undefined ? (
+            <TextField
+              id={`hex:${row.id}`}
+              label={`${row.label} Hex`}
+              binding={control.hexBinding.handle}
+              value={control.hex}
+              disabled={disabled(control.hexBinding)}
+              style={{ fontVariantNumeric: "tabular-nums" }}
+            />
+          ) : null}
+        </>
+      );
+    case "fill":
+      // API-GAP I2: no kit Fill recipe; preserve structured gradient
+      // data in the model and use a neutral host-popover trigger, never flatten.
+      return (
+        <Action
+          {...common}
+          disabled={bound.disabled}
+          style={menuWell}
+          children={menuValue(control.description)}
+          onActivate={(event) =>
+            session.nativeRequest({
+              type: "fill-popover",
+              row: row.id,
+              anchor: event.currentTarget,
+            })
+          }
+        />
+      );
+    case "segmented":
+      return (
+        <SegmentedControl
+          {...common}
+          disabled={bound.disabled}
+          mixed={control.mixed}
+          value={control.value}
+          options={control.options}
+          onChange={(value) =>
+            session.send({ type: "set-value", row: row.id, value })
+          }
+        />
+      );
+  }
+}
+function Property({
+  row,
+  session,
+  partTransform,
+}: {
+  row: Row;
+  session: InspectorSession;
+  partTransform?: boolean;
+  key?: string;
+}) {
+  const disabled = !!row.locked || !!row.disabled;
+  const keyValue =
+    row.animation === "key-at-playhead"
+      ? "keyframe at playhead"
+      : row.animation === "animated"
+        ? "animated"
+        : "not animated";
+  const requestMenu = (event: SurfaceEvent) =>
+    session.nativeRequest({
+      type: "row-menu",
+      anchor: event.currentTarget,
+      row: row.id,
+      items: partTransform
+        ? rowMenu(row).filter(
+            ({ action }) =>
+              action === "add-key" || action === "remove-animation",
+          )
+        : rowMenu(row),
+    });
+  return (
+    <div
+      id={`row:${row.id}`}
+      onPointerDown={(event) => {
+        if (event.button === 2) requestMenu(event);
+      }}
+    >
+      <InspectorRow
+        label={row.label}
+        // The label is its own tooltip when it is cut; the row says only
+        // why it cannot be edited.
+        title={row.locked ? "Locked layers can’t be edited." : undefined}
+        // A multi-line editor grows its row from the standard one-line height.
+        style={
+          row.control.kind === "text" && row.control.multiline
+            ? {
+                height: null,
+                minHeight: token("metrics.row"),
+                paddingTop: token("metrics.pill_inset"),
+                paddingBottom: token("metrics.pill_inset"),
+              }
+            : undefined
+        }
+        leading={
+          row.animation ? (
+            <Action
+              id={`key:${row.id}`}
+              label={`Keyframe, ${row.label}`}
+              value={keyValue}
+              disabled={disabled}
+              // One small mark whose shape says the state, as the timeline's:
+              // outline = static, half = animated, filled = key at playhead.
+              symbol={
+                row.animation === "key-at-playhead"
+                  ? "diamond.fill"
+                  : row.animation === "animated"
+                    ? "diamond.lefthalf.filled"
+                    : "diamond"
+              }
+              style={{
+                symbolSize: token("metrics.symbol_inline"),
+                color: token(
+                  row.animation === "static" ? "colors.muted" : "colors.accent",
+                ),
+              }}
+              // Option-click adds (or edits) an expression, as Option-click
+              // on After Effects' stopwatch does (PM-502).
+              onActivate={(event) =>
+                event.altKey && !partTransform
+                  ? session.send({
+                      type: "row-action",
+                      row: row.id,
+                      action: "edit-expression",
+                    })
+                  : session.send({
+                      type: "key",
+                      row: row.id,
+                      removeAnimation: false,
+                    })
+              }
+            />
+          ) : (
+            gutter
+          )
+        }
+        trailing={
+          row.linked !== undefined ? (
+            <Action
+              id={`link:${row.id}`}
+              // One glyph (the system has no slashed link: it drew
+              // nothing); its ink says linked or not.
+              symbol="link"
+              label="Lock aspect ratio"
+              tooltip={row.linked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"}
+              value={row.linked ? "linked" : "not linked"}
+              style={{
+                color: token(row.linked ? "colors.secondary" : "colors.faint"),
+                symbolSize: token("metrics.symbol_inline"),
+              }}
+              disabled={disabled}
+              onActivate={() =>
+                session.send({
+                  type: "row-action",
+                  row: row.id,
+                  action: "link",
+                })
+              }
+            />
+          ) : null
+        }
+      >
+        <Field row={row} session={session} />
+      </InspectorRow>
+      {row.expression || row.error ? (
+        // Under its row, from the label's x to the panel's inset: the
+        // expression in the fixed-width face, as many lines as it has, and
+        // what is wrong with it or with the value. A valid one says nothing.
+        <div data-pm-slot="detail" style={column}>
+          {row.expression ? (
+            <TextField
+              id={`expression:${row.id}`}
+              label={`Expression for ${row.label}`}
+              binding={row.expression.binding.handle}
+              value={row.expression.source}
+              multiline
+              metadata={{ code: true }}
+              disabled={
+                disabled || !session.ready(row.expression.binding.handle)
+              }
+            />
+          ) : null}
+          {row.expression?.error ? (
+            <text role="status" style={problem}>
+              {row.expression.error}
+            </text>
+          ) : null}
+          {row.error ? (
+            <text role="status" style={problem}>
+              {row.error.kind === "number"
+                ? "Enter a number."
+                : `Enter a value from ${row.error.min} to ${row.error.max}.`}
+            </text>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+/** An explicit disclosure choice takes priority over automatic expansion. */
+const expandedParts = new Map<string, boolean>();
+const partRow = {
+  ...horizontal,
+  flexShrink: 0,
+  borderRadius: token("metrics.inner_radius"),
+  paddingLeft: token("metrics.gap"),
+  paddingRight: token("metrics.gap"),
+};
+const partName = {
+  flexGrow: 1,
+  flexShrink: 1,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: token("typography.label"),
+};
+const partIcon = {
+  color: token("colors.muted"),
+  symbolSize: token("metrics.symbol_inline"),
+  flexShrink: 0,
+};
+const disclosureSpace = { width: token("metrics.hit"), flexShrink: 0 };
+
+function PartsTree({
+  parts,
+  rows,
+  locked,
+  session,
+}: {
+  parts: PartsSectionData;
+  rows: Row[];
+  locked: boolean;
+  session: InspectorSession;
+}) {
+  const [, redraw] = useState(0);
+  const [hovered, setHovered] = useState<string>();
+  const [focusedEye, setFocusedEye] = useState<string>();
+  const { layer, active, activeName, activeEdited, items } = parts;
+  const byKey = new Map(items.map((part) => [part.v, part]));
+  const siblings = new Map<string | null, number>();
+  for (const { parent } of items)
+    siblings.set(parent, (siblings.get(parent) ?? 0) + 1);
+
+  const isOpen = (key: string) => {
+    const remembered = expandedParts.get(`${layer}:${key}`);
+    if (remembered !== undefined) return remembered;
+    if (active === key || active?.startsWith(`${key}_`)) return true;
+    const part = byKey.get(key);
+    return (
+      !!part &&
+      (siblings.get(part.parent) === 1 ||
+        (part.depth === 0 && items.length <= 24))
+    );
+  };
+  const setOpen = (key: string, open: boolean) => {
+    expandedParts.set(`${layer}:${key}`, open);
+    redraw((version) => version + 1);
+  };
+  const shown = items.filter(({ parent }) => {
+    for (let key = parent; key !== null; key = byKey.get(key)?.parent ?? null)
+      if (!isOpen(key)) return false;
+    return true;
+  });
+  const setValue = (row: string, value: string | boolean | null) => {
+    const target = session.inspect().target;
+    if (target.kind === "layers" && target.first.id === layer)
+      session.send({ type: "set-value", row, value });
+  };
+
+  return (
+    <>
+      <scroll
+        id="parts:scroll"
+        role="tree"
+        label="Model parts"
+        style={{
+          ...column,
+          maxHeight: token("metrics.sidebar"),
+          overflow: "scroll",
+          marginLeft: token("metrics.dock_gap"),
+          marginRight: token("metrics.dock_gap"),
+          paddingTop: token("metrics.pill_inset"),
+          paddingBottom: token("metrics.pill_inset"),
+        }}
+      >
+        <TreeItem
+          id="parts:whole"
+          label="Whole Model"
+          metadata={{ selectionRingOnly: true }}
+          selected={active === null}
+          onSelect={() => setValue("3d.part.select", null)}
+          style={{
+            ...partRow,
+            background: token(
+              active === null ? "colors.accent_wash" : "colors.panel",
+            ),
+          }}
+        >
+          <div style={disclosureSpace} />
+          <text
+            attr={{ symbol: "cube" }}
+            style={{
+              ...partIcon,
+              color: token(
+                active === null ? "colors.accent_text" : "colors.muted",
+              ),
+            }}
+          />
+          <text
+            style={{
+              ...partName,
+              paddingLeft: token("metrics.gap"),
+              color: token(
+                active === null ? "colors.accent_text" : "colors.text",
+              ),
+            }}
+          >
+            Whole Model
+          </text>
+        </TreeItem>
+        {shown.map((part) => {
+          const open = isOpen(part.v);
+          const selected = part.v === active;
+          const hasChildren = part.children > 0;
+          const eyeShown =
+            !part.visible || hovered === part.v || focusedEye === part.v;
+          return (
+            <TreeItem
+              key={part.v}
+              id={`parts:item:${part.v}`}
+              label={part.label}
+              value={part.edited ? "Changed" : undefined}
+              title={part.label}
+              metadata={{ selectionRingOnly: true }}
+              selected={selected}
+              expanded={hasChildren ? open : undefined}
+              onExpand={
+                hasChildren ? (next) => setOpen(part.v, next) : undefined
+              }
+              onSelect={() => setValue("3d.part.select", part.v)}
+              onPointerEnter={() => setHovered(part.v)}
+              onPointerLeave={() => setHovered(undefined)}
+              style={{
+                ...partRow,
+                background: token(
+                  selected
+                    ? "colors.accent_wash"
+                    : hovered === part.v
+                      ? "colors.hover"
+                      : "colors.panel",
+                ),
+              }}
+            >
+              {Array.from({ length: part.depth + 1 }, (_, level) => (
+                <div
+                  key={level}
+                  style={{ width: token("metrics.tree_indent"), flexShrink: 0 }}
+                />
+              ))}
+              {hasChildren ? (
+                <Action
+                  id={`parts:expand:${part.v}`}
+                  label={`${open ? "Collapse" : "Expand"} ${part.label}`}
+                  symbol={open ? "chevron.down" : "chevron.right"}
+                  style={partIcon}
+                  onActivate={(event) => {
+                    event.stopPropagation();
+                    setOpen(part.v, !open);
+                  }}
+                />
+              ) : (
+                <div style={disclosureSpace} />
+              )}
+              <text
+                style={{
+                  ...partName,
+                  color: token(
+                    !part.visible
+                      ? "colors.muted"
+                      : selected
+                        ? "colors.accent_text"
+                        : "colors.text",
+                  ),
+                }}
+              >
+                {part.label}
+              </text>
+              {part.edited ? (
+                <div
+                  title="Moved or animated"
+                  style={{
+                    width: token("metrics.gap"),
+                    height: token("metrics.gap"),
+                    borderRadius: token("metrics.inner_radius"),
+                    background: token("colors.accent"),
+                    flexShrink: 0,
+                  }}
+                />
+              ) : null}
+              <Action
+                id={`parts:visible:${part.v}`}
+                label={`${part.visible ? "Hide" : "Show"} ${part.label}`}
+                symbol={part.visible ? "eye" : "eye.slash"}
+                active={!part.visible}
+                disabled={locked}
+                style={{ ...partIcon, opacity: eyeShown ? 1 : 0 }}
+                onFocus={() => setFocusedEye(part.v)}
+                onBlur={() => setFocusedEye(undefined)}
+                onActivate={(event) => {
+                  event.stopPropagation();
+                  setValue(`3d.part.${part.v}.visible`, !part.visible);
+                }}
+              />
+            </TreeItem>
+          );
+        })}
+      </scroll>
+      {active !== null ? (
+        <>
+          <div
+            style={{
+              ...horizontal,
+              height: token("metrics.row"),
+              marginTop: token("metrics.gap"),
+              borderTopWidth: token("metrics.border"),
+              borderColor: token("colors.separator"),
+              paddingLeft: token("metrics.inset"),
+              paddingRight: token("metrics.inset"),
+            }}
+          >
+            <text
+              style={{
+                ...partName,
+                color: token("colors.text"),
+                fontWeight: token("typography.semibold_weight"),
+              }}
+            >
+              {activeName}
+            </text>
+            {activeEdited ? (
+              <Action
+                id="parts:reset"
+                label={`Reset ${activeName}`}
+                tooltip={`Put ${activeName} back where the model file has it`}
+                disabled={locked}
+                style={{
+                  color: token("colors.muted"),
+                  fontSize: token("typography.label"),
+                }}
+                onActivate={() => setValue(`3d.part.${active}.reset`, null)}
+              >
+                Reset
+              </Action>
+            ) : null}
+          </div>
+          {rows
+            .filter((row) => !row.hidden)
+            .map((row) => (
+              <Property
+                key={row.id}
+                row={row}
+                session={session}
+                partTransform
+              />
+            ))}
+        </>
+      ) : (
+        <text
+          style={{
+            color: token("colors.muted"),
+            fontSize: token("typography.label"),
+            paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.inset"),
+            paddingTop: token("metrics.pill_inset"),
+            paddingBottom: token("metrics.pill_inset"),
+          }}
+        >
+          Double-click the model in the viewer to pick a part, then drag it with
+          the handles.
+        </text>
+      )}
+    </>
+  );
+}
+/** 3d-studio.md §8 Finish shelf: `m.row` squares, `m.gap` apart, with a
+ * hairline edge. Swatches are content, so they are the one coloured thing
+ * here. No selected state: a finish is a starting point. One click, one Undo. */
+function FinishShelf({
+  finishes,
+  disabled,
+  session,
+}: {
+  finishes: Finish[];
+  disabled: boolean;
+  session: InspectorSession;
+}) {
+  // The kit has no wrapping row: split into balanced rows that fit the
+  // narrowest docked inspector (six tiles of m.row plus gaps).
+  const perRow = Math.ceil(finishes.length / Math.ceil(finishes.length / 6));
+  const rows: (typeof finishes)[] = [];
+  for (let i = 0; i < finishes.length; i += perRow)
+    rows.push(finishes.slice(i, i + perRow));
+  return (
+    <div
+      id="finish-shelf"
+      role="group"
+      label="Finish"
+      style={{
+        ...column,
+        gap: token("metrics.gap"),
+        paddingLeft: token("metrics.inset"),
+        paddingRight: token("metrics.inset"),
+        paddingTop: token("metrics.inner_radius"),
+        paddingBottom: token("metrics.gap"),
+      }}
+    >
+      {rows.map((row, index) => (
+        <div
+          key={`finish-row-${index}`}
+          role="presentation"
+          style={{ ...horizontal, gap: token("metrics.gap") }}
+        >
+          {row.map((finish) => (
+            <div
+              key={finish.id}
+              role="presentation"
+              style={{
+                position: "relative",
+                width: token("metrics.row"),
+                height: token("metrics.row"),
+                minWidth: token("metrics.row"),
+              }}
+            >
+              {/* Rim, lit body up-left, highlight, and a coat's glint. */}
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  inset: "fill",
+                  borderRadius: token("metrics.row"),
+                  background: finish.rim,
+                  borderWidth: token("metrics.border"),
+                  borderColor: token("colors.separator"),
+                }}
+              />
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  left: "8%",
+                  top: "6%",
+                  width: finish.size,
+                  height: finish.size,
+                  borderRadius: token("metrics.row"),
+                  background: finish.body,
+                }}
+              />
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  left: "20%",
+                  top: "18%",
+                  width: finish.spot,
+                  height: finish.spot,
+                  borderRadius: token("metrics.row"),
+                  background: finish.highlight,
+                }}
+              />
+              {finish.glint ? (
+                <div
+                  role="presentation"
+                  style={{
+                    position: "absolute",
+                    left: "26%",
+                    top: "24%",
+                    width: finish.glintSize,
+                    height: finish.glintSize,
+                    borderRadius: token("metrics.row"),
+                    background: finish.glint,
+                  }}
+                />
+              ) : null}
+              <Action
+                id={`finish:${finish.id}`}
+                label={finish.label}
+                tooltip={finish.label}
+                disabled={disabled}
+                style={{
+                  position: "absolute",
+                  inset: "fill",
+                  borderRadius: token("metrics.row"),
+                }}
+                onActivate={() =>
+                  session.send({
+                    type: "set-value",
+                    row: "3d.finish",
+                    value: finish.id,
+                  })
+                }
+              />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+export function InspectorPanel({
+  session,
+  effects,
+}: {
+  session: InspectorSession;
+  effects?: { controller: EffectsController; rowHeight: number };
+  key?: string;
+}) {
+  const [, refresh] = useState(0);
+  useLayoutEffect(
+    () => session.subscribe(() => refresh((value) => value + 1)),
+    [session],
+  );
+  const snapshot = session.inspect();
+  const target = snapshot.target;
+  const cameraNamedForType =
+    target.kind === "layers" &&
+    target.count === 1 &&
+    target.first.typeLabel === "Camera" &&
+    target.first.name === "Camera";
+  // A section's own action: a quiet text action at the trailing edge of its
+  // heading (design language, Properties).
+  const sectionAction = (
+    section: (typeof snapshot.sections)[number],
+    action: SectionAction,
+    several: boolean,
+  ) => {
+    const label = sectionActions[action];
+    if (!label) return null;
+    return (
+      <Action
+        key={action}
+        id={
+          several
+            ? `section-action:${section.id}:${action}`
+            : `section-action:${section.id}`
+        }
+        label={label}
+        symbol={sectionSymbols[action] ?? "plus"}
+        children={sectionShort[action] ?? label}
+        style={{
+          gap: token("metrics.border"),
+          paddingLeft: token("metrics.gap"),
+          paddingRight: token("metrics.gap"),
+          color: token("colors.muted"),
+          fontSize: token("typography.label"),
+          symbolSize: token("metrics.symbol_inline"),
+        }}
+        disabled={target.kind === "layers" && target.first.locked}
+        onActivate={(event) =>
+          action === "animator"
+            ? session.nativeRequest({
+                type: "animator-menu",
+                anchor: event.currentTarget,
+                items: section.presets ?? [],
+              })
+            : session.send({
+                type: "section-action",
+                section: section.id,
+                action,
+              })
+        }
+      />
+    );
+  };
+  const [drop, setDrop] = useState(false);
+  const canDrop =
+    target.kind === "layers" &&
+    target.first.acceptsEffects &&
+    !target.first.locked;
+  const accepts = (event: SurfaceEvent) =>
+    canDrop &&
+    event.drag?.types.includes("application/x-powermove-effect") &&
+    event.drag.data !== undefined;
+  const content: ComponentChildren =
+    target.kind === "no-project" ? (
+      <EmptyState
+        label="No Composition"
+        explanation="Open a project to start editing."
+        attr={{ symbol: "sidebar.trailing" }}
+        action={null}
+      />
+    ) : (
+      <>
+        {target.kind === "layers" ? (
+          <>
+            <div
+              role="heading"
+              label={
+                target.count > 1
+                  ? `${target.count} layers selected`
+                  : cameraNamedForType
+                    ? `${target.first.name} layer`
+                    : `${target.first.name}, ${target.first.typeLabel.toLowerCase().replace(/\b3d\b/g, "3D")} layer`
+              }
+              style={{
+                ...horizontal,
+                gap: token("metrics.inner_radius"),
+                height: token("metrics.row"),
+                minHeight: token("metrics.row"),
+                // Clear of the header's rule.
+                marginTop: token("metrics.pill_inset"),
+                paddingLeft: token("metrics.inset"),
+                paddingRight: token("metrics.inset"),
+              }}
+            >
+              <text
+                title={target.first.name}
+                style={{
+                  color: token("colors.text"),
+                  fontSize: token("typography.label"),
+                  fontWeight: token("typography.semibold_weight"),
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {target.count > 1
+                  ? `${target.count} Layers`
+                  : target.first.name}
+              </text>
+              {cameraNamedForType ? null : (
+                <text
+                  style={{
+                    color: token("colors.muted"),
+                    fontSize: token("typography.label"),
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {`· ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}
+                </text>
+              )}
+              {target.first.locked ? (
+                <text
+                  attr={{ symbol: "lock" }}
+                  title="Locked layers can’t be edited."
+                  style={{
+                    color: token("colors.muted"),
+                    symbolSize: token("metrics.symbol_inline"),
+                  }}
+                />
+              ) : null}
+            </div>
+            {target.count === 1 && target.first.error ? (
+              <div
+                role="status"
+                label={target.first.error}
+                style={{
+                  ...horizontal,
+                  alignItems: "start",
+                  gap: token("metrics.gap"),
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                  paddingTop: token("metrics.inner_radius"),
+                  paddingBottom: token("metrics.inner_radius"),
+                }}
+              >
+                <text
+                  attr={{ symbol: "exclamationmark.triangle.fill" }}
+                  style={{
+                    color: token("colors.danger"),
+                    symbolSize: token("metrics.symbol_inline"),
+                    // Centred on the first line of the message, not its top.
+                    paddingTop: token("metrics.inner_radius"),
+                  }}
+                />
+                <text
+                  style={{
+                    color: token("colors.danger"),
+                    fontSize: token("typography.body"),
+                  }}
+                >
+                  {target.first.error}
+                </text>
+              </div>
+            ) : null}
+            {target.first.studio ? null : (
+              <AlignmentStrip key={target.key} session={session} />
+            )}
+          </>
+        ) : null}
+        {snapshot.sections.map((section) => (
+          <DisclosureGroup
+            key={section.id}
+            id={`section:${section.id}`}
+            label={section.title}
+            open={!section.collapsed}
+            style={
+              section.focused
+                ? { background: token("colors.selected_fill") }
+                : undefined
+            }
+            onChange={(open) =>
+              session.send({
+                type: "collapse",
+                section: section.id,
+                collapsed: !open,
+              })
+            }
+            accessory={
+              section.id === "effects" && effects ? (
+                <Action
+                  id="inspector:add-effect"
+                  label="Add effect"
+                  symbol="plus"
+                  disabled={target.kind !== "layers" || target.first.locked}
+                  onActivate={() => {
+                    void effects.controller.add().catch(session.onError);
+                  }}
+                />
+              ) : section.actions ? (
+                // Several actions (Time) stand in a row at the trailing edge.
+                <div style={{ ...horizontal, gap: token("metrics.border") }}>
+                  {section.actions.map((action) =>
+                    sectionAction(section, action, true),
+                  )}
+                </div>
+              ) : section.action ? (
+                sectionAction(section, section.action, false)
+              ) : undefined
+            }
+          >
+            {section.id === "effects" && effects ? (
+              <EffectControls {...effects} embedded />
+            ) : null}
+            {section.finishes ? (
+              <FinishShelf
+                finishes={section.finishes}
+                disabled={target.kind === "layers" && target.first.locked}
+                session={session}
+              />
+            ) : null}
+            {section.animators?.flatMap((animator) => [
+              <InspectorRow
+                key={animator.id}
+                label={animator.name}
+                leading={gutter}
+              >
+                <Action
+                  id={`remove-animator:${animator.id}`}
+                  label={`Remove ${animator.name}`}
+                  tooltip="Remove Text Animator"
+                  symbol="minus"
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={() =>
+                    session.send({
+                      type: "remove-animator",
+                      animator: animator.id,
+                    })
+                  }
+                />
+              </InspectorRow>,
+              ...animator.rows.map((row) => (
+                <Property key={row.id} row={row} session={session} />
+              )),
+            ])}
+            {section.masks?.flatMap((mask) => [
+              <InspectorRow key={mask.id} label={mask.name} leading={gutter}>
+                <Action
+                  id={`remove-mask:${mask.id}`}
+                  label={`Remove ${mask.name}`}
+                  tooltip="Remove Mask"
+                  symbol="minus"
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={() =>
+                    session.send({ type: "remove-mask", mask: mask.id })
+                  }
+                />
+              </InspectorRow>,
+              ...mask.rows.map((row) => (
+                <Property key={row.id} row={row} session={session} />
+              )),
+            ])}
+            {section.parts ? (
+              <PartsTree
+                key={section.parts.layer}
+                parts={section.parts}
+                rows={section.rows}
+                session={session}
+                locked={target.kind === "layers" && target.first.locked}
+              />
+            ) : (
+              section.rows
+                .filter((row) => !row.hidden)
+                .map((row) => (
+                  <Property key={row.id} row={row} session={session} />
+                ))
+            )}
+            {section.note ? (
+              <text
+                style={{
+                  color: token("colors.muted"),
+                  fontSize: token("typography.minimum"),
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                  paddingBottom: token("metrics.inner_radius"),
+                }}
+              >
+                {section.note}
+              </text>
+            ) : null}
+          </DisclosureGroup>
+        ))}
+        {target.kind === "composition" ? (
+          <text
+            style={{
+              color: token("colors.muted"),
+              fontSize: token("typography.minimum"),
+              paddingLeft: token("metrics.inset"),
+              paddingRight: token("metrics.inset"),
+              paddingTop: token("metrics.inset"),
+            }}
+          >
+            Select a layer to edit its properties.
+          </text>
+        ) : null}
+      </>
+    );
+  return (
+    <div
+      id="inspector"
+      role="group"
+      label="Properties"
+      style={{
+        ...column,
+        background: token("colors.panel"),
+        borderRadius: token("metrics.panel_radius"),
+      }}
+    >
+      <div
+        id="inspector:header"
+        data-pm-slot="header"
+        style={{
+          ...horizontal,
+          justifyContent: "space-between",
+          height: token("metrics.header"),
+          paddingLeft: token("metrics.inset"),
+          paddingRight: token("metrics.inset"),
+        }}
+      >
+        <text
+          style={{
+            color: token("colors.text"),
+            fontSize: token("typography.title"),
+            fontWeight: token("typography.semibold_weight"),
+          }}
+        >
+          Properties
+        </text>
+        {!effects && target.kind === "layers" && target.first.acceptsEffects ? (
+          <Action
+            id="inspector:add-effect"
+            label="Add Effect"
+            disabled={target.first.locked}
+            onActivate={(event) =>
+              session.nativeRequest({
+                type: "add-effect-menu",
+                anchor: event.currentTarget,
+                target: target.first.id,
+              })
+            }
+          />
+        ) : null}
+      </div>
+      <scroll
+        id="inspector:content"
+        role="group"
+        label="Properties"
+        state={{ drop: drop && canDrop }}
+        style={{
+          ...column,
+          paddingBottom: token("metrics.inset"),
+          ...(drop && canDrop
+            ? { background: token("colors.accent_wash") }
+            : {}),
+        }}
+        preventDefault={{ dragover: true, drop: true }}
+        onDragOver={(event) => setDrop(!!accepts(event))}
+        onDragLeave={() => setDrop(false)}
+        onDrop={(event) => {
+          setDrop(false);
+          if (accepts(event) && target.kind === "layers")
+            session.send({
+              type: "drop-effect",
+              effect: event.drag!.data!,
+              target: target.first.id,
+            });
+        }}
+      >
+        {content}
+      </scroll>
+    </div>
+  );
+}

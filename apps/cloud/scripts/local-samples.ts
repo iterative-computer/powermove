@@ -1,11 +1,12 @@
 import { resolve } from 'node:path';
+import { databaseUrl, workerUrl } from './lib/local-env';
 import { Pool } from 'pg';
-import { publishExtensions, type ExtensionListing, type ExtensionPlan } from '../../desktop/scripts/lib/publish-builtins';
+import { publishExtensions, type ExtensionListing, type ExtensionPlan } from './lib/publish-builtins';
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 const root = resolve(import.meta.dir, '../samples');
-const origin = 'http://localhost:8787';
+const origin = workerUrl;
 export const sampleListings: Record<string, ExtensionListing> = {
   'glass-tint': { name: 'Glass Tint', tagline: 'A soft, grainy colour wash for any layer.', category: 'effects', licence: 'MIT', visibility: 'public' },
   'ease-lab': { name: 'Ease Lab', tagline: 'Preview easing curves in a dockable panel.', category: 'panels', licence: 'MIT', visibility: 'public' },
@@ -35,7 +36,7 @@ export async function publishLocalSamples(options: { token: string; update?: boo
 }
 
 async function localMaraToken(): Promise<string> {
-  const pool = new Pool({ connectionString: 'postgres://powermove:powermove@localhost:54329/powermove', max: 1 });
+  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   try {
     const result = await pool.query<{ token: string }>(
       `select s.token from "session" s

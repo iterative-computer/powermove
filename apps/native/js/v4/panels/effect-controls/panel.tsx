@@ -1,0 +1,1225 @@
+import { useLayoutEffect, useState } from "preact/hooks";
+import * as UI from "../../src/components";
+import type { SurfaceEvent } from "../../src/protocol";
+import { EffectsController, pointBinding } from "./controller";
+import {
+  PANEL_ID,
+  PANEL_TITLE,
+  type Projection,
+  type EffectHeader,
+  type ParameterRow,
+  type SummaryRow,
+  type RampRow,
+  type PointRow,
+  type MoreRow,
+  type Intent,
+} from "./contract";
+const t = UI.token;
+const hit = { minWidth: t("metrics.hit"), minHeight: t("metrics.hit") };
+const stop = (e: SurfaceEvent) => e.stopPropagation();
+/** The rows the panel first publishes (the native side's 0..96 window). */
+const ROW_WINDOW = 96;
+export interface PanelProps {
+  /** Properties shares the stack without the standalone panel chrome. */
+  embedded?: boolean;
+  controller: EffectsController;
+  /** Must be resolved from pm-design Tokens.metrics.row by the native worker. */
+  rowHeight: number;
+  increaseContrast?: boolean;
+  reduceMotion?: boolean;
+  /** Native focus ownership, never inferred from a pointer-generated focus event. */
+  keyboardFocus?: boolean;
+}
+interface Drag {
+  id?: string;
+  definition?: string;
+  slot: number;
+}
+
+export function EffectControls(props: PanelProps) {
+  const { controller: c } = props;
+  const [p, update] = useState(c.snapshot());
+  const [hover, setHover] = useState<string | null>(null);
+  const [keyboard, setKeyboard] = useState(false);
+  const [drag, setDrag] = useState<Drag | null>(null);
+  useLayoutEffect(() => c.subscribe(() => update(c.snapshot())), [c]);
+  useLayoutEffect(() => {
+    setDrag(null);
+  }, [p.layer, p.locked]);
+  if (!Number.isFinite(props.rowHeight) || props.rowHeight <= 0)
+    throw new TypeError("Native row token required");
+  const editable = p.target === "Layer" && !p.locked;
+  const send = (intent: Intent) => {
+    if (editable) c.send(intent);
+  };
+  const select = (id: string, e: SurfaceEvent) => {
+    if (!editable) return;
+    stop(e);
+    c.platform.focus(`${PANEL_ID}:list`);
+    send({
+      type: "select",
+      id,
+      meta: !!e.metaKey,
+      ctrl: !!e.ctrlKey,
+      shift: !!e.shiftKey,
+    });
+  };
+  const add = () => {
+    void c.add().catch((error) => c.platform.report(error));
+  };
+  const focused = p.rows.find(
+    (r) => r.kind === "effect" && r.id === p.focus,
+  ) as EffectHeader | undefined;
+  const key = (e: SurfaceEvent) => {
+    setKeyboard(true);
+    // Nested native controls consume their own keys before this list route.
+    const k = e.key?.toLowerCase();
+    let intent: Intent | undefined;
+    if (k === "escape") {
+      e.stopPropagation();
+      setDrag(null);
+      send({ type: "clear" });
+      c.platform.focus(`${PANEL_ID}:list`);
+      return;
+    }
+    if (!editable || !p.focus) return;
+    if (k === "arrowup" || k === "arrowdown") {
+      const direction = k === "arrowup" ? -1 : 1;
+      intent = e.altKey
+        ? { type: "reorder", id: p.focus, direction }
+        : { type: "navigate", direction, shift: !!e.shiftKey };
+    } else if ((e.metaKey || e.ctrlKey) && k === "c")
+      intent = { type: "copy", id: p.focus };
+    else if ((e.metaKey || e.ctrlKey) && k === "v" && p.clipboardCount)
+      intent = { type: "paste" };
+    else if (k === "backspace" || k === "delete")
+      intent = { type: "remove-selection" };
+    else if (k === "arrowright" || k === "arrowleft")
+      intent = { type: "disclose", id: p.focus, open: k === "arrowright" };
+    else if (k === " ") intent = { type: "toggle", id: p.focus };
+    else if (k === "enter") {
+      const parameter = p.rows.find(
+        (r) => r.kind === "parameter" && r.parameter.effect === p.focus,
+      );
+      if (parameter) c.platform.focus(`${PANEL_ID}:field:${parameter.id}`);
+      e.stopPropagation();
+      return;
+    } else return;
+    e.stopPropagation();
+    if (intent) send(intent);
+  };
+  const dragOver = (e: SurfaceEvent, slot: number) => {
+    if (!editable) return;
+    const data = e.drag?.data;
+    // Stack reorders originate in this panel. External payload ids cannot
+    // accidentally address a same-named effect in another project/layer.
+    const id = drag?.id;
+    const definition =
+      typeof data?.["application/x-powermove-effect-definition"] === "string"
+        ? (data["application/x-powermove-effect-definition"] as string)
+        : undefined;
+    if (id || definition || drag?.id) {
+      e.stopPropagation();
+      setDrag({ id: id ?? drag?.id, definition, slot });
+    }
+  };
+  const drop = (e: SurfaceEvent) => {
+    stop(e);
+    if (editable && drag) {
+      if (drag.id) send({ type: "drop", id: drag.id, slot: drag.slot });
+      else if (drag.definition)
+        send({ type: "add", definition: drag.definition, slot: drag.slot });
+    }
+    setDrag(null);
+  };
+  const trailingAdd = (
+    <UI.PushButton
+      id={`${PANEL_ID}:add-bottom`}
+      label="Add Effect…"
+      disabled={!editable}
+      onClick={add}
+      style={{ height: t("metrics.control"), marginTop: t("metrics.inset") }}
+    >
+      Add Effect…
+    </UI.PushButton>
+  );
+  return (
+    <div
+      id={PANEL_ID}
+      role="group"
+      label={PANEL_TITLE}
+      metadata={{ panel: PANEL_ID }}
+      style={{
+        background: t(
+          p.count === 0 && drag ? "colors.selected_fill" : "colors.panel",
+        ),
+        borderRadius: t("metrics.panel_radius"),
+        ...(props.increaseContrast
+          ? {
+              borderWidth: t("metrics.border"),
+              borderColor: t("colors.separator"),
+            }
+          : {}),
+      }}
+      onClick={() => send({ type: "clear" })}
+      onPointerMove={() => setHover(null)}
+      onBlur={() => {
+        setHover(null);
+        setKeyboard(false);
+      }}
+    >
+      {!props.embedded && (
+        <div
+          role="group"
+          label={PANEL_TITLE}
+          data-pm-slot="header"
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            height: t("metrics.header"),
+            paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
+          }}
+        >
+          <text
+            style={{
+              color: t("colors.text"),
+              fontSize: t("typography.title"),
+              fontWeight: t("typography.semibold_weight"),
+            }}
+          >
+            {PANEL_TITLE}
+          </text>
+          {p.target === "Layer" && (
+            <UI.ToolbarItem
+              id={`${PANEL_ID}:add`}
+              label="Add Effect"
+              title="Add Effect"
+              disabled={!editable}
+              attr={{ symbol: "plus" }}
+              onClick={add}
+              style={{ symbolSize: t("metrics.symbol_panel") }}
+            />
+          )}
+        </div>
+      )}
+      {!props.embedded && p.layer && (
+        <div
+          role="heading"
+          label={`${p.name} · ${p.typeLabel}`}
+          title={`${p.name} · ${p.typeLabel}`}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+            height: t("metrics.row"),
+            paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
+            color: t(p.locked ? "colors.muted" : "colors.text"),
+            // As Properties names its layer: a label, a step under the
+            // panel's title.
+            fontSize: t("typography.label"),
+            fontWeight: t("typography.semibold_weight"),
+            minHeight: t("metrics.row"),
+          }}
+        >
+          <text
+            style={{
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {p.name}
+          </text>
+          {p.typeLabel && (
+            <text
+              style={{
+                color: t("colors.muted"),
+                fontWeight: t("typography.regular_weight"),
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+              }}
+            >{`· ${p.typeLabel}`}</text>
+          )}
+          {p.locked && (
+            <text
+              attr={{ symbol: "lock" }}
+              title="Locked layers can’t be edited."
+            />
+          )}
+        </div>
+      )}
+      {p.target !== "Layer" ? (
+        <UI.EmptyState
+          label={
+            p.target === "NoProject"
+              ? "No Composition"
+              : p.target === "NoSelection"
+                ? "No Selection"
+                : "No Effects"
+          }
+          explanation={
+            p.target === "NoProject"
+              ? "Open a project to start editing."
+              : p.target === "NoSelection"
+                ? "Select a layer to see its effects."
+                : "This kind of layer can’t have effects."
+          }
+          attr={{ symbol: "wand.and.rays" }}
+          action={null}
+        />
+      ) : p.count === 0 ? (
+        <div
+          id={`${PANEL_ID}:empty`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            minHeight: t("metrics.row"),
+            paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
+            color: t("colors.secondary"),
+            fontSize: t("typography.body"),
+            ...(drag ? { background: t("colors.selected_fill") } : {}),
+          }}
+          onDragOver={(e) => dragOver(e, 0)}
+          onDragLeave={() => setDrag(null)}
+          onDrop={drop}
+        >
+          <text>{drag ? "Drop to add effect" : "No effects"}</text>
+        </div>
+      ) : (
+        <>
+          <UI.List
+            id={`${PANEL_ID}:list`}
+            label="Effects"
+            style={{ ...hit, flexGrow: 1, flexShrink: 1 }}
+            tabIndex={p.locked ? -1 : 0}
+            disabled={p.locked}
+            metadata={{
+              multiselectable: true,
+              // The rows keep their height: in a dock too short for them the
+              // panel's body scrolls (a short dock left them none, U4). A
+              // stack longer than the first row window scrolls in the list.
+              rowFloor: props.embedded
+                ? p.count
+                : Math.min(p.count, ROW_WINDOW),
+              rowCount: p.count,
+              effectCount: p.effectCount,
+              focus: p.focus,
+              // Embedded in Properties, whose content scrolls: the list is
+              // no scroller of its own (a nested one scrolled a few points
+              // by itself and left stale nested-scroller bounds/culling).
+              ...(props.embedded ? { scrollOwner: "parent" } : {}),
+            }}
+            onFocus={() => setKeyboard(props.keyboardFocus === true)}
+            onPointerDown={() => setKeyboard(false)}
+            onKeyDown={key}
+            preventDefault={
+              p.focus && editable
+                ? { keydown: ["backspace", "delete", "Backspace", "Delete"] }
+                : undefined
+            }
+            onDragOver={(e) => dragOver(e, p.effectCount)}
+            onDrop={drop}
+          >
+            <StackRows
+              embedded={props.embedded}
+              count={p.count}
+              range={p.range}
+              itemSize={props.rowHeight}
+              metadata={{
+                tokenSource: "metrics.row",
+                overscanViewports: 1,
+                anchor: p.rows[0]?.id ?? null,
+              }}
+              onRangeChange={(e: SurfaceEvent) => {
+                // A list laid out with no height shows no rows: it asks
+                // for none rather than emptying the window it has.
+                if (e.range && e.range[1] > e.range[0]) {
+                  const [start, end] = e.range,
+                    length = end - start;
+                  c.send({
+                    type: "range",
+                    range: [
+                      Math.max(0, start - length),
+                      Math.min(p.count, end + length),
+                    ],
+                  });
+                }
+              }}
+            >
+              {p.rows.map((row) =>
+                row.kind === "action" ? (
+                  <UI.PushButton
+                    key={row.id}
+                    label={row.label}
+                    disabled={p.locked || row.readonly}
+                    onClick={(e) => {
+                      stop(e);
+                      send({
+                        type: "action",
+                        id: row.effect,
+                        index: row.index,
+                      });
+                    }}
+                  />
+                ) : row.kind === "spacer" ? (
+                  // The standalone virtual list reserves a second slot for
+                  // the pad. Embedded Properties sizes the actual row.
+                  props.embedded ? null : (
+                    <div
+                      key={row.id}
+                      role="presentation"
+                      style={{ height: t("metrics.row"), flexShrink: 0 }}
+                    />
+                  )
+                ) : row.kind === "ramp" ? (
+                  <RampView key={row.id} row={row} locked={p.locked} />
+                ) : row.kind === "point" ? (
+                  <PointView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    controller={c}
+                    embedded={props.embedded}
+                  />
+                ) : row.kind === "more" ? (
+                  <MoreView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    send={send}
+                  />
+                ) : row.kind === "summary" ? (
+                  <SummaryView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    controller={c}
+                  />
+                ) : row.kind === "parameter" ? (
+                  <ParameterView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    controller={c}
+                  />
+                ) : (
+                  <UI.ListItem
+                    key={row.id}
+                    id={`${PANEL_ID}:effect:${row.id}`}
+                    label={`${row.label} effect, ${row.enabled ? "enabled" : "disabled"}, ${row.expanded ? "expanded" : "collapsed"}, ${row.ordinal + 1} of ${row.effectCount}`}
+                    tabIndex={-1}
+                    disabled={p.locked}
+                    selected={row.selected}
+                    onSelect={() => {}}
+                    metadata={{
+                      effect: row.id,
+                      actions: [
+                        "Press",
+                        row.expanded ? "Collapse" : "Expand",
+                        "Delete",
+                        "Move Up",
+                        "Move Down",
+                        "Reset",
+                      ],
+                      focused: keyboard && p.focus === row.id,
+                      dragging: drag?.id === row.id,
+                      dragOpacity: drag?.id === row.id ? 0.5 : 1,
+                      insertBefore: drag?.slot === row.ordinal,
+                      insertAfter:
+                        drag?.slot === p.effectCount &&
+                        row.ordinal === p.effectCount - 1,
+                      reduceMotion: !!props.reduceMotion,
+                    }}
+                    onPointerMove={(e) => {
+                      e.stopPropagation();
+                      setHover(row.id);
+                    }}
+                    onPointerCancel={() => {
+                      setHover(null);
+                      setDrag(null);
+                    }}
+                    onClickCapture={(e) => {
+                      if (e.target === e.currentTarget) select(row.id, e);
+                    }}
+                    onPointerDown={(e) => {
+                      setKeyboard(false);
+                      if (e.button === 2) {
+                        e.stopPropagation();
+                        void c
+                          .menu(row.id)
+                          .catch((error) => c.platform.report(error));
+                      }
+                    }}
+                    onDragStart={(e) => {
+                      if (editable && e.target === e.currentTarget)
+                        setDrag({ id: row.id, slot: row.ordinal });
+                    }}
+                    onDragOver={(e) =>
+                      dragOver(
+                        e,
+                        row.ordinal + (e.y !== undefined && e.y > 0.5 ? 1 : 0),
+                      )
+                    }
+                    onDrop={drop}
+                    onDragEnd={() => setDrag(null)}
+                    style={{
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      color: t(
+                        p.locked || !row.enabled
+                          ? "colors.muted"
+                          : "colors.text",
+                      ),
+                      // An effect's heading is a section heading: the
+                      // label role, its mark in the gutter its
+                      // parameters' keyframe marks stand in.
+                      fontSize: t("typography.label"),
+                      fontWeight: t("typography.semibold_weight"),
+                      paddingLeft: t("metrics.border"),
+                      borderRadius: t("metrics.control_radius"),
+                      ...(drag?.slot === row.ordinal
+                        ? {
+                            borderTopWidth: t("metrics.border"),
+                            borderColor: t("colors.accent"),
+                          }
+                        : {}),
+                      ...(drag?.slot === p.effectCount &&
+                      row.ordinal === p.effectCount - 1
+                        ? {
+                            borderBottomWidth: t("metrics.border"),
+                            borderColor: t("colors.accent"),
+                          }
+                        : {}),
+                      ...(row.ordinal ? { marginTop: t("metrics.gap") } : {}),
+                      ...(hover === row.id && !row.selected && !p.locked
+                        ? { background: t("colors.hover") }
+                        : {}),
+                      ...(props.increaseContrast && row.ordinal
+                        ? {
+                            borderTopWidth: t("metrics.border"),
+                            borderColor: t("colors.separator"),
+                          }
+                        : {}),
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <UI.ToolbarItem
+                        label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+                        tabIndex={-1}
+                        disabled={p.locked}
+                        aria-expanded={row.expanded}
+                        attr={{
+                          symbol: row.expanded
+                            ? "chevron.down"
+                            : "chevron.right",
+                          expanded: row.expanded,
+                        }}
+                        onClick={(e) => {
+                          stop(e);
+                          send({
+                            type: "disclose",
+                            id: row.id,
+                            open: !row.expanded,
+                          });
+                        }}
+                        style={{
+                          color: t("colors.muted"),
+                          symbolSize: t("metrics.symbol_inline"),
+                        }}
+                      />
+                      <UI.Checkbox
+                        preventDefault={{ click: true }}
+                        label={`Enable ${row.label}`}
+                        binding={`${PANEL_ID}:enable:${row.id}`}
+                        value={row.enabled}
+                        disabled={p.locked}
+                        tabIndex={-1}
+                        onClick={stop}
+                        // A person's click (the AppKit checkbox's action, the
+                        // drawn box's click) and the agent's arrive as the
+                        // box's change: no host sends a click for a checkbox.
+                        onChange={(e) => {
+                          stop(e);
+                          send({ type: "toggle", id: row.id });
+                        }}
+                        onKeyDown={stop}
+                      />
+                      <text
+                        title={row.label}
+                        style={{
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          paddingLeft: t("metrics.gap"),
+                        }}
+                        onClick={(e) => select(row.id, e)}
+                      >
+                        {row.label}
+                      </text>
+                      {row.missing && (
+                        <text
+                          title={`${row.label} isn’t installed. The layer draws without it, and exports stop until it’s installed or removed.`}
+                          style={{
+                            color: t("colors.danger"),
+                            fontSize: t("typography.minimum"),
+                            paddingLeft: t("metrics.gap"),
+                            whiteSpace: "nowrap",
+                            flexShrink: 0,
+                          }}
+                        >
+                          Not installed
+                        </text>
+                      )}
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <UI.ToolbarItem
+                        label={`Reset ${row.label}`}
+                        title="Reset Effect"
+                        disabled={p.locked || row.missing}
+                        tabIndex={-1}
+                        attr={{ symbol: "arrow.counterclockwise" }}
+                        onClick={(e) => {
+                          stop(e);
+                          send({ type: "reset", id: row.id });
+                        }}
+                        style={{ symbolSize: t("metrics.symbol_inline") }}
+                      />
+                      <UI.ToolbarItem
+                        label={`Remove ${row.label}`}
+                        title="Remove Effect"
+                        disabled={p.locked}
+                        tabIndex={-1}
+                        attr={{ symbol: "xmark" }}
+                        onClick={(e) => {
+                          stop(e);
+                          send({ type: "remove", id: row.id });
+                        }}
+                        style={{ symbolSize: t("metrics.symbol_inline") }}
+                      />
+                    </div>
+                  </UI.ListItem>
+                ),
+              )}
+            </StackRows>
+          </UI.List>
+          {drag && (
+            <div
+              metadata={{ insertionSlot: drag.slot, insertionLine: true }}
+              style={{ background: t("colors.accent") }}
+            />
+          )}
+          {/* The stack's one action stands on the panel's inset under the
+              last effect (it sat on the panel's edge, cut off by it). */}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              flexShrink: 0,
+              paddingLeft: t("metrics.inset"),
+              paddingRight: t("metrics.inset"),
+              paddingBottom: t("metrics.inset"),
+            }}
+          >
+            {trailingAdd}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+/** Read-only text for a value without a registry control (design review T4). */
+/** A channel value as a colourist reads it: two places, a true minus. */
+/** v1's gradient bar: the effect's start colour to its end colour, above
+ * their own rows. */
+function RampView({
+  row,
+  locked,
+}: {
+  key?: string;
+  row: RampRow;
+  locked: boolean;
+}) {
+  const [start, end, midpoint] = row.parameters;
+  const muted = locked || !row.enabled;
+  return (
+    <div role="group" label={`${row.effectLabel}, ${row.label}`}>
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
+        leading={<div role="presentation" style={hit} />}
+      >
+        <UI.GradientBar
+          id={`${PANEL_ID}:ramp:${row.id}`}
+          label={`${row.label}, ${scalar(start.value) ?? "start"} to ${scalar(end.value) ?? "end"}${midpoint ? `, midpoint ${scalar(midpoint.value)}` : ""}`}
+          start={String(start.value)}
+          end={String(end.value)}
+          {...(midpoint
+            ? {
+                binding: midpoint.binding,
+                value: midpoint.value as number,
+                min: midpoint.min ?? 0,
+                max: midpoint.max ?? 100,
+              }
+            : {})}
+          disabled={locked || !!midpoint?.readonly}
+          style={{ opacity: muted ? 0.5 : 1 }}
+          onKeyDown={stop}
+        />
+      </UI.InspectorRow>
+    </div>
+  );
+}
+/** v1's point: X and Y side by side in one row, one keyframe mark for both. */
+function PointView({
+  row,
+  locked,
+  controller: c,
+  embedded,
+}: {
+  key?: string;
+  row: PointRow;
+  locked: boolean;
+  controller: EffectsController;
+  embedded?: boolean;
+}) {
+  const axes = row.parameters;
+  const disabled = locked || axes.some((p) => p.readonly);
+  const key = axes.some((p) => p.keyAtPlayhead);
+  const animated = axes.some((p) => p.animated);
+  const state = key
+    ? "keyframe at playhead"
+    : animated
+      ? "animated"
+      : "not animated";
+  return (
+    <div
+      role="group"
+      label={row.effectLabel}
+      onClick={stop}
+      onKeyDown={stop}
+      onPointerDown={(e) => {
+        if (e.button !== 2) return;
+        stop(e);
+        void c.parameterMenu(row.id).catch((error) => c.platform.report(error));
+      }}
+    >
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          parameter: axes[0].id,
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{
+          ...(embedded ? { height: null, flexShrink: 0 } : {}),
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`Keyframe, ${row.label}`}
+            title={state}
+            disabled={disabled}
+            aria-pressed={key}
+            attr={{
+              symbol: key
+                ? "diamond.fill"
+                : animated
+                  ? "diamond.lefthalf.filled"
+                  : "diamond",
+              value: state,
+            }}
+            onClick={(e) => {
+              stop(e);
+              if (disabled) return;
+              for (const p of axes)
+                c.send({
+                  type: "parameter",
+                  id: p.id,
+                  action: e.altKey ? "stopwatch" : "diamond",
+                });
+            }}
+            style={{
+              ...hit,
+              color: t(animated ? "colors.accent" : "colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            // Only the virtual list uses a following spacer. In Properties,
+            // the pad and stacked fields determine the row's own height.
+            alignItems: "flex-start",
+            ...(embedded ? {} : { height: t("metrics.row") }),
+            paddingTop: t("metrics.border"),
+            gap: t("metrics.gap"),
+            flexGrow: 1,
+          }}
+        >
+          {/* v1's point: the pad, and its X over its Y. */}
+          <UI.PointPad
+            id={`${PANEL_ID}:pad:${row.id}`}
+            label={`${row.label}, ${axes.map((p, i) => `${i ? "Y" : "X"} ${scalar(p.value)}`).join(", ")}`}
+            binding={pointBinding(row)}
+            value={[axes[0].value as number, axes[1].value as number]}
+            min={[axes[0].min ?? -100, axes[1].min ?? -100]}
+            max={[axes[0].max ?? 100, axes[1].max ?? 100]}
+            disabled={disabled}
+            onKeyDown={stop}
+          />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: t("metrics.border"),
+              flexGrow: 1,
+              flexBasis: 0,
+            }}
+          >
+            {axes.map((p, i) => (
+              <div
+                key={p.id}
+                style={{
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: t("metrics.border"),
+                }}
+              >
+                <text
+                  style={{
+                    color: t("colors.muted"),
+                    fontSize: t("typography.label"),
+                    ...(embedded
+                      ? { width: t("metrics.symbol_inline"), flexShrink: 0 }
+                      : {}),
+                  }}
+                >
+                  {i ? "Y" : "X"}
+                </text>
+                <UI.NumberField
+                  id={`${PANEL_ID}:field:${row.id}:${i}`}
+                  label={p.label}
+                  binding={p.binding}
+                  disabled={disabled || p.readonly}
+                  mixed={p.mixed}
+                  value={p.value as number}
+                  step={p.step}
+                  min={p.min}
+                  max={p.max}
+                  precision={p.precision}
+                  unit={p.unit}
+                  onKeyDown={stop}
+                  onClick={stop}
+                  style={
+                    embedded
+                      ? { width: t("metrics.grade_field"), flexShrink: 1 }
+                      : undefined
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
+/** An effect's More: its rarely used parameters, closed until opened, with
+ * a dot when one of them is not at its default (v1's disclosure). */
+function MoreView({
+  row,
+  locked,
+  send,
+}: {
+  key?: string;
+  row: MoreRow;
+  locked: boolean;
+  send: (intent: Intent) => void;
+}) {
+  const toggle = (e: SurfaceEvent) => {
+    stop(e);
+    send({ type: "disclose", id: row.id, open: !row.open });
+  };
+  return (
+    <div
+      role="group"
+      label={`${row.effectLabel}, More, ${row.count} ${row.count === 1 ? "parameter" : "parameters"}${row.changed ? ", changed" : ""}`}
+      onClick={toggle}
+    >
+      <UI.InspectorRow
+        label="More"
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`${row.open ? "Hide" : "Show"} more ${row.effectLabel} parameters`}
+            aria-expanded={row.open}
+            attr={{
+              symbol: row.open ? "chevron.down" : "chevron.right",
+              expanded: row.open,
+            }}
+            onClick={toggle}
+            style={{
+              ...hit,
+              color: t("colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+          }}
+        >
+          <text
+            style={{
+              color: t("colors.muted"),
+              fontSize: t("typography.label"),
+            }}
+          >
+            {String(row.count)}
+          </text>
+          {row.changed && !row.open ? (
+            <div
+              role="presentation"
+              style={{
+                width: t("metrics.status_dot"),
+                height: t("metrics.status_dot"),
+                borderRadius: t("metrics.status_dot"),
+                background: t("colors.accent"),
+              }}
+            />
+          ) : null}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
+function signed(v: unknown) {
+  return typeof v === "number" && Number.isFinite(v)
+    ? v.toFixed(2).replace("-", "\u2212")
+    : "\u2013";
+}
+/** A grade instrument summed up on one row: a wheel's master (a field) and
+ * its red, green and blue in their inks, or a curve's point count; the
+ * Color panel, where the instrument is drawn, is one press away. */
+function SummaryView({
+  row,
+  locked,
+  controller: c,
+}: {
+  key?: string;
+  row: SummaryRow;
+  locked: boolean;
+  controller: EffectsController;
+}) {
+  const by = (suffix: string) =>
+    row.parameters.find((p) => p.key?.endsWith(suffix));
+  const master = row.group === "curve" ? undefined : by("Master");
+  const channels =
+    row.group === "curve" ? [] : [by("Red"), by("Green"), by("Blue")];
+  const count = row.group === "curve" ? by("count") : undefined;
+  const points = Number(count?.value ?? 0);
+  const muted = locked || !row.enabled;
+  const value =
+    row.group === "curve"
+      ? `${points} ${points === 1 ? "point" : "points"}`
+      : channels.map((ch) => signed(ch?.value)).join(", ");
+  return (
+    <div
+      role="group"
+      label={`${row.effectLabel}, ${row.label}, ${master ? `master ${signed(master.value)}, ` : ""}${value}`}
+      onClick={stop}
+      onKeyDown={stop}
+    >
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
+        leading={<div role="presentation" style={hit} />}
+        trailing={
+          <UI.ToolbarItem
+            id={`${PANEL_ID}:open-color:${row.id}`}
+            label={`Open ${row.effectLabel} in Color`}
+            title="Open in Color"
+            attr={{ symbol: "camera.filters" }}
+            onClick={(e) => {
+              stop(e);
+              // A maximised Effect Controls gives way first.
+              c.platform.command("restorePanel");
+              c.platform.command("panel:activate:color");
+            }}
+            style={{
+              ...hit,
+              color: t("colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+            flexGrow: 1,
+            minWidth: 0,
+          }}
+        >
+          {master && (
+            <UI.NumberField
+              id={`${PANEL_ID}:field:${row.id}:master`}
+              label={`${row.label} Master`}
+              binding={master.binding}
+              value={master.value as number}
+              step={master.step}
+              min={master.min}
+              max={master.max}
+              precision={master.precision}
+              disabled={locked || master.readonly}
+              mixed={master.mixed}
+              onKeyDown={stop}
+              onClick={stop}
+              style={{ width: t("metrics.grade_field"), flexGrow: 0 }}
+            />
+          )}
+          {row.group === "curve" ? (
+            <text
+              style={{
+                color: t("colors.secondary"),
+                fontSize: t("typography.body"),
+              }}
+            >
+              {value}
+            </text>
+          ) : (
+            // R, G and B keep their own widths a gap apart. In a column too
+            // narrow for all three, a value that does not fit wraps onto a
+            // second line the group's one-line height hides: whole values
+            // only, none run into the next or under the Color button.
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: t("metrics.gap"),
+                height: t("metrics.field"),
+                flexGrow: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                overflow: "hidden",
+              }}
+            >
+              {(["channel_red", "channel_green", "channel_blue"] as const).map(
+                (ink, i) => (
+                  <text
+                    key={ink}
+                    style={{
+                      color: t(muted ? "colors.muted" : `colors.${ink}`),
+                      fontSize: t("typography.caption"),
+                      fontVariantNumeric: "tabular-nums",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {signed(channels[i]?.value)}
+                  </text>
+                ),
+              )}
+            </div>
+          )}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
+function scalar(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "On" : "Off";
+  return undefined;
+}
+function ParameterView({
+  row,
+  locked,
+  controller: c,
+}: {
+  key?: string;
+  row: ParameterRow;
+  locked: boolean;
+  controller: EffectsController;
+}) {
+  const p = row.parameter;
+  const disabled = locked || p.readonly;
+  const common = {
+    id: `${PANEL_ID}:field:${row.id}`,
+    label: p.label,
+    binding: p.binding,
+    disabled,
+    mixed: p.mixed,
+    onKeyDown: stop,
+    onClick: stop,
+  };
+  let field;
+  if (p.control === "number")
+    field = (
+      <UI.NumberField
+        {...common}
+        value={p.value as number}
+        step={p.step}
+        min={p.min}
+        max={p.max}
+        precision={p.precision}
+        unit={p.unit}
+      />
+    );
+  else if (p.control === "toggle")
+    field = <UI.Checkbox {...common} value={p.value as boolean} />;
+  else if (p.control === "color")
+    field = <UI.ColourWell {...common} value={p.value as string} />;
+  else if (p.control === "text")
+    field = <UI.TextField {...common} value={p.value as string} />;
+  else if (p.control === "choice")
+    field = (
+      <UI.PopUpButton {...common} value={p.value} options={p.options ?? []} />
+    );
+  else
+    field = (
+      <text
+        label={`${p.label}, ${scalar(p.value) ?? "custom value"}, read only`}
+        style={{
+          color: t(
+            scalar(p.value) === undefined ? "colors.muted" : "colors.secondary",
+          ),
+          fontSize: t("typography.body"),
+        }}
+      >
+        {scalar(p.display ?? p.value) ?? "Custom value"}
+      </text>
+    );
+  const state = p.keyAtPlayhead
+    ? "keyframe at playhead"
+    : p.animated
+      ? "animated"
+      : "not animated";
+  return (
+    <div
+      role="group"
+      label={row.effectLabel}
+      onClick={stop}
+      onKeyDown={stop}
+      onPointerDown={(e) => {
+        if (e.button !== 2) return;
+        stop(e);
+        void c.parameterMenu(row.id).catch((error) => c.platform.report(error));
+      }}
+    >
+      <UI.InspectorRow
+        label={p.label}
+        metadata={{
+          parameter: p.id,
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`Keyframe, ${p.label}`}
+            title={state}
+            disabled={disabled}
+            aria-pressed={p.keyAtPlayhead}
+            attr={{
+              symbol: p.keyAtPlayhead
+                ? "diamond.fill"
+                : p.animated
+                  ? "diamond.lefthalf.filled"
+                  : "diamond",
+              value: state,
+            }}
+            onClick={(e) => {
+              stop(e);
+              if (!disabled)
+                c.send({
+                  type: "parameter",
+                  id: p.id,
+                  action: e.altKey ? "stopwatch" : "diamond",
+                });
+            }}
+            style={{
+              ...hit,
+              color: t(p.animated ? "colors.accent" : "colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        {field}
+      </UI.InspectorRow>
+    </div>
+  );
+}
+
+function StackRows({ embedded, children, ...props }: any) {
+  return embedded ? (
+    <div>{children}</div>
+  ) : (
+    <virtual-list {...props}>{children}</virtual-list>
+  );
+}

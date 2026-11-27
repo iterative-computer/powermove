@@ -1,0 +1,622 @@
+import { beforeAll, test, expect } from "bun:test";
+import { ViewerPanel, type ViewerActions } from "../panel";
+import { snapshot, zoomTitle, resolutionTitle, percent } from "../contract";
+import type { ViewerSnapshot } from "../contract";
+import { binaries, fixture, recorder, replay } from "./helpers";
+
+// A cold Rust build is setup work, not part of a five-second UI assertion.
+beforeAll(() => {
+  binaries();
+}, 120_000);
+
+const actions: ViewerActions = { drive() {}, open() {}, command() {} };
+const cases: [string, (s: ViewerSnapshot) => void][] = [
+  [
+    "empty-no-project",
+    (s) => {
+      s.model = null;
+      s.host.frame.resource = null;
+    },
+  ],
+  [
+    "empty-composition",
+    (s) => {
+      s.model!.empty = true;
+      s.model!.selectionCount = 0;
+    },
+  ],
+  [
+    "loading-first-frame",
+    (s) => {
+      s.host.frame.resource = null;
+      s.host.frame.loading = true;
+    },
+  ],
+  [
+    "loading-retains-last-good",
+    (s) => {
+      s.host.frame.loading = true;
+    },
+  ],
+  [
+    "selected",
+    (s) => {
+      s.model!.selectionCount = 1;
+    },
+  ],
+  [
+    "hover",
+    (s) => {
+      s.host.interaction = "hover";
+    },
+  ],
+  [
+    "focus",
+    (s) => {
+      s.host.interaction = "focus";
+    },
+  ],
+  // No-project hides the bar (§3); there are no focusable disabled pop-ups.
+  [
+    "disabled-no-project",
+    (s) => {
+      s.model = null;
+      s.host.frame.resource = null;
+    },
+  ],
+  [
+    "error-last-good",
+    (s) => {
+      s.host.frame.failed = true;
+    },
+  ],
+  [
+    "drag-media",
+    (s) => {
+      s.host.interaction = "media-drop";
+    },
+  ],
+  [
+    "drag-effect",
+    (s) => {
+      s.host.interaction = "effect-drop";
+    },
+  ],
+  [
+    "multi-select",
+    (s) => {
+      s.model!.selectionCount = 2;
+    },
+  ],
+  [
+    "source-image",
+    (s) => {
+      s.host.source = {
+        id: "a",
+        name: "Still.png",
+        kind: "image",
+        time: 0,
+        duration: null,
+        playing: false,
+        epoch: "1",
+      };
+    },
+  ],
+  [
+    "source-video",
+    (s) => {
+      s.host.source = {
+        id: "a",
+        name: "Take.mov",
+        kind: "video",
+        time: 0.125,
+        duration: 3,
+        playing: false,
+        epoch: "2",
+      };
+    },
+  ],
+  [
+    "source-audio",
+    (s) => {
+      s.host.source = {
+        id: "a",
+        name: "VO_take03.wav",
+        kind: "audio",
+        time: 0.125,
+        duration: 3,
+        playing: true,
+        epoch: "3",
+      };
+    },
+  ],
+  [
+    // The native timecode layer draws the time while playing; the bar's
+    // readout steps aside and Play reads Pause.
+    "transport-playing-looping",
+    (s) => {
+      s.host.transport!.playing = true;
+      s.host.transport!.looping = true;
+    },
+  ],
+  [
+    "playing-auto-half",
+    (s) => {
+      s.model!.effectiveQuality = 0.5;
+    },
+  ],
+  [
+    "playing-auto-full",
+    (s) => {
+      s.model!.effectiveQuality = 1;
+    },
+  ],
+  [
+    "focus-workspace",
+    (s) => {
+      s.host.presentation = "Focus";
+    },
+  ],
+  [
+    "full-screen",
+    (s) => {
+      s.host.presentation = "FullScreen";
+    },
+  ],
+  [
+    "lost-canvas",
+    (s) => {
+      s.model!.canvasLost = true;
+    },
+  ],
+  [
+    "hidden-controls",
+    (s) => {
+      s.model!.showControls = false;
+    },
+  ],
+  [
+    "custom-zoom",
+    (s) => {
+      s.model!.fit = false;
+      s.model!.shownZoom = 0.54321;
+    },
+  ],
+  [
+    "60000-selected-no-row-list",
+    (s) => {
+      s.model!.selectionCount = 60_000;
+    },
+  ],
+];
+for (const [name, change] of cases) {
+  test(`wire tree / AX: ${name} (placeholders do not certify rendering)`, async () => {
+    const state = fixture();
+    change(state);
+    const { root, commits } = recorder();
+    await root.render(
+      <ViewerPanel state={snapshot(state)} actions={actions} />,
+    );
+    const result = replay(commits).at(-1);
+    expect(result.accepted).toBe(true);
+    expect(result.wireDiagnostics).toEqual([]);
+    for (const appearance of result.appearances)
+      expect(appearance.diagnostics).toEqual([]);
+    expect(result.nodes).toMatchSnapshot(name);
+    const nodes = Object.values(result.nodes) as any[];
+    const focus = result.focusOrder.map(
+      (id: number) => result.nodes[id].props.id,
+    );
+    const lost =
+      state.model && !state.host.source && state.model.canvasLost
+        ? ["viewer.canvas.return"]
+        : [];
+    expect(focus).toEqual(
+      !state.model
+        ? ["viewer.open"]
+        : state.host.presentation !== "Docked"
+          ? [
+              "viewer.canvas",
+              ...lost,
+              "viewer.channels",
+              "viewer.zoom",
+              "viewer.quality",
+            ]
+          : [
+              ...(state.host.source
+                ? ["viewer.source.close"]
+                : [
+                    // 2D | 3D leads the bar (its checked segment takes focus).
+                    ...(state.model?.studio ? [nodes.find(
+                      (n) => n.props.role === "radio" && n.props.label === "2D",
+                    )?.props.id] : []),
+                    ...[
+                    "gotoStart",
+                    "prevFrame",
+                    "play",
+                    "nextFrame",
+                    "gotoEnd",
+                    "loop",
+                  ].map((id) => `viewer.transport.${id}`),
+                  ]),
+              "viewer.channels",
+              "viewer.zoom",
+              "viewer.quality",
+              "viewer.canvas",
+              ...lost,
+            ],
+    );
+    for (const { accessibility: ax } of result.appearances) {
+      const byId = (id: string) =>
+        ax.find((n: any) => n.id === nodes.find((n) => n.props.id === id)?.id);
+      if (state.model) {
+        expect(byId("viewer.canvas")).toMatchObject({
+          role: "Group",
+          label: "Viewer",
+          disabled: false,
+        });
+        expect(byId("viewer.canvas").value).toContain(
+          `${state.model.selectionCount} ${state.model.selectionCount === 1 ? "layer" : "layers"} selected`,
+        );
+        {
+          // Docked bar or Focus/full-screen overlay: same controls, same labels.
+          expect(byId("viewer.zoom")).toMatchObject({
+            role: "ComboBox",
+            label:
+              "Zoom, " +
+              (state.model.fit ? "Fit, " : "") +
+              percent(state.model.shownZoom) +
+              " percent",
+          });
+          expect(byId("viewer.quality").label).toContain("Preview resolution");
+        }
+        if (state.host.source && state.host.presentation === "Docked")
+          expect(byId("viewer.source.close")).toMatchObject({
+            role: "Button",
+            label: "Back to Composition",
+          });
+      } else
+        expect(byId("viewer.open")).toMatchObject({
+          role: "Button",
+          label: "Open…",
+        });
+    }
+    expect(nodes.length).toBeLessThan(40);
+    await root.dispose();
+  });
+}
+test("popup copy is exact; custom zoom has no invented menu item", async () => {
+  const state = fixture();
+  state.model!.fit = false;
+  state.model!.shownZoom = 0.54321;
+  const { root } = recorder();
+  await root.render(<ViewerPanel state={state} actions={actions} />);
+  const zoom = root.inspect().nodes.find((n) => n.props.id === "viewer.zoom")!;
+  expect((zoom.props.options as any[]).map((o) => o.label)).toEqual([
+    "Fit",
+    "5 %",
+    "12.5 %",
+    "25 %",
+    "50 %",
+    "100 %",
+    "200 %",
+    "400 %",
+    "800 %",
+    "Zoom In",
+    "Zoom Out",
+    "Actual Size",
+    "Fit Composition",
+  ]);
+  expect(zoom.props.value).toBe(0.54321);
+  expect(zoomTitle(state.model!)).toBe("54 %");
+  state.model!.shownZoom = 0.125;
+  expect(zoomTitle(state.model!)).toBe("12.5 %");
+  expect(resolutionTitle(state.model!)).toBe("Auto (Half)");
+  state.model!.effectiveQuality = 1;
+  expect(resolutionTitle(state.model!)).toBe("Auto");
+  state.model!.effectiveQuality = 0.25;
+  expect(resolutionTitle(state.model!)).toBe("Auto (Quarter)");
+  // Design review D2: intermediate adaptive scales show as a percentage.
+  state.model!.effectiveQuality = 0.75;
+  expect(resolutionTitle(state.model!)).toBe("Auto (75 %)");
+  await root.dispose();
+});
+test("every zoom and resolution change emits the matching model ID once", async () => {
+  const seen: unknown[][] = [];
+  const { root } = recorder();
+  await root.render(
+    <ViewerPanel
+      state={fixture()}
+      actions={{
+        open() {},
+        command() {},
+        drive: (...args) => {
+          seen.push(args);
+        },
+      }}
+    />,
+  );
+  const zoom = root.inspect().nodes.find((n) => n.props.id === "viewer.zoom")!;
+  const quality = root
+    .inspect()
+    .nodes.find((n) => n.props.id === "viewer.quality")!;
+  for (const value of [
+    "fit",
+    0.05,
+    0.125,
+    0.25,
+    0.5,
+    1,
+    2,
+    4,
+    8,
+    "viewer.zoom.in",
+    "viewer.zoom.out",
+    "actual",
+    "viewer.fit",
+  ])
+    await root.drive(zoom.id, "change", { value });
+  expect(seen).toEqual([
+    ["viewer.fit"],
+    ...[0.05, 0.125, 0.25, 0.5, 1, 2, 4, 8].map((v) => ["viewer.zoom", v]),
+    ["viewer.zoom.in"],
+    ["viewer.zoom.out"],
+    ["viewer.zoom", 1],
+    ["viewer.fit"],
+  ]);
+  seen.length = 0;
+  for (const value of ["auto", "1", "0.5", "0.25", "forged", null])
+    await root.drive(quality.id, "change", { value });
+  expect(seen).toEqual(
+    ["auto", "1", "0.5", "0.25"].map((v) => ["viewer.quality", v]),
+  );
+  await root.drive(zoom.id, "change", { value: 7 });
+  expect(seen).toHaveLength(4);
+  await root.dispose();
+});
+test("source Back and empty Open callbacks; no visible viewer title or unrelated controls", async () => {
+  const seen: string[] = [];
+  const state = fixture();
+  state.host.source = {
+    id: "a",
+    name: "Audio.wav",
+    kind: "audio",
+    time: 0,
+    duration: 1,
+    playing: false,
+    epoch: "1",
+  };
+  const { root } = recorder();
+  const actions = {
+    command() {},
+    drive: (id: string) => {
+      seen.push(id);
+    },
+    open: () => {
+      seen.push("open");
+    },
+  };
+  await root.render(<ViewerPanel state={state} actions={actions} />);
+  await root.drive(
+    root.inspect().nodes.find((n) => n.props.id === "viewer.source.close")!.id,
+    "click",
+    {},
+  );
+  state.model = null;
+  state.host.source = null;
+  await root.render(<ViewerPanel state={state} actions={actions} />);
+  await root.drive(
+    root.inspect().nodes.find((n) => n.props.id === "viewer.open")!.id,
+    "click",
+    {},
+  );
+  expect(seen).toEqual(["viewer.source.close", "open"]);
+  expect(
+    root
+      .inspect()
+      .nodes.some((n) => /safe|grid|guides/.test(String(n.props.id))),
+  ).toBe(false);
+  expect(root.inspect().nodes.some((n) => n.text === "Viewer")).toBe(false);
+  await root.dispose();
+});
+test("the transport runs the app's own commands, once each", async () => {
+  const seen: string[] = [];
+  const { root } = recorder();
+  await root.render(
+    <ViewerPanel
+      state={fixture()}
+      actions={{ open() {}, drive() {}, command: (name) => seen.push(name) }}
+    />,
+  );
+  for (const id of [
+    "gotoStart",
+    "prevFrame",
+    "play",
+    "nextFrame",
+    "gotoEnd",
+    "loop",
+  ]) {
+    const node = root
+      .inspect()
+      .nodes.find((n) => n.props.id === `viewer.transport.${id}`)!;
+    expect(node).toBeDefined();
+    await root.drive(node.id, "click", {});
+  }
+  expect(seen).toEqual([
+    "gotoStart",
+    "prevFrame",
+    "play",
+    "nextFrame",
+    "gotoEnd",
+    "toggleLoop",
+  ]);
+  await root.dispose();
+});
+test("with a timeline in the workspace the viewer shows no transport or timecode", async () => {
+  const { root } = recorder();
+  const s = fixture();
+  s.host.transport = null;
+  await root.render(<ViewerPanel state={s} actions={actions} />);
+  const ids = root.inspect().nodes.map((n) => String(n.props.id));
+  expect(ids.some((id) => id.startsWith("viewer.transport"))).toBe(false);
+  expect(ids).not.toContain("viewer.time");
+  expect(ids).not.toContain("viewer.duration");
+  // The view's own controls stay.
+  expect(ids).toContain("viewer.zoom");
+  await root.dispose();
+  // Without a timeline, the viewer carries both.
+  const { root: alone } = recorder();
+  await alone.render(<ViewerPanel state={fixture()} actions={actions} />);
+  const shown = alone.inspect().nodes.map((n) => String(n.props.id));
+  expect(shown).toContain("viewer.time");
+  expect(shown).toContain("viewer.transport.play");
+  await alone.dispose();
+});
+test("a 3D composition adds no toolbar; away from the shot one top-left control returns", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const at = (look: "camera" | "free") => {
+    const s = fixture();
+    s.model!.studio = { tier: "live", tool: "move", look };
+    return s;
+  };
+  const { root } = recorder();
+  await root.render(
+    <ViewerPanel state={at("camera")} actions={{ ...actions, drive }} />,
+  );
+  let nodes = root.inspect().nodes;
+  // No 3D group in the bar, no Light panel, no return control on the shot
+  // (the one 3D control in the bar is the preview pop-up, tested below).
+  for (const id of [
+    "viewer.studio",
+    "viewer.studio.tool",
+    "viewer.studio.look",
+    "viewer.studio.lightPanel",
+    "viewer.studio.viewCamera",
+  ])
+    expect(nodes.some((n) => n.props.id === id)).toBe(false);
+  await root.dispose();
+  // Focus has no bar (no 2D | 3D): one control returns.
+  const focused = at("free");
+  focused.host.presentation = "Focus";
+  const { root: free } = recorder();
+  await free.render(
+    <ViewerPanel state={focused} actions={{ ...actions, drive }} />,
+  );
+  nodes = free.inspect().nodes;
+  const ret = nodes.find((n) => n.props.id === "viewer.studio.viewCamera")!;
+  expect(ret).toBeDefined();
+  expect(ret.props.label).toBe("View camera");
+  const box = nodes.find((n) => n.props.id === "viewer.studio.return")!;
+  const style = box.props.style as Record<string, unknown>;
+  expect(style.left).toBeDefined();
+  expect(style.top).toBeDefined();
+  expect(style.bottom).toBeUndefined();
+  expect(nodes.some((n) => n.text === "Return to Camera")).toBe(false);
+  // The zoom slot names the editor view.
+  expect(nodes.find((n) => n.props.id === "viewer.zoom")!.props.label).toBe(
+    "Editor View",
+  );
+  await free.drive(ret.id, "click", {});
+  expect(seen).toEqual([["viewer.studio.look", "camera"]]);
+  await free.dispose();
+});
+
+test("a 3D composition's bar has one preview pop-up: Fast by default, before RGB", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const s = fixture();
+  s.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  const { root } = recorder();
+  await root.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  const nodes = root.inspect().nodes;
+  const ids = nodes.map((n) => String(n.props.id));
+  const tier = nodes.find((n) => n.props.id === "viewer.studio.tier")!;
+  expect(tier).toBeDefined();
+  expect(tier.props.label).toBe("3D preview, Fast");
+  expect(ids.indexOf("viewer.studio.tier")).toBeLessThan(ids.indexOf("viewer.channels"));
+  await root.drive(tier.id, "change", { value: "live" });
+  await root.drive(tier.id, "change", { value: "refine" });
+  await root.drive(tier.id, "change", { value: "final" });
+  expect(seen).toEqual([
+    ["viewer.studio.tier", "live"],
+    ["viewer.studio.tier", "refine"],
+  ]);
+  await root.dispose();
+  // A 2D composition has no 3D preview control.
+  const { root: flat } = recorder();
+  await flat.render(<ViewerPanel state={fixture()} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.studio.tier")).toBe(false);
+  await flat.dispose();
+});
+
+test("2D | 3D leads the bar: it switches the shot and the scene, and hides without a scene", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const segment = (nodes: { props: Record<string, unknown> }[], label: string) =>
+    nodes.find((n) => n.props.role === "radio" && n.props.label === label)!;
+  const s = fixture();
+  s.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  const { root } = recorder();
+  await root.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  let nodes = root.inspect().nodes;
+  const ids = nodes.map((n) => String(n.props.id));
+  expect(ids.indexOf("viewer.dimension")).toBeGreaterThanOrEqual(0);
+  expect(ids.indexOf("viewer.dimension")).toBeLessThan(ids.indexOf("viewer.channels"));
+  expect(segment(nodes, "2D").props["aria-checked"]).toBe(true);
+  expect(segment(nodes, "3D").props.disabled).toBeFalsy();
+  await root.drive((segment(nodes, "3D") as unknown as { id: number }).id, "click", {});
+  await root.dispose();
+  // In the scene: 3D is on, and the bar replaces the floating View camera.
+  s.model!.studio = { tier: "fast", tool: "move", look: "free" };
+  const { root: scene } = recorder();
+  await scene.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  nodes = scene.inspect().nodes;
+  expect(segment(nodes, "3D").props["aria-checked"]).toBe(true);
+  expect(nodes.some((n) => n.props.id === "viewer.studio.viewCamera")).toBe(false);
+  await scene.drive((segment(nodes, "2D") as unknown as { id: number }).id, "click", {});
+  expect(seen).toEqual([
+    ["viewer.studio.look", "free"],
+    ["viewer.studio.look", "camera"],
+  ]);
+  await scene.dispose();
+  // Adding and deleting the last 3D layer updates the same mounted bar.
+  const { root: flat } = recorder();
+  const state = fixture();
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
+  state.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(true);
+  delete state.model!.studio;
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
+  await flat.dispose();
+});
+
+test("nested composition breadcrumbs navigate ancestors and retain the way back down", async () => {
+  const seen: [string, unknown][] = [];
+  const state = fixture();
+  state.model!.compositions = [
+    { id: "main", name: "Main", parents: [] },
+    { id: "logo", name: "Logo", parents: ["main"] },
+    { id: "spinner", name: "Spinner", parents: ["logo"] },
+  ];
+  state.model!.composition = "logo";
+  state.model!.trail = { ids: ["main", "logo", "spinner"], index: 1 };
+  const { root, commits } = recorder();
+  await root.render(<ViewerPanel state={state} actions={{ ...actions, drive: (id, argument) => { seen.push([id, argument]); } }} />);
+  const nodes = root.inspect().nodes;
+  expect(nodes.find(n => n.props.id === "viewer.path")?.props.label).toBe("Composition path");
+  for (const id of ["main", "spinner"]) {
+    const crumb = nodes.find(n => n.props.id === `viewer.crumb.${id}`)!;
+    expect(crumb).toBeDefined();
+    await root.drive(crumb.id, "click", {});
+  }
+  expect(seen).toEqual([["viewer.composition.open", "main"], ["viewer.composition.open", "spinner"]]);
+  const report = replay(commits).at(-1);
+  expect(report.accepted).toBe(true);
+  expect(report.wireDiagnostics).toEqual([]);
+  expect(report.focusOrder.map((id: number) => report.nodes[id].props.id)).not.toContain("viewer.crumb.logo");
+  await root.dispose();
+});

@@ -1,0 +1,21 @@
+{
+ "name": "toggle-invert-stripes",
+ "kind": "shader",
+ "covers": [
+  "param-bool",
+  "param-float",
+  "defines"
+ ],
+ "prompt": "Diagonal stripes with a checkbox to invert the colors and a slider for stripe density. Use a #define for the stripe angle.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "2c2c1893e1446355f938887dc8f67aa6930fb3b4882cf4b07e7ed39c94ab09b3",
+  "seconds": 8.405,
+  "generated": "2026-10-17T07:31:51.487Z"
+ },
+ "code": "// Diagonal stripes — angle set by #define, density slider, invert checkbox.\n#define STRIPE_ANGLE 45.0   // degrees\n\nuniform float uDensity; // @param 12.0 1 80\nuniform bool  uInvert;  // @param false\n\nvoid main() {\n  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);\n  float a = radians(STRIPE_ANGLE);\n  float d = dot(p, vec2(cos(a), sin(a))) * uDensity;\n  float f = fract(d);\n  float w = fwidth(d) * 0.75;\n  // anti-aliased 50% duty stripe\n  float s = smoothstep(0.5 - w, 0.5 + w, f) - smoothstep(1.0 - w, 1.0 + w, f) + smoothstep(-w, w, f) - 1.0;\n  s = clamp(s, 0.0, 1.0);\n  if (uInvert) s = 1.0 - s;\n  vec3 col = vec3(s);\n  fragColor = vec4(col, 1.0);\n}",
+ "definition": null,
+ "summary": "I wrote a shader layer with black-and-white diagonal stripes. It has a `uDensity` slider (default 12, range 1–80), a `uInvert` checkbox, and `#define STRIPE_ANGLE 45.0` (degrees) for the angle. I didn't apply it to the project, compile it or render it, because no live Powermove tools were attached to this run."
+}

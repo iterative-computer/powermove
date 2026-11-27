@@ -1,0 +1,61 @@
+{
+ "name": "agent-chromatic-split",
+ "kind": "effect",
+ "covers": [
+  "effect-uniforms",
+  "effect-toggle-float"
+ ],
+ "prompt": "Effect: RGB split that offsets red and blue channels by an amount in pixels with an angle; include a toggle to animate the split with time.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "1dbaf3720f38b6e3ed26ed9c95db6a2fd6c80387541562430370991427ab8396",
+  "seconds": 38.975,
+  "generated": "2026-10-17T07:35:13.184Z"
+ },
+ "code": null,
+ "definition": {
+  "id": "gen.rgb-split",
+  "label": "RGB Split",
+  "group": "Stylize",
+  "params": [
+   {
+    "k": "amount",
+    "label": "Amount",
+    "def": 8,
+    "min": 0,
+    "max": 200,
+    "step": 0.1,
+    "unit": "px"
+   },
+   {
+    "k": "angle",
+    "label": "Angle",
+    "def": 0,
+    "min": -180,
+    "max": 180,
+    "unit": "°"
+   },
+   {
+    "k": "animate",
+    "label": "Animate",
+    "def": 0,
+    "min": 0,
+    "max": 1,
+    "step": 1
+   },
+   {
+    "k": "speed",
+    "label": "Speed",
+    "def": 1,
+    "min": 0,
+    "max": 10,
+    "step": 0.01,
+    "unit": "Hz"
+   }
+  ],
+  "frag": "\n    float ang = radians(u_angle);\n    float amt = u_amount;\n    if (u_animate > 0.5) {\n      float t = u_time * u_speed;\n      float pulse = 0.5 + 0.5 * sin(t * 6.28318);\n      float jitter = (noise(vec2(t * 4.0, 1.7)) - 0.5) * 0.3;\n      amt *= clamp(pulse + jitter, 0.0, 1.0);\n      ang += sin(t * 3.14159) * 0.2;\n    }\n    vec2 off = vec2(cos(ang), sin(ang)) * amt * u_texel;\n    vec4 r = texture(u_tex, v_st - off);\n    vec4 g = texture(u_tex, v_st);\n    vec4 b = texture(u_tex, v_st + off);\n    float a = max(g.a, max(r.a, b.a));\n    o = vec4(r.r, g.g, b.b, a);\n  "
+ },
+ "summary": "Defined the gen.rgb-split effect in Stylize. Red and blue shift in opposite directions by Amount (px) along Angle, and Animate (0 or 1) pulses the split over time at Speed (Hz). Not validated, compiled or rendered, since no Powermove tools were attached."
+}

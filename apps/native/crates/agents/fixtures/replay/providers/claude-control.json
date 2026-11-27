@@ -1,0 +1,152 @@
+{
+  "baseline": "v1.2.0",
+  "source": "apps/desktop/src/main/claude/runner.test.ts; unmodified control/answer methods",
+  "frames": [
+    {
+      "kind": "in",
+      "value": {
+        "type": "control_request",
+        "request_id": "question-1",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "AskUserQuestion",
+          "tool_use_id": "ask-1",
+          "input": {
+            "questions": [
+              {
+                "header": "Colour",
+                "question": "Pick a colour?",
+                "options": [
+                  {
+                    "label": "Blue",
+                    "description": "Calm"
+                  }
+                ],
+                "multiSelect": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "question",
+        "itemId": "ask-1",
+        "questions": [
+          {
+            "id": "ask-1-0",
+            "header": "Colour",
+            "question": "Pick a colour?",
+            "options": [
+              {
+                "label": "Blue",
+                "description": "Calm"
+              }
+            ],
+            "allowOther": true,
+            "secret": false,
+            "multiSelect": true
+          }
+        ],
+        "transport": "reply",
+        "blocking": true
+      }
+    },
+    {
+      "kind": "answer",
+      "value": {
+        "id": "oracle-run",
+        "itemId": "ask-1",
+        "answers": {
+          "ask-1-0": [
+            "Blue",
+            "Green"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "question-1",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "questions": [
+                {
+                  "header": "Colour",
+                  "question": "Pick a colour?",
+                  "options": [
+                    {
+                      "label": "Blue",
+                      "description": "Calm"
+                    }
+                  ],
+                  "multiSelect": true
+                }
+              ],
+              "answers": {
+                "Pick a colour?": "Blue, Green"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "control_request",
+        "request_id": "deny-1",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "Bash",
+          "tool_use_id": "bash-1",
+          "input": {
+            "command": "pwd"
+          }
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "deny-1",
+          "response": {
+            "behavior": "deny",
+            "message": "Powermove does not allow Bash in this run."
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "type": "control_request",
+        "request_id": "unsupported",
+        "request": {
+          "subtype": "other"
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "type": "control_response",
+        "response": {
+          "subtype": "error",
+          "request_id": "unsupported",
+          "error": "Unsupported by Powermove."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,855 @@
+use crate::{Drag, DragKind, DragSample, HostEffect, ModelError, Plan, TimelineModel};
+use pm_kernel::{Ack, Call, Caller, GestureCall, KernelHandle, Reply, Request, WriteBody};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+#[derive(Debug)]
+pub enum ClientError {
+    Closed,
+    Kernel(String),
+    Rejected(String),
+    Model(ModelError),
+    GestureActive,
+    NoGesture,
+    DocumentChanged,
+    OriginMismatch,
+    ConcurrentRelativeGesture,
+}
+/// The status line shows a sentence, never a variant or an internal id.
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Kernel(message) | Self::Rejected(message) => f.write_str(message),
+            Self::Model(e) => write!(f, "{e}"),
+            Self::Closed => f.write_str("The project is closed."),
+            Self::GestureActive => f.write_str("Another timeline edit is still under way."),
+            Self::NoGesture => f.write_str("That timeline edit has already ended."),
+            Self::DocumentChanged => {
+                f.write_str("The project changed meanwhile, so this timeline edit was not made.")
+            }
+            Self::OriginMismatch => f.write_str("That timeline edit belongs to another window."),
+            Self::ConcurrentRelativeGesture => {
+                f.write_str("Another edit is moving the same items at the same time.")
+            }
+        }
+    }
+}
+impl std::error::Error for ClientError {}
+impl From<ModelError> for ClientError {
+    fn from(e: ModelError) -> Self {
+        Self::Model(e)
+    }
+}
+
+/// An immutable frame for a local clip move, trim or audio gain edit. Its snapshot
+/// is never published to the project's kernel.
+#[derive(Clone, Debug)]
+pub struct LayerPreviewFrame {
+    pub starts: std::sync::Arc<[(String, f64)]>,
+    pub snapshot: pm_kernel::Snapshot,
+    pub gain_commands: Option<std::sync::Arc<[pm_kernel::Command]>>,
+    pub trimmed: bool,
+}
+/// Absolute timeline positions for moved keys, and `None` for the keys
+/// they replace on the destination frame. Indexed by layer, then key id.
+#[derive(Debug, Default, PartialEq)]
+pub struct KeyMovePreview {
+    pub(crate) layers: HashMap<String, HashMap<String, Option<f64>>>,
+}
+
+struct KeyMove {
+    tracks: Vec<(usize, usize)>,
+    limits: (f64, f64),
+    delta: Option<f64>,
+    frame: Arc<KeyMovePreview>,
+}
+impl KeyMove {
+    fn new(index: &crate::TimelineIndex, ids: &[String]) -> Self {
+        let ids: HashSet<_> = ids.iter().map(String::as_str).collect();
+        let mut tracks = Vec::new();
+        let mut limits = (f64::NEG_INFINITY, f64::INFINITY);
+        for (i, layer) in index.layers.iter().enumerate() {
+            for (j, channel) in layer.channels.iter().enumerate() {
+                let mut affected = false;
+                for key in channel
+                    .keys
+                    .iter()
+                    .filter(|key| ids.contains(key.id.as_str()))
+                {
+                    affected = true;
+                    limits.0 = limits.0.max(key.time.min(-layer.from) - key.time);
+                    limits.1 = limits
+                        .1
+                        .min(key.time.max((index.duration - layer.from).max(0.)) - key.time);
+                }
+                if affected {
+                    tracks.push((i, j));
+                }
+            }
+        }
+        Self {
+            tracks,
+            limits,
+            delta: None,
+            frame: Arc::default(),
+        }
+    }
+    fn sample(&mut self, index: &crate::TimelineIndex, ids: &[String], delta: f64) {
+        // Keep the same frame rounding, composition limits and collision rule
+        // as the writer's KeyframeCommand::Move.
+        let rate = index.fps;
+        let frame = |time: f64| (time * rate + 0.5).floor();
+        let delta = (frame(delta) / rate).max(self.limits.0).min(self.limits.1);
+        if self.delta == Some(delta) {
+            return;
+        }
+        self.delta = Some(delta);
+        let mut preview = KeyMovePreview::default();
+        if delta.abs() > 1e-12 {
+            let ids: HashSet<_> = ids.iter().map(String::as_str).collect();
+            for &(i, j) in &self.tracks {
+                let layer = &index.layers[i];
+                let keys = &layer.channels[j].keys;
+                let changes = preview.layers.entry(layer.id.clone()).or_default();
+                let mut destination = HashSet::new();
+                for key in keys.iter().filter(|key| ids.contains(key.id.as_str())) {
+                    destination.insert(frame(key.time + delta) as i64);
+                    changes.insert(key.id.clone(), Some(layer.from + (key.time + delta)));
+                }
+                for key in keys.iter().filter(|key| !ids.contains(key.id.as_str())) {
+                    if destination.contains(&(frame(key.time) as i64)) {
+                        changes.insert(key.id.clone(), None);
+                    }
+                }
+            }
+        }
+        self.frame = Arc::new(preview);
+    }
+}
+
+struct LayerPreview {
+    drag: Drag,
+    gain: bool,
+    key_move: Option<KeyMove>,
+    commands: Vec<pm_kernel::Command>,
+    frame: Option<LayerPreviewFrame>,
+    serial: u64,
+    sample: Option<(DragSample, u64)>,
+}
+/// Awaitable kernel adapter. No wait(), call_blocking(), platform or JS calls.
+/// Caller identity is injected so agent/MCP lock protections are retained.
+pub struct TimelineClient {
+    pub kernel: KernelHandle,
+    pub project: String,
+    pub caller: Caller,
+    pub model: TimelineModel,
+    active: Option<(u64, Drag)>,
+    active_revision: Option<u64>,
+    switch_gesture: Option<u64>,
+    preview: Option<LayerPreview>,
+    adopted: Option<pm_model::Value>,
+}
+impl TimelineClient {
+    pub fn new(
+        kernel: KernelHandle,
+        project: impl Into<String>,
+        caller: Caller,
+    ) -> Result<Self, ClientError> {
+        let mut this = Self {
+            kernel,
+            project: project.into(),
+            caller,
+            model: TimelineModel::default(),
+            active: None,
+            active_revision: None,
+            switch_gesture: None,
+            preview: None,
+            adopted: None,
+        };
+        this.sync()?;
+        Ok(this)
+    }
+    pub fn sync(&mut self) -> Result<(), ClientError> {
+        let p = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        self.model.sync(&p);
+        if self.preview.as_ref().is_some_and(|preview| {
+            preview.drag.start.doc_id != p.snapshot.doc_id
+                || preview.drag.start.comp_id != p.snapshot.open_comp()
+        }) {
+            self.preview = None;
+        }
+        if let Some((sample, edition)) = self.preview.as_ref().and_then(|p| p.sample)
+            && edition != p.snapshot.document.edition()
+        {
+            self.preview_sample(sample)?;
+        }
+        Ok(())
+    }
+    pub async fn call(&mut self, call: Call) -> Result<Ack, ClientError> {
+        self.call_document(call, self.model.index.doc_id).await
+    }
+    async fn call_document(&mut self, call: Call, document: u64) -> Result<Ack, ClientError> {
+        let ack = self
+            .kernel
+            .call(
+                &self.project,
+                Request::new(self.caller, call).with_document(document),
+            )
+            .await
+            .ok_or(ClientError::Closed)?
+            .map_err(|e| ClientError::Kernel(e.to_string()))?;
+        self.sync()?;
+        if let Reply::Throw(e) = &ack.reply {
+            return Err(ClientError::Rejected(e.to_string()));
+        }
+        if let Reply::Edit(e) = &ack.reply
+            && !e.ok
+        {
+            return Err(ClientError::Rejected(e.message.clone().unwrap_or_default()));
+        }
+        Ok(ack)
+    }
+    /// Stops on the first rejection: dependent selection/host effects never run.
+    pub async fn dispatch(&mut self, plan: Plan) -> Result<Vec<HostEffect>, ClientError> {
+        let published = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        if plan
+            .expected_document
+            .is_some_and(|doc| doc != published.snapshot.doc_id)
+        {
+            return Err(ClientError::DocumentChanged);
+        }
+        if plan
+            .required_origin
+            .is_some_and(|origin| origin != self.caller.origin)
+        {
+            return Err(ClientError::OriginMismatch);
+        }
+        let document = plan.expected_document.unwrap_or(self.model.index.doc_id);
+        let mut calls = plan.calls.into_iter().peekable();
+        while let Some(call) = calls.next() {
+            let call = match call {
+                Call::Transact {
+                    label,
+                    body,
+                    expected_revision,
+                } => {
+                    let mut selection = Vec::new();
+                    while matches!(calls.peek(), Some(Call::Selection(_))) {
+                        if let Some(Call::Selection(next)) = calls.next() {
+                            selection.push(next);
+                        }
+                    }
+                    if selection.is_empty() {
+                        Call::Transact {
+                            label,
+                            body,
+                            expected_revision,
+                        }
+                    } else {
+                        Call::TransactWithSelection {
+                            label,
+                            body,
+                            expected_revision,
+                            selection: pm_kernel::SelectionCall::Batch(selection),
+                        }
+                    }
+                }
+                call => call,
+            };
+            self.call_document(call, document).await?;
+        }
+        Ok(plan.effects)
+    }
+    /// Explicit idempotency supplied by an agent's per-writer sequence.
+    pub async fn transact_idempotent(
+        &mut self,
+        commands: Vec<pm_kernel::Command>,
+        txid: u64,
+    ) -> Result<Ack, ClientError> {
+        let request = self.model.transact(self.caller, commands, txid);
+        let ack = self
+            .kernel
+            .call(&self.project, request)
+            .await
+            .ok_or(ClientError::Closed)?
+            .map_err(|e| ClientError::Kernel(e.to_string()))?;
+        self.sync()?;
+        if let Reply::Throw(e) = &ack.reply {
+            return Err(ClientError::Rejected(e.to_string()));
+        }
+        Ok(ack)
+    }
+    pub async fn begin_drag(&mut self, kind: DragKind) -> Result<(), ClientError> {
+        if self.active.is_some() || self.preview.is_some() {
+            return Err(ClientError::GestureActive);
+        }
+        self.sync()?;
+        let mut drag = Drag::begin(&self.model, kind)?;
+        if let DragKind::ProEdit(command) = &drag.kind {
+            let source = self
+                .model
+                .index
+                .source
+                .as_ref()
+                .ok_or(ModelError::InvalidGesture)?;
+            // Checked as it will run: after the lanes it shows are written.
+            let mut scratch =
+                pm_model::Document::from_root(source.root().cloned(), source.revision);
+            if let Some(pin) = drag.pin_command() {
+                let ops = pin
+                    .plan(
+                        scratch.root().ok_or(ModelError::InvalidGesture)?,
+                        self.caller.origin,
+                    )
+                    .map_err(|e| ClientError::Rejected(e.to_string()))?;
+                scratch
+                    .apply_ops(&ops)
+                    .map_err(|e| ClientError::Rejected(format!("{e:?}")))?;
+            }
+            let command: pm_kernel::Command = command.clone().into();
+            command
+                .plan(
+                    scratch.root().ok_or(ModelError::InvalidGesture)?,
+                    self.caller.origin,
+                )
+                .map_err(|e| ClientError::Rejected(e.to_string()))?;
+        }
+        if let DragKind::Property { targets, time } = &drag.kind {
+            let published = self
+                .kernel
+                .published(&self.project)
+                .ok_or(ClientError::Closed)?;
+            let mut mirror = pm_kernel::QueryMirror::new(&published);
+            let mut evaluated = targets.clone();
+            for (layer, channel) in targets {
+                if matches!(channel.as_str(), "scale.x" | "scale.y" | "scale.z") {
+                    let three_d = self.model.index.layer(layer).is_some_and(|l| l.three_d);
+                    for paired in ["scale.x", "scale.y", "scale.z"] {
+                        if paired == channel
+                            || (paired == "scale.z" && !three_d)
+                            || self.model.index.channel(layer, paired).is_none()
+                        {
+                            continue;
+                        }
+                        if !evaluated.contains(&(layer.clone(), paired.into())) {
+                            evaluated.push((layer.clone(), paired.into()));
+                        }
+                    }
+                }
+            }
+            for (layer, channel) in &evaluated {
+                let value = mirror
+                    .queries()
+                    .evaluate(self.model.index.comp_id.as_deref(), layer, channel, *time)
+                    .map_err(|e| ClientError::Kernel(e.to_string()))?;
+                let number = value
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or(ModelError::InvalidNumber)?;
+                drag.property_values
+                    .insert((layer.clone(), channel.clone()), number);
+            }
+        }
+        let ack = self
+            .call(
+                GestureCall::Begin {
+                    label: drag.label(),
+                }
+                .into(),
+            )
+            .await?;
+        let Reply::Gesture(id) = ack.reply else {
+            return Err(ClientError::Rejected("gesture acknowledgement".into()));
+        };
+        self.active_revision = Some(ack.revision);
+        self.active = Some((id, drag));
+        Ok(())
+    }
+    /// Native clip moves, edge trims and gain drags preview locally. The writer, history
+    /// and published document are used only at mouse-up.
+    pub fn begin_preview_drag(&mut self, kind: DragKind) -> Result<(), ClientError> {
+        if self.active.is_some() || self.preview.is_some() {
+            return Err(ClientError::GestureActive);
+        }
+        self.sync()?;
+        let gain = self.is_gain_drag(&kind);
+        if !gain
+            && !kind.is_strip_trim()
+            && !matches!(kind, DragKind::Layers { .. } | DragKind::Keys { .. })
+        {
+            return Err(ModelError::InvalidGesture.into());
+        }
+        let mut drag = Drag::begin(&self.model, kind)?;
+        if let DragKind::Property { targets, time } = &drag.kind {
+            let published = self
+                .kernel
+                .published(&self.project)
+                .ok_or(ClientError::Closed)?;
+            let mut mirror = pm_kernel::QueryMirror::new(&published);
+            for (layer, path) in targets {
+                let value = mirror
+                    .queries()
+                    .evaluate_property(self.model.index.comp_id.as_deref(), layer, path, *time)
+                    .map_err(|e| ClientError::Kernel(e.to_string()))?
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or(ModelError::InvalidNumber)?;
+                drag.property_values
+                    .insert((layer.clone(), path.clone()), value);
+            }
+        }
+        let key_move = match &drag.kind {
+            DragKind::Keys { ids } if !gain => Some(KeyMove::new(&drag.start, ids)),
+            _ => None,
+        };
+        self.preview = Some(LayerPreview {
+            drag,
+            gain,
+            key_move,
+            commands: vec![],
+            frame: None,
+            serial: 0,
+            sample: None,
+        });
+        Ok(())
+    }
+    pub fn is_gain_drag(&self, kind: &DragKind) -> bool {
+        let is_gain = |path: &str| matches!(path, "c.gain" | "c.audioGain");
+        let gain_key = |id: &str| {
+            self.model
+                .index
+                .key(id)
+                .is_some_and(|(_, channel, _)| is_gain(&channel.path))
+        };
+        match kind {
+            DragKind::Keys { ids }
+            | DragKind::GraphKeys { ids }
+            | DragKind::StretchKeys { ids, .. }
+            | DragKind::TransformKeys { ids, .. } => {
+                !ids.is_empty() && ids.iter().all(|id| gain_key(id))
+            }
+            DragKind::QuickOffsetKeys { groups, .. } => {
+                let mut keys = groups.iter().flatten().peekable();
+                keys.peek().is_some() && keys.all(|id| gain_key(id))
+            }
+            DragKind::Handle { id, .. } => gain_key(id),
+            DragKind::Gain { .. } => true,
+            DragKind::Property { targets, .. } => {
+                !targets.is_empty() && targets.iter().all(|(_, path)| is_gain(path))
+            }
+            _ => false,
+        }
+    }
+    pub fn layer_preview(&self) -> Option<&LayerPreviewFrame> {
+        self.preview.as_ref().and_then(|p| p.frame.as_ref())
+    }
+    pub fn key_preview(&self) -> Option<&Arc<KeyMovePreview>> {
+        self.preview
+            .as_ref()?
+            .key_move
+            .as_ref()
+            .map(|keys| &keys.frame)
+    }
+    fn preview_sample(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
+        use pm_model::{Document, Op, Patch};
+        let p = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        if !self.model.follows_snapshot(&p.snapshot) {
+            self.model.sync(&p);
+        }
+        let preview = self.preview.as_mut().ok_or(ClientError::NoGesture)?;
+        if p.snapshot.doc_id != preview.drag.start.doc_id
+            || p.snapshot.open_comp() != preview.drag.start.comp_id
+        {
+            return Err(ClientError::DocumentChanged);
+        }
+        // Gain is relative and trim targets are absolute times from the
+        // drag's start: an edit published since would be overwritten.
+        let trimmed = preview.drag.kind.is_strip_trim();
+        if (preview.gain || trimmed || preview.key_move.is_some())
+            && p.revision() != preview.drag.start.revision
+        {
+            // The edit ends; the model shows the other edit.
+            self.preview = None;
+            self.sync()?;
+            return Err(ClientError::ConcurrentRelativeGesture);
+        }
+        let commands = preview.drag.commands(sample)?;
+        if let Some(keys) = &mut preview.key_move {
+            if let [
+                pm_kernel::Command::Keyframe(pm_kernel::KeyframeCommand::Move { key_ids, delta }),
+            ] = commands.as_slice()
+            {
+                keys.sample(&preview.drag.start, key_ids, *delta);
+            }
+            preview.sample = Some((sample, p.snapshot.document.edition()));
+            preview.commands = commands;
+            return Ok(preview_ack(p.revision()));
+        }
+        if preview.gain || trimmed {
+            let root = p.snapshot.root().ok_or(ClientError::Closed)?;
+            let revision = p.revision() + preview.serial + 1;
+            let document = if trimmed {
+                pm_kernel::commands::timing::preview_strip_trim(
+                    root,
+                    revision,
+                    self.caller.origin,
+                    &commands,
+                )
+                .map_err(|e| ClientError::Rejected(e.to_string()))?
+            } else {
+                let mut document = Document::from_root(Some(root.clone()), revision);
+                for command in &commands {
+                    let ops = command
+                        .plan(
+                            document.root().ok_or(ClientError::Closed)?,
+                            self.caller.origin,
+                        )
+                        .map_err(|e| ClientError::Rejected(e.to_string()))?;
+                    document
+                        .apply_ops(&ops)
+                        .map_err(|e| ClientError::Kernel(e.to_string()))?;
+                }
+                document
+            };
+            preview.serial = document.revision() - p.revision();
+            preview.frame = Some(LayerPreviewFrame {
+                starts: [].into(),
+                snapshot: pm_kernel::Snapshot {
+                    doc_id: p.snapshot.doc_id,
+                    revision: document.revision(),
+                    document: std::sync::Arc::new(document),
+                },
+                gain_commands: preview.gain.then(|| commands.clone().into()),
+                trimmed,
+            });
+            preview.sample = Some((sample, p.snapshot.document.edition()));
+            preview.commands = commands;
+            return Ok(preview_ack(p.revision()));
+        }
+        let starts: Vec<_> = commands
+            .iter()
+            .filter_map(|c| match c {
+                pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id, patch }) => {
+                    patch.from.map(|from| (layer_id.clone(), from))
+                }
+                _ => None,
+            })
+            .collect();
+        // Use ordinals from this publication, including after a foreign reorder.
+        let root = p.snapshot.root().ok_or(ClientError::Closed)?;
+        let mut ops = Vec::with_capacity(starts.len());
+        for command in &commands {
+            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id: id, patch }) = command else {
+                continue;
+            };
+            let Some(from) = patch.from else { continue };
+            let index = self
+                .model
+                .index
+                .source_ordinal(id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            let mut path = pm_kernel::model::LayerLoc {
+                comp_id: preview.drag.start.comp_id.clone(),
+                index,
+            }
+            .path();
+            if let Some(duration) = patch.duration {
+                let mut duration_path = path.clone();
+                duration_path.push("dur".into());
+                ops.push(Op::Leaf(Patch::set(duration_path, pm_model::Value::Number(duration))));
+            }
+            path.push("from".into());
+            ops.push(Op::Leaf(Patch::set(path, pm_model::Value::Number(from))));
+        }
+        preview.serial += 1;
+        let revision = p.revision() + preview.serial;
+        let mut document = Document::from_root(Some(root.clone()), p.revision());
+        document
+            .apply_ops_at(&ops, revision)
+            .map_err(|e| ClientError::Kernel(e.to_string()))?;
+        preview.sample = Some((sample, p.snapshot.document.edition()));
+        preview.commands = commands;
+        preview.frame = Some(LayerPreviewFrame {
+            starts: starts.into(),
+            gain_commands: None,
+            trimmed: false,
+            snapshot: pm_kernel::Snapshot {
+                doc_id: p.snapshot.doc_id,
+                revision,
+                document: std::sync::Arc::new(document),
+            },
+        });
+        Ok(preview_ack(p.revision()))
+    }
+    pub async fn drag(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
+        if self.preview.is_some() {
+            return self.preview_sample(sample);
+        }
+        let (id, drag) = self.active.as_mut().ok_or(ClientError::NoGesture)?;
+        let published = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        if published.snapshot.doc_id != drag.start.doc_id {
+            return Err(ClientError::DocumentChanged);
+        }
+        let revision = published.revision();
+        if self.active_revision.is_some_and(|r| r != revision)
+            && matches!(
+                drag.kind,
+                DragKind::ProEdit(_)
+                    | DragKind::Timing(_)
+                    | DragKind::Keys { .. }
+                    | DragKind::GraphKeys { .. }
+                    | DragKind::StretchKeys { .. }
+                    | DragKind::TransformKeys { .. }
+            )
+        {
+            return Err(ClientError::ConcurrentRelativeGesture);
+        }
+        let commands = drag.commands(sample)?;
+        let id = *id;
+        let ack = self
+            .call(
+                GestureCall::Step {
+                    gesture: id,
+                    body: WriteBody::Commands(commands),
+                    replace: true,
+                }
+                .into(),
+            )
+            .await?;
+        self.active_revision = Some(ack.revision);
+        Ok(ack)
+    }
+    /// Escape uses the kernel's selective cancellation; foreign edits survive.
+    /// A conflict notice is returned intact so the host can report a kept edit.
+    pub async fn finish_drag(&mut self, commit: bool) -> Result<Ack, ClientError> {
+        if let Some(preview) = self.preview.take() {
+            let published = self
+                .kernel
+                .published(&self.project)
+                .ok_or(ClientError::Closed)?;
+            if published.snapshot.doc_id != preview.drag.start.doc_id
+                || published.snapshot.open_comp() != preview.drag.start.comp_id
+            {
+                self.sync()?;
+                return Err(ClientError::DocumentChanged);
+            }
+            if commit {
+                return self
+                    .call(Call::Transact {
+                        label: Some(preview.drag.label().into()),
+                        body: WriteBody::Commands(preview.commands),
+                        expected_revision: (preview.gain
+                            || preview.drag.kind.is_strip_trim()
+                            || preview.key_move.is_some())
+                        .then_some(preview.drag.start.revision),
+                    })
+                    .await;
+            }
+            self.sync()?;
+            return Ok(Ack {
+                txid: None,
+                revision: published.revision(),
+                folded: None,
+                notice: None,
+                reply: Reply::Applied {
+                    revision: published.revision(),
+                    changed: false,
+                },
+            });
+        }
+        let (id, drag) = self.active.as_ref().ok_or(ClientError::NoGesture)?;
+        let published = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        if published.snapshot.doc_id != drag.start.doc_id {
+            self.active = None;
+            self.active_revision = None;
+            return Err(ClientError::DocumentChanged);
+        }
+        let call = if commit {
+            GestureCall::Commit { gesture: *id }
+        } else {
+            GestureCall::Cancel { gesture: *id }
+        };
+        let ack = self.call(call.into()).await?;
+        self.active = None;
+        self.active_revision = None;
+        Ok(ack)
+    }
+
+    /// Begin a press-and-drag switch paint gesture (one undo step across all swept rows).
+    pub async fn begin_switch_paint(
+        &mut self,
+        label: String,
+        commands: Vec<pm_kernel::Command>,
+    ) -> Result<(), ClientError> {
+        if let Some(old) = self.switch_gesture.take() {
+            let _ = self.call(GestureCall::Commit { gesture: old }.into()).await;
+        }
+        self.sync()?;
+        let ack = self
+            .call(GestureCall::Begin { label }.into())
+            .await?;
+        let Reply::Gesture(id) = ack.reply else {
+            return Err(ClientError::Rejected("gesture acknowledgement".into()));
+        };
+        self.switch_gesture = Some(id);
+        if !commands.is_empty() {
+            self.call(
+                GestureCall::Step {
+                    gesture: id,
+                    body: WriteBody::Commands(commands),
+                    replace: false,
+                }
+                .into(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Append newly swept layer switch edits to the active switch-paint gesture.
+    pub async fn step_switch_paint(
+        &mut self,
+        commands: Vec<pm_kernel::Command>,
+    ) -> Result<(), ClientError> {
+        let Some(id) = self.switch_gesture else {
+            return Ok(());
+        };
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.call(
+            GestureCall::Step {
+                gesture: id,
+                body: WriteBody::Commands(commands),
+                replace: false,
+            }
+            .into(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Commit or cancel the active switch-paint gesture.
+    pub async fn finish_switch_paint(&mut self, commit: bool) -> Result<(), ClientError> {
+        let Some(id) = self.switch_gesture.take() else {
+            return Ok(());
+        };
+        let call = if commit {
+            GestureCall::Commit { gesture: id }
+        } else {
+            GestureCall::Cancel { gesture: id }
+        };
+        self.call(call.into()).await?;
+        Ok(())
+    }
+    /// Adopt view facts another client of this project persisted. Rows depend
+    /// on them, so a native surface and the panel worker must agree.
+    pub fn adopt_view(&mut self) -> Result<bool, ClientError> {
+        let p = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        let view = p.ui_state.timeline.clone();
+        if self.adopted.as_ref() == Some(&view) {
+            return Ok(false);
+        }
+        self.adopted = Some(view);
+        self.model.sync(&p);
+        Ok(true)
+    }
+    /// [`publish_view`](Self::publish_view) when the view differs from the
+    /// one published: every view the panel draws from (the mode, the graph,
+    /// reveals) follows whatever changed the model, menu, key or control.
+    pub async fn publish_view_if_changed(&self) -> Result<(), ClientError> {
+        self.publish_view().await
+    }
+    pub async fn publish_view(&self) -> Result<(), ClientError> {
+        self.publish_view_from(self.kernel.state()).await
+    }
+    /// [`Self::publish_view`], patching `state` first. The view facts are a
+    /// patch on the project's UI entry as read: when another write moved the
+    /// state on meanwhile (the editor writes it on most changes), the patch
+    /// is made again on the state as it is now, so nothing either wrote is
+    /// lost (PM-476: a fast run of text boxes left the stale write's raw
+    /// error in the status line).
+    pub async fn publish_view_from(
+        &self,
+        mut state: std::sync::Arc<pm_kernel::state::StateSnapshot>,
+    ) -> Result<(), ClientError> {
+        use pm_kernel::state::{STATE_CHANGED, StateOp, StateTransaction};
+        const TRIES: usize = 8;
+        for attempt in 1..=TRIES {
+            let old = state.ui.get(&self.project).cloned().unwrap_or_default();
+            let next = self.model.patch_ui(&old);
+            if next == old && self.kernel.state().revision == state.revision {
+                return Ok(());
+            }
+            let written = self
+                .kernel
+                .state_transaction(StateTransaction {
+                    expected_revision: Some(state.revision),
+                    ops: vec![StateOp::Ui {
+                        project: self.project.clone(),
+                        next,
+                    }],
+                })
+                .await
+                .ok_or(ClientError::Closed)?;
+            match written {
+                Ok(_) => return Ok(()),
+                Err(pm_kernel::KernelFailure::Storage(m))
+                    if m == STATE_CHANGED && attempt < TRIES =>
+                {
+                    state = self.kernel.state();
+                }
+                Err(e) => return Err(ClientError::Kernel(e.to_string())),
+            }
+        }
+        unreachable!("the last try returns")
+    }
+    /// The host awaits disposal before retiring/replacing a panel. Drop never
+    /// blocks the main thread and cannot silently cancel a kernel lease.
+    pub async fn dispose(mut self) -> Result<Option<Ack>, ClientError> {
+        if self.active.is_some() || self.preview.is_some() {
+            self.finish_drag(false).await.map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn active_drag(&self) -> Option<&Drag> {
+        self.preview
+            .as_ref()
+            .map(|p| &p.drag)
+            .or_else(|| self.active.as_ref().map(|(_, d)| d))
+    }
+}
+
+fn preview_ack(revision: u64) -> Ack {
+    Ack {
+        txid: None,
+        revision,
+        folded: None,
+        notice: None,
+        reply: Reply::Applied {
+            revision,
+            changed: false,
+        },
+    }
+}

@@ -1,0 +1,42 @@
+{
+ "time": 2,
+ "view": {
+  "zoom": 2
+ },
+ "history": {
+  "version": 1,
+  "paths": "composition",
+  "index": 0,
+  "entries": [
+   {
+    "label": "Rename Layer",
+    "forward": [
+     {
+      "path": [
+       "comps",
+       "C1",
+       "layers",
+       0,
+       "name"
+      ],
+      "exists": true,
+      "value": "Before"
+     }
+    ],
+    "backward": [
+     {
+      "path": [
+       "comps",
+       "C1",
+       "layers",
+       0,
+       "name"
+      ],
+      "exists": true,
+      "value": "Original"
+     }
+    ]
+   }
+  ]
+ }
+}

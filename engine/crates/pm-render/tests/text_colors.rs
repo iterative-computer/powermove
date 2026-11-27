@@ -1,0 +1,296 @@
+//! Text and caption colors as today's canvas setters take them:
+//!
+//! - `hsl()` and `hwb()` draw the sRGB color Chromium stores;
+//! - a string the setter rejects keeps the style that `save()` restored
+//!   (black on a fresh canvas, the box fill under a caption box), never the
+//!   previous glyph's or word's color;
+//! - `hexToRgba` strings holding `NaN` are rejected the same way;
+//! - CSS Color 4/5 colors (`oklch()`, `lab()`, `color()`, `color-mix()`,
+//!   relative colors, `currentcolor`) draw (`pm_text::render::color4`; their
+//!   pixels are gated on the closure capture in `text_raster`);
+//! - a valid CSS color the engine does not reproduce (`light-dark()`, system
+//!   colors not measured) refuses the layer, in `text_raster` and in
+//!   `render`, and the refusal is not left behind for the next layer.
+//!
+//! Runs without the harness (the CoreText registry needs the main thread).
+
+mod support;
+
+#[cfg(target_os = "macos")]
+fn main() {
+    use pm_protocol::color::Precision;
+    use pm_render::Renderer;
+    use serde_json::{Value, json};
+    use support::doc::{ch, layer, no_fill, project};
+
+    let mut r = Renderer::headless().expect("a Metal device");
+    r.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
+        pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+        None,
+    ))));
+    let doc_of = |ty: &str, d: &Value| {
+        let l = layer("l", ty, d.clone(), 960.0, 540.0, 10.0);
+        let v = project(1920, 1080, 10.0, no_fill(), vec![l]);
+        pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1)
+    };
+    let text = |color: &str| {
+        json!({"text": "Color 123", "font": "SF Pro Display", "weight": 700, "size": 48,
+            "color": color, "align": "left"})
+    };
+    let ranged = |base: &str, second: &str| {
+        let style = |id: &str, start: u32, end: u32, color: &str| json!({"id": id, "start": start, "end": end, "p": {"color": ch(json!(color))}});
+        json!({"text": "Ranged colors", "font": "SF Pro Display", "weight": 700, "size": 48,
+            "color": base, "align": "left",
+            "styles": [style("s1", 0, 3, "#FF0000"), style("s2", 3, 6, second)]})
+    };
+    let caption = |fill: &str, highlight: &str, box_color: &str, stroke: &str, boxed: bool| {
+        json!({
+            "cues": [{"id": "c1", "text": "Colors in a caption", "start": 0, "end": 3}],
+            "style": {"preset": "pop", "font": "SF Pro Display", "weight": 900, "italic": false,
+                "size": 64, "tracking": 0, "leading": 1.05, "fill": fill, "stroke": 6,
+                "strokeColor": stroke, "box": boxed, "boxColor": box_color, "boxOpacity": 100,
+                "boxPadding": 14, "boxRadius": 10, "placement": "middle", "align": "center",
+                "offsetX": 0, "offsetY": 0, "safeMargin": 8, "maxWidth": 76, "maxLines": 2,
+                "textCase": "none", "highlight": true, "highlightColor": highlight,
+                "highlightScale": 100, "wordAnimation": "none"}
+        })
+    };
+    let mut failures: Vec<String> = Vec::new();
+    let raster = |r: &mut Renderer, ty: &str, d: &Value| {
+        r.text_raster(
+            &doc_of(ty, d),
+            "Ptest-root",
+            "l",
+            1.05,
+            1.0,
+            Precision::Float32,
+        )
+    };
+
+    // Equal rendered colors and geometry. Parser representations can differ
+    // below f32 paint precision without sharing an internal cache key.
+    let same = [
+        (
+            "detached light-dark() retains black",
+            "text",
+            text("light-dark(red, blue)"),
+            text("#000000"),
+        ),
+        ("ButtonFace", "text", text("ButtonFace"), text("#efefef")),
+        (
+            "Highlight",
+            "text",
+            text("Highlight"),
+            text("rgba(128,188,254,0.6)"),
+        ),
+        (
+            "hsl() as hex",
+            "text",
+            text("hsl(0 100% 50%)"),
+            text("#FF0000"),
+        ),
+        (
+            "hsla() legacy syntax",
+            "text",
+            text("hsla(240, 100%, 50%, 0.5)"),
+            text("rgba(0, 0, 255, 0.5)"),
+        ),
+        ("hwb()", "text", text("hwb(120 0% 0%)"), text("#00FF00")),
+        (
+            "rejected text color is black",
+            "text",
+            text("bogus"),
+            text("#000000"),
+        ),
+        (
+            "rejected glyph color is black, not the previous glyph's",
+            "text",
+            ranged("#00FF00", "bogus"),
+            ranged("#00FF00", "#000000"),
+        ),
+        (
+            "hsl() in a range style",
+            "text",
+            ranged("#00FF00", "hsl(240 100% 50%)"),
+            ranged("#00FF00", "#0000FF"),
+        ),
+        (
+            "rejected caption fill takes the box color",
+            "captions",
+            caption("bogus", "bogus", "#202020", "#000000", true),
+            caption("#202020", "#202020", "#202020", "#000000", true),
+        ),
+        (
+            "rejected caption fill without a box is black",
+            "captions",
+            caption("bogus", "bogus", "#202020", "#333333", false),
+            caption("#000000", "#000000", "#202020", "#333333", false),
+        ),
+        (
+            "rejected highlight color takes the box color, not the previous word's",
+            "captions",
+            caption("#FFFFFF", "bogus", "#202020", "#000000", true),
+            caption("#FFFFFF", "#202020", "#202020", "#000000", true),
+        ),
+        (
+            "a short box code (rgba with NaN) fills black",
+            "captions",
+            caption("#FFFFFF", "#FFD43B", "#fff", "#000000", true),
+            caption("#FFFFFF", "#FFD43B", "#000000", "#000000", true),
+        ),
+        (
+            "a short stroke code (rgba with NaN) strokes black",
+            "captions",
+            caption("#FFFFFF", "#FFD43B", "#202020", "#fff", true),
+            caption("#FFFFFF", "#FFD43B", "#202020", "#000000", true),
+        ),
+    ];
+    for (name, ty, d, expected) in &same {
+        match (raster(&mut r, ty, d), raster(&mut r, ty, expected)) {
+            (Ok(Some(a)), Ok(Some(b))) => {
+                let equal =
+                    a.canvas == b.canvas && a.plan.crop == b.plan.crop && a.pixels == b.pixels;
+                println!("{name:<72} {}", if equal { "equal" } else { "DIFFERS" });
+                if !equal {
+                    failures.push(format!("{name}: draws differently from the expected color"));
+                }
+            }
+            (a, b) => failures.push(format!(
+                "{name}: {:?} / {:?}",
+                a.map(|r| r.is_some()),
+                b.map(|r| r.is_some())
+            )),
+        }
+    }
+    // The cases above can fail: the colors they tell apart draw
+    // differently (carrying the previous glyph's or word's color forward,
+    // as the engine once did, would not be equal to the expected scene).
+    let differ = [
+        ("text", text("#FF0000"), text("#000000")),
+        (
+            "text",
+            ranged("#00FF00", "#000000"),
+            ranged("#00FF00", "#FF0000"),
+        ),
+        (
+            "captions",
+            caption("#FFFFFF", "#202020", "#202020", "#000000", true),
+            caption("#FFFFFF", "#FFFFFF", "#202020", "#000000", true),
+        ),
+        (
+            "captions",
+            caption("#202020", "#202020", "#202020", "#000000", true),
+            caption("#000000", "#000000", "#202020", "#000000", true),
+        ),
+        (
+            "captions",
+            caption("#FFFFFF", "#FFD43B", "#000000", "#000000", true),
+            caption("#FFFFFF", "#FFD43B", "#FFFFFF", "#000000", true),
+        ),
+    ];
+    for (i, (ty, a, b)) in differ.iter().enumerate() {
+        let a = raster(&mut r, ty, a).unwrap().unwrap();
+        let b = raster(&mut r, ty, b).unwrap().unwrap();
+        if a.plan.key == b.plan.key {
+            failures.push(format!("sanity case {i}: the colors draw identically"));
+        }
+    }
+
+    // CSS Color 4/5 colors draw.
+    for (name, ty, d) in [
+        ("oklch() text", "text", text("oklch(62.8% 0.258 29.2)")),
+        ("lab() text", "text", text("lab(50% 40 59.5)")),
+        ("color() text", "text", text("color(display-p3 1 0 0)")),
+        ("currentcolor text", "text", text("currentcolor")),
+        (
+            "oklch() range style",
+            "text",
+            ranged("#00FF00", "oklch(70% 0.1 200)"),
+        ),
+        (
+            "color-mix() caption fill",
+            "captions",
+            caption(
+                "color-mix(in srgb, red, blue)",
+                "#FFD43B",
+                "#202020",
+                "#000000",
+                true,
+            ),
+        ),
+    ] {
+        match raster(&mut r, ty, &d) {
+            Ok(Some(_)) => println!("{name:<72} drawn"),
+            Ok(None) => failures.push(format!("{name}: text_raster drew nothing")),
+            Err(e) => failures.push(format!("{name}: text_raster refused: {e}")),
+        }
+    }
+    // An effect that reads its layer's rectangle (Levels) grades a text
+    // layer: the ink takes the colour a plain layer of that colour takes.
+    {
+        use pm_protocol::common::{Size, Ticks};
+        let levels = pm_fx_defs::catalog::main_catalog()
+            .current("levels")
+            .expect("levels");
+        let mut p: serde_json::Map<String, Value> = levels
+            .defaults()
+            .into_iter()
+            .map(|(key, value)| (key, ch(value)))
+            .collect();
+        p.insert("gamma".into(), ch(json!(1.25)));
+        p.insert("outBlack".into(), ch(json!(0.04)));
+        let fx = json!([{"id":"grade","type":"levels","on":true,"p":p,"inputs":{},
+            "version": levels.metadata.get("version").cloned().unwrap_or(json!(1))}]);
+        let mut ink = |d: Value, ty: &str, graded: bool| {
+            let mut l = layer("l", ty, d, 128.0, 64.0, 1.0);
+            if graded {
+                l["fx"] = fx.clone();
+            }
+            let v = project(256, 128, 1.0, no_fill(), vec![l]);
+            let mut doc =
+                pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1);
+            doc.set_saving_app_version(Some("1.3.0".into()));
+            r.set_main_effects_for_document(&doc).unwrap();
+            let frame = r
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    Ticks::ZERO,
+                    &pm_render::RenderRequest::sized(Size::new(256, 128), Precision::Float32),
+                    &pm_render::MapResolver::default(),
+                )
+                .expect("the frame draws");
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let pixels = r.read_rgba(&frame).unwrap();
+            // The most covered pixel: solid ink inside a heavy stem.
+            pixels
+                .chunks_exact(4)
+                .max_by(|a, b| a[3].total_cmp(&b[3]))
+                .map(|px| [px[0], px[1], px[2], px[3]])
+                .unwrap()
+        };
+        let heavy = json!({"text": "HHH", "font": "SF Pro Display", "weight": 900, "size": 96,
+            "color": "#996633", "align": "center"});
+        let plain = ink(heavy.clone(), "text", false);
+        let text = ink(heavy, "text", true);
+        let solid = ink(json!({"w":64,"h":64,"color":"#996633"}), "solid", true);
+        if plain[3] < 0.999 || (0..3).all(|c| (text[c] - plain[c]).abs() < 1e-3) {
+            failures.push(format!(
+                "Levels on text: ungraded {plain:?}, graded {text:?}: the grade changes solid ink"
+            ));
+        }
+        if (0..4).any(|c| (text[c] - solid[c]).abs() > 1e-4) {
+            failures.push(format!(
+                "Levels on text: ink {text:?}, a plain layer of that colour {solid:?}"
+            ));
+        }
+        println!("{:<72} drawn", "Levels on a text layer");
+    }
+    for f in &failures {
+        println!("FAILED {f}");
+    }
+    assert!(failures.is_empty());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}

@@ -1,0 +1,3341 @@
+//! The headless render API: (document, composition, time, request) →
+//! texture or readback. One [`Renderer`] per engine (interactive or job);
+//! it keeps compiled pipelines, the target pool, media caches, and the
+//! evaluator's caches across frames.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+mod chrome;
+mod footage;
+#[cfg(test)]
+mod image_budget_tests;
+mod layer_raster;
+pub(crate) mod media_prepare;
+mod material_capture;
+pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCaptureStats};
+mod source;
+mod source_video;
+pub use footage::FrameFootage;
+#[cfg(test)]
+mod still_wait_tests;
+pub use layer_raster::{LayerPixels, LayerRaster};
+pub use media_prepare::MediaPreparation;
+
+use pm_eval::{Comp, Evaluator};
+use pm_gpu::{Target, TargetPool, working_format};
+use pm_model::Document;
+use pm_protocol::color::{Precision, WorkingEncoding};
+use pm_protocol::common::Ticks;
+
+use crate::assets::AssetResolver;
+use crate::capability::{self, Feature, Unsupported};
+use crate::composite::{ColorSettings, EffectHost};
+use crate::effects::Effects;
+use crate::error::{LayerFailure, RenderError};
+use crate::exec::{Exec, Region};
+use crate::expr::PmExprEngine;
+use crate::media::MediaCache;
+use crate::pipelines::Pipelines;
+use crate::plan::{self, Background, CompPlan};
+use crate::request::RenderRequest;
+use crate::scene3d::Scene3dRenderer;
+
+/// Rounds of a frame through a fallback host. A frame takes one round per
+/// runner step it draws: a waiting step's pixels may feed every later step
+/// (a request covers its textures' pixels), so later steps are asked for
+/// once it is answered, even on independent layers. Each round must ask
+/// for a request not asked before in the frame (answers are pinned until
+/// the frame is delivered, so one asked again means no progress); this cap
+/// only bounds a frame whose requests never repeat, far past any real
+/// project (each round renders the frame again).
+const HOST_ROUNDS: usize = 1024;
+
+/// Attempts a fallback host gets at a request that fails transiently.
+const HOST_ATTEMPTS: u32 = 3;
+
+/// Answers a fallback host may give that the program is still compiling
+/// (`deadline`: the runner keeps the compile going, and the request waits
+/// for the same compile again) before they count as attempts. Each answer
+/// waits the runner's compile deadline (10 s), so a job waits about ten
+/// minutes for a program WebGL takes long to compile, as today's exporter
+/// waits for its compile; one the driver never finishes still stops the
+/// job with an error naming the program.
+pub const HOST_COMPILE_WAITS: u32 = 60;
+
+/// Whether a frame's `rounds`-th round through a fallback host makes
+/// progress: it asks for at least one request not asked before in the
+/// frame, within [`HOST_ROUNDS`].
+fn host_progress(
+    asked: &mut std::collections::HashSet<String>,
+    requests: &[crate::shader_layers::FallbackRequest],
+    rounds: usize,
+) -> Result<(), RenderError> {
+    if rounds > HOST_ROUNDS {
+        return Err(RenderError::Fallback(format!(
+            "the frame still needed the WebGL fallback runner after {HOST_ROUNDS} rounds"
+        )));
+    }
+    let mut new = false;
+    for r in requests {
+        new |= asked.insert(r.key.clone());
+    }
+    if !new {
+        return Err(RenderError::Fallback(format!(
+            "the frame asked the WebGL fallback runner again for {} answered request(s) (round {rounds})",
+            requests.len()
+        )));
+    }
+    Ok(())
+}
+
+/// The frame's SVG images drawn by the declared resvg fallback, attributed
+/// to the layers whose documents name an unsupported feature (a device or
+/// work limit names only its file), and their layer diagnostics: warnings
+/// for each, and an empty one for a layer warned on the previous frame.
+fn svg_diagnostics(
+    layers: &[crate::plan::SvgLayer],
+    fallbacks: &[(std::path::PathBuf, String)],
+    warned: &mut Vec<(String, String)>,
+    meta: &mut Vec<pm_protocol::frame::Scene3dMeta>,
+) -> Vec<crate::SvgFallback> {
+    let mut out = Vec::new();
+    let mut now: Vec<(String, String)> = Vec::new();
+    for (path, reason) in fallbacks {
+        let mut attributed = false;
+        for l in layers.iter().filter(|l| l.path == *path) {
+            attributed = true;
+            out.push(crate::SvgFallback {
+                composition: l.composition.clone(),
+                layer: l.layer.clone(),
+                path: path.clone(),
+                reason: reason.clone(),
+            });
+        }
+        if !attributed {
+            out.push(crate::SvgFallback {
+                composition: String::new(),
+                layer: String::new(),
+                path: path.clone(),
+                reason: reason.clone(),
+            });
+        }
+    }
+    let mut report = |composition: &str, layer: &str, warnings: Vec<String>| {
+        let composition = pm_protocol::common::CompositionId::new(composition);
+        let layer = pm_protocol::common::LayerId::new(layer);
+        if composition.is_valid() && layer.is_valid() {
+            meta.push(pm_protocol::frame::Scene3dMeta {
+                composition,
+                layers: vec![layer],
+                warnings,
+                error: None,
+            });
+        }
+    };
+    for f in &out {
+        let key = (f.composition.clone(), f.layer.clone());
+        if f.layer.is_empty() || now.contains(&key) {
+            continue;
+        }
+        let warnings = out
+            .iter()
+            .filter(|g| g.composition == f.composition && g.layer == f.layer)
+            .map(|g| format!("Drawn by the 8-bit resvg fallback: {}", g.reason))
+            .collect();
+        report(&f.composition, &f.layer, warnings);
+        now.push(key);
+    }
+    for (composition, layer) in warned.iter().filter(|k| !now.contains(k)) {
+        report(composition, layer, Vec::new());
+    }
+    *warned = now;
+    out
+}
+
+/// A rendered frame.
+pub struct Frame {
+    /// Scene diagnostics of these pixels, grouped by composition and layer.
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
+    /// Premultiplied output values, E-encoded after linear-light compositing,
+    /// at the project's storage precision and the requested region size.
+    pub color: Target,
+    /// The depth and object-id surface (`rgba16float`), when requested.
+    pub depth_id: Option<Target>,
+    /// Top-level layer ids by id surface index (id − 1).
+    pub legend: Vec<String>,
+    /// Layers that failed and drew nothing.
+    pub failures: Vec<LayerFailure>,
+    /// SVG layers drawn by the declared resvg fallback, with the reason.
+    pub svg_fallbacks: Vec<crate::SvgFallback>,
+    /// The composition time rendered, in seconds.
+    pub seconds: f64,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: FrameFootage,
+}
+
+/// One layer's text raster ([`Renderer::text_raster`]).
+pub struct TextRaster {
+    /// Premultiplied working values of the plan's crop, top-down.
+    pub pixels: Vec<f32>,
+    /// The whole canvas in device pixels (`plan.crop` is a part of it).
+    pub canvas: (u32, u32),
+    /// The crop's quad in layer pixels and its anchor.
+    pub box_size: (f64, f64),
+    pub anchor: (f64, f64),
+    pub plan: crate::text::TextPlan,
+}
+
+/// A pass-through candidate ([`Renderer::pass_through`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PassThrough {
+    pub path: std::path::PathBuf,
+    /// Source time in seconds (the frame is selected by section 5 rule 7).
+    pub seconds: f64,
+    pub facts: pm_color::chroma::FrameFacts,
+}
+
+/// What a render into a caller's target reports.
+pub struct Rendered {
+    /// Scene diagnostics by composition and layer: 3D scenes, and SVG image
+    /// layers drawn by the declared resvg fallback (warnings name the
+    /// reason; an empty report clears one when the layer draws in float).
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
+    pub legend: Vec<String>,
+    pub failures: Vec<LayerFailure>,
+    /// SVG layers drawn by the declared resvg fallback, with the reason.
+    pub svg_fallbacks: Vec<crate::SvgFallback>,
+    pub seconds: f64,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: FrameFootage,
+    /// Where each top-level layer was drawn: its content quad in output
+    /// pixels, top-down, corners in the order (0,0), (1,0), (1,1), (0,1)
+    /// of the layer's unit quad (the viewer's overlay geometry, section 18
+    /// item 6). A layer drawn as several quads (a flattened group) reports
+    /// each of them.
+    pub quads: Vec<LayerQuad>,
+    /// Video layers drawn with the nearest decoded frame while their exact
+    /// frame decodes (scrub renders only, [`Renderer::set_scrub`]): the
+    /// frame each shows (its presented index in its source). Empty when
+    /// every video layer shows its exact frame.
+    pub stand_ins: Vec<usize>,
+}
+
+/// Row order in a snapshot target. `Gl` rows are inverted while the mapped
+/// readback is encoded or the viewer places the frame; other callers always
+/// receive top-down targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRows {
+    TopDown,
+    Gl,
+}
+
+/// One drawn quad of a top-level layer ([`Rendered::quads`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerQuad {
+    pub layer: String,
+    pub corners: [[f64; 2]; 4],
+}
+
+impl LayerQuad {
+    /// The quads of a plan's top-level draws, in output pixels top-down.
+    /// Plan matrices map the unit quad in the frame's own (top-down)
+    /// composition space scaled to output pixels.
+    pub fn of_plan(plan: &CompPlan) -> Vec<LayerQuad> {
+        let mut out = Vec::new();
+        for draw in &plan.draws {
+            quads_of(draw, &mut out);
+        }
+        out
+    }
+}
+
+fn quads_of(draw: &plan::Draw, out: &mut Vec<LayerQuad>) {
+    match &draw.content {
+        // A 2.5D layer: its projected quad.
+        plan::Content::Placed(p) if p.plane.is_some() => {
+            out.push(LayerQuad {
+                layer: draw.layer.clone(),
+                corners: crate::space25d::corners(p.plane.as_ref().expect("checked")),
+            });
+        }
+        // A motion-blurred layer: where its samples were drawn.
+        plan::Content::Texture {
+            source: plan::Source::Accumulate(acc),
+            ..
+        } => {
+            let start = out.len();
+            for d in &acc.draws {
+                quads_of(d, out);
+            }
+            for q in &mut out[start..] {
+                q.layer.clone_from(&draw.layer);
+            }
+        }
+        _ => {
+            let m = draw.matrix;
+            let at = |x: f64, y: f64| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+            out.push(LayerQuad {
+                layer: draw.layer.clone(),
+                corners: [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
+            });
+        }
+    }
+}
+
+/// Commands recorded around each frame's own commands, in the frame's
+/// command buffer: the job engine's GPU timestamps (contract 13), which must
+/// not count the time the GPU waits for the frame to be encoded.
+pub trait CommandBracket: Send + Sync {
+    /// Recorded first.
+    fn begin(&self, encoder: &mut wgpu::CommandEncoder);
+    /// Recorded last; `output` is the frame's target, written by then.
+    fn end(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView);
+}
+
+/// The motion blur and resampler a request asks of its root composition.
+fn build_options(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+    shader_fallback: bool,
+    offline_cards: bool,
+) -> plan::BuildOptions {
+    plan::BuildOptions {
+        material: None,
+        blur: crate::motion::resolve(comp, request.motion_blur),
+        sampling: request.sampling,
+        shader_fallback,
+        offline_cards,
+        preview: preview_window(comp, request),
+        origin: request.origin,
+        final_output: request.output_kind == crate::OutputKind::Final,
+        read_ahead: request.read_ahead && !request.export,
+        keep_empty_groups: request.depth_id,
+        compat_probe_only: false,
+        focus_group: (!request.export).then(|| request.focus_group.clone()).flatten(),
+    }
+}
+
+/// The viewer's source-clipping window in a preview of the open root
+/// composition: today's `canClipPreviewSources` (`crate::compat_crop`). A
+/// supplied canvas includes its pan buffer, even when presentation only
+/// draws a smaller region. Without a canvas, the region is the window.
+fn preview_window(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+) -> Option<crate::compat_crop::PreviewWindow> {
+    if request.export
+        || !(comp.at_root() || comp.is_open_canonical())
+        || !matches!(request.output_kind, crate::request::OutputKind::Preview)
+    {
+        return None;
+    }
+    let r = if request.preview_canvas {
+        pm_protocol::common::PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        }
+    } else {
+        request.region?
+    };
+    Some(crate::compat_crop::PreviewWindow {
+        x: f64::from(r.x),
+        y: f64::from(r.y),
+        width: f64::from(r.width),
+        height: f64::from(r.height),
+    })
+}
+
+/// A cropped effect needs the pixels outside the presentation rectangle.
+/// Keep a logical canvas around the viewport and express the viewport as its
+/// ROI; the compositor then grows that ROI by the declared chain padding.
+/// Without this, the viewport edge becomes an artificial blur/shadow sampling
+/// edge. Only the grown ROI is allocated. Padding that outreaches the canvas
+/// stops at its edge, as any padding stops at the frame.
+fn effect_viewport_request(
+    comp: &Comp<'_>,
+    effects: &Effects,
+    request: &RenderRequest,
+) -> Option<RenderRequest> {
+    let (ox, oy) = request.origin?;
+    if !comp.layers().iter().any(|layer| {
+        // Local source chains already retain their complete padded raster.
+        if pm_eval::node::string(pm_eval::node::member(Some(layer), "effectSpace"))
+            .is_some_and(|s| s.as_bytes() == b"source")
+        {
+            return false;
+        }
+        pm_eval::node::array(pm_eval::node::member(Some(layer), "fx")).is_some_and(|fx| {
+            fx.iter().any(|effect| {
+                if matches!(
+                    pm_eval::node::member(Some(effect), "on").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::Bool(false))
+                ) {
+                    return false;
+                }
+                let id = pm_eval::node::to_js_string(pm_eval::node::member(Some(effect), "type"))
+                    .to_string_lossy();
+                let Ok(key) =
+                    effects.saved_key(&id, pm_eval::node::member(Some(effect), "version"))
+                else {
+                    return false;
+                };
+                effects
+                    .get(pm_protocol::definitions::DefinitionKind::Effect, &key)
+                    .is_some_and(|d| {
+                        !d.flags.viewport_safe
+                            || !d.flags.viewport_padding.is_empty()
+                            || crate::effects::versions::main_definition(&key).is_some_and(|d| {
+                                d.metadata
+                                    .get("viewportPaddingPixels")
+                                    .and_then(|v| v.as_f64())
+                                    .is_some_and(|p| p > 0.)
+                            })
+                    })
+            })
+        })
+    }) {
+        return None;
+    }
+    let scale = request.scale.unwrap_or_else(|| {
+        plan::derived_scale(comp, request.output_size.width, request.output_size.height)
+    });
+    let dim = |field: &str, fallback: u32| {
+        let n = pm_eval::node::to_number(comp.member(field));
+        if n.is_finite() && n > 0. {
+            n
+        } else {
+            f64::from(fallback)
+        }
+    };
+    // Align the new ROI to integer pixels while retaining fractional pan in
+    // the canvas origin. Negative pans keep their exact outside-comp extent.
+    // A canvas beyond the largest output, which every viewer crop is, becomes
+    // a window of that size around the viewport, the limit of `Region::grow`.
+    let limit = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
+    let window = |origin: f64, visible: u32, extent: f64| {
+        let start = origin.ceil().max(0.);
+        let base = origin - start;
+        let visible = f64::from(visible);
+        let full = (extent - base).ceil().max(start + visible);
+        let shift = (start - ((limit - visible) / 2.).floor()).clamp(0., (full - limit).max(0.));
+        (base + shift, full.min(limit), start - shift, full > limit)
+    };
+    let (ox, width, x, cut_x) = window(
+        ox,
+        request.output_size.width,
+        dim("w", request.output_size.width) * scale.0,
+    );
+    let (oy, height, y, cut_y) = window(
+        oy,
+        request.output_size.height,
+        dim("h", request.output_size.height) * scale.1,
+    );
+    let r = request.region.unwrap_or(pm_protocol::common::PixelRect {
+        x: 0,
+        y: 0,
+        width: request.output_size.width,
+        height: request.output_size.height,
+    });
+    let mut expanded = request.clone();
+    expanded.output_size = pm_protocol::common::Size::new(width as u32, height as u32);
+    expanded.scale = Some(scale);
+    expanded.region = Some(pm_protocol::common::PixelRect {
+        x: x as u32 + r.x,
+        y: y as u32 + r.y,
+        width: r.width,
+        height: r.height,
+    });
+    expanded.origin = (cut_x || cut_y || (ox, oy) != (0., 0.)).then_some((ox, oy));
+    expanded.preview_canvas = true;
+    Some(expanded)
+}
+
+/// The renderer.
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    /// SVG layers (composition, layer) the last frame of each rendered
+    /// composition warned about: views of other compositions sharing the
+    /// renderer neither clear nor repeat them.
+    svg_warned: std::collections::HashMap<String, Vec<(String, String)>>,
+    pipelines: Pipelines,
+    media: MediaCache,
+    pool: TargetPool,
+    scene3d: Scene3dRenderer,
+    /// The 3D pass's planning options (mesh definitions; the view override
+    /// comes with each request).
+    options3d: crate::scene3d::Options3d,
+    vector: crate::vector::cache::VectorCache,
+    /// [`Renderer::set_vector_batching`], kept across cache resets.
+    vector_batching: bool,
+    pyramids: crate::sampling::gpu::PyramidCache,
+    evaluator: Evaluator,
+    bracket: Option<Arc<dyn CommandBracket>>,
+    /// A fallback runner the renderer waits on ([`Renderer::set_fallback_host`]).
+    fallback_host: Option<Arc<dyn crate::shader_layers::FallbackHost>>,
+    /// Effect, transition, and layer definitions and their programs
+    /// (`crate::effects`, contract 10): the renderer's own effect host.
+    effects: Effects,
+    /// Another effect host in place of the renderer's own (tests).
+    effect_host: Option<Arc<dyn EffectHost>>,
+    /// Shader-layer programs and the decision 19 fallback runner's state
+    /// (`crate::shader_layers`).
+    shaders: crate::shader_layers::exec::ShaderState,
+    /// Mesh definitions given with [`Renderer::set_mesh_definitions`]; the
+    /// definition set's mesh snapshots are added to them.
+    explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
+    text: crate::text::TextContext,
+    text_gpu: crate::text::gpu::TextGpu,
+    /// The session's compatibility rasters (`crate::compat`).
+    compat: Option<Arc<dyn crate::compat::CompatRasters>>,
+    /// Layer draws kept across frames of one paused time
+    /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
+    reuse: crate::reuse::DrawReuse,
+    reuse_enabled: bool,
+    /// See [`Renderer::set_isolate_layers`].
+    isolate_layers: bool,
+    /// See [`Renderer::set_early_target_release`].
+    early_target_release: bool,
+    #[cfg(test)]
+    vector_trim_limits: Option<(u64, u64)>,
+    /// [`Renderer::missing_effects`].
+    missing_effects: Vec<crate::effects::versions::MissingEffect>,
+    /// [`Renderer::set_channel_memo`].
+    channel_memo: bool,
+    /// The bottom of the last reusing frame kept on the GPU
+    /// (`crate::frame_prefix`).
+    prefix: crate::frame_prefix::FramePrefix,
+    groups: crate::frame_prefix::GroupCache,
+    /// Frames read back one after another (exports): the staging buffer, a
+    /// frame target given back with [`Renderer::recycle`] and pixels given
+    /// back with [`Renderer::give_rgba`] (docs/engine/perfbench.md). Held
+    /// from one frame of an export to the next; dropped by
+    /// [`Renderer::release_frame_reuse`] (the export's end, every one-off
+    /// frame) and by [`Renderer::trim`].
+    frame_reuse: FrameReuse,
+    /// Source-monitor and filmstrip targets/readbacks reused only by the
+    /// source path. Composition frame-reuse and its lease stay independent.
+    source_reuse: source::SourceReuse,
+    material: material_capture::State,
+    /// Bind groups kept across frames (`crate::binds`).
+    binds: crate::binds::BindCache,
+}
+
+/// See [`Renderer::read_rgba_reusing`] and [`Renderer::recycle`].
+#[derive(Default)]
+struct FrameReuse {
+    readback: pm_gpu::readback::Readback,
+    target: Option<Target>,
+    /// A pixel buffer given back for the next read ([`Renderer::give_rgba`]).
+    rgba: Option<Vec<f32>>,
+}
+
+impl Renderer {
+    /// A renderer on a device. The device needs
+    /// `pm_gpu::device::required_features()`; 32-bit precision also needs
+    /// `FLOAT32_FILTERABLE` and `FLOAT32_BLENDABLE` (`pm_gpu::Gpu` requests
+    /// them when present).
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Renderer {
+        let pipelines = Pipelines::new(&device);
+        let media = MediaCache::new(&device);
+        let text_gpu = crate::text::gpu::TextGpu::new(&device);
+        let effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
+        Renderer {
+            text: crate::text::TextContext::default(),
+            text_gpu,
+            pipelines,
+            media,
+            pool: TargetPool::new(),
+            scene3d: Scene3dRenderer::default(),
+            options3d: crate::scene3d::Options3d::default(),
+            vector: crate::vector::cache::VectorCache::new(),
+            vector_batching: true,
+            pyramids: crate::sampling::gpu::PyramidCache::new(),
+            evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
+            device,
+            queue,
+            bracket: None,
+            effects,
+            effect_host: None,
+            shaders: Default::default(),
+            fallback_host: None,
+            explicit_meshes: Default::default(),
+            compat: None,
+            reuse: crate::reuse::DrawReuse::new(),
+            reuse_enabled: false,
+            isolate_layers: false,
+            early_target_release: true,
+            #[cfg(test)]
+            vector_trim_limits: Some(crate::exec::VECTOR_TRIM_LIMITS),
+            missing_effects: Vec::new(),
+            svg_warned: Default::default(),
+            channel_memo: true,
+            prefix: Default::default(),
+            groups: Default::default(),
+            frame_reuse: FrameReuse::default(),
+            source_reuse: source::SourceReuse::default(),
+            material: Default::default(),
+            binds: crate::binds::BindCache::default(),
+        }
+    }
+
+    /// The compatibility rasters frames draw from (`crate::compat`): with a
+    /// producer for a source, the layers it draws ask it, and a frame whose
+    /// answers have not arrived fails with [`RenderError::CompatPending`].
+    /// `None` (the default): every layer is the engine's own.
+    pub fn set_compat_rasters(&mut self, compat: Option<Arc<dyn crate::compat::CompatRasters>>) {
+        self.compat = compat;
+    }
+
+    /// Whether [`Renderer::render_into`] plans with the layer draws kept
+    /// from the last frame that used them (`crate::reuse`). Off by
+    /// default; the interactive viewer turns it on around its own frames
+    /// of a long-lived document, which changes in place, and off for
+    /// everything else the renderer draws. Entries stay while it is off
+    /// (they are validated by revision when it is on again).
+    pub fn set_draw_reuse(&mut self, enabled: bool) {
+        self.reuse_enabled = enabled;
+    }
+
+    /// Whether a draw list's missing coverage scenes render together
+    /// (`VectorCache::prepare_scenes_in`; on by default). Every texture is
+    /// the one each scene renders alone; tests turn it off to compare.
+    pub fn set_vector_batching(&mut self, enabled: bool) {
+        self.vector_batching = enabled;
+        self.vector.set_batching(enabled);
+    }
+
+    /// Lowers the vector cache's per-frame scratch bound (tests force split
+    /// and refused batches). It never raises the standing bound and resets
+    /// with the cache.
+    pub fn limit_vector_frame_scratch(&mut self, bytes: u64) {
+        self.vector.limit_frame_scratch(bytes);
+    }
+
+    /// Whether frames plan with the channels found in the same unchanged
+    /// document on earlier frames (`pm_eval` `channel_memo`; on by default).
+    /// Every plan is the one planned without it; tests turn it off to
+    /// compare.
+    pub fn set_channel_memo(&mut self, enabled: bool) {
+        self.channel_memo = enabled;
+        if !enabled {
+            self.evaluator.clear_channel_memo();
+        }
+    }
+
+    /// Opens the channel memo for a plan of `document` when it is on.
+    fn open_channel_memo(&mut self, document: &Document) {
+        if self.channel_memo {
+            self.evaluator.open_channel_memo(document);
+        }
+    }
+
+    /// Drops the kept layer draws and the kept bottom of the last frame.
+    pub fn clear_draw_reuse(&mut self) {
+        self.reuse.clear();
+        self.prefix.clear(&mut self.pool);
+        self.groups.clear();
+    }
+
+    /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
+    pub fn channel_memo_stats(&self) -> (u64, u64) {
+        self.evaluator.channel_memo_stats()
+    }
+
+    /// Queues the document's native effect and custom shader-layer programs on
+    /// background compiler workers. Host-provided effects retain their own
+    /// lifecycle.
+    pub fn prewarm_programs(&mut self, document: &pm_model::Document) -> usize {
+        let precision = document
+            .root()
+            .and_then(|root| crate::composite::color::project_color(root).ok())
+            .map_or(pm_protocol::color::Precision::Float16, |color| {
+                color.precision
+            });
+        let format = pm_gpu::target::working_format(precision);
+        let mut queued = 0;
+        if self.effect_host.is_none() {
+            let first = crate::effects::prewarm::document_definitions(document);
+            queued += self.effects.prewarm(&self.device, format, &first);
+        }
+        queued += self.shaders.prewarm(&self.device, format, document);
+        queued
+    }
+
+    /// The draw reuse's counters (with the frames drawn from a kept bottom
+    /// and the draws those did not draw again).
+    pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
+        crate::reuse::ReuseStats {
+            prefix_frames: self.prefix.reused_frames,
+            prefix_draws: self.prefix.reused_draws,
+            group_hits: self.groups.hits,
+            ..self.reuse.stats()
+        }
+    }
+
+    /// Install the pinned native current and historical built-in programs.
+    /// File provenance is carried outside authored JSON and frozen per job.
+    pub fn set_main_effects_for_document(&mut self, document: &Document) -> Result<(), String> {
+        self.set_document_effects(document, &[]).map(drop)
+    }
+
+    /// The pinned programs plus contributed definitions. A contribution with a
+    /// built-in id replaces it, as an extension override does in the registry.
+    /// Contributed code is third-party input: a bad definition fails alone and
+    /// comes back in the returned list, and only a layer that uses it is affected.
+    /// A pinned program that fails is an engine bug and stops the document.
+    pub fn set_document_effects(
+        &mut self,
+        document: &Document,
+        contributed: &[pm_protocol::definitions::DefinitionSnapshot],
+    ) -> Result<Vec<pm_protocol::error::EngineError>, String> {
+        use pm_protocol::{
+            common::DefinitionId,
+            error::{ErrorCode, ErrorScope},
+            validate::Validate,
+        };
+        let mut set =
+            crate::effects::versions::for_document(document, &mut self.effects.effect_types);
+        let mut refused = Vec::new();
+        let mut accepted = std::collections::BTreeSet::<DefinitionId>::new();
+        for definition in contributed {
+            if let Err(violation) = definition.validate() {
+                let message = format!("{} was refused: {violation:?}", definition.id.as_str());
+                refused.push(pm_protocol::error::EngineError::new(
+                    ErrorCode::ShaderCompile,
+                    ErrorScope::Definition {
+                        definition: definition.id.clone(),
+                    },
+                    message,
+                ));
+                continue;
+            }
+            accepted.insert(definition.id.clone());
+            set.definitions
+                .retain(|d| (d.kind, &d.id) != (definition.kind, &definition.id));
+            set.missing.retain(|m| *m != definition.id);
+            set.definitions.push(definition.clone());
+        }
+        let known: std::collections::HashSet<String> = set
+            .definitions
+            .iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect)
+            .map(|d| d.id.as_str().to_owned())
+            .collect();
+        let failures = self.set_definitions(&set).map_err(|e| e.to_string())?;
+        let (own, pinned): (Vec<_>, Vec<_>) = failures.into_iter().partition(|failure| {
+            matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
+        });
+        if !pinned.is_empty() {
+            return Err(pinned_failure(&pinned));
+        }
+        self.effects.versioned_builtins = true;
+        self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
+        let effects = &self.effects;
+        let unavailable = |ty: &str, version: Option<&pm_model::Node>| {
+            if !known.contains(ty) {
+                return Some(None);
+            }
+            effects.unavailable_revision(ty, version).map(Some)
+        };
+        self.missing_effects = document
+            .root()
+            .and_then(crate::capability::open_composition_id)
+            .map(|open| crate::effects::versions::missing_effects(document, &open, &unavailable))
+            .unwrap_or_default();
+        refused.extend(own);
+        Ok(refused)
+    }
+
+    pub fn set_plane_camera(&mut self, camera: Option<pm_eval::space3d::Camera3d>) {
+        self.options3d.plane_camera = camera;
+    }
+
+    /// Attach an immutable, worker-safe Studio source for viewer and exports.
+    /// Replacing it retires presented scenes and draws, retaining immutable BLASes.
+    pub fn set_studio_source(
+        &mut self,
+        source: Option<Arc<dyn crate::scene3d::provider::Source>>,
+        settings: crate::scene3d::provider::Settings,
+    ) {
+        if source.is_none() && self.scene3d.provider.is_none() {
+            return;
+        }
+        self.options3d.studio = source.as_ref().map(|_| settings);
+        match (self.scene3d.provider.as_mut(), source) {
+            (Some(pass), Some(source)) => pass.replace_source(source),
+            (_, source) => self.scene3d.provider = source.map(crate::scene3d::provider::Pass::new),
+        }
+        self.clear_draw_reuse();
+    }
+
+    pub fn studio_counters(&self) -> crate::scene3d::provider::Counters {
+        self.scene3d
+            .provider
+            .as_ref()
+            .map_or_else(Default::default, |p| p.counters())
+    }
+    /// Worker-only query against the attached Studio scene. No frame render,
+    /// path-tracing samples or image readback is needed.
+    pub fn pick_studio_surface(&mut self, request: &crate::scene3d::provider::SceneRequest, x:f32, y:f32) -> Result<Option<crate::scene3d::provider::SurfaceHit>, String> {
+        let Some(settings) = self.options3d.studio else {return Ok(None)};
+        let Some(pass) = self.scene3d.provider.as_mut() else {return Ok(None)};
+        pass.pick_surface(&self.device, &self.queue, request, settings.preview,x,y)
+    }
+
+    /// Runs layer effects and adjustment layers through `host` instead of
+    /// the renderer's definitions; `None` goes back to them.
+    pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
+        self.effect_host = host;
+    }
+
+    /// Replaces the effect, transition, and layer definitions with an
+    /// embedded set (an export job's, a collected project's, `pm-cli`'s;
+    /// contract 10) and translates what changed. Returns per-definition
+    /// failures. Without definitions, layers with effects or transitions
+    /// are routed.
+    pub fn set_definitions(
+        &mut self,
+        set: &pm_protocol::definitions::DefinitionSetSnapshot,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        let out = self.effects.set_snapshot(set);
+        self.refresh_meshes();
+        out
+    }
+
+    /// Applies a kernel update (`pushDefinitions`); the failures are
+    /// `DefinitionsApplied.failures`. In force for every later frame.
+    pub fn apply_definitions(
+        &mut self,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
+        let out = self.effects.apply(update);
+        self.refresh_meshes();
+        out
+    }
+
+    /// Forgets every definition: effects and transitions are routed again.
+    pub fn clear_definitions(&mut self) {
+        self.effects.clear();
+        self.refresh_meshes();
+    }
+
+    /// The mesh layer definitions the 3D pass plans with: the built-in OBJ
+    /// model layer, [`Renderer::set_mesh_definitions`], and every mesh
+    /// snapshot of the definition set (contract 10: `renderer.assetField`
+    /// and the parameter defaults), the set's winning over the others.
+    fn refresh_meshes(&mut self) {
+        let mut all = crate::scene3d::legacy::builtin_mesh_definitions();
+        all.extend(self.explicit_meshes.clone());
+        all.extend(crate::shader_layers::mesh_definitions(&self.effects));
+        self.options3d.mesh_definitions = Arc::new(all);
+    }
+
+    /// Whether a decision 19 fallback runner (a WebGL2 context in the
+    /// renderer) draws programs the native pipeline cannot translate. With
+    /// one, such layers plan as fallback requests and a frame without their
+    /// pixels fails with [`RenderError::ShaderFallbackPending`]; without
+    /// one (the default, every headless host) they route as
+    /// `Feature::ShaderFallback`.
+    pub fn set_shader_fallback_runner(&mut self, attached: bool) {
+        self.shaders.fallback_runner = attached;
+        self.effects.fallback.runner = attached;
+        if !attached {
+            self.shaders.clear_fallback();
+            self.fallback_host = None;
+        }
+    }
+
+    /// A runner the renderer waits on (the job engine's: the host runs each
+    /// request in a window's runner, contract 14): frames needing it render
+    /// to completion instead of failing with
+    /// [`RenderError::ShaderFallbackPending`]. `None` detaches it.
+    pub fn set_fallback_host(&mut self, host: Option<Arc<dyn crate::shader_layers::FallbackHost>>) {
+        self.set_shader_fallback_runner(host.is_some());
+        self.fallback_host = host;
+    }
+
+    /// Stores the runner's pixels for a request key
+    /// (`crate::shader_layers::FallbackRequest::key`).
+    pub fn put_fallback_pixels(
+        &mut self,
+        key: String,
+        pixels: crate::shader_layers::FallbackPixels,
+    ) {
+        if self.effects.fallback.expects(&key) {
+            self.effects.fallback.put_pixels(key, pixels);
+        } else {
+            if let Some(program) = self.shaders.waiting.remove(&key) {
+                self.effects.fallback.retries.succeeded(&program);
+            }
+            self.shaders.fallback.insert(key, pixels);
+        }
+    }
+
+    /// The runner could not draw a request.
+    ///
+    /// A final failure ([`FallbackFailure::is_final`]: WebGL refused the
+    /// program, or its draw passed the runner's deadline) is kept until the
+    /// program's source changes: it draws nothing (a shader layer) or is
+    /// skipped (an effect or transition) and is reported, and a draw past
+    /// the deadline is turned off by the watchdog. Any other failure is
+    /// transient (the runner's context was lost, its compile deadline
+    /// passed, no runner answered): the program is asked for again after
+    /// the returned delay (`Some(ZERO)` at the next frame), as today's
+    /// compositor draws again once its context is restored. A host draws
+    /// the view again then.
+    ///
+    /// [`FallbackFailure::is_final`]: crate::shader_layers::FallbackFailure::is_final
+    pub fn put_fallback_failure(
+        &mut self,
+        key: &str,
+        failure: crate::shader_layers::FallbackFailure,
+    ) -> Option<std::time::Duration> {
+        let now = self.effects.watchdog.now();
+        if self.effects.fallback.expects(key) {
+            self.effects.fallback.put_failure(key, failure, now)
+        } else if let Some(program) = self.shaders.waiting.remove(key) {
+            if failure.is_final() {
+                self.effects.fallback.retries.succeeded(&program);
+                self.shaders.failed.insert(program, (failure, false));
+                None
+            } else {
+                Some(self.effects.fallback.retries.failed(&program, failure, now))
+            }
+        } else {
+            None
+        }
+    }
+
+    /// When the earliest program whose request failed transiently is asked
+    /// for again (a host draws its views again then).
+    pub fn fallback_retry_at(&self) -> Option<Instant> {
+        self.effects.fallback.retries.next_at()
+    }
+
+    /// The textures a waiting effect or transition request samples (sent to
+    /// the runner after the request, `ShaderFallbackMessage::Input`).
+    pub fn fallback_textures(
+        &self,
+        key: &str,
+    ) -> Option<Vec<Arc<crate::shader_layers::FallbackPixels>>> {
+        self.effects.fallback.textures(key)
+    }
+
+    /// What the shader UI is told about the shader and extension layers of
+    /// `composition` and the compositions it nests, at the document's
+    /// revision (`crate::shader_layers::reports`): shader layers whose code
+    /// does not compile and extension layers whose definition is missing.
+    pub fn layer_reports(
+        &self,
+        document: &pm_model::Document,
+        composition: &str,
+    ) -> Vec<pm_protocol::error::EngineError> {
+        let meshes = self.options3d.mesh_definitions.clone();
+        crate::shader_layers::layer_reports(
+            document,
+            composition,
+            effect_host(&self.effect_host, &self.effects).and_then(|e| e.layer_definitions()),
+            &|id| meshes.contains_key(id),
+        )
+    }
+
+    /// Shader-layer programs built and fallback pixels held.
+    pub fn shader_state(&self) -> &crate::shader_layers::exec::ShaderState {
+        &self.shaders
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shaders_mut(&mut self) -> &mut crate::shader_layers::exec::ShaderState {
+        &mut self.shaders
+    }
+
+    /// The definitions in force (what an export job embeds).
+    pub fn definitions(&self) -> pm_protocol::definitions::DefinitionSetSnapshot {
+        self.effects.snapshot()
+    }
+
+    pub fn effects(&self) -> &Effects {
+        &self.effects
+    }
+
+    pub fn effects_mut(&mut self) -> &mut Effects {
+        &mut self.effects
+    }
+
+    /// Swaps in another definition set (one per view of a shared renderer:
+    /// each keeps its programs and watchdog state); returns the previous.
+    /// Whether a fallback runner is attached belongs to the renderer, not
+    /// to a definition set: the set swapped in draws with it.
+    pub fn swap_effects(&mut self, effects: &mut Effects) {
+        std::mem::swap(&mut self.effects, effects);
+        self.effects.fallback.runner = self.shaders.fallback_runner;
+        self.refresh_meshes();
+    }
+
+    /// Runs `f` with an effect context over the renderer's own definitions,
+    /// then submits and gives the intermediates back.
+    fn with_gpu<T>(
+        &mut self,
+        label: &str,
+        precision: Precision,
+        full: (u32, u32),
+        f: impl FnOnce(&mut crate::effects::exec::Gpu<'_>) -> T,
+    ) -> (T, Vec<Unsupported>) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        let mut taken = Vec::new();
+        let mut unsupported = Vec::new();
+        let out = {
+            let mut cx = crate::composite::effects::EffectContext {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                pool: &mut self.pool,
+                precision,
+                working: pm_protocol::color::WorkingEncoding::Standard,
+                full,
+                view: None,
+                taken: &mut taken,
+                recycle: true,
+                native: Some(crate::effects::exec::Native {
+                    inputs: &[],
+                    effects: &mut self.effects,
+                    timer: None,
+                    linear: &self.pipelines.linear,
+                    unsupported: &mut unsupported,
+                    content: None,
+                    output_bounds: None,
+                }),
+            };
+            let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
+            f(&mut gpu)
+        };
+        self.effects.uniforms.flush(&self.queue);
+        self.queue.submit([encoder.finish()]);
+        self.pool.end_submitted_frame(&self.queue, taken);
+        (out, unsupported)
+    }
+
+    /// Runs effect pass nodes on `input` as the compositor's `runEffects`
+    /// does (harnesses and the shader parity tests): every buffer the size
+    /// of `input`, in GL row order, E-encoded. `region` places the buffer in
+    /// a level of `full` pixels (`effectViewportCoordinates`); `backdrop` is
+    /// `u_backdrop` (an empty unit without one). Returns a new working
+    /// target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_effects(
+        &mut self,
+        input: &Target,
+        backdrop: Option<&Target>,
+        steps: &[crate::effects::plan::EffectStep],
+        time: f64,
+        region: Option<(u32, u32)>,
+        full: (u32, u32),
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let (w, h) = (input.width(), input.height());
+        let region = region.map(|(x, y)| Region {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+        let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h), None);
+        self.with_runner(|r| {
+            r.with_gpu("pm effects", precision, full, |gpu| {
+                Some(
+                    gpu.chain(
+                        "",
+                        steps,
+                        time,
+                        input,
+                        backdrop,
+                        coordinates,
+                        pm_protocol::color::WorkingEncoding::Standard,
+                    )
+                    .unwrap_or_else(|| gpu.copy_of(input)),
+                )
+            })
+        })
+    }
+
+    /// Runs `draw` (a harness's effects or transition, `with_gpu`) until
+    /// no fallback request waits: through the fallback host when one is
+    /// attached, else failing with [`RenderError::ShaderFallbackPending`].
+    fn with_runner(
+        &mut self,
+        draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
+    ) -> Result<Target, RenderError> {
+        if self.fallback_host.is_none() {
+            return self.with_runner_rounds(draw);
+        }
+        self.effects.fallback.retries.clear();
+        self.pin_fallback_results(true);
+        let out = self.with_runner_rounds(draw);
+        self.pin_fallback_results(false);
+        out
+    }
+
+    /// Keeps every runner result a host answers until the frame is
+    /// delivered (`true`), or lets the stores' budgets apply again.
+    fn pin_fallback_results(&mut self, pin: bool) {
+        if pin {
+            self.effects.fallback.pin_results();
+            self.shaders.fallback.pin();
+        } else {
+            self.effects.fallback.unpin_results();
+            self.shaders.fallback.unpin();
+        }
+    }
+
+    fn with_runner_rounds(
+        &mut self,
+        mut draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
+    ) -> Result<Target, RenderError> {
+        let mut rounds = 0;
+        let mut asked = std::collections::HashSet::new();
+        loop {
+            self.effects.fallback.pending.clear();
+            self.effects.fallback.fatal = None;
+            self.effects.fallback.blocked = false;
+            let (out, unsupported) = draw(self);
+            if let Some(why) = self.effects.fallback.fatal.take() {
+                return Err(RenderError::Fallback(why));
+            }
+            if !unsupported.is_empty() {
+                return Err(RenderError::Unsupported(unsupported));
+            }
+            let pending: Vec<_> = self
+                .effects
+                .fallback
+                .pending
+                .drain(..)
+                .map(|r| (*r).clone())
+                .collect();
+            if pending.is_empty() {
+                return out.ok_or_else(|| RenderError::Unsupported(vec![]));
+            }
+            let Some(host) = self.fallback_host.clone() else {
+                return Err(RenderError::ShaderFallbackPending(pending));
+            };
+            rounds += 1;
+            host_progress(&mut asked, &pending, rounds)?;
+            self.run_host(host.as_ref(), pending);
+        }
+    }
+
+    /// Runs requests through a fallback host and stores what it answers.
+    /// A transient failure (the runner's context was lost, no runner
+    /// answered) is tried again in place, up to [`HOST_ATTEMPTS`] times; a
+    /// program still compiling (`deadline`) is waited for again first, up to
+    /// [`HOST_COMPILE_WAITS`] times. Then the failure is stored
+    /// ([`Renderer::put_fallback_failure`]); the frame drawn again then
+    /// stops a job with an error naming the program, so nothing is
+    /// delivered without a program WebGL draws today. Each frame of a job
+    /// starts with fresh attempts.
+    fn run_host(
+        &mut self,
+        host: &dyn crate::shader_layers::FallbackHost,
+        requests: Vec<crate::shader_layers::FallbackRequest>,
+    ) {
+        for r in requests {
+            let textures = self.fallback_textures(&r.key).unwrap_or_default();
+            let key = r.key.clone();
+            let job = crate::shader_layers::FallbackJob {
+                request: r,
+                textures,
+            };
+            let mut attempt = 0;
+            let mut waits = 0;
+            let failure = loop {
+                pm_perf::bump(pm_perf::Counter::RasterRequests);
+                let failure = match host.run(&job) {
+                    Ok(pixels) if pixels.fits(&job.request) => {
+                        pm_perf::bump(pm_perf::Counter::RasterAnswers);
+                        self.put_fallback_pixels(key.clone(), pixels);
+                        break None;
+                    }
+                    Ok(pixels) if let Some(code) = pixels.invalid_rgba8_code(&job.request) => {
+                        crate::shader_layers::FallbackFailure {
+                            reason: "pixelCode".into(),
+                            message: format!(
+                                "the runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+                            ),
+                        }
+                    }
+                    Ok(pixels) => crate::shader_layers::FallbackFailure {
+                        reason: "size".into(),
+                        message: format!(
+                            "the runner answered {}×{} for a {}×{} target",
+                            pixels.width, pixels.height, job.request.width, job.request.height
+                        ),
+                    },
+                    Err(failure) => failure,
+                };
+                if failure.reason == "deadline" && waits < HOST_COMPILE_WAITS {
+                    waits += 1;
+                    continue;
+                }
+                attempt += 1;
+                if failure.is_final() || attempt >= HOST_ATTEMPTS {
+                    break Some(failure);
+                }
+            };
+            if let Some(mut failure) = failure {
+                if !failure.is_final() {
+                    failure.message = if waits > 0 {
+                        format!(
+                            "{} (after {attempt} attempts and {waits} waits for its compile)",
+                            failure.message
+                        )
+                    } else {
+                        format!("{} (after {attempt} attempts)", failure.message)
+                    };
+                }
+                self.put_fallback_failure(&key, failure);
+            }
+        }
+    }
+
+    /// Runs a transition node from `from` to `to` (`runTransition`).
+    pub fn run_transition(
+        &mut self,
+        from: &Target,
+        to: &Target,
+        step: &crate::effects::plan::TransitionStep,
+        time: f64,
+        precision: Precision,
+    ) -> Result<Target, RenderError> {
+        let mut step = step.clone();
+        step.edge_in = true;
+        let full = (from.width(), from.height());
+        self.with_runner(|r| {
+            r.with_gpu("pm transition", precision, full, |gpu| {
+                gpu.run_transition("", &step, from, to, time)
+            })
+        })
+    }
+
+    /// Reads finished watchdog timestamps (`wait`: every submitted frame)
+    /// and returns the overruns reported since the last call.
+    pub fn watchdog_reports(&mut self, wait: bool) -> Vec<pm_protocol::error::EngineError> {
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, wait);
+        self.effects.watchdog.take_reports()
+    }
+
+    /// Looks at the frames the watchdog follows without waiting (a host
+    /// calls it between renders, every few tens of milliseconds while
+    /// frames are in flight): completions are seen promptly, a frame seen
+    /// running past the hang budget is suspected, and ended frames are
+    /// judged.
+    pub fn watchdog_watch(&mut self) {
+        if self.effects.watchdog.frames_in_flight() > 0 {
+            self.effects
+                .watchdog
+                .collect(&self.device, &self.queue, false);
+        }
+    }
+
+    /// Whether a frame the hang guard suspects has not been judged yet
+    /// (frames drawing its user programs fail with
+    /// [`RenderError::WatchdogPending`] until it is).
+    pub fn watchdog_holding(&self) -> bool {
+        self.effects.watchdog.holding()
+    }
+
+    /// Why a job renderer's watchdog stopped every frame, if it did.
+    pub fn watchdog_stopped(&self) -> Option<&str> {
+        self.effects.watchdog.stopped()
+    }
+
+    /// Waits until every submitted command has completed, looking at the
+    /// watchdog's frames every 100 ms meanwhile (so a frame that runs away
+    /// is seen running), then judges them. Job hosts wait here after each
+    /// frame, so a runaway is judged before its pixels are read.
+    pub fn wait_idle(&mut self) {
+        loop {
+            let done = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_millis(100)),
+            });
+            match done {
+                Err(wgpu::PollError::Timeout) => self.watchdog_watch(),
+                _ => break,
+            }
+        }
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, true);
+    }
+
+    /// [`Self::wait_idle`] for the commands up to `index` only: later
+    /// submissions (the next export frame) keep running. Completed frames
+    /// are judged as far as their timestamps allow; a later wait or
+    /// `wait_idle` judges the rest.
+    pub fn wait_submission(&mut self, index: wgpu::SubmissionIndex) {
+        loop {
+            let done = self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(index.clone()),
+                timeout: Some(std::time::Duration::from_millis(100)),
+            });
+            match done {
+                Err(wgpu::PollError::Timeout) => self.watchdog_watch(),
+                _ => break,
+            }
+        }
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, false);
+    }
+
+    /// Draws the following frames in time slices (`crate::slices`): a
+    /// renderer drawing behind interactive ones never holds the GPU for
+    /// longer than a slice, and gives way when its gate says so. `None`:
+    /// each frame is one submission.
+    pub fn set_slices(&mut self, slices: Option<crate::slices::Slices>) {
+        self.effects.slices = slices;
+    }
+
+    /// The slices of the frames drawn since they were set.
+    pub fn slices_mut(&mut self) -> Option<&mut crate::slices::Slices> {
+        self.effects.slices.as_mut()
+    }
+
+    /// Records `bracket` around every following frame's commands (`None`:
+    /// nothing).
+    pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
+        self.bracket = bracket;
+    }
+
+    /// The capability check for this renderer: `unsupported_with_media`,
+    /// with text and captions drawn when fonts are configured, and effects,
+    /// transitions, and extension layers checked against the renderer's
+    /// own definitions when it holds them (contract 10: an export job's,
+    /// a still batch's, `pm-cli`'s; `capability::unsupported_for`).
+    pub fn unsupported_with_media(
+        &self,
+        document: &Document,
+        composition: &str,
+        assets: &dyn AssetResolver,
+    ) -> Vec<Unsupported> {
+        let effects = self.effect_host.is_none().then_some(&self.effects);
+        let mut list = capability::unsupported_for(
+            document,
+            composition,
+            Some(assets),
+            effects,
+            self.text.has_fonts(),
+        );
+        // A runner the renderer waits on draws what only WebGL can.
+        if self.fallback_host.is_some() {
+            list.retain(|u| !matches!(u.feature, Feature::ShaderFallback(_)));
+        }
+        list
+    }
+
+    /// The fonts text and captions layers lay out with (`None`: those
+    /// layers are unsupported and route to the legacy renderer). Dropping
+    /// or replacing them clears the glyph and raster caches.
+    pub fn set_text_fonts(&mut self, fonts: Option<Box<dyn crate::text::TextFonts>>) {
+        self.clear_draw_reuse();
+        self.text.set_fonts(fonts);
+        self.text_gpu.clear();
+    }
+
+    /// The window the next frames are drawn for: text measures with that
+    /// renderer's font cache seeds (`text::served::SeedScope`).
+    pub fn set_text_seed_scope(&mut self, scope: crate::text::served::SeedScope) {
+        if let Some(fonts) = self.text.fonts.as_deref_mut() {
+            fonts.set_seed_scope(scope);
+        }
+        self.clear_draw_reuse();
+    }
+
+    /// Text layout and rendering state (profiles, the captions switch).
+    pub fn text(&mut self) -> &mut crate::text::TextContext {
+        &mut self.text
+    }
+
+    /// The GPU side of text rendering (coverage source, cache, counters).
+    pub fn text_gpu(&mut self) -> &mut crate::text::gpu::TextGpu {
+        &mut self.text_gpu
+    }
+
+    /// `PM.captionsHidden` for the following frames: an export without
+    /// burned-in captions (`captionsBurn: false`) draws no captions layer.
+    pub fn set_captions_hidden(&mut self, hidden: bool) {
+        if self.text.captions_hidden() != hidden {
+            self.clear_draw_reuse();
+        }
+        self.text.set_captions_hidden(hidden);
+    }
+
+    /// A renderer on its own device (`pm_gpu::Gpu::new`).
+    pub fn headless() -> Result<Renderer, RenderError> {
+        let gpu = pm_gpu::Gpu::new("pm-render")?;
+        Ok(Renderer::new(gpu.device, gpu.queue))
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Bytes of intermediate targets held by the pool and of the kept mip
+    /// pyramids of level 2 stills.
+    pub fn pooled_bytes(&self) -> u64 {
+        self.pool.bytes() + self.pyramids.bytes()
+    }
+
+    /// Nominal texel bytes retained by reusable intermediate targets.
+    pub fn target_pool_bytes(&self) -> u64 {
+        self.pool.bytes() + self.prefix.bytes() + self.groups.bytes()
+    }
+
+    /// Reusable targets currently idle in the pool.
+    pub fn target_pool_idle(&self) -> usize {
+        self.pool.idle()
+    }
+
+    /// Targets allocated since this renderer was created.
+    pub fn target_pool_created(&self) -> u64 {
+        self.pool.created()
+    }
+
+    /// Nominal texel bytes retained by image mip pyramids, with the stills
+    /// only their kept views still own (the media cache has let them go and
+    /// no longer counts them).
+    pub fn pyramid_bytes(&self) -> u64 {
+        self.pyramids.bytes()
+            + self
+                .pyramids
+                .orphaned_bytes(|texture| self.media.holds_image(texture))
+    }
+
+    /// Nominal texel bytes of still and converted-video textures.
+    pub fn media_texture_bytes(&self) -> u64 {
+        self.media.bytes
+    }
+
+    pub fn image_cache_bytes(&self) -> u64 {
+        self.media.image_bytes()
+    }
+
+
+    /// Explicit viewer opt-in, for stills and for video: a copy at the
+    /// view's resolution instead of the source's. CLI exact/reference and
+    /// export paths keep native source resolution and precision by default.
+    pub fn set_preview_media(&mut self, stills: bool, video: bool) {
+        if self.media.preview_media != stills {
+            self.prefix.clear(&mut self.pool);
+        }
+        self.media.preview_media = stills;
+        self.media.preview_video = video;
+        self.media.draw_edge = None;
+    }
+
+    /// Drops the stills kept at their full size (`MediaCache::release_whole_images`).
+    pub fn release_whole_stills(&mut self) {
+        self.media.release_whole_images();
+        // Kept bind groups and kept pyramids (the views of a still's own
+        // mip chain) hold their textures alive: they go with the stills.
+        self.binds.clear();
+        self.pyramids.clear();
+    }
+    pub fn set_image_cache_budget(&mut self, bytes: u64) {
+        self.media.trim_images(bytes);
+        let media = &self.media;
+        self.pyramids
+            .retain_own(|texture| media.holds_image(texture));
+    }
+    /// Critical memory pressure: after each frame is submitted, its stills
+    /// too go down to the image budget.
+    pub fn set_memory_pressure(&mut self, critical: bool) {
+        self.media.set_image_pressure(critical);
+    }
+    /// The last frame's own stills exceeded the image budget: their bytes
+    /// and the budget (an over-budget frame, kept while it drew).
+    pub fn image_over_budget(&self) -> Option<(u64, u64)> {
+        self.media.image_over_budget()
+    }
+    pub fn set_converted_frame_budget(&mut self, bytes: u64) {
+        self.media.trim_frames(bytes);
+    }
+    /// One allowance for reusable targets, kept mip pyramids and kept bind
+    /// groups (with the compatibility uploads they own), split so that
+    /// together they keep at most `bytes` ([`target_shares`]).
+    pub fn set_target_pool_budget(&mut self, bytes: u64) {
+        let (targets, pyramids, binds) = target_shares(bytes);
+        let retained = self.prefix.bytes() + self.groups.bytes();
+        self.pool.set_free_budget(targets.saturating_sub(retained));
+        self.pyramids.set_budget(pyramids);
+        self.binds.set_budget(binds);
+    }
+
+    /// Divide the playback target allowance between working textures and
+    /// the auxiliary caches that reference them.
+    pub fn set_playback_target_budget(&mut self, total: u64, pool: u64, shader: u64) {
+        let pool = pool.min(total);
+        let auxiliary = total - pool;
+        self.pyramids.set_budget(auxiliary / 2);
+        self.binds.set_budget(auxiliary - auxiliary / 2);
+        self.set_playback_retention(pool, shader);
+    }
+
+    /// Bytes the pooled targets, kept pyramids and kept bindings hold now
+    /// (bindings with their compatibility uploads).
+    pub fn target_store_bytes(&self) -> (u64, u64, u64) {
+        (self.target_pool_bytes(), self.pyramids.bytes(), self.binding_cache_bytes())
+    }
+
+    /// Visible play shares a 128 MiB ceiling across both kinds of retention.
+    /// Charge the whole playback pool, even if the ordinary pool was empty.
+    pub fn set_playback_retention(&mut self, pool: u64, shader: u64) {
+        if (pool > 0) != self.pool.playback_retention() {
+            // Pooled views sampled before the switch can still have a
+            // persistent binding or pyramid under the previous policy.
+            self.binds.clear();
+            self.pyramids.clear();
+        }
+        let shader = shader.min(crate::shader_layers::exec::OUTPUT_CACHE_CAP);
+        self.shaders.output.set_budget(shader);
+        // Reserve all 32 MiB for shader generations, including retired ones
+        // after a grant change. Pool generations have their own fence ledger.
+        self.pool.set_playback_budget(pool.min(96 << 20));
+    }
+
+    pub fn shader_output_cache_bytes(&self) -> u64 {
+        self.shaders.output.bytes()
+    }
+
+    /// Hits, admissions, skipped admissions and evictions.
+    pub fn shader_output_cache_stats(&self) -> (u64, u64, u64, u64) {
+        self.shaders.output.stats()
+    }
+
+    /// Assigned, charged, high-water, evicted and aged-out pool bytes.
+    pub fn playback_pool_stats(&self) -> (u64, u64, u64, u64, u64) {
+        self.pool.playback_stats()
+    }
+
+    pub fn retired_playback_target_bytes(&self) -> u64 {
+        self.pool.retired_bytes()
+    }
+
+    /// What only bindings keep: the textures and buffers they reference and
+    /// the compatibility uploads they own.
+    pub fn binding_cache_bytes(&self) -> u64 {
+        self.binds.retained_bytes() + self.binds.compat.bytes()
+    }
+    pub fn converted_frame_bytes(&self) -> u64 {
+        self.media.frame_bytes()
+    }
+
+    /// Bytes of cached text rasters and reusable coverage scratch.
+    pub fn text_cache_bytes(&self) -> u64 {
+        self.text_gpu.cached_bytes()
+    }
+
+    /// Standing budget for cached GPU text rasters.
+    pub fn set_text_cache_budget(&mut self, bytes: u64) {
+        self.text_gpu.set_cache_budget(bytes);
+    }
+
+    /// Keeps translated 3D programs (amendment 11's disk program cache) and
+    /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
+    /// processes; the engine host passes its shader cache folder.
+    pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        // Translated GLSL (`pm_glsl::Cache`: source hash and device) in its
+        // own folder; definition sets made before keep their cache.
+        self.effects
+            .set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
+        // Shader layers share the folder (entries are content-addressed).
+        crate::shader_layers::translate::set_cache_dir(dir.as_ref().map(|d| d.join("glsl")));
+        self.scene3d.set_program_cache(dir);
+    }
+
+    /// GPU meshes and material maps the 3D pass keeps between frames
+    /// (released once no 3D frame draws them).
+    pub fn scene3d_resident(&self) -> crate::scene3d::Resident3d {
+        self.scene3d.resident()
+    }
+
+    /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`) by
+    /// definition id, so legacy OBJ mesh layers render natively. The
+    /// built-in OBJ model layer is always known; a snapshot for its id
+    /// replaces it.
+    pub fn set_mesh_definitions(
+        &mut self,
+        definitions: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
+    ) {
+        self.explicit_meshes = definitions;
+        self.refresh_meshes();
+    }
+
+    /// 3D layers render without MSAA when `false` (only for the parity
+    /// lane's classification of MSAA edge pixels, section 25; output always
+    /// uses today's 4 samples).
+    pub fn set_3d_msaa(&mut self, on: bool) {
+        self.scene3d
+            .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
+    }
+
+    /// Scrub renders (a paused `seek {scrub}`, docs/engine/scrub.md): a
+    /// video layer whose exact frame has not decoded yet draws the nearest
+    /// decoded frame of its source while the exact one decodes, and
+    /// [`Rendered::stand_ins`] counts such layers. Off by default; never
+    /// applies to export requests.
+    /// Whether a drag frame asked for video within `within` (scrub allowance).
+    pub fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        self.media.scrubbed_within(within)
+    }
+    /// Playback or export: no scrub is in progress any more.
+    pub fn clear_scrub_mark(&self) {
+        self.media.clear_scrub_mark();
+    }
+    pub fn set_scrub(&mut self, on: bool) {
+        self.media.scrub = on;
+        if on {
+            self.media.note_scrub();
+        }
+    }
+
+    /// Frames while playing: a video layer waits for its exact frame until
+    /// `deadline`, then draws a stand-in so the frame keeps its display
+    /// deadline. `None` waits as paused frames do. Stand-ins are reported in
+    /// [`Rendered::stand_ins`]; a viewer draws the exact frame once it stops.
+    pub fn set_playback(&mut self, deadline: Option<std::time::Instant>) {
+        self.media.playback = deadline;
+    }
+
+    /// Viewer frames: a frame that waits for a still being read stops
+    /// waiting once `interrupt` moves past the value it carries (the frame
+    /// is superseded or its viewer closed). `None` outside viewer frames.
+    pub fn set_interrupt(&mut self, interrupt: Option<crate::media::Interrupt>) {
+        self.media.interrupt = interrupt;
+    }
+
+    /// Viewer frames: a layer this renderer cannot draw becomes a
+    /// [`LayerFailure`] and the rest of the frame is drawn. Exports never set
+    /// this: a delivered file refuses to omit a layer.
+    /// An effect whose provider isn't installed, or whose saved revision this
+    /// build doesn't have, is bypassed on its layer too
+    /// ([`Renderer::missing_effects`] names them).
+    /// Tests: whether zero-preserving effect passes keep to the pixels they
+    /// can change (on by default; off shades every pixel of each pass, the
+    /// reference the scissored passes are compared with bit for bit).
+    #[doc(hidden)]
+    pub fn set_effect_scissor(&mut self, on: bool) {
+        self.effects.scissor_passes = on;
+    }
+
+    /// A/B diagnostic for the zero-source bounds shader.
+    pub fn set_effect_output_bounds(&mut self, enabled: bool) {
+        self.pipelines.effect_output_bounds = enabled;
+    }
+
+    /// A/B diagnostic for the experimental group-wrapper elision.
+    pub fn set_direct_group_target(&mut self, enabled: bool) {
+        self.pipelines.direct_group_target = enabled;
+    }
+
+    /// Group content targets rendered without the experimental wrapper.
+    pub fn direct_group_target_draws(&self) -> u64 {
+        self.pipelines
+            .direct_group_draws
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Tests and benches: whether a frame's node, group, and effect targets
+    /// go back to the pool as soon as the last pass reading them is
+    /// recorded, for the frame's later passes (on by default). Off, every
+    /// such target is held until the frame is submitted: the reference the
+    /// reusing frames are compared with bit for bit.
+    #[doc(hidden)]
+    pub fn set_early_target_release(&mut self, on: bool) {
+        self.early_target_release = on;
+    }
+
+    pub fn set_isolate_layers(&mut self, on: bool) {
+        self.isolate_layers = on;
+        self.effects.bypass_missing = on;
+    }
+
+    /// Whether failing layers are left out of the frame
+    /// ([`Renderer::set_isolate_layers`]).
+    pub fn isolates_layers(&self) -> bool {
+        self.isolate_layers
+    }
+
+    /// Draws a layer without an effect whose provider isn't installed
+    /// instead of refusing it (a look at the project, not a delivery).
+    pub fn set_bypass_missing_effects(&mut self, on: bool) {
+        self.effects.bypass_missing = on;
+    }
+
+    /// Enabled effects the open composition of the document set by
+    /// [`Renderer::set_document_effects`] draws that no installed provider
+    /// defines, with how many layers use each.
+    pub fn missing_effects(&self) -> &[crate::effects::versions::MissingEffect] {
+        &self.missing_effects
+    }
+
+    /// The same, for what `composition` draws (an export's composition).
+    pub fn missing_effects_in(
+        &self,
+        document: &Document,
+        composition: &str,
+    ) -> Vec<crate::effects::versions::MissingEffect> {
+        let unavailable = |ty: &str, version: Option<&pm_model::Node>| {
+            if self
+                .effects
+                .get(pm_protocol::definitions::DefinitionKind::Effect, ty)
+                .is_none()
+            {
+                return Some(None);
+            }
+            self.effects.unavailable_revision(ty, version).map(Some)
+        };
+        crate::effects::versions::missing_effects(document, composition, &unavailable)
+    }
+
+    /// Changes whenever a frame a scrub render asked for has decoded: a
+    /// frame drawn with stand-ins can be drawn again.
+    pub fn media_landed(&self) -> u64 {
+        self.media.landed()
+    }
+
+    /// Counters of the display decode workers.
+    pub fn scrub_stats(&self) -> pm_media::decode::scrub::ScrubStats {
+        self.media.scrub_stats()
+    }
+
+    /// Exact Export-purpose source decoder counters.
+    pub fn source_scrub_stats(&self) -> pm_media::decode::scrub::ScrubStats {
+        self.media.source_scrub_stats()
+    }
+
+    /// Applies this renderer's shares of the engine's lease to its decode
+    /// service (the viewer's renderer: docs/engine/scrub.md, "Memory").
+    /// Renderers that never get a share keep
+    /// [`crate::media::DEFAULT_FRAME_CACHE`].
+    pub fn apply_media_lease(
+        &mut self,
+        lease: pm_media::decode::service::MediaLease,
+    ) -> pm_media::decode::service::MediaUsage {
+        self.media.apply_lease(lease)
+    }
+
+    /// What the decode service holds.
+    pub fn media_usage(&self) -> pm_media::decode::service::MediaUsage {
+        self.media.media_usage()
+    }
+
+    /// Whether recent frames read video for display.
+    pub fn reads_video(&self) -> bool {
+        self.media.reads_video()
+    }
+
+    /// Bounds the auxiliary caches while playback budgets are applied
+    /// individually to targets, bindings, video, images, text and vector rasters.
+    pub fn trim_playback_aux(&mut self, bytes: u64) {
+        self.material.trim(bytes);
+        let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
+        self.release_frame_reuse();
+        self.source_reuse.trim(bytes);
+    }
+
+    /// Frees idle intermediate targets and cached vector textures so that
+    /// together they hold at most `bytes` (lease pressure): the pool trims
+    /// first, and the vector cache gets what the pool leaves. The text
+    /// raster cache is kept apart from the pool and trims to `bytes` on its
+    /// own (`text_gpu().cached_bytes()`).
+    pub fn trim(&mut self, bytes: u64) {
+        // Idle release and critical pressure return CPU glyph/font storage too.
+        // Ordinary GPU grant changes must keep the warm glyph caches.
+        if bytes == 0 {
+            self.text.forget_glyphs();
+            self.set_playback_retention(0, 0);
+        }
+        self.material.trim(bytes.min(128 * 1024 * 1024));
+        let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
+        // Kept bind groups hold their views (and textures) alive.
+        self.binds.clear();
+        // An export's kept staging buffer, frame target and pixels (the
+        // next frame allocates them again).
+        self.release_frame_reuse();
+        self.source_reuse.trim(bytes);
+        let retained = self.prefix.bytes() + self.groups.bytes();
+        if retained > bytes {
+            self.prefix.clear(&mut self.pool);
+            self.groups.clear();
+        }
+        let bytes = bytes.saturating_sub(
+            self.source_reuse.bytes() + self.prefix.bytes() + self.groups.bytes(),
+        );
+        // Playback's pool/cache grant was funded separately by the governor.
+        let pool_bytes = if self.pool.playback_retention() {
+            0
+        } else {
+            self.pool.trim(bytes);
+            self.pool.bytes()
+        };
+        if pool_bytes + self.pyramids.bytes() > bytes {
+            self.pyramids.clear();
+        }
+        self.vector
+            .trim(bytes.saturating_sub(pool_bytes + self.pyramids.bytes()));
+        self.text_gpu.trim(bytes);
+    }
+
+    /// Frees idle intermediate targets, kept mip pyramids, and CPU glyph/font
+    /// caches (a viewer at rest). Returns the target/pyramid bytes freed.
+    /// Targets in use, such as the kept bottom of the last frame
+    /// (`crate::frame_prefix`), stay valid.
+    pub fn release_idle_targets(&mut self) -> u64 {
+        self.text.forget_glyphs();
+        self.media.retire_cold_sessions();
+        let before = self.pool.bytes() + self.pyramids.bytes();
+        self.pool.trim(0);
+        self.pyramids.clear();
+        self.binds.clear();
+        before - self.pool.bytes()
+    }
+
+    pub fn release_idle_media(&mut self) {
+        self.media.release_idle_frames();
+        self.binds.clear();
+    }
+
+    /// [`Self::release_idle_media`], keeping the decoders of the clips under
+    /// the paused playhead (their references only) so Play continues them.
+    pub fn release_idle_media_keeping_decoders(&mut self) {
+        self.media.release_idle_frames_keeping(true);
+        self.binds.clear();
+    }
+
+    /// Closes the decoders kept by [`Self::release_idle_media_keeping_decoders`].
+    pub fn release_kept_decoders(&mut self) {
+        self.media.release_kept_decoders();
+    }
+
+    /// Decoders kept open while paused.
+    pub fn kept_decoders(&self) -> usize {
+        self.media.kept_decoders()
+    }
+
+    /// Recording has submitted every reference from this frame. Its working
+    /// set may exceed a standing cache grant; stop retaining that excess now.
+    /// Command buffers own the resources their GPU work still needs.
+    pub fn trim_submitted_frame_caches(&mut self) {
+        self.vector.trim(self.vector.max_bytes());
+        self.text_gpu.end_frame();
+    }
+
+    /// A document closed. Release content caches and worker ownership,
+    /// including media indexes and prefetched input that idle trimming keeps.
+    /// Submitted commands retain their own GPU resources until completion.
+    pub fn release_project_memory(&mut self) {
+        self.clear_draw_reuse();
+        self.trim(0);
+        self.media = MediaCache::new(&self.device);
+        self.vector = crate::vector::cache::VectorCache::new();
+        self.vector.set_batching(self.vector_batching);
+        self.scene3d = Scene3dRenderer::default();
+        self.options3d.studio = None;
+        self.evaluator.reset();
+        self.text = crate::text::TextContext::default();
+        self.text_gpu.clear();
+        let runner = self.shaders.fallback_runner;
+        let output = std::mem::take(&mut self.shaders.output);
+        self.shaders = Default::default();
+        self.shaders.output = output;
+        self.shaders.fallback_runner = runner;
+        self.effects.fallback = Default::default();
+        self.effects.fallback.runner = runner;
+        self.effects.assets = Default::default();
+        self.effects.effect_types = Default::default();
+        self.clear_definitions();
+        self.compat = None;
+        self.svg_warned.clear();
+        self.missing_effects.clear();
+    }
+
+    /// Native SVG fallback diagnostic for the most recently resolved SVG.
+    /// The reason names the unsupported feature or resource/device limit;
+    /// it never requires an editor window or host raster request.
+    pub fn svg_fallback_reason(&self) -> Option<&str> {
+        self.vector.svg_fallback_reason()
+    }
+
+    /// The vector cache's standing bound, enforced while frames render
+    /// (default: today's raster cache, 192 MiB and 4096 entries).
+    pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {
+        self.vector.set_budget(max_bytes, max_entries);
+    }
+
+    /// Cached vector textures.
+    pub fn vector_cache_len(&self) -> usize {
+        self.vector.len()
+    }
+
+    /// Bytes of cached vector textures (shape rasters and level 2 scenes):
+    /// the render cache category of the lease.
+    pub fn vector_cache_bytes(&self) -> u64 {
+        self.vector.bytes()
+    }
+
+    fn supports_precision(&self, precision: Precision) -> bool {
+        precision != Precision::Float32
+            || self
+                .device
+                .features()
+                .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
+    }
+
+    /// The project's requested output format on a device supporting its depth.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
+    pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
+        let precision = match document.root().map(project_settings) {
+            Some(Ok(c)) => effective_precision(request.precision, c.precision),
+            _ => request.precision,
+        };
+        working_format(storage_precision(precision))
+    }
+
+    /// The actual output format on this device. Main's compositor falls
+    /// back from 32 to 16 when float32 filtering/blending is unavailable.
+    /// Viewers, snapshots and caller-owned targets must use this choice.
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let format = Self::target_format(document, request);
+        if format == wgpu::TextureFormat::Rgba32Float
+            && !self.supports_precision(Precision::Float32)
+        {
+            working_format(Precision::Float16)
+        } else {
+            format
+        }
+    }
+
+    /// Compiles the pipelines every frame of `document` draws with at its
+    /// working format ([`Pipelines::prewarm`]) and its text pipelines. They
+    /// are built on first use; the engine service calls this before the
+    /// first frame at a format, so no later frame compiles them.
+    pub fn prewarm(&self, document: &Document) {
+        let request =
+            RenderRequest::sized(pm_protocol::common::Size::new(1, 1), Precision::Float16);
+        let format = self.device_target_format(document, &request);
+        self.pipelines.prewarm(format);
+        // Text pipelines too: a text layer first met while playing compiled
+        // its paint pipeline on that frame (about 80 ms).
+        self.text_gpu
+            .prewarm(if format == working_format(Precision::Float32) {
+                Precision::Float32
+            } else {
+                Precision::Float16
+            });
+    }
+
+    /// Prewarms Studio's Fast raster pipelines and material-capture renderer
+    /// pipelines for `document` so the first frame entering a 3D section does
+    /// not stall compiling shaders.
+    pub fn prewarm_studio(&mut self, document: &Document, composition: &str, ticks: i64) {
+        let Some(settings) = self.options3d.studio else {
+            return;
+        };
+        let Some(pass) = self.scene3d.provider.as_mut() else {
+            return;
+        };
+        let request = crate::scene3d::provider::SceneRequest {
+            composition: composition.to_owned(),
+            revision: document.revision(),
+            ticks,
+            width: 1,
+            height: 1,
+        };
+        pass.prewarm(&self.device, &self.queue, document, &request, settings.preview);
+    }
+
+    /// Asks the font registry for the faces `document`'s text layers lay out
+    /// with ([`crate::text::TextContext::prefetch_fonts`]): the presenter
+    /// calls this at rest, so the first seek to a text layer does not wait
+    /// for them.
+    pub fn prefetch_fonts(&mut self, document: &Document) {
+        self.text.prefetch_fonts(document);
+    }
+
+    /// Renders `composition` at `time` into a new texture.
+    pub fn render(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<Frame, RenderError> {
+        let size = request.target_size();
+        let format = self.device_target_format(document, request);
+        // A target a finished frame gave back (`recycle`), when it fits.
+        let target = match self.frame_reuse.target.take() {
+            Some(t)
+                if t.width() == size.width && t.height() == size.height && t.format() == format =>
+            {
+                t
+            }
+            _ => Target::new(
+                &self.device,
+                "pm frame",
+                size.width,
+                size.height,
+                format,
+                pm_gpu::target::working_usage(),
+            ),
+        };
+        let depth_id = request.depth_id.then(|| {
+            Target::new(
+                &self.device,
+                "pm depth and id",
+                size.width,
+                size.height,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            )
+        });
+        let r = self.render_into(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            &target,
+            depth_id.as_ref(),
+        )?;
+        Ok(Frame {
+            scene3d_meta: r.scene3d_meta,
+            color: target,
+            depth_id,
+            legend: r.legend,
+            failures: r.failures,
+            svg_fallbacks: r.svg_fallbacks,
+            seconds: r.seconds,
+            footage: r.footage,
+        })
+    }
+
+    /// Renders into a caller's target (the presenter's working texture, an
+    /// export buffer): the region's size, a working format
+    /// (`rgba16float`, `rgba32float`), drawable. `depth_id` receives the
+    /// depth and id surface when given (`rgba16float`, the same size).
+    /// On [`RenderError::Unsupported`] the targets are left untouched.
+    ///
+    /// With a fallback host ([`Renderer::set_fallback_host`]), programs only
+    /// the runner draws are run through it and the frame is rendered again
+    /// with their pixels (a step's request covers its inputs, so a chain of
+    /// them takes one round per step).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+    ) -> Result<Rendered, RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            depth_id,
+            SnapshotRows::TopDown,
+            None,
+        )
+    }
+
+    /// Renders a fresh presenter snapshot. In Standard working encoding, the
+    /// target keeps GL row order so its mapped readback can reverse rows
+    /// without recording a second render pass. Linear encoding still uses
+    /// its GPU color-conversion and flip pass.
+    pub fn render_snapshot_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+        )
+    }
+
+    /// Snapshot variant that queues the fresh target's staging copy in the
+    /// same GPU submission as its render passes. Mapping begins afterward.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            Some(copy),
+        )
+    }
+
+    /// Renders a pinned viewer canvas through the same top-down color pass
+    /// as a live viewer frame, then records its staging copy. Standard
+    /// snapshots normally skip this pass and reverse GL rows on the CPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_viewer_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            SnapshotRows::TopDown,
+            Some(copy),
+        )
+        .map(|rendered| (rendered, SnapshotRows::TopDown))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_snapshot_into_with_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        let rows = if self.bracket.is_none()
+            && document
+                .root()
+                .and_then(|root| project_settings(root).ok())
+                .is_some_and(|color| color.working == WorkingEncoding::Standard)
+        {
+            SnapshotRows::Gl
+        } else {
+            SnapshotRows::TopDown
+        };
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            rows,
+            copy,
+        )
+        .map(|rendered| (rendered, rows))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_rows(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<Rendered, RenderError> {
+        if let Some(studio) = self.scene3d.provider.as_mut() {
+            studio.begin_frame();
+        }
+        if self.fallback_host.is_none() {
+            return self.render_into_once(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+                rows,
+                copy,
+            );
+        }
+        self.effects.fallback.retries.clear();
+        self.pin_fallback_results(true);
+        let mut rounds = 0;
+        let mut asked = std::collections::HashSet::new();
+        let out = loop {
+            let result = self.render_into_once(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+                rows,
+                copy,
+            );
+            let Some(host) = self.fallback_host.clone() else {
+                break result;
+            };
+            let requests = match result {
+                Err(RenderError::ShaderFallbackPending(requests)) => requests,
+                other => break other,
+            };
+            rounds += 1;
+            if let Err(e) = host_progress(&mut asked, &requests, rounds) {
+                break Err(e);
+            }
+            self.run_host(host.as_ref(), requests);
+        };
+        self.pin_fallback_results(false);
+        out
+    }
+
+    /// The compatibility needs a frame of `composition` at `time` would ask
+    /// the producers for and they have not answered yet, without drawing
+    /// it: probes the plan for overrides (the presenter tells the window what the
+    /// frames ahead of playback will need, `pm-node` `present`).
+    pub fn compat_missing(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<Vec<crate::compat::CompatNeed>, RenderError> {
+        if self.compat.is_none() {
+            return Ok(Vec::new());
+        }
+        request.validate()?;
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = request
+            .scale
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        let options3d = self.options3d.for_request(request);
+        self.open_channel_memo(document);
+        let (_, build) = plan::build_reusing(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            options3d,
+            Some(&mut self.text),
+            plan::BuildOptions {
+                compat_probe_only: true,
+                ..build_options(
+                    &comp,
+                    request,
+                    self.shaders.fallback_runner,
+                    self.isolate_layers,
+                )
+            },
+            self.compat.as_deref(),
+            None,
+        );
+        self.evaluator.close_channel_memo();
+        Ok(build.compat_missing)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_once(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<Rendered, RenderError> {
+        request.validate()?;
+        // One look at each media file per frame (`media::StampFrame`).
+        let _stamps = crate::media::StampFrame::begin();
+        if self.effects.versioned_builtins {
+            self.effects.assets.prepare(document, assets);
+        }
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let color = project_settings(root)?;
+        self.effects.map_midpoint = if color.precision == Precision::Unorm8 {
+            128. / 255.
+        } else {
+            0.5
+        };
+        debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
+        let precision = available_precision(
+            effective_precision(request.precision, color.precision),
+            self.supports_precision(Precision::Float32),
+        );
+        if !self.supports_precision(precision) {
+            return Err(RenderError::Unsupported(vec![Unsupported::request(
+                "32-bit precision on a device without rgba32float filtering and blending",
+            )]));
+        }
+        let size = request.target_size();
+        if target.width() != size.width || target.height() != size.height {
+            return Err(RenderError::Request(format!(
+                "target is {}×{}, the request needs {}×{}",
+                target.width(),
+                target.height(),
+                size.width,
+                size.height
+            )));
+        }
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let expanded_request = effect_viewport_request(&comp, &self.effects, request);
+        let request = expanded_request.as_ref().unwrap_or(request);
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = self.material.scale.or(request.scale)
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        // Overruns measured on earlier frames disable their programs now.
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, false);
+        // A job renderer stops after a runaway program: nothing is drawn
+        // without a program the project asks for (watchdog policy).
+        if let Some(why) = self.effects.watchdog.stopped() {
+            return Err(RenderError::Watchdog(why.to_owned()));
+        }
+        let options3d = self.options3d.for_request(request);
+        // Channels found in this document are kept across its frames while
+        // it is unchanged (`pm_eval` `channel_memo`).
+        self.open_channel_memo(document);
+        let (mut plan, build) = plan::build_reusing(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            options3d,
+            Some(&mut self.text),
+            // The depth and id surface's legend lists every top-level draw:
+            // its frames keep boundary groups that draw nothing.
+            plan::BuildOptions {
+                material: self.material.plan,
+                keep_empty_groups: depth_id.is_some() || request.depth_id,
+                ..build_options(
+                    &comp,
+                    request,
+                    self.shaders.fallback_runner,
+                    self.isolate_layers,
+                )
+            },
+            self.compat.as_deref(),
+            (self.reuse_enabled && !request.export).then_some(&mut self.reuse),
+        );
+        self.evaluator.close_channel_memo();
+        if !request.background {
+            plan.background = Background::Transparent;
+        }
+        let quads = LayerQuad::of_plan(&plan);
+        // The viewer can preserve an accumulator underneath an adjustment.
+        // Depth/id and sliced or exported frames require every draw.
+        let prefix = self.reuse_enabled
+            && depth_id.is_none()
+            && !request.depth_id
+            && !request.export
+            && self.effects.slices.is_none();
+        let mut failures = build.failures;
+        let svg_layers = build.svg_layers;
+        let mut planned_unsupported = build.unsupported;
+        if self.isolate_layers {
+            layer_failures(&mut planned_unsupported, &mut failures);
+        }
+        if !planned_unsupported.is_empty() {
+            return Err(RenderError::Unsupported(planned_unsupported));
+        }
+        if !build.compat_missing.is_empty() {
+            return Err(RenderError::CompatPending(build.compat_missing));
+        }
+        // A still an earlier frame gave up waiting for is still being read:
+        // held before any of the frame is drawn, so a retry costs a plan.
+        if !request.export
+            && media_prepare::any_still(&plan, &mut |path| self.media.still_held(path))
+        {
+            return Err(RenderError::MediaPending);
+        }
+        let footage = self.footage_of(&plan, w, h);
+        let region = request.region.map(|r| Region {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        });
+        // The previous frame's vector textures become evictable, and the
+        // cache returns within its bound; 3D meshes and maps no recent 3D
+        // frame drew are released.
+        self.pool.begin_frame();
+        self.media
+            .begin_frame(request.read_ahead && !request.export);
+        self.media.retire_cold_sessions();
+        self.vector.begin_frame();
+        self.scene3d.begin_frame();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm frame"),
+            });
+        if let Some(bracket) = &self.bracket {
+            bracket.begin(&mut encoder);
+        }
+        // Video sources this frame meets for the first time open together.
+        self.media
+            .open_cold(&media_prepare::planned_videos(&plan), request.export);
+        // Exports never draw stand-ins (docs/engine/scrub.md).
+        self.media.stand_ins.clear();
+        let scrub = self.media.scrub;
+        self.media.scrub = scrub && !request.export;
+        self.media.hdr_light = color.hdr;
+        // Renderers drawing their own definitions time effects,
+        // transitions, and shader and fragment layers (the budget and the
+        // hang guard; `effects::watchdog`).
+        let timer = self
+            .effect_host
+            .is_none()
+            .then(|| self.effects.watchdog.frame_timer(&self.device));
+        self.effects.watchdog.take_held();
+        self.effects.fallback.pending.clear();
+        self.effects.fallback.fatal = None;
+        self.effects.fallback.blocked = false;
+        if let Some(slices) = &mut self.effects.slices {
+            slices.begin_frame();
+        }
+        self.shaders.output.begin_frame(
+            !request.export
+                && self.effects.slices.is_none()
+                && std::env::var_os("PM_SHADER_OUTPUT_CACHE").is_none_or(|v| v != "0"),
+        );
+        let prefix_key = prefix.then(|| crate::frame_prefix::PrefixKey {
+            composition: composition.to_owned(),
+            width: size.width,
+            height: size.height,
+            format: working_format(precision),
+            region,
+            precision,
+            working: color.working,
+            blend_domain: color.blend_domain,
+            background: plan.background.clone(),
+            plan_size: (plan.width, plan.height),
+            view: plan.view,
+            sampling: request.sampling,
+            final_output: request.output_kind == crate::OutputKind::Final,
+        });
+        if let Some(key) = &prefix_key {
+            self.groups.begin(key, self.prefix.bytes());
+        }
+        let (legend, taken, unsupported, exec_failures, timer, pending) = {
+            self.effects.uniforms.reset();
+            self.binds.begin_frame();
+            self.text_gpu.begin_frame();
+            self.pyramids.begin_frame();
+            #[cfg(not(test))]
+            let vector_trim_limits = Some(crate::exec::VECTOR_TRIM_LIMITS);
+            #[cfg(test)]
+            let vector_trim_limits = self.vector_trim_limits;
+            let mut exec = Exec {
+                device: &self.device,
+                queue: &self.queue,
+                pipelines: &self.pipelines,
+                binds: &mut self.binds,
+                media: &mut self.media,
+                pool: &mut self.pool,
+                scene3d: &mut self.scene3d,
+                effects: &mut self.effects,
+                timer,
+                vector: &mut self.vector,
+                shaders: &mut self.shaders,
+                fallback_pending: Vec::new(),
+                text: &mut self.text_gpu,
+                precision,
+                working: color.working,
+                blend_domain: color.blend_domain,
+                export: request.export,
+                final_frame: request.export
+                    || matches!(request.output_kind, crate::request::OutputKind::Final),
+                depth_id: depth_id.is_some(),
+                vector_trim: vector_trim_limits
+                    .filter(|_| {
+                        request.viewer
+                            && !request.export
+                            && !request.read_ahead
+                            && !scrub
+                            && region.is_some()
+                            && expanded_request.is_some()
+                    })
+                    .map(|limits| (&plan, limits)),
+                // The depth and id surface reads the frame's images after
+                // the frame: nothing it may read goes back early.
+                recycle: self.early_target_release && depth_id.is_none(),
+                taken: Vec::new(),
+                drawn: Vec::new(),
+                pyramids: &mut self.pyramids,
+                failures: Vec::new(),
+                unsupported: Vec::new(),
+                twins: crate::exec::comp_twins(&plan),
+                comps: Vec::new(),
+                groups: prefix.then_some(&mut self.groups),
+            };
+            // Generic renders flip GL rows into the caller's top-down target.
+            // Standard snapshots draw directly into their readback target.
+            let pooled_gl_rows = (rows == SnapshotRows::TopDown
+                || target.format() != working_format(precision)
+                || request.output_tone.is_some())
+            .then(|| {
+                exec.pool.take(
+                    exec.device,
+                    size.width,
+                    size.height,
+                    working_format(precision),
+                    pm_gpu::target::working_usage(),
+                )
+            });
+            let gl_rows = pooled_gl_rows.as_ref().unwrap_or(target);
+            // The viewer's frames draw from the kept bottom of the last one
+            // when they start with the same draws (`crate::frame_prefix`).
+            let (resolved, kept_legend) = if let Some(key) = prefix_key {
+                if crate::composite::has_nodes(&plan) {
+                    exec.render_comp_nodes(
+                        &mut encoder, &plan, region, gl_rows, Some((&mut self.prefix, key)),
+                    )
+                } else {
+                    let (start, mut resolved, legend) = crate::frame_prefix::seed(
+                        &mut exec, &mut encoder, &plan, region, gl_rows, &mut self.prefix, key,
+                    );
+                    if start == 0 || start < plan.draws.len() {
+                        resolved.extend(exec.render_draws(
+                            &mut encoder, &plan, &plan.draws[start..], region, gl_rows,
+                            crate::pipelines::PassBlend::Over, start == 0,
+                        ));
+                    }
+                    (resolved, legend)
+                }
+            } else {
+                (exec.render_comp(&mut encoder, &plan, region, gl_rows), Vec::new())
+            };
+            // Something met at exec time is unsupported (media facts the
+            // plan could not see): the frame fails, and the caller's
+            // targets keep their previous contents. The commands still run,
+            // so media caches filled by this encoder stay valid. A viewer
+            // keeps drawing the rest of the frame instead.
+            if self.isolate_layers {
+                let mut unsupported = std::mem::take(&mut exec.unsupported);
+                layer_failures(&mut unsupported, &mut exec.failures);
+                exec.unsupported = unsupported;
+            }
+            let held = exec.effects.watchdog.take_held();
+            // A frame that gave way never reaches the caller's target.
+            let abandoned = exec.effects.slices.as_ref().is_some_and(|s| s.stopped());
+            let complete = !exec.media.still_pending
+                && exec.unsupported.is_empty()
+                && exec.fallback_pending.is_empty()
+                && exec.effects.fallback.pending.is_empty()
+                && exec.effects.fallback.fatal.is_none()
+                && !held
+                && !abandoned;
+            if complete && pooled_gl_rows.is_some() {
+                exec.finish_color(
+                    &mut encoder,
+                    gl_rows,
+                    target,
+                    rows == SnapshotRows::TopDown,
+                    request.output_tone,
+                );
+            }
+            if let Some(gl_rows) = pooled_gl_rows {
+                exec.taken.push(gl_rows);
+            }
+            if let Some(ids) = depth_id.filter(|_| complete) {
+                let id_rows = exec.pool.take(
+                    exec.device,
+                    size.width,
+                    size.height,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                );
+                exec.render_ids(
+                    &mut encoder,
+                    &resolved,
+                    region,
+                    (plan.width, plan.height),
+                    &id_rows,
+                );
+                exec.flip(&mut encoder, &id_rows, ids);
+                exec.taken.push(id_rows);
+            }
+            // Every resolve hands its group passes to the pass drawing them
+            // (`Exec::resolve_draws_owned`); none is left, but one would be
+            // given back after the frame like any other.
+            exec.taken.append(&mut exec.drawn);
+            let legend: Vec<String> = kept_legend
+                .into_iter()
+                .chain(resolved.iter().map(|r| r.layer.clone()))
+                .collect();
+            let timer = exec.timer.take();
+            let mut pending = std::mem::take(&mut exec.fallback_pending);
+            pending.append(&mut exec.effects.fallback.pending);
+            (
+                legend,
+                exec.taken,
+                exec.unsupported,
+                exec.failures,
+                timer,
+                (pending, held),
+            )
+        };
+        let (pending, held) = pending;
+        if let Some(timer) = timer {
+            self.effects.watchdog.finish(&mut encoder, timer);
+        }
+        if let Some(bracket) = &self.bracket {
+            bracket.end(&mut encoder, &target.view);
+        }
+        if let Some(copy) = copy {
+            copy.record(&mut encoder, &target.texture);
+        }
+        self.effects.uniforms.flush(&self.queue);
+        // The last slice of a frame drawn in slices is admitted and waited
+        // for as the ones before it: the frame is done when this returns.
+        if let Some(slices) = &mut self.effects.slices {
+            slices.admit();
+        }
+        let last = self.queue.submit([encoder.finish()]);
+        self.effects.watchdog.submitted(&self.queue);
+        let abandoned = if let Some(slices) = &mut self.effects.slices {
+            let (device, queue, watchdog) = (&self.device, &self.queue, &mut self.effects.watchdog);
+            slices.submitted(device, last, || {
+                if watchdog.frames_in_flight() > 0 {
+                    watchdog.collect(device, queue, false);
+                }
+            });
+            slices.stopped()
+        } else {
+            false
+        };
+        let complete = !abandoned
+            && !held
+            && pending.is_empty()
+            && unsupported.is_empty()
+            && !self.media.still_pending
+            && self.effects.fallback.fatal.is_none();
+        self.shaders.output.submitted(&self.queue, complete);
+        self.binds.end_frame();
+        self.pool.end_submitted_frame(&self.queue, taken);
+        self.vector
+            .end_frame(complete && self.effects.watchdog.stopped().is_none());
+        let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
+        if prefix {
+            if unsupported.is_empty()
+                && pending.is_empty()
+                && !abandoned
+                && !held
+                && !self.media.still_pending
+                && self.effects.fallback.fatal.is_none()
+            {
+                self.groups.finish();
+                self.prefix.remember(std::mem::take(&mut plan.draws));
+            } else {
+                self.prefix.clear(&mut self.pool);
+                self.groups.clear();
+            }
+        }
+        self.media.flush();
+        self.media.scrub = scrub;
+        failures.extend(exec_failures);
+        if let Some(provider)=&self.scene3d.provider {
+            let mut seen:std::collections::HashSet<_>=failures.iter().map(|f|(f.composition.clone(),f.layer.clone())).collect();
+            for failure in provider.layer_failures() {
+                if seen.insert((failure.composition.clone(),failure.layer.clone())) {failures.push(failure.clone());}
+            }
+        }
+        crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
+        let fallbacks = self.vector.take_svg_fallbacks();
+        let svg_fallbacks = if fallbacks.is_empty() && !self.svg_warned.contains_key(composition) {
+            Vec::new()
+        } else {
+            let warned = self.svg_warned.entry(composition.to_owned()).or_default();
+            let out = svg_diagnostics(&svg_layers, &fallbacks, warned, &mut scene3d_meta);
+            if warned.is_empty() {
+                self.svg_warned.remove(composition);
+            }
+            out
+        };
+        if abandoned {
+            return Err(RenderError::Abandoned);
+        }
+        if !unsupported.is_empty() {
+            return Err(RenderError::Unsupported(unsupported));
+        }
+        if let Some(why) = self.effects.fallback.fatal.take() {
+            return Err(RenderError::Fallback(why));
+        }
+        if let Some(why) = self.effects.watchdog.stopped() {
+            return Err(RenderError::Watchdog(why.to_owned()));
+        }
+        if held {
+            return Err(RenderError::WatchdogPending);
+        }
+        for request in &pending {
+            if !self.effects.fallback.expects(&request.key) {
+                self.shaders.waiting.insert(
+                    request.key.clone(),
+                    crate::shader_layers::fallback::program_id(request),
+                );
+            }
+        }
+        if !pending.is_empty() {
+            return Err(RenderError::ShaderFallbackPending(
+                pending.iter().map(|r| (**r).clone()).collect(),
+            ));
+        }
+        if self.media.still_pending {
+            return Err(RenderError::MediaPending);
+        }
+        Ok(Rendered {
+            scene3d_meta,
+            quads,
+            legend,
+            failures,
+            svg_fallbacks,
+            seconds,
+            footage,
+            stand_ins: std::mem::take(&mut self.media.stand_ins),
+        })
+    }
+
+    /// "Interpret Footage" for a video file: read it with `color` (its
+    /// primaries, transfer, matrix, siting, alpha) instead of the probe's
+    /// reading; `None` restores the probe's.
+    pub fn interpret(
+        &mut self,
+        path: &std::path::Path,
+        color: Option<pm_protocol::color::ColorDescription>,
+    ) {
+        self.media.interpret(path, color);
+    }
+
+    /// The color reading the renderer uses for a video file.
+    pub fn video_color(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<pm_protocol::color::ColorDescription, RenderError> {
+        self.media.video_color(path).map_err(|e| match e {
+            crate::media::MediaFailure::Unsupported(f) => {
+                RenderError::Unsupported(vec![Unsupported {
+                    composition: None,
+                    layer: None,
+                    feature: f,
+                }])
+            }
+            crate::media::MediaFailure::Failed(m) => RenderError::Media(m),
+            crate::media::MediaFailure::Pending => RenderError::MediaPending,
+        })
+    }
+
+    /// Reads a frame's color back as premultiplied f32 RGBA, top-down.
+    /// GPU bytes held by compatibility rasters' textures (the rasters the
+    /// last two frames drew).
+    pub fn compat_texture_bytes(&self) -> u64 {
+        self.binds.compat.bytes()
+    }
+
+    pub fn read_rgba(&self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
+        Ok(pm_gpu::readback::read_f32(
+            &self.device,
+            &self.queue,
+            &frame.color.texture,
+        )?)
+    }
+
+    /// [`Self::read_rgba`] through a staging buffer the renderer keeps for
+    /// the next read (an export reads every frame): the same values, without
+    /// a new GPU buffer and a packed byte copy per frame.
+    pub fn read_rgba_reusing(&mut self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
+        let out = self.frame_reuse.rgba.take().unwrap_or_default();
+        Ok(self.frame_reuse.readback.read_f32_into(
+            &self.device,
+            &self.queue,
+            &frame.color.texture,
+            out,
+        )?)
+    }
+
+    /// Gives a finished frame's pixels back: the next
+    /// [`Self::read_rgba_reusing`] reads into their allocation.
+    pub fn give_rgba(&mut self, rgba: Vec<f32>) {
+        self.frame_reuse.rgba = Some(rgba);
+    }
+
+    /// Gives a finished frame's color target back: the next [`Self::render`]
+    /// of the same size and format draws into it instead of allocating one.
+    /// The frame is consumed, so nothing can read the target after the next
+    /// render overwrites it.
+    pub fn recycle(&mut self, frame: Frame) {
+        if frame.depth_id.is_none() {
+            self.frame_reuse.target = Some(frame.color);
+        }
+    }
+
+    /// Bytes [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] keep for the next frame: the staging buffer, the
+    /// frame target and the pixels.
+    pub fn frame_reuse_bytes(&self) -> u64 {
+        let r = &self.frame_reuse;
+        r.readback.capacity_bytes()
+            + r.target.as_ref().map_or(0, |t| t.bytes())
+            + r.rgba.as_ref().map_or(0, |v| (v.capacity() * 4) as u64)
+            + self.source_reuse.bytes()
+    }
+
+    /// Drops what [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] kept (at the end of an export, after a one-off
+    /// frame, and on [`Self::trim`]).
+    pub fn release_frame_reuse(&mut self) {
+        self.frame_reuse = FrameReuse::default();
+    }
+
+    /// Reads the depth and id surface back (r depth, g/b id − 1, a coverage).
+    pub fn read_depth_id(&self, frame: &Frame) -> Result<Option<Vec<f32>>, RenderError> {
+        frame
+            .depth_id
+            .as_ref()
+            .map(|t| pm_gpu::readback::read_f32(&self.device, &self.queue, &t.texture))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Section 9's pass-through candidate: when the frame is one video
+    /// source drawn 1:1 over the whole output (no transform, crop,
+    /// resampling, or opacity), the source, its time, and the frame facts
+    /// `pm_color::chroma::pass_through` needs. The exporter then compares
+    /// the source's format, range, subsampling, and siting with the output
+    /// and copies its Y′CbCr planes when they match. `None` for any other
+    /// frame.
+    pub fn pass_through(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<Option<PassThrough>, RenderError> {
+        let footage = self.footage(document, composition, time, request, assets)?;
+        Ok(footage.candidate.map(|mut candidate| {
+            candidate.facts.untransformed &= request.region.is_none();
+            candidate
+        }))
+    }
+
+    /// The canvas raster of one text or captions layer at composition time
+    /// `seconds`, drawn at raster scale `scale` (what today's `PM.raster(L,
+    /// scale, T)` paints), read back. `None` when the layer draws nothing
+    /// (no cue showing, no ink). For parity tests, `pm-cli`, and debugging.
+    pub fn text_raster(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        layer: &str,
+        seconds: f64,
+        scale: f64,
+        precision: Precision,
+    ) -> Result<Option<TextRaster>, RenderError> {
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let root = document.root().unwrap();
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        if !self.text.has_fonts() {
+            return Err(RenderError::Unsupported(vec![Unsupported::request(
+                "text without configured fonts",
+            )]));
+        }
+        let comp_id = comp.id().to_string_lossy();
+        let mut scope = pm_eval::Scope::new(&mut self.evaluator, &comp, &project);
+        let node = scope
+            .layers()
+            .iter()
+            .find(|l| crate::js::layer_id(l) == layer)
+            .ok_or_else(|| RenderError::Request(format!("no layer {layer}")))?;
+        let ty = crate::js::layer_type(node);
+        let quad = match ty.as_str() {
+            "text" => self.text.text_layer(&mut scope, node, seconds, scale),
+            "captions" => self.text.captions_layer(&mut scope, node, seconds, scale),
+            other => return Err(RenderError::Request(format!("layer {layer} is {other}"))),
+        };
+        // What the layer could not draw is refused here, as `render` refuses
+        // it, and never left for a later layer to report.
+        let refused: Vec<Unsupported> = self
+            .text
+            .take_unsupported()
+            .into_iter()
+            .map(|what| Unsupported::layer(&comp_id, node, Feature::Text(what)))
+            .collect();
+        let quad = quad.map_err(|e| RenderError::Request(e.to_string()))?;
+        if !refused.is_empty() {
+            return Err(RenderError::Unsupported(refused));
+        }
+        let Some(quad) = quad else { return Ok(None) };
+        self.text_gpu.begin_frame();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm text raster"),
+            });
+        let mut taken = Vec::new();
+        let view = self
+            .text_gpu
+            .render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.pool,
+                &mut taken,
+                &quad.plan,
+                precision,
+                WorkingEncoding::Standard,
+            )
+            .map_err(RenderError::Media)?;
+        self.queue.submit([encoder.finish()]);
+        self.pool.end_submitted_frame(&self.queue, taken);
+        let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+        Ok(Some(TextRaster {
+            pixels,
+            canvas: (quad.plan.scene.width, quad.plan.scene.height),
+            box_size: (quad.w, quad.h),
+            anchor: (quad.ax, quad.ay),
+            plan: quad.plan,
+        }))
+    }
+
+    /// Paints a text scene (the whole scene) through the GPU text path and
+    /// reads it back: premultiplied working values, top-down. For the level
+    /// 2 gate, review sheets, and tools that build scenes themselves.
+    pub fn paint_text_scene(
+        &mut self,
+        scene: pm_text::render::scene::TextScene,
+        precision: Precision,
+    ) -> Result<Vec<f32>, RenderError> {
+        let plan = crate::text::TextPlan::whole(scene);
+        self.text_gpu.begin_frame();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm text scene"),
+            });
+        let mut taken = Vec::new();
+        let view = self
+            .text_gpu
+            .render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.pool,
+                &mut taken,
+                &plan,
+                precision,
+                WorkingEncoding::Standard,
+            )
+            .map_err(RenderError::Media)?;
+        self.queue.submit([encoder.finish()]);
+        self.pool.end_submitted_frame(&self.queue, taken);
+        Ok(pm_gpu::readback::read_f32(
+            &self.device,
+            &self.queue,
+            view.texture(),
+        )?)
+    }
+
+    /// The plan of a frame without rendering it (tests, `pm-cli parity`),
+    /// with the draw reuse when it is on ([`Renderer::set_draw_reuse`]).
+    pub fn plan(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<(CompPlan, Vec<LayerFailure>), RenderError> {
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        if self.effects.versioned_builtins {
+            self.effects.assets.prepare(document, assets);
+        }
+        let root = document.root().unwrap();
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = request
+            .scale
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        let options3d = self.options3d.for_request(request);
+        self.open_channel_memo(document);
+        let (plan, build) = plan::build_reusing(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            options3d,
+            Some(&mut self.text),
+            build_options(
+                &comp,
+                request,
+                self.shaders.fallback_runner,
+                self.isolate_layers,
+            ),
+            self.compat.as_deref(),
+            (self.reuse_enabled && !request.export).then_some(&mut self.reuse),
+        );
+        self.evaluator.close_channel_memo();
+        if !build.unsupported.is_empty() {
+            return Err(RenderError::Unsupported(build.unsupported));
+        }
+        Ok((plan, build.failures))
+    }
+}
+
+/// The effect host plans are built with: another host when one is set,
+/// else the renderer's definitions once it has any (without either, layers
+/// with effects or transitions are routed).
+fn effect_host<'a>(
+    host: &'a Option<Arc<dyn EffectHost>>,
+    effects: &'a Effects,
+) -> Option<&'a dyn EffectHost> {
+    match host {
+        Some(h) => Some(h.as_ref()),
+        None => effects.configured().then_some(effects as &dyn EffectHost),
+    }
+}
+
+/// The project's color settings, or the routing answer for settings this
+/// build cannot render.
+fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError> {
+    crate::composite::project_color(root)
+        .map(|c| ColorSettings::of(&c))
+        .map_err(|_| {
+            RenderError::Unsupported(vec![Unsupported {
+                composition: None,
+                layer: None,
+                feature: Feature::ProjectColor,
+            }])
+        })
+}
+
+/// Why the pinned built-in programs can't draw: one sentence a person can
+/// read, then a blank line and every program's own message.
+fn pinned_failure(pinned: &[pm_protocol::error::EngineError]) -> String {
+    let process = pm_glsl::FailureStage::CompilerProcess.name();
+    let summary = if pinned.iter().any(|f| f.message.contains(process)) {
+        "Effects can't draw: the shader compiler (pm-glsl-compiler) didn't start.".to_owned()
+    } else {
+        let mut names: Vec<String> = Vec::new();
+        for f in pinned {
+            if let pm_protocol::error::ErrorScope::Definition { definition } = &f.scope {
+                let id = definition.as_str();
+                let id = id.strip_prefix("pm.history.main.").unwrap_or(id);
+                let id = id
+                    .rsplit_once('.')
+                    .filter(|(_, v)| v.parse::<u32>().is_ok())
+                    .map_or(id, |(id, _)| id);
+                if !names.iter().any(|n| n == id) {
+                    names.push(id.to_owned());
+                }
+            }
+        }
+        let more = match names.len().saturating_sub(3) {
+            0 => String::new(),
+            n => format!(" and {n} more"),
+        };
+        names.truncate(3);
+        format!("Built-in effects can't draw: {}{more}.", names.join(", "))
+    };
+    let details: Vec<_> = pinned.iter().map(|f| f.message.as_str()).collect();
+    format!("{summary}\n\n{}", details.join("\n"))
+}
+
+/// Moves layer-scoped refusals into per-layer failures.
+fn layer_failures(unsupported: &mut Vec<Unsupported>, failures: &mut Vec<LayerFailure>) {
+    unsupported.retain(|u| {
+        let Some(layer) = &u.layer else { return true };
+        failures.push(LayerFailure {
+            composition: u.composition.clone().unwrap_or_default(),
+            layer: layer.clone(),
+            message: u.feature.to_string(),
+        });
+        false
+    });
+}
+
+/// The project Color depth is authoritative for preview, snapshots and export.
+/// Request precision is retained in the protocol for older callers, but cannot
+/// change the rounding boundaries of an existing project (DEPTH-1).
+pub fn effective_precision(_request: Precision, project: Precision) -> Precision {
+    project
+}
+
+/// The shipped compositor's hardware fallback: 32 → 16 on devices without
+/// float32 filtering and blending. The saved project depth is unchanged.
+fn available_precision(precision: Precision, float32: bool) -> Precision {
+    match (storage_precision(precision), float32) {
+        (Precision::Float32, false) => Precision::Float16,
+        (storage, _) => storage,
+    }
+}
+
+/// Eight-bit delivery still needs floating intermediates: CSS gamut mapping
+/// must see extended values before the final display or encoder quantization.
+fn storage_precision(precision: Precision) -> Precision {
+    match precision {
+        Precision::Unorm8 => Precision::Float16,
+        _ => precision,
+    }
+}
+
+/// The parts of one target allowance: half to reusable targets (visible
+/// playback's pool ceiling), a quarter each to kept mip pyramids and kept
+/// bind groups. They sum to `bytes`.
+pub fn target_shares(bytes: u64) -> (u64, u64, u64) {
+    let targets = bytes / 2;
+    let pyramids = bytes / 4;
+    (targets, pyramids, bytes - targets - pyramids)
+}
+
+#[cfg(test)]
+mod target_share_tests {
+    /// w84 review P1-1: targets, pyramids and bindings split one allowance;
+    /// none of them gets the whole of it, and together they never exceed it.
+    #[test]
+    fn one_allowance_is_split_across_targets_pyramids_and_bindings() {
+        for bytes in [0, 1, 3, 10 << 20, (2u64 << 30) / 5, u64::MAX / 2] {
+            let (targets, pyramids, binds) = super::target_shares(bytes);
+            assert_eq!(targets + pyramids + binds, bytes);
+            // Bindings take the rounding remainder: under four bytes.
+            assert!(targets <= bytes / 2 && pyramids <= bytes / 4 && binds < bytes / 4 + 4);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/doc.rs"]
+mod vector_trim_doc;
+
+#[cfg(test)]
+mod vector_trim_tests {
+    use super::*;
+    use pm_perf::{Counter, snapshot};
+    use pm_protocol::common::Size;
+    use serde_json::json;
+    use vector_trim_doc::{ch, layer, load, project, solid_fill};
+
+    #[test]
+    fn trimming_before_a_wide_effect_keeps_the_viewport_bits_and_vector_reuse() {
+        let gpu = pm_gpu::Gpu::new("cropped vector trim differential").unwrap();
+        let (w, h) = (384, 216);
+        let shape = |id, x, y, color| {
+            layer(id, "shape", json!({
+                "shape": "star", "color": color, "w": 144, "h": 132,
+                "points": 5, "stroke": 1, "strokeColor": "#bd461e",
+            }), x, y, 2.)
+        };
+        let mut effect = layer("wide", "solid", json!({
+            "color": "#2077c0c0", "w": 122, "h": 130,
+        }), 32., 20., 2.);
+        effect["fx"] = json!([{
+            "id": "soften", "type": "blur", "version": 1, "on": true,
+            "p": { "amount": ch(json!(18.)) },
+        }]);
+        let mut p = project(w, h, 2., solid_fill("#434c54"), vec![
+            shape("front-a", 45., 56., "#407db5a0"),
+            shape("front-b", 105., 23., "#991d5ad0"),
+            effect,
+            shape("back-a", 45., 56., "#407db5a0"),
+            shape("back-b", 76., 52., "#de8832a0"),
+        ]);
+        p["colorDepth"] = json!(16);
+        let mut doc = load(&p);
+        doc.set_saving_app_version(Some("1.3.0".into()));
+        let mut request = RenderRequest::at_scale(Size::new(148, 106), 1., Precision::Float16);
+        request.viewer = true;
+        request.origin = Some((16., 27.));
+        let draw = |limits| {
+            let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+            renderer.vector_trim_limits = limits;
+            renderer.set_main_effects_for_document(&doc).unwrap();
+            let before = snapshot();
+            let frame = renderer.render(&doc, "Ptest-root", Ticks::ZERO, &request, &crate::MapResolver::default()).unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let counters = snapshot().since(&before);
+            let pixels = pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &frame.color.texture).unwrap();
+            (pixels, counters)
+        };
+        let (reference, before) = draw(None);
+        let (trimmed, after) = draw(Some((1, 1)));
+        assert_eq!(reference, trimmed);
+        assert!(after.get(Counter::VectorScratchClears) > before.get(Counter::VectorScratchClears));
+        assert!(before.get(Counter::VectorBatchedScenes) >= 2);
+        assert_eq!(before.get(Counter::VectorCacheMisses), after.get(Counter::VectorCacheMisses));
+    }
+}
+
+#[cfg(test)]
+mod depth_device_tests {
+    use super::*;
+    #[test]
+    fn storage_preserves_extended_color_until_output_and_handles_float32_fallback() {
+        assert_eq!(
+            available_precision(Precision::Unorm8, true),
+            Precision::Float16
+        );
+        assert_eq!(
+            available_precision(Precision::Float32, false),
+            Precision::Float16
+        );
+        for depth in [Precision::Float16, Precision::Float32] {
+            assert_eq!(available_precision(depth, true), depth);
+        }
+        assert_eq!(
+            available_precision(Precision::Unorm8, false),
+            Precision::Float16
+        );
+        assert_eq!(
+            available_precision(Precision::Float16, false),
+            Precision::Float16
+        );
+    }
+}
+
+#[cfg(test)]
+mod pinned_failure_tests {
+    use pm_protocol::{
+        common::DefinitionId,
+        error::{EngineError, ErrorCode, ErrorScope},
+    };
+    fn failure(id: &str, message: &str) -> EngineError {
+        EngineError::new(
+            ErrorCode::NotHeadlessRenderable,
+            ErrorScope::Definition {
+                definition: DefinitionId::from(id),
+            },
+            message,
+        )
+    }
+    #[test]
+    fn the_status_reads_as_one_sentence_with_every_message_after_it() {
+        let missing = super::pinned_failure(&[failure(
+            "pm.history.main.blur.2",
+            "The shader of pm.history.main.blur.2 compiles in WebGL but not in the native engine's pipeline (compiler-process: cannot start pm-glsl-compiler).",
+        )]);
+        let (first, rest) = missing.split_once("\n\n").unwrap();
+        assert_eq!(
+            first,
+            "Effects can't draw: the shader compiler (pm-glsl-compiler) didn't start."
+        );
+        assert!(rest.contains("pm.history.main.blur.2"));
+        let named = super::pinned_failure(&[
+            failure("pm.history.main.blur.2", "a (naga-msl: x)."),
+            failure("blur", "b (naga-msl: x)."),
+            failure("crossfade", "c (naga-msl: x)."),
+            failure("wipe", "d (naga-msl: x)."),
+            failure("glow", "e (naga-msl: x)."),
+        ]);
+        assert!(
+            named.starts_with("Built-in effects can't draw: blur, crossfade, wipe and 1 more.\n\n"),
+            "{named}"
+        );
+    }
+}

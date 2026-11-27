@@ -15,6 +15,6 @@ export function extensionState(e: AdminExtension): string {
 
 const ACTIONS: Record<string, string> = {
   hide: 'Hidden', unhide: 'Restored', remove: 'Removed', yank: 'Version withdrawn', tombstone: 'Deleted by owner',
-  verify: 'Verified', unverify: 'Unverified', grant_admin: 'Admin granted', revoke_admin: 'Admin revoked',
+  verify: 'Verified', unverify: 'Unverified', grant_admin: 'Admin granted', revoke_admin: 'Admin revoked', unblock_aero: 'Aero unblocked',
 };
 export const actionLabel = (action: string) => ACTIONS[action] ?? action;

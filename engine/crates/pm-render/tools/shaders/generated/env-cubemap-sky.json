@@ -1,0 +1,20 @@
+{
+ "name": "env-cubemap-sky",
+ "kind": "shader",
+ "covers": [
+  "non-sampler2D-sampler",
+  "iTime"
+ ],
+ "prompt": "Sky gradient shader layer that also samples a samplerCube environment uniform for reflections (it can be empty for now), mixing it in at 20%.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "08c9ee5a4eca1495e5e4158f432d2f6ce5bed7876548a1bab93b1af832c9e90c",
+  "seconds": 23.224,
+  "generated": "2026-10-17T07:32:42.081Z"
+ },
+ "code": "// Sky gradient with samplerCube environment reflections mixed in at 20%.\n// uEnvMap is not an @param: nothing is bound yet, so it samples black.\nuniform vec3  uZenith;    // @param #1E4FA8\nuniform vec3  uHorizon;   // @param #9CC8F0\nuniform vec3  uGround;    // @param #3A3F4A\nuniform vec3  uSunColor;  // @param #FFE2B0\nuniform float uSunHeight; // @param 0.25 -0.2 1\nuniform float uSunX;      // @param 0.3 -1 1\nuniform float uSunSize;   // @param 0.04 0.005 0.2\nuniform float uHorizonY;  // @param 0.45 0 1\nuniform float uEnvMix;    // @param 0.2 0 1\nuniform float uFov;       // @param 1.2 0.3 2.5\nuniform samplerCube uEnvMap;\n\nvoid main() {\n  float aspect = iResolution.x / iResolution.y;\n  vec2 p = vec2((uv.x - 0.5) * aspect, uv.y - uHorizonY);\n\n  // View ray for this pixel (camera looks toward -Z, Y up).\n  vec3 dir = normalize(vec3(p.x * uFov, p.y * uFov, -1.0));\n\n  // Sky gradient: horizon -> zenith above, horizon -> ground below.\n  float h = dir.y;\n  vec3 sky = mix(uHorizon, uZenith, pow(clamp(h, 0.0, 1.0), 0.6));\n  vec3 below = mix(uHorizon, uGround, smoothstep(0.0, 0.35, -h));\n  vec3 col = h >= 0.0 ? sky : below;\n\n  // Horizon haze band.\n  col += uHorizon * 0.15 * exp(-abs(h) * 18.0);\n\n  // Sun disc + glow.\n  vec3 sunDir = normalize(vec3(uSunX, uSunHeight, -1.0));\n  float sd = max(dot(dir, sunDir), 0.0);\n  float disc = smoothstep(1.0 - uSunSize * 0.05, 1.0 - uSunSize * 0.04, sd);\n  col += uSunColor * (disc * 2.0 + pow(sd, 64.0) * 0.6 + pow(sd, 8.0) * 0.15);\n\n  // Environment reflection: mirror rays below the horizon about the ground plane.\n  vec3 rdir = h >= 0.0 ? dir : reflect(dir, vec3(0.0, 1.0, 0.0));\n  vec3 env = textureLod(uEnvMap, rdir, 0.0).rgb;\n  col = mix(col, env, clamp(uEnvMix, 0.0, 1.0));\n\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a sky gradient shader with a sun, a horizon haze band and a `samplerCube uEnvMap`. The environment map is mixed in through `uEnvMix` (default 0.2) using `textureLod`, and rays below the horizon are mirrored about the ground plane as reflections. I haven't compiled or rendered it because no Powermove tools were attached, and nothing in the docs says shader layers can bind cubemaps. With no cubemap bound, the sampler returns black, so the sky renders about 20% darker until you bind a cubemap or set `uEnvMix` to 0."
+}

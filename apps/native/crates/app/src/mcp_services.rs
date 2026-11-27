@@ -1,0 +1,3363 @@
+//! Production hosts behind MCP's service traits. Everything here runs on MCP or
+//! export workers. Exports and frames use the same child job as the Export panel.
+use crate::mcp::Tools;
+use crate::raster_overrides::OverrideWindows;
+use anyhow::{Context, Result as AnyResult};
+use pm_engine_service::jobs::{ExportHandle, ExportRequest, JobSession};
+use pm_kernel::media_archive::Archive;
+use pm_kernel::{KernelHandle, Published};
+use pm_mcp::{
+    CaptureRequest, EngineHook, Error, Result,
+    export_jobs::Progress,
+    media::{MediaRegistry, MediaState},
+    media_tools::{
+        FrameRequest, MediaSource, Probe, SheetOutput, SheetPlan, SheetRequest, Waveform,
+        WaveformRequest,
+    },
+    services::{
+        ExportChild, FrozenProject, Image, ImportedMedia, MediaImport, MediaImporter, MediaRequest,
+        ThreadArchive, VideoExportRequest,
+    },
+};
+use pm_model::json::to_canonical_string;
+use pm_protocol::{
+    color::{OutputColor, Precision},
+    common::{FrameRate, SessionId, Size, TickRange, Ticks},
+    priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec, JobState, QualityTier},
+};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, atomic::AtomicBool},
+    time::{Duration, Instant},
+};
+
+type Resources = Arc<pm_engine_service::resources::ResourceSnapshot>;
+/// Each open document's extension definitions (its window's), for the
+/// captures and exports agents start; a request copies them when it starts.
+static RESOURCES: Mutex<Option<HashMap<u64, Resources>>> = Mutex::new(None);
+static SETTLED: std::sync::Condvar = std::sync::Condvar::new();
+/// How long a capture or export waits for its window's extensions to load
+/// before it goes ahead with what is registered (and says what is missing).
+const EXTENSIONS_WAIT: Duration = Duration::from_secs(120);
+/// Document `doc_id`'s window definitions (none: no window publication).
+pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
+    let mut all = RESOURCES.lock().unwrap();
+    let all = all.get_or_insert_with(HashMap::new);
+    match resources {
+        Some(resources) => all.insert(doc_id, resources),
+        None => all.remove(&doc_id),
+    };
+    SETTLED.notify_all();
+    if !all.contains_key(&doc_id) {
+        NATIVE_ADMISSION.lock().unwrap().remove(&doc_id);
+        NATIVE_CHANGED.notify_all();
+    }
+}
+#[derive(Default)]
+struct NativeProgress {
+    identity: Arc<()>,
+    revision: u64,
+    loads: usize,
+}
+static NATIVE_ADMISSION: Mutex<std::collections::BTreeMap<u64, NativeProgress>> =
+    Mutex::new(std::collections::BTreeMap::new());
+static NATIVE_CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+pub(crate) struct NativeLoad {
+    document: u64,
+    identity: Arc<()>,
+}
+impl Drop for NativeLoad {
+    fn drop(&mut self) {
+        if let Some(progress) = NATIVE_ADMISSION.lock().unwrap().get_mut(&self.document)
+            && Arc::ptr_eq(&progress.identity, &self.identity)
+        {
+            progress.loads = progress.loads.saturating_sub(1);
+        }
+        NATIVE_CHANGED.notify_all();
+    }
+}
+pub(crate) fn begin_native_load(document: u64) -> NativeLoad {
+    let mut all = NATIVE_ADMISSION.lock().unwrap();
+    let progress = all.entry(document).or_default();
+    progress.loads += 1;
+    NativeLoad {
+        document,
+        identity: progress.identity.clone(),
+    }
+}
+pub(crate) fn admit_native(document: u64, revision: u64) {
+    NATIVE_ADMISSION
+        .lock()
+        .unwrap()
+        .entry(document)
+        .or_default()
+        .revision = revision;
+    NATIVE_CHANGED.notify_all();
+}
+fn native_ready(
+    document: u64,
+    revision: u64,
+    wanted: bool,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> AnyResult<()> {
+    let deadline = Instant::now() + EXTENSIONS_WAIT;
+    let mut all = NATIVE_ADMISSION.lock().unwrap();
+    if !wanted && !all.contains_key(&document) {
+        return Ok(());
+    }
+    loop {
+        if stop() {
+            return Err(anyhow::anyhow!(CAPTURE_STOPPED));
+        }
+        if all
+            .get(&document)
+            .is_some_and(|p| p.revision >= revision && p.loads == 0)
+        {
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(anyhow::anyhow!("Native extensions did not finish loading"));
+        }
+        all = NATIVE_CHANGED
+            .wait_timeout(all, left.min(STOP_POLL))
+            .unwrap()
+            .0;
+    }
+}
+/// The definitions some open window's extensions have settled on: the
+/// profile's installed extensions, as any project open nowhere would load.
+fn settled_resources(allowed: impl Fn(u64) -> bool) -> Option<Resources> {
+    RESOURCES
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .iter()
+        .find(|(id, resources)| !resources.pending && allowed(**id))
+        .map(|(_, resources)| resources.clone())
+}
+/// The wait for a document's extensions was stopped by who asked (a
+/// cancelled export, a stopped capture).
+#[derive(Debug, PartialEq)]
+struct Stopped;
+/// How often a waiting capture or export looks at its stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
+/// Document `doc_id`'s definitions once its extensions have loaded: an
+/// effect still loading is never exported or captured as not installed.
+/// `wait: false` (an extension's own capture, which its realm may be loading
+/// for) takes them as they are. A wait ends as soon as `stop` says so (the
+/// person cancelled the export, the capture's task was stopped), not when
+/// the extensions settle or the wait runs out.
+fn resources_of(
+    doc_id: u64,
+    wait: bool,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> std::result::Result<Option<Resources>, Stopped> {
+    let deadline = Instant::now() + EXTENSIONS_WAIT;
+    let mut all = RESOURCES.lock().unwrap();
+    loop {
+        let Some(resources) = all.as_ref().and_then(|all| all.get(&doc_id).cloned()) else {
+            return Ok(None);
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !wait || !resources.pending || left.is_zero() {
+            return Ok(Some(resources));
+        }
+        if stop() {
+            return Err(Stopped);
+        }
+        all = SETTLED.wait_timeout(all, left.min(STOP_POLL)).unwrap().0;
+    }
+}
+/// A capture draws a missing effect bypassed, as the viewer does, but never
+/// one its window's extensions may still register: past the wait it fails
+/// saying the effect is still loading instead of showing the frame without it.
+fn bypasses_missing(
+    look: bool,
+    resources: &pm_engine_service::resources::ResourceSnapshot,
+) -> bool {
+    look && !resources.pending
+}
+/// Install the production engine hosts. Call on a worker before serving.
+pub fn connect_engine(
+    tools: &Tools,
+    activity: pm_engine_service::jobs::Activity,
+    overrides: OverrideWindows,
+) -> AnyResult<Arc<EngineJobs>> {
+    connect_engine_with_executable(tools, activity, overrides, std::env::current_exe()?)
+}
+
+/// Shared service wiring for the app and an isolated engine-worker fixture.
+pub(crate) fn connect_engine_with_executable(
+    tools: &Tools,
+    activity: pm_engine_service::jobs::Activity,
+    overrides: OverrideWindows,
+    executable: PathBuf,
+) -> AnyResult<Arc<EngineJobs>> {
+    let jobs = EngineJobs::new(
+        tools.host.kernel.clone(),
+        executable,
+        activity,
+        tools.host.profile.clone(),
+        overrides,
+    );
+    let _ = jobs.app_host.set(Arc::downgrade(&tools.host));
+    let mut automation = tools.automation.lock().unwrap();
+    automation.export_child = jobs.clone();
+    automation.media_importer = Some(jobs.clone());
+    automation.speech = Some(crate::agent_speech::AgentSpeech::new(
+        tools.host.kernel.clone(),
+        tools.host.profile.clone(),
+    ));
+    automation.media_registry = Some(jobs.clone());
+    automation.threads = Some(jobs.clone());
+    automation.engine = Some(jobs.clone());
+    let extensions = crate::extension_authoring::AppExtensions::new(tools.host.profile.clone());
+    // Before any window scans: finish or undo a promotion a crash interrupted.
+    if let Err(error) = pm_mcp::extensions::recover_all(&extensions) {
+        eprintln!("Extension change recovery failed: {error}");
+    }
+    automation.extensions = Some(Arc::new(extensions));
+    automation.store_reads = Some(Arc::new(StoreHttp));
+    Ok(jobs)
+}
+/// The Store's public read routes over the system HTTP stack, for
+/// `store_search`, `store_extension` and `store_source` (runs on MCP workers).
+struct StoreHttp;
+impl pm_mcp::store::StoreRead for StoreHttp {
+    fn get(&self, request: pm_mcp::store::Request) -> Result<pm_mcp::store::Response> {
+        let failed = |message: &str| Error {
+            code: "store_error".into(),
+            message: message.into(),
+            backing: Some("native Store transport".into()),
+        };
+        let origin = url::Url::parse(pm_compat_runner::store_install::origin())
+            .map_err(|_| Error::invalid("Invalid Store origin"))?;
+        let mut url = origin
+            .join(&request.path)
+            .map_err(|_| Error::invalid("Invalid Store route"))?;
+        if !request.path.starts_with("/v1/store/")
+            || request.path.contains(['?', '#'])
+            || url.origin() != origin.origin()
+            || request.max_bytes > pm_mcp::store::JSON_LIMIT
+        {
+            return Err(Error::invalid("Invalid native Store read request"));
+        }
+        if !request.query.is_empty() {
+            url.query_pairs_mut().extend_pairs(request.query);
+        }
+        // Never leaves the Store's origin, even by redirect. Transport errors
+        // can carry hosts and system detail: none crosses MCP.
+        let response = pm_compat_runner::net::get_within(
+            pm_compat_runner::store_install::origin(),
+            url.as_str(),
+            request.max_bytes,
+            30,
+        )
+        .map_err(|e| match e {
+            pm_runtime_v8::Error::Host(m) if m.contains("sent elsewhere") => {
+                failed("The Store redirected the read to another origin")
+            }
+            _ => failed("The Store didn't answer. Check the connection and try again."),
+        })?;
+        Ok(pm_mcp::store::Response {
+            status: response.status,
+            body: response.body,
+        })
+    }
+}
+pub fn headless(
+    profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>, eval: bool,
+) -> anyhow::Result<()> {
+    crate::mcp_extensions::run(move |fonts| -> anyhow::Result<()> {
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
+            journal_root: Some(profile.join("journals")),
+            backup_root: Some(profile.join("backups")),
+            write_coordinator: Some(crate::file_coordination::system()),
+            trash: Some(crate::file_coordination::trash()),
+            text: Some(crate::text_host::text_host(&fonts)),
+            ..Default::default()
+        });
+        let host = crate::mcp::Host::new(actor.handle(), profile.clone());
+        crate::mcp::attach(&host.kernel, &profile)?;
+        if let Some(path) = launch {
+            host.open(
+                crate::session::stable_id(&path),
+                pm_kernel::session::SessionSource::File(path),
+            )?;
+        }
+        let tools = Tools::new(host, exports);
+        let jobs = connect_engine(&tools, Default::default(), Default::default())?;
+        // Start the opened project's extensions now, but answer the agent at
+        // once: a slow or failing load is each job's to wait for or report,
+        // never a reason for the tool server not to start.
+        if let Some(session) = tools.host.current()
+            && let Some(published) = tools.host.kernel.published(&session.project)
+        {
+            std::thread::Builder::new()
+                .name("mcp-extensions-start".into())
+                .spawn(move || {
+                    if let Err(error) = jobs.resources(&published, true, &never) {
+                        eprintln!("Extensions of the opened project: {error}");
+                    }
+                })?;
+        }
+        let shared = tools.clone();
+        let server = if eval {
+            pm_mcp::transport::LoopbackServer::start_unix_with(&profile, move || shared.connect())?
+        } else {
+            pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?
+        };
+        let result = if eval {
+            pm_mcp::aero_rpc::serve(
+                std::io::BufReader::new(std::io::stdin()), std::io::stdout().lock(),
+                tools.automation.clone(), profile,
+            )
+        } else {
+            pm_mcp::transport::serve_stdio(
+                std::io::stdin().lock(), std::io::stdout().lock(), tools.connect(),
+            )
+        };
+        drop(server);
+        let exports = tools.automation.lock().unwrap().export_jobs.clone();
+        // In a windowless owner, stdin EOF closes the client, not its export.
+        let drained = exports.drain(exports.limit);
+        let closed = tools.automation.lock().unwrap().close_headless();
+        actor.shutdown();
+        result.and(drained).and(closed).map_err(Into::into)
+    })
+}
+struct ProjectExtensions {
+    v4: Option<Arc<pm_builtins::Builtins>>,
+    surfaces: HashMap<String, String>,
+    project: String,
+    host: Arc<pm_compat_runner::host::ExtensionHost>,
+    /// Answers the raster overrides of this project's jobs, as a window's do.
+    overrides: crate::raster_overrides::Overrides,
+}
+impl Drop for ProjectExtensions {
+    fn drop(&mut self) {
+        if let Some(runtime) = &self.v4 {
+            runtime.close();
+        }
+    }
+}
+/// Starts engine child jobs from the running executable. `activity` lets the
+/// viewer keep precedence over export bands, as it does for panel exports.
+pub struct EngineJobs {
+    kernel: KernelHandle,
+    executable: PathBuf,
+    activity: pm_engine_service::jobs::Activity,
+    profile: PathBuf,
+    cache: PathBuf,
+    progress: Mutex<HashMap<u64, Progress>>,
+    /// Whose extensions answer a project's raster overrides.
+    overrides: OverrideWindows,
+    /// Projects without a window still own the production V8 extension host.
+    /// Its discovery, enabled preferences, reloads and Store confinement are
+    /// identical to a window's; only DOM panels are absent.
+    extensions: Mutex<HashMap<u64, ProjectExtensions>>,
+    app_host: std::sync::OnceLock<std::sync::Weak<crate::mcp::Host>>,
+}
+impl EngineJobs {
+    pub fn new(
+        kernel: KernelHandle,
+        executable: PathBuf,
+        activity: pm_engine_service::jobs::Activity,
+        profile: PathBuf,
+        overrides: OverrideWindows,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            kernel,
+            executable,
+            activity,
+            cache: profile.join("cache/mcp"),
+            profile,
+            progress: Mutex::default(),
+            overrides,
+            extensions: Mutex::default(),
+            app_host: Default::default(),
+        })
+    }
+
+    fn settled_installed_resources(&self) -> Option<Resources> {
+        let host = self.app_host.get().and_then(std::sync::Weak::upgrade);
+        settled_resources(|id| {
+            host.as_ref().is_none_or(|host| {
+                let scope = host.project_extensions(id);
+                scope.root.is_none() && scope.excluded.is_empty()
+            })
+        })
+    }
+    /// The definitions a job of `published` draws with: its window's, once
+    /// that window's extensions have loaded when `wait` asks (ended early by
+    /// `stop`: a cancelled export, a stopped capture), or with no window the
+    /// same host started without a page.
+    pub(crate) fn resources(
+        &self,
+        published: &Arc<Published>,
+        wait: bool,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> AnyResult<Resources> {
+        let settled = if wait {
+            pm_compat_runner::host::settle_document(
+                published.snapshot.doc_id,
+                EXTENSIONS_WAIT,
+                &|| stop(),
+            )
+            .map_err(|error| match error {
+                pm_runtime_v8::Error::Host(message)
+                    if message == pm_compat_runner::host::WAIT_STOPPED =>
+                {
+                    anyhow::anyhow!(CAPTURE_STOPPED)
+                }
+                error => anyhow::anyhow!("Extension definitions: {error}"),
+            })?
+        } else {
+            None
+        };
+        // A settled owner is authoritative even if the UI has not replaced
+        // an older pending pin yet. Do not wait on the UI a second time.
+        let window = resources_of(published.snapshot.doc_id, wait && settled.is_none(), stop)
+            .map_err(|Stopped| anyhow::anyhow!(CAPTURE_STOPPED))?;
+        // A project open nowhere (Home's poster of its stored version): no
+        // realm can load its extensions, as the kernel does not hold it, so
+        // it draws with the definitions an open window has (the same
+        // installed extensions), else with missing effects bypassed, as the
+        // viewer draws them. Never a minute's wait for a load that cannot be.
+        if window.is_none() && self.kernel.published(&published.project).is_none() {
+            return Ok(self.settled_installed_resources().unwrap_or_default());
+        }
+        if let Some(mut resources) = window {
+            if let Some(publication) = &settled {
+                native_ready(
+                    published.snapshot.doc_id,
+                    publication.revision,
+                    publication.native_surfaces,
+                    stop,
+                )?;
+                resources = resources_of(published.snapshot.doc_id, false, stop)
+                    .map_err(|Stopped| anyhow::anyhow!(CAPTURE_STOPPED))?
+                    .ok_or_else(|| anyhow::anyhow!("The extension window closed"))?;
+            }
+            // Retire a worker host once the window owns this document again.
+            self.extensions
+                .lock()
+                .unwrap()
+                .remove(&published.snapshot.doc_id);
+            if let Some(publication) = settled {
+                // The owner can finish before the UI publishes its next pin.
+                // Take definitions and availability from that single moment.
+                let definitions = if publication.native_surfaces {
+                    // native_ready waited for the window to pin its own
+                    // isolates for this exact publication.
+                    resources.definitions.clone()
+                } else {
+                    publication
+                        .contributions
+                        .as_deref()
+                        .map(crate::extensions::definitions)
+                        .unwrap_or_default()
+                };
+                let unavailable = crate::extensions::unavailable(&publication);
+                if resources.definitions != definitions
+                    || resources.unavailable != unavailable
+                    || resources.pending
+                {
+                    let mut next = (*resources).clone();
+                    next.generation += 1;
+                    next.definitions = definitions;
+                    next.unavailable = unavailable;
+                    next.pending = !publication.settled;
+                    next.loading = publication.loading;
+                    return Ok(Arc::new(next));
+                }
+            }
+            return Ok(resources);
+        }
+        let host = {
+            let mut hosts = self.extensions.lock().unwrap();
+            hosts.retain(|doc, entry| {
+                // A closed/reopened document must not keep an old realm alive.
+                self.kernel
+                    .published(&entry.project)
+                    .is_some_and(|p| p.snapshot.doc_id == *doc)
+            });
+            let entry = hosts.entry(published.snapshot.doc_id).or_insert_with(|| {
+                // An extension that wraps the `raster` service draws here
+                // as in a window: the same hooks, base rasters and fonts,
+                // and a realm of its own for each delivery.
+                let overrides = crate::raster_overrides::Overrides::windowless(
+                    self.kernel.clone(),
+                    published.project.clone(),
+                    self.overrides.clone(),
+                );
+                let fonts = self.overrides.painters().fonts;
+                let excluded = self
+                    .app_host
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                    .map(|host| host.extension_exclusions(published.snapshot.doc_id))
+                    .unwrap_or_default();
+                let host = Arc::new(pm_compat_runner::host::ExtensionHost::start_scoped(
+                    pm_compat_runner::host::HostConfig {
+                        kernel: self.kernel.clone(),
+                        project: published.project.clone(),
+                        roots: crate::extensions::roots(&self.profile),
+                        cache: self.profile.join("extensions-build"),
+                        owner: None,
+                        text: Some(crate::extensions::canvas_text(fonts)),
+                        frames: None,
+                        rasters: Some(overrides.hooks()),
+                        clipboard: None,
+                        vars: Some(crate::extensions::vars_source(&self.profile)),
+                        wake: Arc::new(|| {}),
+                    },
+                    pm_compat_runner::host::ProjectScope {
+                        excluded,
+                        ..Default::default()
+                    },
+                ));
+                overrides.connect(host.raster_inbox());
+                crate::mcp_extensions::watch(&host);
+                ProjectExtensions {
+                    v4: None,
+                    surfaces: HashMap::new(),
+                    project: published.project.clone(),
+                    host,
+                    overrides,
+                }
+            });
+            // A window that had taken the project over may have closed since.
+            entry.overrides.register();
+            entry.host.clone()
+        };
+        // Cancel reaches this wait too; a load no realm will finish answers
+        // with its failure instead of a minute's wait.
+        let (generation, value) = host
+            .wait_contributions(Duration::from_secs(60), stop)
+            .map_err(|error| match error {
+                pm_runtime_v8::Error::Host(message)
+                    if message == pm_compat_runner::host::WAIT_STOPPED =>
+                {
+                    anyhow::anyhow!(CAPTURE_STOPPED)
+                }
+                pm_runtime_v8::Error::Host(message) => anyhow::anyhow!(message),
+                error => anyhow::anyhow!(error),
+            })?;
+        // Native v4 extensions have their own isolate. Windowless MCP needs
+        // those isolates too: validation's temporary mounts are not providers.
+        let wanted = host.surfaces();
+        let (runtime, mounts) = {
+            let mut hosts = self.extensions.lock().unwrap();
+            let entry = hosts
+                .get_mut(&published.snapshot.doc_id)
+                .ok_or_else(|| anyhow::anyhow!("Extension project closed"))?;
+            if entry.v4.is_none() && !wanted.is_empty() {
+                entry.v4 = Some(Arc::new(pm_builtins::Builtins::new(
+                    self.kernel.clone(),
+                    &published.project,
+                    || {},
+                )?));
+            }
+            let runtime = entry.v4.clone();
+            let gone: Vec<_> = entry
+                .surfaces
+                .keys()
+                .filter(|id| !wanted.iter().any(|surface| surface["id"] == id.as_str()))
+                .cloned()
+                .collect();
+            for id in gone {
+                if let Some(runtime) = &runtime {
+                    runtime.unmount_extension(&id);
+                }
+                entry.surfaces.remove(&id);
+            }
+            let mounts: Vec<_> = wanted
+                .into_iter()
+                .filter(|surface| {
+                    let id = surface["id"].as_str().unwrap_or_default();
+                    let hash = surface["graph"]["hash"].as_str().unwrap_or_default();
+                    entry.surfaces.get(id).is_none_or(|old| old != hash)
+                })
+                .collect();
+            (runtime, mounts)
+        };
+        if let Some(runtime) = &runtime {
+            for surface in mounts {
+                let id = surface["id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("v4 extension id"))?;
+                runtime.unmount_extension(id);
+                let ticket = runtime.mount_extension(id, &surface["graph"], None)?;
+                crate::ticket::answer(ticket, Instant::now() + Duration::from_secs(10))
+                    .ok_or_else(|| anyhow::anyhow!("v4 effect activation timed out"))??;
+                if let Some(error) = runtime.take_errors().first() {
+                    return Err(anyhow::anyhow!("{id}: {error}"));
+                }
+                if let Some(entry) = self
+                    .extensions
+                    .lock()
+                    .unwrap()
+                    .get_mut(&published.snapshot.doc_id)
+                {
+                    entry.surfaces.insert(
+                        id.into(),
+                        surface["graph"]["hash"].as_str().unwrap_or_default().into(),
+                    );
+                }
+            }
+        }
+        Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+            generation,
+            definitions: crate::extensions::native_effect_definitions(
+                runtime.as_deref(),
+                crate::extensions::definitions(&value),
+            ),
+            unavailable: crate::extensions::unavailable(&host.publication()),
+            ..Default::default()
+        }))
+    }
+    fn published(&self, frozen: &FrozenProject) -> Result<Arc<Published>> {
+        let published = self.published_at(&frozen.project_id, frozen.document_id, frozen.revision)?;
+        if let Some(comp) = frozen.project["compId"].as_str()
+            && published.snapshot.open_comp().as_deref() != Some(comp)
+        {
+            // Render a private projection, without publishing editor navigation.
+            let mut targeted = (*published).clone();
+            targeted.snapshot =
+                pm_mcp::automation::composition_snapshot(&published.snapshot, comp)?;
+            return Ok(Arc::new(targeted));
+        }
+        Ok(published)
+    }
+
+    fn published_at(&self, id: &str, document: u64, revision: u64) -> Result<Arc<Published>> {
+        self.kernel
+            .published(id)
+            .filter(|p| p.snapshot.doc_id == document && p.revision() == revision)
+            .ok_or_else(|| Error::conflict("The composition changed during engine work"))
+    }
+
+    fn start(
+        &self,
+        published: &Arc<Published>,
+        settings: ExportSettings,
+        destination: PathBuf,
+        replace: bool,
+        look: bool,
+        preview: bool,
+        offline_as_nothing: bool,
+        studio_quality: Option<serde_json::Value>,
+        studio_render_scale: Option<f32>,
+        resources: Resources,
+    ) -> AnyResult<ExportHandle> {
+        let media = crate::media::for_session(
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        )?
+        .catalog;
+        let mut request = ExportRequest::new(
+            pm_kernel::new_id("export").as_str().into(),
+            &published.snapshot,
+            JobSpec::Export {
+                session: SessionId::new(published.snapshot.doc_id)?,
+                composition: published.snapshot.render_comp().as_str().into(),
+                settings,
+            },
+            media,
+            destination,
+        )?;
+        request.preview = preview;
+        request.replace = replace;
+        request.studio_quality = studio_quality;
+        request.studio_render_scale = studio_render_scale;
+        // The definitions its caller pinned (`Self::resources`): the
+        // window's, or with no window the same host run without a page.
+        request.resources = (*resources).clone();
+        // A capture shows the project as the viewer does; a video is a delivery.
+        request.bypass_missing_effects = bypasses_missing(look, &request.resources);
+        // As the shipped app's agent exports: silent offline clips are left
+        // out, not asked about; missing audio still fails by name. Captures
+        // refuse offline media unless they draw the card (agent stills).
+        request.without_offline = !look || offline_as_nothing;
+        let mut session = JobSession::new(request);
+        if let Some(overrides) = self.overrides.of(published.snapshot.doc_id) {
+            // A look at the window's project now may ask its realm; a frame of
+            // a frozen publication (an export realm's capture) is that realm's.
+            let current = self
+                .kernel
+                .published(&published.project)
+                .is_some_and(|now| Arc::ptr_eq(&now, published));
+            overrides.pin(&mut session, published, look && current);
+        }
+        ExportHandle::start_scheduled(&self.executable, session, self.activity.clone())
+    }
+}
+/// An agent's export as the Export sheet's options: today's defaults, with
+/// the sheet's options the agent gave laid over them, checked by the same
+/// planner as a person's export.
+fn sheet_options(
+    project: &serde_json::Value,
+    agent: &pm_mcp::services::VideoOptions,
+) -> Result<pm_promedia::export_panel::Options> {
+    let mut sheet = json!({
+        "format": agent.format,
+        "scale": 1,
+        "width": project["w"],
+        "height": project["h"],
+        "fps": project["fps"],
+        "range": agent.range,
+        "quality": "high",
+        "mblur": agent.motion_blur,
+        "audio": agent.audio,
+        "alpha": agent.alpha,
+        "captionsBurn": false,
+        "captionsSidecar": "none",
+    });
+    for (key, value) in &agent.sheet {
+        sheet[key] = value.clone();
+    }
+    pm_builtins::delivery::options(&sheet).map_err(Error::invalid)
+}
+fn failed(error: impl std::fmt::Display) -> Error {
+    Error {
+        code: "export_failed".into(),
+        message: error.to_string(),
+        backing: Some("pm-engine-service".into()),
+    }
+}
+fn finish(handle: ExportHandle) -> Result<PathBuf> {
+    finished(handle).map(|(path, _)| path)
+}
+/// A finished export's file and what the person is told with it.
+fn finished(handle: ExportHandle) -> Result<(PathBuf, Vec<String>)> {
+    let status = handle.wait().map_err(failed)?;
+    let notes = status.notes;
+    match status.state {
+        JobState::Done => status
+            .path
+            .map(|path| (PathBuf::from(path), notes))
+            .ok_or_else(|| failed("Export completed without an output path")),
+        _ => Err(failed(status.error.map(|e| e.message).unwrap_or_else(
+            || "Powermove lost contact with the export engine. Try again.".into(),
+        ))),
+    }
+}
+/// The published name made safe for a file: with a unique suffix, or as
+/// given to replace the last export of it (`replace`).
+fn file_name(name: &str, extension: &str, replace: bool) -> String {
+    let stem = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect::<String>();
+    if replace {
+        return format!("{stem}.{extension}");
+    }
+    format!("{stem}-{}.{extension}", pm_kernel::new_id("export"))
+}
+impl ExportChild for EngineJobs {
+    fn video(&self, request: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
+        let frozen = &request.snapshot;
+        let cancelled = || Error {
+            code: "export_cancelled".into(),
+            message: "Export cancelled.".into(),
+            backing: None,
+        };
+        if request.cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(cancelled());
+        }
+        let published = match &request.publication {
+            Some(publication) => publication.clone(),
+            None => self.published(frozen)?,
+        };
+        let project = &frozen.project;
+        let options = sheet_options(project, &request.options)?;
+        let time = project["time"].as_f64().unwrap_or(0.);
+        let plan = pm_builtins::delivery::plan(&published.snapshot, &options, time)
+            .map_err(Error::invalid)?;
+        let settings = plan
+            .settings
+            .clone()
+            .ok_or_else(|| Error::invalid("Missing render settings"))?;
+        // What the file is: the agent may have chosen its size and rate.
+        let (settings_size, settings_rate) = (settings.size, settings.frame_rate);
+        std::fs::create_dir_all(&request.directory)?;
+        let name = request
+            .options
+            .name
+            .clone()
+            .or_else(|| project["name"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "Untitled".into());
+        let replace = request.options.replace;
+        let destination =
+            request
+                .directory
+                .join(file_name(&name, options.format.extension(), replace));
+        // Caption files beside the video, as a person's export writes them.
+        let sidecar = match options.captions_sidecar.as_str() {
+            "srt" => Some(pm_captions::CaptionFormat::Srt),
+            "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+            _ => None,
+        };
+        let sidecars = sidecar
+            .filter(|_| plan.captions > 0)
+            .map(|format| {
+                crate::export_coordinator::sidecar_files(
+                    &published,
+                    &options.range,
+                    format,
+                    &destination,
+                )
+            })
+            .unwrap_or_default();
+        // Told before the encode: nothing already there is replaced unless
+        // the agent asked to.
+        let existing = crate::export_coordinator::existing_outputs(&destination, &sidecars);
+        if !replace && let Some(first) = existing.first() {
+            return Err(Error::invalid(format!(
+                "“{}” is already in the export folder, and nothing there is replaced without replace true.",
+                crate::export_coordinator::shown_name(first)
+            )));
+        }
+        // Listed in Background Tasks beside the person's exports, where it can
+        // be watched and cancelled.
+        let task = crate::export_coordinator::AgentExport::start_with_cancel(
+            &name, &frozen.project_id, plan.frames, request.cancel.clone(),
+        )
+        .map_err(failed)?;
+        // Cancel in Background Tasks ends the wait for extensions too.
+        let resources = match self.resources(&published, true, &|| task.cancelled()) {
+            Ok(resources) => resources,
+            Err(_) if task.cancelled() => {
+                task.finish(Err("cancelled".into()));
+                return Err(cancelled());
+            }
+            Err(error) => {
+                task.finish(Err(error.to_string()));
+                return Err(failed(error));
+            }
+        };
+        if task.cancelled() {
+            task.finish(Err("cancelled".into()));
+            return Err(cancelled());
+        }
+        let handle = match self.start(
+            &published,
+            settings,
+            destination,
+            replace,
+            false,
+            false,
+            false,
+            request.options.studio_quality.clone(),
+            request.options.studio_render_scale,
+            resources,
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                task.finish(Err(error.to_string()));
+                return Err(failed(error));
+            }
+        };
+        let started = Instant::now();
+        while !matches!(
+            handle.status().state,
+            JobState::Done | JobState::Failed | JobState::Cancelled
+        ) {
+            if task.cancelled() {
+                handle.cancel();
+                break;
+            }
+            let frames = (handle.status().progress * plan.frames as f64).round() as u64;
+            task.progress(frames, plan.frames);
+            self.progress.lock().unwrap().insert(
+                frozen.document_id,
+                Progress {
+                    frames,
+                    total: Some(plan.frames),
+                    encoder: None,
+                    seconds: started.elapsed().as_secs_f64(),
+                },
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.progress.lock().unwrap().remove(&frozen.document_id);
+        if task.cancelled() && handle.status().state != JobState::Done {
+            let _ = handle.wait();
+            task.finish(Err("cancelled".into()));
+            return Err(cancelled());
+        }
+        let size = (settings_size.width, settings_size.height);
+        let fps = settings_rate.num as f64 / settings_rate.den as f64;
+        let result = finished(handle).and_then(|(path, notes)| {
+            crate::export_coordinator::write_sidecars(&sidecars, replace).map_err(failed)?;
+            Ok(pm_mcp::services::VideoDelivered {
+                path,
+                size: Some(size),
+                fps: Some(fps),
+                notes,
+            })
+        });
+        task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
+        result
+    }
+    fn video_progress(&self, document: u64) -> Option<Progress> {
+        self.progress
+            .lock()
+            .unwrap()
+            .get(&document)
+            .cloned()
+    }
+}
+/// One composition frame as PNG bytes, through the production export renderer.
+/// The extension realm's `render.renderFrameTo`/`snapshot`: the open
+/// composition of `project`, rendered by the engine as one PNG frame.
+pub(crate) fn frame_renderer(
+    kernel: KernelHandle,
+    project: String,
+    profile: PathBuf,
+    overrides: OverrideWindows,
+    capture: Capture,
+) -> AnyResult<pm_compat_runner::FrameRenderer> {
+    let jobs = EngineJobs::new(
+        kernel.clone(),
+        std::env::current_exe()?,
+        Default::default(),
+        profile,
+        overrides,
+    );
+    let epochs = jobs.overrides.clone();
+    let pins = jobs.clone();
+    Ok(cached_frames(
+        kernel,
+        project,
+        move |doc_id| epochs.of(doc_id).and_then(|o| o.epoch()),
+        // An extension's own capture never waits for its realm's load.
+        move |published, request| {
+            pins.resources(
+                published,
+                capture != Capture::ExtensionSnapshot,
+                request.stop,
+            )
+            .map_err(|e| e.to_string())
+        },
+        move |published, request, resources| {
+            let root = published.snapshot.root().ok_or("No open project")?;
+            let open = published.snapshot.open_comp();
+            let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+            let fps = comp
+                .get("fps")
+                .and_then(|n| n.to_value().as_f64())
+                .unwrap_or(30.);
+            std::fs::create_dir_all(&jobs.cache).map_err(|e| e.to_string())?;
+            let look = Look {
+                alpha: AlphaOutput::None,
+                motion_blur: request.motion_blur,
+            };
+            // An extension's snapshot (renderFrameTo, PM.Export.snapshot) is a
+            // delivery: offline media refuses, so no Media Offline card is ever
+            // cached here or saved by an extension. Home's poster is a look at
+            // the project and draws the card (its renderer is its own).
+            frame(
+                &jobs,
+                published,
+                fps,
+                request.time,
+                Size::new(request.width, request.height),
+                look,
+                request.stop,
+                capture,
+                resources,
+            )
+            .map_err(|e| e.to_string())
+        },
+    ))
+}
+/// A frame renderer that keeps the last few frames it drew: a panel that asks
+/// for the same frame again (thumbnails, a check on every redraw) gets it
+/// without a render. A kept frame is the same document revision drawn by the
+/// same override wrappers (`epoch`) and the same extension definitions: the
+/// resources are pinned (`pin`) before the lookup and `render` draws with
+/// those, so a frame drawn before an extension reloaded is never the answer
+/// after it. While extensions load nothing is kept or served: a frame drawn
+/// then lacks, or is about to gain, an effect.
+fn cached_frames(
+    kernel: KernelHandle,
+    project: String,
+    epoch: impl Fn(u64) -> Option<u64> + Send + Sync + 'static,
+    pin: impl Fn(
+        &Arc<Published>,
+        &pm_compat_runner::FrameRequest,
+    ) -> std::result::Result<Resources, String>
+    + Send
+    + Sync
+    + 'static,
+    render: impl Fn(
+        &Arc<Published>,
+        &pm_compat_runner::FrameRequest,
+        Resources,
+    ) -> std::result::Result<Vec<u8>, String>
+    + Send
+    + Sync
+    + 'static,
+) -> pm_compat_runner::FrameRenderer {
+    let cache: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>> = Mutex::default();
+    Arc::new(move |request: &pm_compat_runner::FrameRequest| {
+        let published = match &request.published {
+            Some(frozen) => frozen.clone(),
+            None => kernel.published(&project).ok_or("No open project")?,
+        };
+        let doc_id = published.snapshot.doc_id;
+        let resources = pin(&published, request)?;
+        let key = if resources.pending {
+            None
+        } else {
+            // A windowless v4 provider can change independently of the compat
+            // publication number. A refreshed stale window pin can reuse that
+            // number too: cache the actual pinned definitions, not just it.
+            let pins = serde_json::to_vec(resources.as_ref()).map_err(|e| e.to_string())?;
+            Some(format!(
+                "{doc_id}:{}:{:?}:{}:{}:{}x{}:{}",
+                published.revision(),
+                epoch(doc_id),
+                blake3::hash(&pins).to_hex(),
+                request.time.to_bits(),
+                request.width,
+                request.height,
+                request.motion_blur
+            ))
+        };
+        if let Some(key) = &key
+            && let Some((_, png)) = cache.lock().unwrap().iter().find(|(k, _)| k == key)
+        {
+            return Ok(png.as_ref().clone());
+        }
+        let png = render(&published, request, resources)?;
+        if let Some(key) = key {
+            let mut cache = cache.lock().unwrap();
+            if cache.len() >= 4 {
+                cache.pop_front();
+            }
+            cache.push_back((key, Arc::new(png.clone())));
+        }
+        Ok(png)
+    })
+}
+/// How a captured frame looks: MCP captures keep alpha; an extension's
+/// `renderFrameTo` is opaque over black with motion blur, as main draws it.
+#[derive(Clone, Copy)]
+pub(crate) struct Look {
+    alpha: AlphaOutput,
+    motion_blur: bool,
+}
+/// An agent's still and contact sheet: opaque over the composition's
+/// background, as the viewer shows it (v1's snapshots were JPEGs).
+const MCP_LOOK: Look = Look {
+    alpha: AlphaOutput::None,
+    motion_blur: false,
+};
+fn never() -> bool {
+    false
+}
+const CAPTURE_STOPPED: &str = "The frame capture was stopped";
+/// Renders one frame; `stop` cancels the export (a stopped task, a deadline).
+/// Who asked for a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Capture {
+    /// An agent's render_frames: a look at the project.
+    AgentStill,
+    /// An extension's renderFrameTo or PM.Export.snapshot: a delivery.
+    ExtensionSnapshot,
+    /// A composition sheet.
+    Sheet,
+    /// Home's poster frame of a project: a look at it.
+    Poster,
+}
+impl Capture {
+    /// An agent's still draws the Media Offline card; Home's poster draws
+    /// offline media as nothing (the card says what is missing, quietly); a
+    /// delivery refuses offline media, as an export does.
+    pub(crate) fn draws_offline_cards(self) -> bool {
+        matches!(self, Capture::AgentStill)
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn frame(
+    jobs: &EngineJobs,
+    published: &Arc<Published>,
+    fps: f64,
+    time: f64,
+    size: Size,
+    look: Look,
+    stop: &(dyn Fn() -> bool + Sync),
+    capture: Capture,
+    resources: Resources,
+) -> AnyResult<Vec<u8>> {
+    // Home's poster draws 3D at Draft: a card needs the picture, not a
+    // clean render. A project with no 3D asks for nothing.
+    let studio_quality = (matches!(capture, Capture::Poster)
+        && pm_engine_service::draws_studio(
+            &published.snapshot.document,
+            &published.snapshot.render_comp(),
+        ))
+    .then(|| serde_json::json!("draft"));
+    frame_with(
+        jobs,
+        published,
+        fps,
+        time,
+        size,
+        look,
+        stop,
+        capture,
+        studio_quality,
+        resources,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn frame_with(
+    jobs: &EngineJobs,
+    published: &Arc<Published>,
+    fps: f64,
+    time: f64,
+    size: Size,
+    look: Look,
+    stop: &(dyn Fn() -> bool + Sync),
+    capture: Capture,
+    studio_quality: Option<serde_json::Value>,
+    resources: Resources,
+) -> AnyResult<Vec<u8>> {
+    let rate = pm_time::rate_from_document(None, fps)?.rate;
+    let start = pm_time::ticks_from_seconds(time)?;
+    let span = rate.den() as f64 / rate.num() as f64;
+    let end = pm_time::ticks_from_seconds(time + span)?;
+    let output = tempfile::tempdir_in(jobs.cache.as_path())?;
+    let destination = output.path().join("frame");
+    let settings = ExportSettings {
+        format: ExportFormat::PngSequence { sixteen_bit: false },
+        alpha: look.alpha,
+        quality: QualityTier::High,
+        size,
+        frame_rate: FrameRate::new(u32::try_from(rate.num())?, u32::try_from(rate.den())?),
+        range: TickRange {
+            start: Ticks::new(start)?,
+            end: Ticks::new(end)?,
+        },
+        audio: false,
+        audio_index_playhead: None,
+        motion_blur: look.motion_blur,
+        color: OutputColor::SrgbImage,
+        precision: Precision::Float16,
+        dither: false,
+        // A look at the project, as the viewer shows it: proxy-only media
+        // draws from its proxy. Exports still refuse it without a choice.
+        draft_from_proxies: true,
+        delivery: Default::default(),
+    };
+    let handle = jobs.start(
+        published,
+        settings,
+        destination,
+        false,
+        true,
+        capture.draws_offline_cards(),
+        capture == Capture::Poster,
+        studio_quality,
+        None,
+        resources,
+    )?;
+    while matches!(
+        handle.status().state,
+        JobState::Queued | JobState::Running | JobState::WaitingForMedia
+    ) {
+        if stop() {
+            handle.cancel();
+            let _ = handle.wait();
+            anyhow::bail!(CAPTURE_STOPPED);
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let (directory, notes) = finished(handle)?;
+    if capture == Capture::Poster {
+        // What the poster left out, for Home's card to say quietly.
+        let left_out = notes.iter().any(|n| n.starts_with("Exported without"));
+        poster_left_out(&published.project, left_out);
+    }
+    first_png(&directory)
+}
+/// Projects whose last poster left offline media out.
+static POSTER_LEFT_OUT: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+fn poster_left_out(project: &str, left_out: bool) {
+    let mut all = POSTER_LEFT_OUT.lock().unwrap();
+    let all = all.get_or_insert_with(Default::default);
+    if left_out {
+        all.insert(project.to_owned());
+    } else {
+        all.remove(project);
+    }
+}
+/// Whether `project`'s last poster left offline media out.
+pub(crate) fn poster_missed_media(project: &str) -> bool {
+    POSTER_LEFT_OUT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|all| all.contains(project))
+}
+fn first_png(directory: &Path) -> AnyResult<Vec<u8>> {
+    let mut frames = std::fs::read_dir(directory)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|e| e == "png"))
+        .collect::<Vec<_>>();
+    frames.sort();
+    Ok(std::fs::read(
+        frames.first().context("Render produced no frame")?,
+    )?)
+}
+fn base64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+const IMPORT_LIMIT: u64 = 512 << 20;
+/// Import Media's kinds and types, plus the 3D models only agents import.
+fn media_type(path: &Path) -> Option<(&'static str, String)> {
+    if let Some(found) = pm_builtins::media_import::classify(path) {
+        return Some(found);
+    }
+    let extension = path.extension()?.to_str()?.to_lowercase();
+    let mime = match extension.as_str() {
+        "hdr" => return Some(("image", "image/vnd.radiance".into())),
+        "exr" => return Some(("image", "image/x-exr".into())),
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "obj" => "model/obj",
+        "fbx" => "model/fbx",
+        _ => return None,
+    };
+    Some(("model", mime.into()))
+}
+use pm_kernel::media_archive::sampled_fingerprint as fingerprint;
+impl MediaImporter for EngineJobs {
+    fn import(&self, request: &MediaImport) -> Result<ImportedMedia> {
+        let path = &request.path;
+        if !path.is_absolute() {
+            return Err(Error::invalid("Provide an absolute local media file path."));
+        }
+        if let Some(fps) = request.sequence {
+            return self.import_sequence(request, fps);
+        }
+        let size = std::fs::metadata(path)
+            .map_err(|_| {
+                Error::invalid(
+                    "The source is unavailable locally. Download cloud files first; no media was changed.",
+                )
+            })?
+            .len();
+        if size > IMPORT_LIMIT {
+            return Err(Error::invalid("Import local files up to 512 MiB."));
+        }
+        if crate::colour::lut_file(path).is_some() {
+            return self.import_lut(request, size);
+        }
+        if let Some(error) = pm_scene3d::import::path::unsupported(path) {
+            return Err(Error::invalid(error));
+        }
+        let (kind, mut mime) =
+            media_type(path).ok_or_else(|| Error::invalid("Unsupported media file."))?;
+        let fingerprint = fingerprint(path, size).map_err(failed)?;
+        if request
+            .expected_fingerprint
+            .as_ref()
+            .is_some_and(|expected| *expected != fingerprint)
+        {
+            return Err(Error::invalid(
+                "The chosen file does not match expectedFingerprint; no media was changed.",
+            ));
+        }
+        let project = &request.frozen.project;
+        if let Some(asset) = &request.replace
+            && project["assets"][asset]["kind"] != kind
+        {
+            return Err(Error::invalid(
+                "Replace media with a file of the same kind.",
+            ));
+        }
+        let environment = matches!(mime.as_str(), "image/vnd.radiance" | "image/x-exr");
+        let image_size = environment
+            .then(|| pm_engine_service::studio::probe_environment(path))
+            .transpose()
+            .map_err(|e| {
+                Error::invalid(format!("This environment image could not be read: {e}"))
+            })?;
+        // The clip's own length (first frame start to last frame end), as
+        // the Project panel's import records it.
+        // A relinked asset keeps reading its file's times as it did, so its
+        // lengths are measured that way.
+        let timing = match &request.replace {
+            Some(asset) => pm_builtins::media_import::asset_timing(project["assets"].get(asset)),
+            None => pm_media::clip::ClipTiming::Presentation,
+        };
+        let unreadable = |_| Error::invalid("This file could not be read as media.");
+        // A still is read as Import Media reads it (its displayed size), not
+        // by the container probe, which refuses stills it cannot address
+        // (TGA).
+        let still_size = (kind == "image" && !environment)
+            .then(|| pm_media::facts::media_facts_as(path, None, timing))
+            .transpose()
+            .map_err(unreadable)?
+            .and_then(|facts| facts.display_size);
+        let probe = (!matches!(kind, "model" | "image") && !environment)
+            .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
+            .transpose()
+            .map_err(unreadable)?;
+        let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
+        let [width, height] = [0, 1].map(|i| {
+            image_size
+                .or(still_size)
+                .map(|d| f64::from(d[i]))
+                .or_else(|| video.map(|video| f64::from([video.width, video.height][i])))
+        });
+        let duration = probe
+            .as_ref()
+            .and_then(|probe| probe.duration_as(timing))
+            .filter(|_| kind != "image");
+        let has_audio = probe
+            .as_ref()
+            .is_some_and(|probe| probe.streams.iter().any(|stream| stream.audio.is_some()));
+        let archive = Archive::open(&self.profile).map_err(failed)?;
+        let prepared = (kind == "model")
+            .then(|| pm_scene3d::import::path::prepare(path))
+            .transpose()
+            .map_err(failed)?;
+        let staged = prepared
+            .as_ref()
+            .map(|model| {
+                let dir = tempfile::tempdir()?;
+                let file = dir.path().join(&model.name);
+                std::fs::write(&file, &model.bytes)?;
+                Ok::<_, std::io::Error>((dir, file))
+            })
+            .transpose()
+            .map_err(failed)?;
+        let retained_path = staged.as_ref().map_or(path.as_path(), |(_, p)| p.as_path());
+        if kind == "model" {
+            mime = media_type(retained_path)
+                .ok_or_else(|| Error::invalid("Unsupported model"))?
+                .1;
+        }
+        let original = archive
+            .retain_path(retained_path, &mime, &AtomicBool::new(false))
+            .map_err(failed)?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let imported = |status, asset: String, revision| ImportedMedia {
+            status,
+            asset,
+            name: name.clone(),
+            kind: kind.into(),
+            width,
+            height,
+            duration,
+            has_audio,
+            fingerprint: fingerprint.clone(),
+            revision,
+            note: None,
+        };
+        let published = self.published(&request.frozen)?;
+        let same_bytes = |entry: &pm_kernel::project_io::MediaEntry| {
+            use pm_kernel::project_io::MediaSource::{Embedded, File, Memory};
+            match &entry.source {
+                File { sha256, .. } | Embedded { sha256, .. } => {
+                    sha256.as_deref() == Some(original.hash())
+                }
+                Memory(_) => false,
+            }
+        };
+        if request.replace.is_none()
+            && let Some(entry) = published.media.iter().find(|entry| {
+                same_bytes(entry) && project["assets"][entry.id.to_string()].is_object()
+            })
+        {
+            return Ok(imported(
+                "already_imported",
+                entry.id.to_string(),
+                request.frozen.revision,
+            ));
+        }
+        let id = request
+            .replace
+            .clone()
+            .unwrap_or_else(|| pm_kernel::new_id("asset"));
+        let previous = request
+            .replace
+            .as_ref()
+            .and_then(|asset| published.media.get(asset))
+            .map(|entry| archive.retain_entry(entry))
+            .transpose()
+            .map_err(failed)?;
+        let mut metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
+            "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
+            "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
+        if kind == "model" {
+            metadata["format"] = json!(
+                retained_path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
+        }
+        if kind == "video" {
+            metadata["audioDur"] = json!(
+                probe
+                    .as_ref()
+                    .and_then(|probe| pm_media::facts::audio_duration(probe, timing))
+                    .unwrap_or(0.)
+            );
+        }
+        // Every audio stream of a multi-track file is listed and heard, as
+        // when a person imports it; a relink keeps what was heard.
+        let streams = probe
+            .as_ref()
+            .map(pm_media::facts::audio_streams)
+            .unwrap_or_default();
+        if let Some(asset) = &request.replace {
+            let old = published
+                .snapshot
+                .root()
+                .and_then(|root| root.get("assets")?.get(asset)?.get("audioStreams"))
+                .and_then(|streams| {
+                    serde_json::from_str(&pm_model::json::to_canonical_string(&streams.to_value()))
+                        .ok()
+                });
+            pm_builtins::media_import::relink_streams(
+                &mut metadata,
+                old.as_ref(),
+                &streams,
+                previous.as_ref(),
+                &original,
+            );
+        } else if let Some(streams) = pm_media::facts::asset_audio_streams(&streams) {
+            metadata["audioStreams"] = streams;
+        }
+        // As a person's import: a new clip's times address the file's
+        // presentation; a replaced asset keeps the reading it was edited with.
+        if request.replace.is_none() && matches!(kind, "video" | "audio") {
+            metadata["timing"] = json!(pm_media::clip::ClipTiming::imported());
+        }
+        let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, revision))
+    }
+}
+impl EngineJobs {
+    /// An image sequence, as File ▸ Import Image Sequence imports it
+    /// (`pm_builtins::media_import::choose_image_sequence`): one clip read in
+    /// place, its numbered files at `fps`, its manifest retained as its
+    /// original. Replacing an asset with one relinks it to these files.
+    fn import_sequence(&self, request: &MediaImport, fps: f64) -> Result<ImportedMedia> {
+        use pm_builtins::media_import::{SEQUENCE_MIME, choose_image_sequence};
+        let chosen = choose_image_sequence(&request.path, fps, &AtomicBool::new(false))
+            .map_err(Error::invalid)?
+            .ok_or_else(|| Error::unavailable("The import was cancelled."))?;
+        let project = &request.frozen.project;
+        if let Some(asset) = &request.replace
+            && project["assets"][asset]["kind"] != "video"
+        {
+            return Err(Error::invalid(
+                "Replace media with a file of the same kind.",
+            ));
+        }
+        let size = std::fs::metadata(&chosen.path).map_err(failed)?.len();
+        let fingerprint = fingerprint(&chosen.path, size).map_err(failed)?;
+        let archive = Archive::open(&self.profile).map_err(failed)?;
+        let original = archive
+            .retain_path(&chosen.path, SEQUENCE_MIME, &AtomicBool::new(false))
+            .map_err(failed)?;
+        let mut metadata = chosen.asset.clone();
+        metadata["mimeType"] = json!(SEQUENCE_MIME);
+        metadata["fingerprint"] = json!(fingerprint);
+        let number = |key: &str| metadata[key].as_f64();
+        let imported = |status, asset: String, revision| ImportedMedia {
+            status,
+            asset,
+            name: metadata["name"].as_str().unwrap_or_default().to_owned(),
+            kind: "video".into(),
+            width: number("w"),
+            height: number("h"),
+            duration: number("dur"),
+            has_audio: false,
+            fingerprint: fingerprint.clone(),
+            revision,
+            note: chosen.missing.clone(),
+        };
+        let published = self.published(&request.frozen)?;
+        // The same frames at the same rate are the same manifest bytes.
+        if request.replace.is_none()
+            && let Some(entry) = published.media.iter().find(|entry| {
+                use pm_kernel::project_io::MediaSource::{Embedded, File};
+                matches!(&entry.source, File { sha256, .. } | Embedded { sha256, .. }
+                    if sha256.as_deref() == Some(original.hash()))
+                    && project["assets"][entry.id.to_string()].is_object()
+            })
+        {
+            return Ok(imported(
+                "already_imported",
+                entry.id.to_string(),
+                request.frozen.revision,
+            ));
+        }
+        let id = request
+            .replace
+            .clone()
+            .unwrap_or_else(|| pm_kernel::new_id("asset"));
+        let previous = request
+            .replace
+            .as_ref()
+            .and_then(|asset| published.media.get(asset))
+            .map(|entry| archive.retain_entry(entry))
+            .transpose()
+            .map_err(failed)?;
+        let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, revision))
+    }
+
+    /// Admits the asset `id` with `metadata` and its retained `original`
+    /// (replacing `previous`) into the project as one media edit; answers
+    /// the project's revision.
+    fn admit(
+        &self,
+        request: &MediaImport,
+        published: &Published,
+        id: &str,
+        metadata: &serde_json::Value,
+        original: pm_kernel::media_archive::Original,
+        previous: Option<pm_kernel::media_archive::Original>,
+    ) -> Result<u64> {
+        let catalog =
+            pm_panel_media::Catalog::published(published).map_err(|e| failed(format!("{e:?}")))?;
+        let edit = catalog
+            .prepare_import(
+                &catalog.stamp,
+                vec![pm_panel_media::StoredAsset {
+                    id: id.to_owned(),
+                    metadata: pm_model::json::parse(&metadata.to_string()).map_err(failed)?,
+                    original_version: original.version().into(),
+                }],
+                request.folder.clone(),
+                request.replace.clone(),
+                &[],
+            )
+            .map_err(|e| match e {
+                pm_panel_media::Error::MissingItem => {
+                    Error::invalid("Choose an existing media folder.")
+                }
+                other => failed(format!("{other:?}")),
+            })?;
+        let expected = published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets"))
+            .and_then(|assets| assets.get(id))
+            .map(pm_model::Node::to_value);
+        let writer = pm_kernel::Caller::realm(request.writer, 1, pm_kernel::Origin::Mcp);
+        let ack = self
+            .kernel
+            .call(
+                &request.frozen.project_id,
+                edit.request_with_media(
+                    writer,
+                    vec![pm_kernel::MediaBinding {
+                        asset: id.to_owned(),
+                        expected,
+                        original,
+                        previous,
+                    }],
+                    vec![],
+                ),
+            )
+            .wait()
+            .ok_or_else(|| Error::unavailable("The app is closing."))?
+            .map_err(Error::kernel)?;
+        if let pm_kernel::Reply::Throw(error) = &ack.reply {
+            return Err(Error::kernel(error));
+        }
+        Ok(ack.revision)
+    }
+
+    /// A `.cube` or `.3dl` file, read as Apply LUT… reads it and kept in the
+    /// media archive, becomes a `lut` asset; `add_effect applyColorLut` with
+    /// `inputs: {lut: {kind: "asset", assetId}}` applies it.
+    fn import_lut(&self, request: &MediaImport, size: u64) -> Result<ImportedMedia> {
+        let path = &request.path;
+        if request.replace.is_some() {
+            return Err(Error::invalid(
+                "Relink a LUT by importing it, then set_effect on the existing effect with \
+                 patch {\"inputs\":{\"lut\":{\"kind\":\"asset\",\"assetId\":\"<new asset>\"}}}.",
+            ));
+        }
+        let retained = crate::colour::retain_lut(&self.profile, path).map_err(Error::invalid)?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let fingerprint = fingerprint(path, size).map_err(failed)?;
+        let id = pm_kernel::new_id("lut");
+        let asset = crate::colour::lut_asset(&name, &retained);
+        let writer = pm_kernel::Caller::realm(request.writer, 1, pm_kernel::Origin::Mcp);
+        let ack = self
+            .kernel
+            .call(
+                &request.frozen.project_id,
+                pm_kernel::Request::new(
+                    writer,
+                    pm_kernel::Call::Transact {
+                        label: Some("Import LUT".into()),
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::MediaCommand::AddAsset {
+                                asset_id: id.clone(),
+                                asset,
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: Some(request.frozen.revision),
+                    },
+                )
+                .with_document(request.frozen.document_id),
+            )
+            .wait()
+            .ok_or_else(|| Error::unavailable("The app is closing."))?
+            .map_err(Error::kernel)?;
+        if let pm_kernel::Reply::Throw(error) = &ack.reply {
+            return Err(Error::kernel(error));
+        }
+        Ok(ImportedMedia {
+            status: "imported",
+            asset: id,
+            name,
+            kind: "lut".into(),
+            width: None,
+            height: None,
+            duration: None,
+            has_audio: false,
+            fingerprint,
+            revision: ack.revision,
+            note: None,
+        })
+    }
+}
+/// The last thing the agent said, which is what a caller wants at a glance.
+fn thread_summary(thread: &Value) -> Value {
+    let messages = thread["conversation"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    pm_agents::conversation::for_agent(messages)
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .map_or(Value::Null, |message| json!(message.text))
+}
+fn describe_thread(thread: &Value) -> Value {
+    let settings = |key: &str| thread[key].clone();
+    let status = thread["lastRunStatus"].as_str().unwrap_or("idle");
+    json!({"threadId":thread["id"],"title":thread["title"],"updatedAt":thread["updatedAt"],
+        "provider":settings("provider"),"model":settings("model"),
+        "reasoningEffort":settings("reasoningEffort"),"access":thread["access"].as_str().unwrap_or("project"),
+        "busy":matches!(status, "queued" | "running" | "waiting"),"runId":thread["lastRunId"],
+        "status":status,"summary":thread_summary(thread)})
+}
+impl ThreadArchive for EngineJobs {
+    fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        let project_id = project.unwrap_or("builtin-application");
+        let reply = self
+            .kernel
+            .profile(ProfileCall::AgentGet {
+                application: project.is_none(),
+                key: format!("agentThreads.{project_id}"),
+            })
+            .wait()
+            .ok_or_else(|| Error::invalid("Agent storage is unavailable."))?
+            .map_err(|error| Error::invalid(error.to_string()))?;
+        let ProfileReply::AgentValue(archive) = reply else {
+            return Err(Error::invalid("Agent storage is unavailable."));
+        };
+        let archive = archive.unwrap_or_else(|| json!({"threads":[]}));
+        let threads = archive["threads"].as_array().map_or(&[][..], Vec::as_slice);
+        let count = |key: &str, default: usize| args[key].as_u64().map_or(default, |n| n as usize);
+        let offset = count("offset", 0);
+        if tool == "thread_list" {
+            let limit = count("limit", 30);
+            let page = threads.iter().skip(offset).take(limit);
+            return Ok(
+                json!({"threads":page.map(describe_thread).collect::<Vec<_>>(),
+                "total":threads.len(),
+                "nextOffset":(offset + limit < threads.len()).then_some(offset + limit)}),
+            );
+        }
+        let thread = threads
+            .iter()
+            .find(|thread| thread["id"] == args["threadId"])
+            .ok_or_else(|| Error::invalid("This thread does not exist in the current project."))?;
+        let conversation = thread["conversation"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let limit = count("limit", 20);
+        let start = count("textOffset", 0);
+        let width = count("maxCharsPerMessage", 12_000).min(160_000 / limit);
+        let messages = conversation
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(limit)
+            .map(|(position, message)| {
+                let source = pm_agents::conversation::message_text(message)
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                let end = (start + width).min(source.len());
+                let text = String::from_utf16_lossy(source.get(start..end).unwrap_or_default());
+                let role = if message["role"] == "trace" {
+                    json!("assistant")
+                } else {
+                    message["role"].clone()
+                };
+                json!({"position":position,"role":role,"text":text,"truncated":end < source.len(),
+                "nextTextOffset":(end < source.len()).then_some(end)})
+            })
+            .collect::<Vec<_>>();
+        Ok(
+            json!({"thread":describe_thread(thread),"messages":messages,"activity":"","questions":[],
+            "nextOffset":(offset + limit < conversation.len()).then_some(offset + limit)}),
+        )
+    }
+}
+impl MediaRegistry for EngineJobs {
+    fn state(&self, project: &str, asset: &str) -> MediaState {
+        let Some(published) = self.kernel.published(project) else {
+            return MediaState::default();
+        };
+        let linked = || {
+            let root = published.snapshot.root()?;
+            let record = root.get("assets")?.get(asset)?.to_value();
+            let path = record.get("sourcePath").or_else(|| record.get("path"))?;
+            Some(Path::new(&*path.as_js_string()?.to_string_lossy()).is_file())
+        };
+        MediaState {
+            available: published.media.get(asset).is_some() || linked() == Some(true),
+            ..Default::default()
+        }
+    }
+}
+impl EngineHook for EngineJobs {
+    fn prepare_definitions(&self, project: &str, document: u64, revision: u64) -> Result<()> {
+        let published = self
+            .kernel
+            .published(project)
+            .filter(|p| p.snapshot.doc_id == document && p.revision() == revision)
+            .ok_or_else(|| Error::conflict("The project changed while loading its effects"))?;
+        self.resources(&published, true, &|| false)
+            .map(|_| ())
+            .map_err(|error| Error::invalid(error.to_string()))
+    }
+
+    fn eval_registrations(&self, project: &str, document: u64, revision: u64) -> Result<Value> {
+        use pm_protocol::definitions::DefinitionKind;
+        let published = self.published_at(project, document, revision)?;
+        let resources = self.resources(&published, true, &never).map_err(failed)?;
+        let host = self
+            .extensions
+            .lock()
+            .unwrap()
+            .get(&document)
+            .map(|entry| (entry.host.clone(), entry.v4.clone()));
+        let mut owners = std::collections::BTreeMap::<String, String>::new();
+        let mut panels = Vec::new();
+        if let Some((host, runtime)) = host {
+            let publication = host.publication();
+            for (extension, definitions) in publication.provides {
+                for id in definitions {
+                    owners.insert(id, extension.clone());
+                }
+            }
+            if let Some(contributions) = publication.contributions {
+                for panel in contributions["panels"].as_array().into_iter().flatten() {
+                    if let (Some(id), Some(owner)) =
+                        (panel["id"].as_str(), panel["ownerId"].as_str())
+                    {
+                        panels.push(json!({"id":id,"extension":owner,"parameters":[]}));
+                    }
+                }
+            }
+            for (owner, definition) in runtime.iter().flat_map(|rt| rt.extension_effects()) {
+                owners.insert(definition.id.as_str().into(), owner);
+            }
+        }
+        let definitions = |kind| {
+            resources.definitions.iter().filter(|def| def.kind == kind).map(|def| {
+            let id = def.id.as_str();
+            json!({"id":id,"extension":owners.get(id),"parameters":def.params.iter().map(|param|param.key()).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>()
+        };
+        Ok(
+            json!({"registeredEffects":definitions(DefinitionKind::Effect),
+            "registeredTransitions":definitions(DefinitionKind::Transition),"registeredPanels":panels}),
+        )
+    }
+
+    fn extension_probe(
+        &self,
+        project: &str,
+        document: u64,
+        revision: u64,
+        ids: &[String],
+    ) -> Result<Value> {
+        use pm_protocol::definitions::DefinitionKind;
+        let published = self.published_at(project, document, revision)?;
+        let resources = self.resources(&published, true, &never).map_err(failed)?;
+        let registrations = self.eval_registrations(project, document, revision)?;
+        let owned = ["registeredEffects", "registeredTransitions"]
+            .into_iter()
+            .flat_map(|key| registrations[key].as_array().into_iter().flatten())
+            .filter(|row| {
+                row["extension"]
+                    .as_str()
+                    .is_some_and(|id| ids.iter().any(|expected| expected == id))
+            })
+            .filter_map(|row| row["id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        // Authored definitions are namespaced by the optional registration
+        // origin in a live window. Do not infer ownership from source files.
+        let mut probes = Vec::new();
+        for definition in &resources.definitions {
+            if matches!(
+                definition.kind,
+                DefinitionKind::Effect | DefinitionKind::Transition
+            ) && owned.contains(definition.id.as_str())
+            {
+                probes.push(crate::effect_lab::probe(definition).map_err(failed)?);
+            }
+        }
+        Ok(json!(probes))
+    }
+
+    fn measure_frame_time(
+        &self,
+        project: &str,
+        document: u64,
+        revision: u64,
+        args: &Value,
+    ) -> Result<Value> {
+        let target = args["target"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::invalid("Name the enabled effect or transition to measure."))?;
+        let times = args["times"]
+            .as_array()
+            .filter(|times| !times.is_empty() && times.len() <= 24)
+            .ok_or_else(|| Error::invalid("Supply from 1 to 24 frame times."))?;
+        let samples = args["samples"]
+            .as_u64()
+            .filter(|n| (1..=32).contains(n))
+            .ok_or_else(|| Error::invalid("Choose from 1 to 32 paired measurements."))?;
+        let width = args["width"]
+            .as_u64()
+            .filter(|n| (160..=1920).contains(n))
+            .ok_or_else(|| Error::invalid("Choose an output width from 160 to 1920."))?
+            as u32;
+        let published = self.published_at(project, document, revision)?;
+        let comp = published.snapshot.render_comp();
+        let comp = comp.as_str();
+        let original = &published.snapshot.document;
+        let mut raw: Value = serde_json::from_str(&to_canonical_string(
+            &original
+                .to_value()
+                .ok_or_else(|| Error::invalid("Missing composition"))?,
+        ))
+        .map_err(failed)?;
+        // The stored document keeps every composition, the main one included,
+        // under comps; a document without that entry keeps its layers at the root.
+        let project_node = if raw["comps"].get(comp).is_some() {
+            &mut raw["comps"][comp]
+        } else {
+            &mut raw
+        };
+        let w = project_node["w"].as_f64().unwrap_or(1920.);
+        let h = project_node["h"].as_f64().unwrap_or(1080.);
+        let height = (h * f64::from(width) / w).round().clamp(2., 1920.) as u32;
+        let mut active = Vec::new();
+        for layer in project_node["layers"].as_array_mut().into_iter().flatten() {
+            if layer["on"] == false {
+                continue;
+            }
+            let from = layer["from"].as_f64().unwrap_or_default();
+            let end = from + layer["dur"].as_f64().unwrap_or_default();
+            for effect in layer["fx"].as_array_mut().into_iter().flatten() {
+                if (effect["type"] == target || effect["id"] == target) && effect["on"] != false {
+                    effect["on"] = json!(false);
+                    active.push((from, end));
+                }
+            }
+            for edge in ["transitionIn", "transitionOut"] {
+                if layer[edge]["type"] == target {
+                    let duration = layer[edge]["dur"].as_f64().unwrap_or_default();
+                    active.push(if edge == "transitionIn" {
+                        (from, from + duration)
+                    } else {
+                        (end - duration, end)
+                    });
+                    layer[edge] = Value::Null;
+                }
+            }
+        }
+        if active.is_empty() {
+            return Err(Error::invalid(format!(
+                "{target} is not a switched-on effect or transition of a switched-on layer in composition {comp}. Name an effect type, effect id or transition type the composition uses."
+            )));
+        }
+        let times = times
+            .iter()
+            .map(|time| {
+                time.as_f64()
+                    .filter(|time| {
+                        time.is_finite()
+                            && active.iter().any(|(from, end)| time >= from && time < end)
+                    })
+                    .ok_or_else(|| {
+                        Error::invalid(format!("{target} is not active at frame time {time}."))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut disabled = pm_model::Document::new(
+            Some(pm_model::json::parse(&raw.to_string()).map_err(failed)?),
+            revision + 1,
+        );
+        disabled.set_saving_app_version(original.saving_app_version().map(str::to_owned));
+        let resources = self.resources(&published, true, &never).map_err(failed)?;
+        let media = crate::media::for_session(
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        )
+        .map_err(failed)?;
+        let resolver = pm_render::MapResolver {
+            paths: media.catalog.originals.into_iter().collect(),
+            ..Default::default()
+        };
+        let mut renderer = pm_render::Renderer::headless().map_err(failed)?;
+        let failures = renderer
+            .set_document_effects(original, &resources.definitions)
+            .map_err(failed)?;
+        if !failures.is_empty() || !renderer.missing_effects().is_empty() {
+            return Err(Error::invalid(
+                "Some effects failed to load. Fix the definitions before timing the project.",
+            ));
+        }
+        let mut request =
+            pm_render::RenderRequest::sized(Size::new(width, height), Precision::Float16);
+        request.export = true;
+        let mut enabled_ms = Vec::new();
+        let mut disabled_ms = Vec::new();
+        for time in times {
+            let ticks =
+                Ticks::new(pm_time::ticks_from_seconds(time).map_err(failed)?).map_err(failed)?;
+            let mut render = |tree: &pm_model::Document| -> Result<f64> {
+                let started = Instant::now();
+                let frame = renderer
+                    .render(tree, comp, ticks, &request, &resolver)
+                    .map_err(failed)?;
+                if !frame.failures.is_empty() {
+                    return Err(Error::invalid(format!(
+                        "Frame {time} failed: {:?}",
+                        frame.failures
+                    )));
+                }
+                renderer.wait_idle();
+                let ms = started.elapsed().as_secs_f64() * 1000.;
+                renderer.recycle(frame);
+                Ok(ms)
+            };
+            render(original)?;
+            render(&disabled)?;
+            for i in 0..samples {
+                if i % 2 == 0 {
+                    enabled_ms.push(render(original)?);
+                    disabled_ms.push(render(&disabled)?);
+                } else {
+                    disabled_ms.push(render(&disabled)?);
+                    enabled_ms.push(render(original)?);
+                }
+            }
+        }
+        self.published_at(project, document, revision)?;
+        Ok(json!({"revision":revision,"enabledMs":enabled_ms,"disabledMs":disabled_ms}))
+    }
+
+    fn render_effect_lab(
+        &self,
+        request: &pm_mcp::effect_lab::Request,
+        context: &pm_mcp::effect_lab::Context,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<pm_mcp::services::ToolOutput> {
+        use pm_mcp::effect_lab::Backdrop;
+        let deadline = Instant::now() + EXTENSIONS_WAIT;
+        let stop = || cancelled() || Instant::now() >= deadline;
+
+        let backdrop = if let Backdrop::Composition {
+            composition_id,
+            time,
+        } = &request.backdrop
+        {
+            let frozen = context
+                .project
+                .as_ref()
+                .ok_or_else(|| Error::invalid("Open the backdrop's project first."))?;
+            let mut published =
+                (*self.published_at(&frozen.id, frozen.document, frozen.revision)?).clone();
+            published.snapshot =
+                pm_mcp::automation::composition_snapshot(&published.snapshot, composition_id)?;
+            let published = Arc::new(published);
+            let root = published
+                .snapshot
+                .root()
+                .ok_or_else(|| Error::invalid("No open project"))?;
+            let comp = pm_kernel::model::comp_node(root, Some(composition_id)).unwrap_or(root);
+            let number = |key| comp.get(key).and_then(|value| value.to_value().as_f64());
+            let duration = number("dur").unwrap_or(10.);
+            if *time >= duration {
+                return Err(Error::invalid(
+                    "Choose a time within the backdrop composition.",
+                ));
+            }
+            let resources = self.resources(&published, true, &stop).map_err(failed)?;
+            std::fs::create_dir_all(&self.cache)?;
+            Some(
+                frame(
+                    self,
+                    &published,
+                    number("fps").unwrap_or(30.),
+                    *time,
+                    Size::new(request.width, request.height),
+                    MCP_LOOK,
+                    &stop,
+                    Capture::AgentStill,
+                    resources,
+                )
+                .map_err(failed)?,
+            )
+        } else {
+            None
+        };
+        let definition = self.lab_definition(request, context, &stop)?;
+        crate::effect_lab::render(request, context, &definition, backdrop.as_deref(), &stop)
+            .map_err(|error| Error::invalid(error.to_string()))
+    }
+    fn capture(&self, _: &CaptureRequest) -> Result<Value> {
+        Err(Error::invalid("Frame capture needs a frozen project"))
+    }
+    fn scene3d_assets(
+        &self,
+        frozen: &FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        let published = self.published(frozen)?;
+        let media = crate::media::for_session(
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        )
+        .map_err(failed)?;
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            media.catalog.originals.into_iter().collect(),
+        )))
+    }
+    fn capture_snapshot(&self, request: &CaptureRequest, frozen: &FrozenProject) -> Result<Value> {
+        let published = self.published(frozen)?;
+        let project = &frozen.project;
+        let (w, h) = (
+            project["w"].as_f64().unwrap_or(1920.),
+            project["h"].as_f64().unwrap_or(1080.),
+        );
+        let fps = project["fps"].as_f64().unwrap_or(30.);
+        // Electron's snapshot width is a maximum: small compositions retain
+        // their authored pixel grid instead of being enlarged for an agent.
+        let scale = (f64::from(request.width.clamp(160, 8192)) / w).min(1.0);
+        let width = (w * scale).round().max(2.0) as u32;
+        let height = (h * scale).round().max(2.0) as u32;
+        std::fs::create_dir_all(&self.cache)?;
+        let mut images = vec![];
+        for time in &request.times {
+            let size = Size::new(width, height);
+            let bytes =
+                // render_frames is a look at the project: offline media draws
+                // the Media Offline card. Nothing caches these stills.
+                frame(
+                    self,
+                    &published,
+                    fps,
+                    *time,
+                    size,
+                    MCP_LOOK,
+                    &never,
+                    Capture::AgentStill,
+                    self.resources(&published, true, &never).map_err(failed)?,
+                )
+                .map_err(failed)?;
+            images.push(format!("data:image/png;base64,{}", base64(&bytes)));
+        }
+        Ok(json!({"times":request.times,"images":images}))
+    }
+    fn resolve_media(&self, request: &MediaRequest) -> Result<MediaSource> {
+        let path = self.original(request)?;
+        let timing = pm_media::probe::probe_timing(&path).map_err(failed)?;
+        Ok(MediaSource {
+            asset: request.asset.clone().unwrap_or_default(),
+            duration: seconds(timing.duration_us),
+            proxy: false,
+            layer: None,
+        })
+    }
+    fn probe(&self, request: &MediaRequest, _: &MediaSource) -> Result<Probe> {
+        let probe = pm_media::probe::probe(&self.original(request)?)
+            .map_err(failed)?
+            .probe;
+        let fps = probe.video.as_ref().and_then(|video| {
+            video
+                .nominal_rate
+                .as_ref()
+                .map(|rate| rate.rate.num() as f64 / rate.rate.den() as f64)
+        });
+        let video = probe
+            .video
+            .iter()
+            .map(|video| {
+                json!({"index":probe.video_stream,"codec":video.codec.codec,"width":video.width,
+                    "height":video.height,"fps":fps,"alpha":video.alpha.is_some()})
+            })
+            .collect();
+        let mut audio = vec![];
+        let mut other = 0;
+        for stream in &probe.streams {
+            match &stream.audio {
+                Some(a) => audio.push(json!({"index":stream.index,"codec":a.codec,
+                    "sampleRate":a.sample_rate,"channels":a.channels})),
+                None if Some(stream.index) != probe.video_stream => other += 1,
+                None => {}
+            }
+        }
+        let duration = seconds(probe.duration_us);
+        Ok(Probe {
+            format: Some(probe.container.clone()),
+            duration,
+            start: seconds(probe.start_us).unwrap_or(0.),
+            bitrate_kbps: duration
+                .filter(|d| *d > 0.)
+                .map(|d| probe.size as f64 * 8. / d / 1000.),
+            video,
+            audio,
+            other_streams: other,
+        })
+    }
+    fn sample(&self, request: &FrameRequest) -> Result<Vec<Image>> {
+        let times: Vec<f64> = request.frames.iter().map(|f| f.source).collect();
+        self.source_frames(&request.request, &times, (request.width, request.height))?
+            .iter()
+            .map(|(pixels, w, h)| image(pixels, *w, *h))
+            .collect()
+    }
+    fn sheet(&self, request: &SheetRequest) -> Result<Image> {
+        let times: Vec<f64> = request.cells.iter().map(|c| c.source).collect();
+        let size = (request.plan.cell_width, request.plan.cell_height);
+        let cells = self.source_frames(&request.request, &times, size)?;
+        sheet(&cells, &request.plan)
+    }
+    /// Each cell is a full engine job, so a long sheet returns a finished prefix.
+    fn composition_sheet(&self, request: &SheetRequest) -> Result<SheetOutput> {
+        let frozen = &request.request.snapshot;
+        let published = self.published(frozen)?;
+        let fps = frozen.project["fps"].as_f64().unwrap_or(30.);
+        let size = Size::new(request.plan.cell_width, request.plan.cell_height);
+        std::fs::create_dir_all(&self.cache)?;
+        let started = Instant::now();
+        let mut cells = vec![];
+        for cell in &request.cells {
+            if !cells.is_empty() && started.elapsed() > Duration::from_secs(45) {
+                break;
+            }
+            let bytes = frame(
+                self,
+                &published,
+                fps,
+                cell.source,
+                size,
+                MCP_LOOK,
+                &never,
+                Capture::Sheet,
+                self.resources(&published, true, &never).map_err(failed)?,
+            )
+            .map_err(failed)?;
+            cells.push(decode_png(&bytes).map_err(failed)?);
+        }
+        let aspect = request.plan.cell_width as f64 / request.plan.cell_height as f64;
+        let plan = pm_mcp::media_tools::plan_sheet(
+            cells.len(),
+            aspect,
+            Some(request.plan.columns).filter(|_| cells.len() == request.cells.len()),
+        );
+        Ok(SheetOutput {
+            image: sheet(&cells, &plan)?,
+            completed: cells.len(),
+        })
+    }
+    /// Loudness and silences of what the mix plays from the asset: its heard
+    /// streams on its clip's timeline (`pm_audio::waveform::clip_envelope`).
+    fn waveform(&self, request: &WaveformRequest) -> Result<Waveform> {
+        const BUCKETS_PER_SECOND: f64 = 100.;
+        let path = self.original(&request.request)?;
+        let published = self.published(&request.request.snapshot)?;
+        let record = request
+            .request
+            .asset
+            .as_ref()
+            .and_then(|asset| asset["id"].as_str())
+            .and_then(|id| published.snapshot.root()?.get("assets")?.get(id));
+        let streams = pm_audio::graph::selected_streams(record);
+        if streams.is_empty() {
+            return Err(Error::invalid("This media's audio streams are all off."));
+        }
+        let (envelope, rate) = pm_audio::waveform::clip_envelope(
+            &path,
+            &streams,
+            pm_audio::graph::clip_timing(record),
+            BUCKETS_PER_SECOND,
+        )
+        .map_err(|_| Error::invalid("This media has no audio."))?;
+        let envelope: Vec<f64> = envelope.into_iter().map(f64::from).collect();
+        let bucket_at = |time: f64| ((time * rate) as usize).min(envelope.len());
+        let span = &envelope[bucket_at(request.start)..bucket_at(request.end)];
+        let peak = span.iter().copied().fold(0., f64::max);
+        let threshold = 10f64.powf(request.threshold_db / 20.);
+        let mut silences = vec![];
+        let mut quiet = None;
+        for (index, level) in span.iter().chain([&f64::MAX]).enumerate() {
+            let time = request.start + index as f64 / rate;
+            match (quiet, *level < threshold) {
+                (None, true) => quiet = Some(time),
+                (Some(start), false) => {
+                    if time - start >= request.min_silence {
+                        silences.push([start, time.min(request.end)]);
+                    }
+                    quiet = None;
+                }
+                _ => {}
+            }
+        }
+        let picture = if request.image && !span.is_empty() {
+            const HEIGHT: u32 = 120;
+            let mut pixels = vec![0u8; (request.width * HEIGHT * 4) as usize];
+            for x in 0..request.width as usize {
+                let level = span[x * span.len() / request.width as usize].min(1.);
+                let reach = (level * HEIGHT as f64 / 2.) as i64;
+                for offset in -reach..=reach {
+                    let y = (HEIGHT as i64 / 2 + offset).clamp(0, HEIGHT as i64 - 1) as usize;
+                    let at = (y * request.width as usize + x) * 4;
+                    pixels[at..at + 4].copy_from_slice(&[255; 4]);
+                }
+            }
+            Some(image(&pixels, request.width, HEIGHT)?)
+        } else {
+            None
+        };
+        Ok(Waveform {
+            loudness: json!({"peakDb":decibels(peak),"clipping":peak >= 1.}),
+            silences,
+            image: picture,
+        })
+    }
+}
+
+pub(crate) type Rgba = (Vec<u8>, u32, u32);
+pub(crate) fn png(pixels: &[u8], width: u32, height: u32) -> AnyResult<Vec<u8>> {
+    let mut bytes = vec![];
+    let mut encoder = ::png::Encoder::new(&mut bytes, width, height);
+    encoder.set_color(::png::ColorType::Rgba);
+    encoder.set_depth(::png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(pixels)?;
+    Ok(bytes)
+}
+pub(crate) fn decode_png(bytes: &[u8]) -> AnyResult<Rgba> {
+    let mut decoder = ::png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(::png::Transformations::ALPHA | ::png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info()?;
+    let mut pixels = vec![0; reader.output_buffer_size().context("Frame too large")?];
+    let info = reader.next_frame(&mut pixels)?;
+    pixels.truncate(info.buffer_size());
+    Ok((pixels, info.width, info.height))
+}
+/// Nearest-neighbour fit. These frames are for an agent to look at, not deliver.
+pub(crate) fn fit(source: &Rgba, width: u32, height: u32) -> Vec<u8> {
+    let (pixels, w, h) = source;
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let sx = (x as u64 * *w as u64 / width as u64) as usize;
+            let sy = (y as u64 * *h as u64 / height as u64) as usize;
+            let at = (sy * *w as usize + sx) * 4;
+            out.extend_from_slice(&pixels[at..at + 4]);
+        }
+    }
+    out
+}
+pub(crate) fn image(pixels: &[u8], width: u32, height: u32) -> Result<Image> {
+    let bytes = png(pixels, width, height).map_err(failed)?;
+    Ok(Image {
+        data: base64(&bytes),
+        mime_type: "image/png".into(),
+    })
+}
+fn sheet(cells: &[Rgba], plan: &SheetPlan) -> Result<Image> {
+    let (cell_w, cell_h) = (plan.cell_width, plan.cell_height);
+    let (width, height) = (cell_w * plan.columns as u32, cell_h * plan.rows as u32);
+    let mut canvas = vec![0u8; (width * height * 4) as usize];
+    for (index, cell) in cells.iter().enumerate() {
+        let (column, row) = (index % plan.columns, index / plan.columns);
+        let fitted = fit(cell, cell_w, cell_h);
+        for line in 0..cell_h as usize {
+            let start =
+                ((row * cell_h as usize + line) * width as usize + column * cell_w as usize) * 4;
+            let source = line * cell_w as usize * 4;
+            canvas[start..start + cell_w as usize * 4]
+                .copy_from_slice(&fitted[source..source + cell_w as usize * 4]);
+        }
+    }
+    image(&canvas, width, height)
+}
+impl EngineJobs {
+    fn lab_definition(
+        &self,
+        request: &pm_mcp::effect_lab::Request,
+        context: &pm_mcp::effect_lab::Context,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Result<pm_protocol::definitions::DefinitionSnapshot> {
+        use pm_protocol::definitions::{DefinitionKind, DefinitionSnapshot};
+        let find = |defs: &[DefinitionSnapshot]| {
+            defs.iter()
+                .find(|definition| {
+                    definition.kind == DefinitionKind::Effect
+                        && definition.id.as_str() == request.effect_id
+                })
+                .cloned()
+        };
+        let staged = request.extension_id.as_deref().or_else(|| {
+            // Stage and live start with the same files. Prefer an explicitly
+            // selected draft, or a new/changed package named like its effect.
+            context.stage.as_ref().and_then(|stage| {
+                pm_mcp::extensions::is_draft(stage, &request.effect_id)
+                    .then_some(request.effect_id.as_str())
+            })
+        });
+        if let Some(id) = staged {
+            let stage = context.stage.as_ref().ok_or_else(|| {
+                Error::invalid("This session has no extension staging directory.")
+            })?;
+            let scratch = tempfile::tempdir()?;
+            let host = crate::extension_authoring::AppExtensions::new(self.profile.clone());
+            let manifest = pm_mcp::extensions::preview_source(&host, stage, id, scratch.path())?;
+            let definitions =
+                crate::extension_authoring::effect_definitions(scratch.path(), &manifest)
+                    .map_err(Error::invalid)?;
+            return find(&definitions).ok_or_else(|| {
+                Error::invalid(format!(
+                    "Staged extension {id} did not register effect {}.",
+                    request.effect_id
+                ))
+            });
+        }
+
+        let resources = match &context.project {
+            Some(project) => {
+                let published = self.published_at(&project.id, project.document, project.revision)?;
+                Some(self.resources(&published, true, stop).map_err(failed)?)
+            }
+            None => self.settled_installed_resources(),
+        };
+        if let Some(definition) = resources.as_ref().and_then(|r| find(&r.definitions)) {
+            return Ok(definition);
+        }
+        if let Some(definition) =
+            find(&pm_render::effects::versions::builtin_snapshot().definitions)
+        {
+            return Ok(definition);
+        }
+        if resources.is_none()
+            && let Some(definition) = find(&self.lab_installed_definitions(stop)?)
+        {
+            return Ok(definition);
+        }
+        Err(Error::invalid(format!(
+            "Unknown effect {}. For a staged effect, supply its extensionId.",
+            request.effect_id
+        )))
+    }
+
+    /// A project-free session can still use installed effects. Start the
+    /// production windowless loader on a private actor, seeded with the live
+    /// enable/disable preferences. The scratch document never enters the app.
+    fn lab_installed_definitions(
+        &self,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Vec<pm_protocol::definitions::DefinitionSnapshot>> {
+        use pm_kernel::state::{StateOp, StateTransaction};
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let ops = self
+            .kernel
+            .state()
+            .extensions
+            .values()
+            .cloned()
+            .map(StateOp::Extension)
+            .collect();
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops,
+            })
+            .wait()
+            .ok_or_else(|| Error::unavailable("private extension loader"))?
+            .map_err(Error::kernel)?;
+        let document = pm_model::json::parse(&pm_compat_runner::initial()["document"].to_string())
+            .map_err(Error::kernel)?;
+        let project = "effect-lab";
+        kernel
+            .open(project, pm_kernel::OpenSource::Untitled(document))
+            .wait()
+            .ok_or_else(|| Error::unavailable("private extension loader"))?
+            .map_err(Error::kernel)?;
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            self.executable.clone(),
+            Default::default(),
+            self.profile.clone(),
+            self.overrides.clone(),
+        );
+        let published = kernel
+            .published(project)
+            .ok_or_else(|| Error::unavailable("private extension loader"))?;
+        let resources = jobs.resources(&published, true, stop).map_err(failed)?;
+        Ok(resources.definitions.clone())
+    }
+    fn original(&self, request: &MediaRequest) -> Result<PathBuf> {
+        let asset = request
+            .asset
+            .as_ref()
+            .and_then(|asset| asset["id"].as_str())
+            .ok_or_else(|| Error::invalid("Supply assetId or layerId."))?;
+        let published = self.published(&request.snapshot)?;
+        crate::media::for_session(
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        )
+        .map_err(failed)?
+        .catalog
+        .originals
+        .remove(asset)
+        .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))
+    }
+    /// The asset's source frames at `times` (seconds of its source, as its
+    /// layers read them), `width` × `height`, drawn by the renderer the way
+    /// every other path reads the file: Interpret Footage, a v1 project's
+    /// video reading (`videoColor`), the asset's timing and the image
+    /// sequence rule (`pm_render::footage`). Straight RGBA8 for the PNG.
+    fn source_frames(
+        &self,
+        request: &MediaRequest,
+        times: &[f64],
+        (width, height): (u32, u32),
+    ) -> Result<Vec<Rgba>> {
+        let path = self.original(request)?;
+        let id = request
+            .asset
+            .as_ref()
+            .and_then(|a| a["id"].as_str())
+            .unwrap_or_default();
+        let published = self.published(&request.snapshot)?;
+        let record = published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets"))
+            .and_then(|assets| assets.get(id));
+        let interpretation = record.and_then(pm_render::footage::interpretation);
+        let sequence = record.is_some_and(pm_render::footage::is_sequence);
+        let mut renderer = pm_render::Renderer::headless().map_err(failed)?;
+        times
+            .iter()
+            .map(|seconds| {
+                let time = Ticks::saturating_from_i128(
+                    (seconds * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i128,
+                );
+                let mut pixels = renderer
+                    .source_rgba8_export(
+                        &path,
+                        time,
+                        Size::new(width, height),
+                        pm_protocol::snapshot::SourceFit::Stretch,
+                        interpretation.as_ref(),
+                        sequence,
+                    )
+                    .map_err(failed)?;
+                for px in pixels.chunks_exact_mut(4) {
+                    let a = u32::from(px[3]);
+                    if a > 0 && a < 255 {
+                        for c in &mut px[..3] {
+                            *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+                        }
+                    }
+                }
+                Ok((pixels, width, height))
+            })
+            .collect()
+    }
+}
+fn seconds(micros: Option<i64>) -> Option<f64> {
+    micros.map(|us| us as f64 / 1_000_000.)
+}
+fn decibels(level: f64) -> f64 {
+    (20. * level.max(1e-9).log10() * 10.).round() / 10.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_engine_service::resources::ResourceSnapshot;
+
+    /// Every Export sheet option an agent gives reaches the export as the
+    /// sheet sets it; absent ones keep today's defaults.
+    #[test]
+    fn native_readiness_waits_for_admission_and_mount_completion() {
+        let document = u64::MAX - 810;
+        let load = begin_native_load(document);
+        admit_native(document, 7);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            tx.send(native_ready(document, 8, true, &|| false).is_ok())
+                .unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+        admit_native(document, 8);
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+        drop(load);
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        waiter.join().unwrap();
+        set_resources(document, None);
+    }
+    #[test]
+    fn native_readiness_old_generation_cannot_release_a_new_mount() {
+        let document = u64::MAX - 811;
+        let old = begin_native_load(document);
+        set_resources(document, None);
+        let new = begin_native_load(document);
+        drop(old);
+        assert_eq!(NATIVE_ADMISSION.lock().unwrap()[&document].loads, 1);
+        drop(new);
+        set_resources(document, None);
+    }
+    #[test]
+    fn an_agents_export_options_are_the_sheets() {
+        use pm_promedia::export_panel::{
+            AudioCoding, Codec, ColorTag, DynamicRange, Profile, Scale,
+        };
+        let project = json!({"w": 1920, "h": 1080, "fps": 29.97});
+        let agent = |args: Value| {
+            let options = pm_mcp::services::VideoOptions::parse(&args).unwrap();
+            sheet_options(&project, &options)
+        };
+        let plain = agent(json!({})).unwrap();
+        assert_eq!(
+            (plain.scale.clone(), plain.width, plain.height, plain.fps),
+            (Scale::Preset(1.), 1920, 1080, 29.97)
+        );
+        assert_eq!(
+            (plain.quality.as_str(), plain.range.as_str()),
+            ("high", "all")
+        );
+        assert!(!plain.use_proxies && !plain.captions_burn);
+        let prores = agent(json!({
+            "format": "prores",
+            "profile": "422hq",
+            "colorTag": "rec709",
+            "timecode": "01:00:00;00",
+            "audioCoding": "pcmFloat",
+            "fps": 23.976,
+            "useProxies": true,
+            "captionsBurn": true,
+            "captionsSidecar": "vtt",
+            "dynamicRange": "hlg",
+            "scale": "custom",
+            "width": 1280,
+            "height": 720,
+            "motionBlur": false,
+            "range": "work",
+        }))
+        .unwrap();
+        assert_eq!(prores.profile, Profile::Hq);
+        assert_eq!(prores.color_tag, ColorTag::Rec709);
+        assert_eq!(prores.timecode, "01:00:00;00");
+        assert_eq!(prores.audio_coding, AudioCoding::PcmFloat);
+        assert_eq!(prores.fps, 23.976);
+        assert!(prores.use_proxies && prores.captions_burn && !prores.mblur);
+        assert_eq!(prores.captions_sidecar, "vtt");
+        assert_eq!(prores.dynamic_range, DynamicRange::Hlg);
+        assert_eq!(
+            (
+                prores.scale,
+                prores.width,
+                prores.height,
+                prores.range.as_str()
+            ),
+            (Scale::Custom("custom".into()), 1280, 720, "work")
+        );
+        let hlg = agent(json!({"dynamicRange": "hlg", "dolbyVision": false})).unwrap();
+        assert!(!hlg.dolby_vision && plain.dolby_vision);
+        let mp4 = agent(json!({"codec": "hevc", "quality": "draft", "scale": 0.5})).unwrap();
+        assert_eq!(
+            (mp4.codec, mp4.quality.as_str(), mp4.scale),
+            (Codec::Hevc, "draft", Scale::Preset(0.5))
+        );
+        // A choice the sheet does not offer is refused, as the sheet would.
+        assert!(agent(json!({"quality": "best"})).is_err());
+        let refused = pm_mcp::services::VideoOptions::parse(&json!({"width": 1280})).unwrap_err();
+        assert!(
+            refused.message.contains("custom size"),
+            "{}",
+            refused.message
+        );
+        let refused = pm_mcp::services::VideoOptions::parse(
+            &json!({"format": "prores", "profile": "422", "alpha": true}),
+        )
+        .unwrap_err();
+        assert!(refused.message.contains("4444"), "{}", refused.message);
+    }
+    /// An agent export takes a fresh name unless it asked to replace the
+    /// last export of its name.
+    #[test]
+    fn an_agent_replaces_only_when_it_asks_to() {
+        assert_eq!(file_name("Film", "mp4", true), "Film.mp4");
+        let fresh = file_name("Film", "mp4", false);
+        assert!(
+            fresh.starts_with("Film-") && fresh.ends_with(".mp4"),
+            "{fresh}"
+        );
+        let parse = |args| {
+            pm_mcp::services::VideoOptions::parse(&args)
+                .unwrap()
+                .replace
+        };
+        assert!(parse(json!({"replace": true})));
+        assert!(!parse(json!({})));
+    }
+    /// A capture's pin from its window alone (production adds the pageless
+    /// host for a project with no window).
+    fn window_pin(
+        wait: bool,
+    ) -> impl Fn(
+        &Arc<Published>,
+        &pm_compat_runner::FrameRequest,
+    ) -> std::result::Result<Resources, String> {
+        move |published, request| {
+            resources_of(published.snapshot.doc_id, wait, request.stop)
+                .map_err(|Stopped| CAPTURE_STOPPED.to_owned())?
+                .ok_or_else(|| "no window".to_owned())
+        }
+    }
+    fn snapshot(generation: u64, pending: bool) -> Option<Resources> {
+        Some(Arc::new(ResourceSnapshot {
+            generation,
+            pending,
+            ..Default::default()
+        }))
+    }
+    /// An export, poster or agent still of a document whose window is still
+    /// loading extensions waits for them; an extension's own capture (its
+    /// realm may be the one loading) takes what is registered.
+    /// A capture taken after the wait while an extension still loads (one
+    /// that hangs) is refused, never drawn without that extension's effect.
+    #[test]
+    fn a_capture_never_bypasses_an_effect_still_loading() {
+        let loaded = ResourceSnapshot::default();
+        let loading = ResourceSnapshot {
+            pending: true,
+            ..Default::default()
+        };
+        assert!(bypasses_missing(true, &loaded));
+        assert!(!bypasses_missing(true, &loading));
+        assert!(!bypasses_missing(false, &loaded));
+    }
+    /// A frame an extension captured (a GLSL-only effect: no override
+    /// wrapper, so no epoch moves) is not the answer after that effect's
+    /// extension reloaded with other code, at the same document revision:
+    /// the kept frame is of the definitions it was drawn with, nothing is
+    /// kept or served while the reload runs, and each render draws with the
+    /// resources pinned for its lookup.
+    #[test]
+    fn a_kept_capture_is_never_served_after_its_effect_reloaded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .open(
+                "capture-cache",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let doc = kernel.published("capture-cache").unwrap().snapshot.doc_id;
+        let renders = Arc::new(AtomicUsize::new(0));
+        let count = renders.clone();
+        // Stands in for the engine child: the "pixels" are the generation of
+        // the definitions the frame was drawn with; a frame drawn while they
+        // load is refused, as the engine refuses it.
+        let capture = cached_frames(
+            kernel.clone(),
+            "capture-cache".into(),
+            |_| None,
+            window_pin(false),
+            move |_, _, resources| {
+                count.fetch_add(1, Ordering::Relaxed);
+                if resources.pending {
+                    return Err("still loading".into());
+                }
+                let mut pixels = resources.generation.to_le_bytes().to_vec();
+                if let Some(source) = resources.definitions.first().and_then(|d| d.glsl.as_ref()) {
+                    pixels.extend_from_slice(source.source.as_bytes());
+                }
+                Ok(pixels)
+            },
+        );
+        let ask = || {
+            capture(&pm_compat_runner::FrameRequest {
+                time: 0.5,
+                width: 64,
+                height: 36,
+                motion_blur: true,
+                stop: &never,
+                published: None,
+            })
+        };
+        let drawn = |generation: u64| Ok(generation.to_le_bytes().to_vec());
+        set_resources(doc, snapshot(1, false));
+        assert_eq!(ask(), drawn(1));
+        assert_eq!(ask(), drawn(1));
+        assert_eq!(renders.load(Ordering::Relaxed), 1, "the same frame is kept");
+        // The reload starts: the old frame is not the answer, and what is
+        // drawn meanwhile is not kept.
+        set_resources(doc, snapshot(2, true));
+        assert_eq!(ask(), Err("still loading".into()));
+        assert_eq!(ask(), Err("still loading".into()));
+        assert_eq!(renders.load(Ordering::Relaxed), 3);
+        // The reloaded code: drawn again with it, at the same revision.
+        set_resources(doc, snapshot(3, false));
+        assert_eq!(ask(), drawn(3));
+        assert_eq!(ask(), drawn(3));
+        assert_eq!(renders.load(Ordering::Relaxed), 4);
+        // A native provider changes while the compat host and document stay
+        // unchanged. The first new pin must replace the kept frame anyway.
+        let mut definition = pm_render::all_builtin_definitions()
+            .definitions
+            .into_iter()
+            .find(|d| d.glsl.is_some())
+            .unwrap();
+        for round in ["first native registration", "native source reload"] {
+            definition
+                .glsl
+                .as_mut()
+                .unwrap()
+                .source
+                .push_str(&format!("\n// {round}"));
+            let mut expected = 3u64.to_le_bytes().to_vec();
+            expected.extend_from_slice(definition.glsl.as_ref().unwrap().source.as_bytes());
+            set_resources(
+                doc,
+                Some(Arc::new(ResourceSnapshot {
+                    generation: 3,
+                    definitions: vec![definition.clone()],
+                    ..Default::default()
+                })),
+            );
+            assert_eq!(ask(), Ok(expected.clone()));
+            assert_eq!(ask(), Ok(expected));
+        }
+        assert_eq!(
+            renders.load(Ordering::Relaxed),
+            6,
+            "each native source gets one fresh frame"
+        );
+        set_resources(doc, None);
+        actor.shutdown();
+    }
+    #[test]
+    fn captures_wait_for_their_window_extensions_to_load() {
+        let doc = 0x5e77_1ed0;
+        set_resources(doc, snapshot(1, true));
+        let of = |wait| resources_of(doc, wait, &never).unwrap();
+        assert_eq!(of(false).map(|r| r.pending), Some(true));
+        let waiter = std::thread::spawn(move || {
+            resources_of(doc, true, &never)
+                .unwrap()
+                .map(|r| r.generation)
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!waiter.is_finished(), "a capture went ahead while loading");
+        set_resources(doc, snapshot(2, true));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!waiter.is_finished(), "still loading");
+        set_resources(doc, snapshot(3, false));
+        assert_eq!(waiter.join().unwrap(), Some(3));
+        set_resources(doc, None);
+        assert!(of(true).is_none());
+    }
+    /// Cancelling an agent's export in Background Tasks while it waits for
+    /// extensions that are still loading ends the wait at once (it used to
+    /// last until they settled, or two minutes); so does stopping a still.
+    #[test]
+    fn a_cancelled_export_or_stopped_still_stops_waiting_for_extensions_at_once() {
+        let doc = 0x5e77_1ed1;
+        set_resources(doc, snapshot(1, true));
+        // The export, as `export_video` waits: its Background Tasks row's
+        // Cancel is the stop.
+        let task = crate::export_coordinator::AgentExport::start("Film", "p-wait", 10).unwrap();
+        let id = task.id();
+        let waiting = std::thread::spawn(move || {
+            let stopped = resources_of(doc, true, &|| task.cancelled());
+            task.finish(Err("cancelled".into()));
+            stopped.map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiting.is_finished(), "it waits while extensions load");
+        assert!(crate::export_coordinator::cancel_export(id));
+        let cancelled = Instant::now();
+        assert_eq!(waiting.join().unwrap(), Err(Stopped));
+        assert!(cancelled.elapsed() < Duration::from_secs(2));
+        // A still whose task is stopped: no render is started for it.
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .open(
+                "still-wait",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let open = kernel.published("still-wait").unwrap().snapshot.doc_id;
+        set_resources(open, snapshot(1, true));
+        let still = cached_frames(
+            kernel.clone(),
+            "still-wait".into(),
+            |_| None,
+            window_pin(true),
+            |_, _, _| panic!("a stopped still was rendered"),
+        );
+        let started = Instant::now();
+        let stop = move || started.elapsed() > Duration::from_millis(150);
+        let answer = still(&pm_compat_runner::FrameRequest {
+            time: 0.,
+            width: 64,
+            height: 36,
+            motion_blur: false,
+            stop: &stop,
+            published: None,
+        });
+        assert_eq!(answer, Err(CAPTURE_STOPPED.to_owned()));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stop was honoured after {:?}",
+            started.elapsed()
+        );
+        set_resources(doc, None);
+        set_resources(open, None);
+        actor.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+    use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::*};
+
+    const RATE: usize = 48_000;
+    const CLICKS: [usize; 3] = [4_800, 24_000, 14_400];
+
+    #[test]
+    fn layer_media_resolves_original_with_trim_offset_and_retime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = clip(&root, "clip.mkv", &[]);
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let asset = json!({"id":"a","name":"clip.mkv","kind":"video","format":"mkv","w":64,"h":64,"fps":25,"dur":1,"timing":2,"sourcePath":path});
+        let layer = json!({"id":"l","name":"Trimmed","type":"video","from":5,"dur":0.3,
+            "p":{},"d":{"asset":"a","trim":{"v":0.2,"kf":[],"expr":null},"speed":{"v":2,"kf":[],"expr":null}}});
+        let project = json!({"id":"p","compId":"c","w":64,"h":64,"fps":25,"dur":8,
+            "layers":[layer],"assets":{"a":asset},"comps":{}});
+        kernel
+            .open(
+                "p",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root,
+            OverrideWindows::default(),
+        );
+        let (published, _) = root_of(&kernel);
+        // MCP freezes the realized composition, not the kernel's canonical storage.
+        let project: Value = serde_json::from_str(&to_canonical_string(
+            &pm_model::canonical::realize_project(published.snapshot.document.to_value().unwrap()),
+        ))
+        .unwrap();
+        let request = MediaRequest {
+            operation: pm_mcp::services::MediaOperation::Probe,
+            snapshot: FrozenProject {
+                project_id: "p".into(),
+                document_id: published.snapshot.doc_id,
+                revision: published.snapshot.revision,
+                project: project.clone(),
+            },
+            asset: Some(project["assets"]["a"].clone()),
+            layer: Some(project["layers"][0].clone()),
+            arguments: json!({}),
+        };
+        let result = pm_mcp::media_tools::run(jobs.as_ref(), &request)
+            .unwrap()
+            .value;
+        assert_eq!(result["asset"]["id"], "a");
+        assert_eq!(result["layer"]["id"], "l");
+        assert_eq!(result["layer"]["from"], json!(5.));
+        assert_eq!(result["layer"]["duration"], json!(0.3));
+        assert_eq!(result["layer"]["sourceStart"], json!(0.2));
+        assert_eq!(result["layer"]["sourceEnd"], json!(0.8));
+        assert_eq!(
+            result["layer"]["from"].as_f64().unwrap()
+                + result["layer"]["duration"].as_f64().unwrap(),
+            5.3
+        );
+        // Asset inspection still uses source time and has no clip metadata.
+        let mut asset_request = request.clone();
+        asset_request.layer = None;
+        let asset_result = pm_mcp::media_tools::run(jobs.as_ref(), &asset_request)
+            .unwrap()
+            .value;
+        assert_eq!(asset_result["asset"]["id"], "a");
+        assert!(asset_result.get("layer").is_none());
+        actor.shutdown();
+    }
+
+    fn ffmpeg_path() -> PathBuf {
+        std::env::var_os("PM_FFMPEG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join("Library/Caches/powermove-engine/ffmpeg/out")
+            })
+            .join("bin/ffmpeg")
+    }
+
+    /// A one-second clip with a picture and one mono PCM stream per click.
+    fn clip(root: &Path, name: &str, clicks: &[usize]) -> PathBuf {
+        let path = root.join(name);
+        let mut command = std::process::Command::new(ffmpeg_path());
+        command.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"]);
+        command.args(["-i", "testsrc2=size=64x64:rate=25:duration=1"]);
+        for at in clicks {
+            command
+                .args(["-f", "lavfi", "-i"])
+                .arg(format!("aevalsrc='0.9*eq(n\\,{at})':s={RATE}:d=1"));
+        }
+        command.args(["-map", "0:v"]);
+        for k in 0..clicks.len() {
+            command.args(["-map", &format!("{}:a", k + 1)]);
+        }
+        command.args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+        assert!(command.arg(&path).status().unwrap().success());
+        path
+    }
+
+    fn root_of(kernel: &KernelHandle) -> (Arc<Published>, Value) {
+        let published = kernel.published("p").unwrap();
+        let root = serde_json::from_str(&to_canonical_string(
+            &published.snapshot.root().unwrap().to_value(),
+        ))
+        .unwrap();
+        (published, root)
+    }
+
+    /// The clicks heard from `asset` as the only clip, through the mix graph.
+    fn heard(kernel: &KernelHandle, asset: &str) -> Vec<usize> {
+        let (_, mut root) = root_of(kernel);
+        root["layers"] = json!([{"id":"V","type":"video","name":"V","from":0,"dur":1,"on":true,
+            "solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],
+            "d":{"asset":asset,"trim":0,"speed":1,"embeddedAudio":true}}]);
+        let source = PathBuf::from(root["assets"][asset]["sourcePath"].as_str().unwrap());
+        let doc =
+            pm_model::Document::new(Some(pm_model::json::parse(&root.to_string()).unwrap()), 1);
+        let cache = pm_audio::SourceCache::new(64 << 20, 0);
+        let resolver = move |_: &str| Some(source.clone());
+        let graph =
+            pm_audio::MixGraph::build(&doc, "c", &mut pm_eval::Evaluator::new(), &cache, &resolver)
+                .unwrap();
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(RATE as u32),
+            Arc::new(doc),
+            Arc::new(graph),
+            pm_eval::Evaluator::new(),
+            cache.clone(),
+        );
+        let mut left = vec![];
+        let summary = pm_audio::offline::render(&mut mixer, 0, RATE as i64, 4096, |_, inter| {
+            left.extend(inter.iter().step_by(2).copied());
+            Ok(())
+        })
+        .unwrap();
+        cache.shutdown();
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        CLICKS
+            .iter()
+            .enumerate()
+            .filter(|(_, at)| left[*at - 2..*at + 3].iter().any(|v| v.abs() > 0.2))
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// The agent's source frames read the file as every other path does:
+    /// an untagged HD FFV1 clip as a v1 project showed it (Rec. 601, with
+    /// `videoColor`), natively (Rec. 709), and with a matrix chosen in
+    /// Interpret Footage over the v1 reading (the native picture again).
+    #[test]
+    fn the_agents_source_frames_follow_interpret_footage_and_the_v1_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let clip = root.join("untagged.mkv");
+        let made = std::process::Command::new(ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=25",
+            ])
+            .args(["-frames:v", "2", "-c:v", "ffv1", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let asset = |id: &str, extra: Value| {
+            let mut a = json!({"id":id,"name":"untagged.mkv","kind":"video","format":"mkv",
+                "w":1280,"h":720,"dur":0.08,"fps":25,"timing":2,"sourcePath":clip});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+        "bg":"#000000","comps":{},"layers":[],"assets":{
+            "native": asset("native", json!({})),
+            "v1": asset("v1", json!({"videoColor":"electron"})),
+            "chosen": asset("chosen", json!({"videoColor":"electron","interpret":{"matrix":"bt709"}})),
+        }});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let frames = |id: &str| -> Vec<u8> {
+            let (published, project) = root_of(&kernel);
+            let request = MediaRequest {
+                operation: pm_mcp::services::MediaOperation::SampleFrames,
+                snapshot: FrozenProject {
+                    project_id: "p".into(),
+                    document_id: published.snapshot.doc_id,
+                    revision: published.revision(),
+                    project,
+                },
+                arguments: json!({}),
+                asset: Some(json!({"id": id})),
+                layer: None,
+            };
+            let times = [0.0];
+            jobs.source_frames(&request, &times, (64, 36))
+                .unwrap()
+                .remove(0)
+                .0
+        };
+        let apart =
+            |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        let (native, v1, chosen) = (frames("native"), frames("v1"), frames("chosen"));
+        assert!(apart(&native, &v1) > 8, "the v1 reading is another picture");
+        assert!(
+            apart(&native, &chosen) <= 1,
+            "a chosen matrix wins over the v1 reading"
+        );
+        actor.shutdown();
+    }
+
+    /// An agent loads a LUT as Apply LUT… does: `import_media` reads and
+    /// keeps the file as a `lut` asset (the record the menu writes), which
+    /// `add_effect applyColorLut` takes as its input; a broken file is
+    /// refused in a sentence and changes nothing.
+    #[test]
+    fn an_agent_imports_a_lut_file_as_a_lut_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":64,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let import = |path: &Path| {
+            let (published, project) = root_of(&kernel);
+            jobs.import(&MediaImport {
+                frozen: FrozenProject {
+                    project_id: "p".into(),
+                    document_id: published.snapshot.doc_id,
+                    revision: published.revision(),
+                    project,
+                },
+                path: path.to_owned(),
+                folder: None,
+                replace: None,
+                expected_fingerprint: None,
+                writer: 1,
+                sequence: None,
+            })
+        };
+        let mut table = String::from("LUT_3D_SIZE 2\n");
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    table.push_str(&format!("{} {} {}\n", r as f64 * 0.9, g, b));
+                }
+            }
+        }
+        let file = root.join("Warm.cube");
+        std::fs::write(&file, table).unwrap();
+        let imported = import(&file).unwrap();
+        assert_eq!(
+            (imported.status, imported.kind.as_str()),
+            ("imported", "lut")
+        );
+        let asset = &root_of(&kernel).1["assets"][&imported.asset];
+        assert_eq!(asset["kind"], "lut");
+        assert_eq!(asset["format"], "cube");
+        assert_eq!(asset["name"], "Warm.cube");
+        let kept = PathBuf::from(asset["sourcePath"].as_str().unwrap());
+        assert_ne!(kept, file, "a retained copy outlives the original");
+        std::fs::remove_file(&file).unwrap();
+        assert!(kept.is_file());
+        let broken = root.join("Broken.cube");
+        std::fs::write(&broken, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
+        let revision = root_of(&kernel).0.revision();
+        let refused = import(&broken).unwrap_err().to_string();
+        assert!(
+            refused.starts_with("This LUT couldn’t be read."),
+            "{refused}"
+        );
+        assert_eq!(root_of(&kernel).0.revision(), revision);
+    }
+
+    /// An agent's relink keeps which audio streams are heard, exactly as a
+    /// person's does (`pm_builtins` tests the full table).
+    #[test]
+    fn an_agent_relink_keeps_which_audio_streams_are_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let entry =
+            |index: u32, on: bool| json!({"index":index,"channels":1,"sampleRate":48000,"on":on});
+        let project = json!({"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{
+                "older":{"id":"older","name":"Older.mov","kind":"video","dur":1},
+                "muted":{"id":"muted","name":"Muted.mov","kind":"video","dur":1,
+                    "audioStreams":[entry(1, true), entry(2, false)]},
+                "first_off":{"id":"first_off","name":"First off.mov","kind":"video","dur":1,
+                    "audioStreams":[entry(1, false), entry(2, true)]},
+                "late":{"id":"late","name":"Late.mp4","kind":"video","dur":1}}});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let ffmpeg = ffmpeg_path();
+        let recorder = clip(&root, "recorder.mov", &CLICKS[..2]);
+        let mono = clip(&root, "mono.mov", &CLICKS[2..]);
+        let relink = |asset: &str, path: &Path| {
+            let (published, project) = root_of(&kernel);
+            let replaced = jobs
+                .import(&MediaImport {
+                    frozen: FrozenProject {
+                        project_id: "p".into(),
+                        document_id: published.snapshot.doc_id,
+                        revision: published.revision(),
+                        project,
+                    },
+                    path: path.to_owned(),
+                    folder: None,
+                    replace: Some(asset.into()),
+                    expected_fingerprint: None,
+                    writer: 1,
+                    sequence: None,
+                })
+                .unwrap();
+            assert_eq!(replaced.status, "replaced");
+        };
+        relink("older", &recorder);
+        assert_eq!(heard(&kernel, "older"), [0]);
+        relink("muted", &recorder);
+        assert_eq!(heard(&kernel, "muted"), [0]);
+        relink("first_off", &mono);
+        assert_eq!(heard(&kernel, "first_off"), Vec::<usize>::new());
+        assert_eq!(
+            root_of(&kernel).1["assets"]["first_off"]["audioStreams"],
+            json!([entry(1, false)])
+        );
+        // An older asset measures its clip as it reads it: twenty frames
+        // 0.4 s into the file end 1.2 s in.
+        let late = root.join("late.mp4");
+        let status = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            .args([
+                "-i",
+                "testsrc2=size=64x64:rate=25:duration=0.8",
+                "-c:v",
+                "mpeg4",
+            ])
+            .args(["-output_ts_offset", "0.4"])
+            .arg(&late)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        relink("late", &late);
+        let dur = root_of(&kernel).1["assets"]["late"]["dur"]
+            .as_f64()
+            .unwrap();
+        assert!((dur - 1.2).abs() < 1e-3, "{dur}");
+    }
+}

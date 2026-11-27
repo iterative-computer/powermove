@@ -1,0 +1,120 @@
+{
+  "id": "synthetic",
+  "compId": "C1",
+  "compName": "Main",
+  "w": 1920,
+  "h": 1080,
+  "fps": 29.97,
+  "dur": 6,
+  "audioGain": 0.625,
+  "colorDepth": 32,
+  "memoryEnabled": false,
+  "memory": [
+    {
+      "id": "goal",
+      "kind": "goal",
+      "text": "Keep exact authored timing",
+      "author": "user",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "future": {
+        "intent": true
+      }
+    },
+    {
+      "id": "open",
+      "kind": "open",
+      "text": "Review nested audio",
+      "why": "Source gain",
+      "resolved": false,
+      "author": "agent",
+      "createdAt": 3,
+      "updatedAt": 4
+    }
+  ],
+  "assets": {
+    "linked": {
+      "id": "linked",
+      "sourcePath": "/synthetic/offline.mov",
+      "storageKey": "media:synthetic",
+      "sourceSize": 9,
+      "playbackProxy": true,
+      "future": null
+    }
+  },
+  "layers": [
+    {
+      "id": "nested",
+      "type": "precomp",
+      "d": {
+        "comp": "C2",
+        "audioGain": {
+          "v": 0.5,
+          "keys": []
+        },
+        "audioMuted": true
+      }
+    },
+    {
+      "id": "captions",
+      "type": "captions",
+      "d": {
+        "cues": [
+          {
+            "id": "cue",
+            "start": 1.25,
+            "end": 2.75,
+            "text": "Authored\nline break",
+            "words": [
+              {
+                "text": "Authored",
+                "start": 1.25,
+                "end": 1.8,
+                "future": true
+              }
+            ],
+            "futureCue": 3
+          }
+        ],
+        "language": "en",
+        "style": {
+          "font": "Synthetic",
+          "size": 42,
+          "wordAnimation": "pop"
+        }
+      }
+    }
+  ],
+  "comps": {
+    "C2": {
+      "id": "C2",
+      "name": "Nested",
+      "w": 1920,
+      "h": 1080,
+      "layers": [],
+      "audioGain": 0.75,
+      "memory": [
+        {
+          "id": "note",
+          "kind": "decision",
+          "text": "Local note"
+        }
+      ],
+      "memoryEnabled": false
+    }
+  },
+  "exportDefaults": {
+    "format": "web",
+    "unknownDelivery": {
+      "keep": true
+    }
+  },
+  "transcription": {
+    "model": "synthetic-model",
+    "language": "en",
+    "future": true
+  },
+  "futureProject": {
+    "version": 7
+  }
+}

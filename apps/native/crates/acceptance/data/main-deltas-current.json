@@ -1,0 +1,42 @@
+[
+  {
+    "id": "M01",
+    "expected": "Figma editable content (fillGradient/strokeGradient, strokeStyle, arc, imageMapping, runs, matteSources, compound, blendVersion 2, figma* effects) from main's own Figma importer (747ce342c, 3b4ef5674, f604090be, 1bbba86ce).",
+    "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved; figma* effects bypassed and named in the viewer",
+      "evidence": "All fields round-trip untouched (pm-kernel tests/main_current.rs); rendering/inspector deferred (backlog)."
+    }
+  },
+  {
+    "id": "M02",
+    "expected": "Text stagger timingVersion 2 with anchor and legacyStartDuration (eed7c727a, cf77caad5, dfb554ef6).",
+    "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved, rendered with v1.2.0 timing",
+      "evidence": "Fields round-trip untouched (pm-kernel tests/main_current.rs); v2 timing render and main's open-time migration deferred (backlog)."
+    }
+  },
+  {
+    "id": "M03",
+    "expected": "scene3dDefaultsVersion 2, switch3DVersion 2, new blend names (colorburn ... linearburn) (ef414bbb2, 3b4ef5674).",
+    "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved, not migrated",
+      "evidence": "Flags and blend names round-trip untouched (pm-kernel tests/main_current.rs); migrations and blend semantics deferred (backlog)."
+    }
+  },
+  {
+    "id": "M04",
+    "expected": "Unknown future fields at document, project, comp, layer, content, effect and asset levels.",
+    "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+    "current_main": {
+      "reference": "6d5bceb63218b96e751d77ac0450a3a3f22293ec",
+      "status": "preserved",
+      "evidence": "Untouched save value-identical; edit changes only the edited path; main's reader re-opens identically (pm-kernel tests/main_current.rs)."
+    }
+  }
+]

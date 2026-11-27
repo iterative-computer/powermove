@@ -1,0 +1,31 @@
+{
+  "runtime": "1.4.4",
+  "warmups": 30,
+  "scope": "JS only; synthetic immediate async ack; no Rust, kernel, IPC, layout, paint or presentation; selected components/data only",
+  "results": [
+    {
+      "name": "timeline-10000-window32",
+      "nativeNodes": 65,
+      "samples": 100,
+      "p50Ms": 2.2383609999999976,
+      "p95Ms": 3.4273769999999786,
+      "ops": 46216
+    },
+    {
+      "name": "inspector-50-properties",
+      "nativeNodes": 253,
+      "samples": 100,
+      "p50Ms": 0.7904169999999908,
+      "p95Ms": 1.9999320000000012,
+      "ops": 20960
+    },
+    {
+      "name": "effects-1000-items",
+      "nativeNodes": 1007,
+      "samples": 100,
+      "p50Ms": 4.406847999999968,
+      "p95Ms": 5.802548999999999,
+      "ops": 134895
+    }
+  ]
+}

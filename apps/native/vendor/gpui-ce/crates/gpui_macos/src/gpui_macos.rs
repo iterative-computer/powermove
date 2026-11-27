@@ -1,0 +1,56 @@
+// Powermove modified: macOS S2 integration; see vendor/gpui-ce/POWERMOVE.md.
+#![cfg(target_os = "macos")]
+//! macOS platform implementation for GPUI.
+//!
+//! macOS screens have a y axis that goes up from the bottom of the screen and
+//! an origin at the bottom left of the main display.
+
+mod dispatcher;
+mod display;
+mod display_link;
+mod drop_sources;
+mod events;
+mod haptic_feedback;
+mod keyboard;
+mod pasteboard;
+mod system_notifications;
+mod text_system;
+
+#[cfg(feature = "screen-capture")]
+mod screen_capture;
+
+#[cfg(not(feature = "wgpu"))]
+use gpui_apple::metal_renderer as renderer;
+#[cfg(feature = "wgpu")]
+mod wgpu_renderer;
+#[cfg(feature = "wgpu")]
+use wgpu_renderer as renderer;
+
+pub mod child_window;
+pub mod composition;
+mod composition_accessibility;
+mod composition_accessibility_order;
+pub mod native_text;
+pub mod native_control;
+mod scroll_fade;
+pub mod slot_region;
+mod platform;
+mod window;
+#[cfg(feature = "frame-capture")]
+pub use window::{allow_offscreen_windows, split_cursor_is_custom};
+mod window_appearance;
+
+pub(crate) use dispatcher::*;
+pub(crate) use display::*;
+pub(crate) use display_link::*;
+pub(crate) use keyboard::*;
+pub(crate) use platform::*;
+pub(crate) use text_system::*;
+pub(crate) use window::*;
+
+pub use drop_sources::{ReceivedDrop, clear_incoming_drops};
+pub use gpui_apple::{feel, launch};
+pub use platform::MacPlatform;
+
+#[cfg(feature = "test-support")]
+pub use drop_sources::tests as drop_source_tests;

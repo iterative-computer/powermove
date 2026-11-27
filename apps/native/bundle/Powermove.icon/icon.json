@@ -1,0 +1,108 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "extended-srgb:0.17647,0.17647,0.18824,1.00000",
+          "extended-srgb:0.09020,0.09020,0.09804,1.00000"
+        ]
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "extended-srgb:0.13725,0.13725,0.14902,1.00000",
+          "extended-srgb:0.06667,0.06667,0.07451,1.00000"
+        ]
+      }
+    }
+  ],
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "playhead-trail.svg",
+          "name": "Motion trail",
+          "opacity-specializations": [
+            {
+              "value": 0.96
+            },
+            {
+              "appearance": "tinted",
+              "value": 0.52
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "name": "Trail",
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "specular": false
+    },
+    {
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:1.00000,0.44314,0.12549,1.00000",
+                  "extended-srgb:0.89412,0.29804,0.01569,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name": "playhead-stem.svg",
+          "name": "Playhead stem"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:1.00000,0.46275,0.14510,1.00000",
+                  "extended-srgb:0.89804,0.30588,0.01961,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name": "playhead-head.svg",
+          "name": "Playhead head"
+        }
+      ],
+      "lighting": "combined",
+      "name": "Playhead",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.22
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.12
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "softglow",
+  "name": "Soft Glow",
+  "version": "1.2.0",
+  "apiVersion": 3,
+  "permissions": [],
+  "description": "A soft bloom around bright edges.",
+  "contributes": [
+    "effects"
+  ],
+  "author": "user"
+}

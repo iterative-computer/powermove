@@ -1,0 +1,335 @@
+//! The v1.2.0 library store read path and persisted-history round trips,
+//! over synthetic fixtures (tests/fixtures/library-store).
+
+mod common;
+
+use pm_kernel::library::{LibraryStore, StoreKey, legacy_apply_patches, parse_key};
+use pm_kernel::{Caller, History, HistoryCall, Kernel, KernelConfig, OpenSource, Reply, Request};
+use pm_model::json::{Value, parse, to_canonical_string};
+
+fn store() -> LibraryStore {
+    LibraryStore::open(&common::crate_dir().join("tests/fixtures/library-store"))
+}
+
+fn layers(v: &Value) -> Vec<String> {
+    v.get("comps")
+        .and_then(|c| c.get("C1"))
+        .and_then(|c| c.get("layers"))
+        .or_else(|| v.get("layers"))
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .map(|l| l.get("name").and_then(Value::as_str).unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn keys_follow_the_registry() {
+    assert_eq!(
+        parse_key("projects"),
+        Some(StoreKey::Static("projects".into()))
+    );
+    assert_eq!(
+        parse_key("projectHistory.ab_C-9"),
+        Some(StoreKey::Dynamic {
+            prefix: "projectHistory".into(),
+            id: "ab_C-9".into()
+        })
+    );
+    assert_eq!(parse_key("project.bad id"), None);
+    assert_eq!(parse_key("pm.projects"), None, "no pm.* file namespace");
+    assert_eq!(parse_key(&format!("project.{}", "x".repeat(121))), None);
+}
+
+#[test]
+fn summary_counts_families_orphans_and_quarantine() {
+    let s = store().summary().unwrap();
+    assert_eq!(s.files, 20, "the .tmp- file is skipped");
+    assert_eq!(s.static_keys, 3); // projects, projectTrash, autosave
+    assert_eq!(s.dynamic.get("project"), Some(&6));
+    assert_eq!(s.dynamic.get("projectHistory"), Some(&3));
+    assert_eq!(s.dynamic.get("ext"), Some(&1));
+    assert_eq!(s.unregistered, 1);
+    assert_eq!(s.quarantined, 1);
+    assert_eq!((s.index_rows, s.trash_rows), (2, 1));
+    assert_eq!(
+        s.orphan_slots, 3,
+        "orphan, broken and delta are kept, never dropped"
+    );
+    assert_eq!(s.missing_slots, 0);
+    let index = store().projects().unwrap();
+    assert!(index[1].has_thumb && !index[0].has_thumb);
+}
+
+#[test]
+fn load_applies_the_journal_like_get_async_and_overlays_session() {
+    let p = store().load("alpha").unwrap().unwrap();
+    assert_eq!((p.journal_applied, p.journal_skipped), (2, 1));
+    assert_eq!(
+        p.project.get("name").and_then(Value::as_str),
+        Some("Alpha journalled")
+    );
+    assert_eq!(layers(&p.project), ["Renamed", "Two"]);
+    assert!(
+        p.project.get("missing").is_none(),
+        "a patch with no parent is skipped"
+    );
+    assert!(
+        p.project.get("futureField").is_some(),
+        "unknown fields are kept"
+    );
+    // projectMeta and projectHistory both exist: the legacy state is not read.
+    let session = p.session.unwrap();
+    assert_eq!(session.get("time").and_then(Value::as_f64), Some(1.5));
+    assert!(session.get("view").is_none() && session.get("history").is_none());
+    assert_eq!(
+        p.history.unwrap().get("format").and_then(Value::as_str),
+        Some("powermove-history-dictionary")
+    );
+    assert!(p.workspace.is_some());
+}
+
+#[test]
+fn load_reads_stringified_slots_legacy_state_history_and_autosave() {
+    let beta = store().load("beta").unwrap().unwrap();
+    assert_eq!(layers(&beta.project), ["Before"]);
+    let session = beta.session.unwrap();
+    assert_eq!(session.get("time").and_then(Value::as_f64), Some(2.0));
+    assert!(session.get("history").is_none());
+    assert_eq!(
+        beta.history
+            .unwrap()
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    let legacy = store().load("legacy").unwrap().unwrap();
+    assert!(legacy.from_autosave);
+    assert_eq!(layers(&legacy.project), ["Autosaved"]);
+    assert!(store().load("absent").unwrap().is_none());
+}
+
+#[test]
+fn library_projects_open_in_the_kernel_with_undo_and_export_round_trips() {
+    let lib = store().load("alpha").unwrap().unwrap();
+    let packed = lib.history.clone().unwrap();
+    let mut k = Kernel::new(KernelConfig::default());
+    let info = k.open("alpha", OpenSource::Library(lib)).unwrap();
+    assert_eq!(info.history_entries, 2);
+    assert!(!info.history_rejected);
+    let store = k.project("alpha").unwrap().store();
+    assert!(!store.is_dirty(), "matches its slot");
+    // Export: packed form equals what the old packer stored; plain form
+    // equals its unpacked contents.
+    let snapshot = store.history().snapshot();
+    assert_eq!(
+        to_canonical_string(&snapshot.to_saved_packed()),
+        to_canonical_string(&packed)
+    );
+    let reimported = History::from_saved(&snapshot.to_saved(), Some("C1")).unwrap();
+    assert_eq!(
+        to_canonical_string(&reimported.snapshot().to_saved()),
+        to_canonical_string(&snapshot.to_saved())
+    );
+    // Undo after migration.
+    let undo = |k: &mut Kernel| {
+        k.handle("alpha", Request::new(Caller::native(), HistoryCall::Undo))
+            .unwrap()
+            .reply
+            .unwrap()
+            .reply
+    };
+    let doc = |k: &Kernel| {
+        k.project("alpha")
+            .unwrap()
+            .store()
+            .snapshot()
+            .document
+            .to_value()
+            .unwrap()
+    };
+    assert!(matches!(undo(&mut k), Reply::Bool(true)));
+    assert_eq!(layers(&doc(&k)), ["One", "Two"]);
+    assert!(matches!(undo(&mut k), Reply::Bool(true)));
+    assert_eq!(layers(&doc(&k)), ["One"]);
+    assert!(matches!(undo(&mut k), Reply::Bool(false)));
+    // The exported cursor after undo (index -1) re-imports as all-redo.
+    let saved = k
+        .project("alpha")
+        .unwrap()
+        .store()
+        .history()
+        .snapshot()
+        .to_saved();
+    assert_eq!(saved.get("index").and_then(Value::as_f64), Some(-1.0));
+}
+
+#[test]
+fn v1_3_gzip_disk_envelopes_are_decoded() {
+    let delta = store().load("delta").unwrap().unwrap();
+    let history = delta.history.clone().unwrap();
+    assert_eq!(history.get("version").and_then(Value::as_f64), Some(1.0));
+    let mut k = Kernel::new(KernelConfig::default());
+    let info = k.open("delta", OpenSource::Library(delta)).unwrap();
+    assert_eq!((info.history_entries, info.history_rejected), (1, false));
+    let ack = k
+        .handle("delta", Request::new(Caller::native(), HistoryCall::Undo))
+        .unwrap()
+        .reply
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Bool(true)));
+    let doc = k
+        .project("delta")
+        .unwrap()
+        .store()
+        .snapshot()
+        .document
+        .to_value()
+        .unwrap();
+    assert_eq!(layers(&doc), ["Before"]);
+    // A truncated or oversized envelope is refused, never half-read.
+    let bad =
+        parse(r#"{"__powermoveDiskValue":1,"encoding":"gzip","bytes":999,"data":"H4sIAAAAAAAA"}"#)
+            .unwrap();
+    assert!(pm_kernel::library::decode_disk_value(bad.clone(), 1 << 20).is_err());
+    assert!(pm_kernel::library::decode_disk_value(bad, 10).is_err());
+}
+
+#[test]
+fn an_invalid_dictionary_never_opens_silently() {
+    let lib = store().load("broken").unwrap().unwrap();
+    let mut k = Kernel::new(KernelConfig::default());
+    let info = k.open("broken", OpenSource::Library(lib)).unwrap();
+    assert!(info.history_rejected);
+    assert_eq!(info.history_entries, 0);
+}
+
+#[test]
+fn legacy_apply_patches_matches_projects_ts() {
+    let mut root = Some(parse(r#"{"a":[1,2,3],"o":{"k":1}}"#).unwrap());
+    legacy_apply_patches(
+        &mut root,
+        &parse(
+            r#"[{"path":["a",1],"exists":false},
+                {"path":["o","k"],"exists":false},
+                {"path":["o","n"],"exists":true,"value":{"x":1}},
+                {"path":["nope","x"],"exists":true,"value":1},
+                {"path":["a",4],"exists":true,"value":9}]"#,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        to_canonical_string(root.as_ref().unwrap()),
+        r#"{"a":[1,3,null,null,9],"o":{"n":{"x":1}}}"#
+    );
+    legacy_apply_patches(
+        &mut root,
+        &parse(r#"[{"path":[],"exists":false}]"#).unwrap(),
+    );
+    assert!(root.is_none());
+}
+
+#[test]
+fn legacy_journal_replays_id_keyed_operations_and_skips_mismatches() {
+    let layer = |id: &str| format!(r#"{{"id":"{id}","name":"{id}"}}"#);
+    let project = format!(
+        r#"{{"layers":[{},{}],"comps":{{"x":{{"layers":[{}]}}}}}}"#,
+        layer("a"),
+        layer("b"),
+        layer("c")
+    );
+    let mut root = Some(parse(&project).unwrap());
+    let patches = format!(
+        r#"[{{"op":"insert","path":["layers"],"index":2,"value":{}}},
+            {{"op":"delete","path":["layers"],"id":"a"}},
+            {{"op":"order","path":["layers"],"ids":["n","b"]}},
+            {{"path":["layers",1,"name"],"exists":true,"value":"New"}},
+            {{"op":"delete","path":["comps","x","layers"],"id":"missing"}},
+            {{"op":"insert","path":["nowhere"],"index":0,"value":{}}},
+            {{"op":"insert","path":["layers"],"index":9,"value":{}}},
+            {{"op":"insert","path":["layers"],"index":0,"value":{}}},
+            {{"op":"order","path":["layers"],"ids":["b","b"]}},
+            {{"op":"order","path":["layers"],"ids":["b"]}},
+            {{"op":"delete","path":["comps","x","layers"],"id":"c"}}]"#,
+        layer("n"),
+        layer("x"),
+        layer("x"),
+        layer("b"),
+    );
+    legacy_apply_patches(&mut root, &parse(&patches).unwrap());
+    assert_eq!(
+        to_canonical_string(root.as_ref().unwrap()),
+        r#"{"comps":{"x":{"layers":[]}},"layers":[{"id":"n","name":"n"},{"id":"b","name":"New"}]}"#
+    );
+}
+
+#[test]
+fn recovery_sequences_keep_rewound_edits_in_plain_and_stringified_slots() {
+    for stringified in [false, true] {
+        for mode in 0..3 {
+            let dir = common::TempDir::new("sequence-reader");
+            std::fs::create_dir(dir.path("store")).unwrap();
+            let mut envelope = serde_json::json!({"v":"1.3.0","proj":{"id":"P","revision":100,"name":"base","layers":[]}});
+            let entries = match mode {
+                0 => {
+                    envelope["recoverySequence"] = 7.into();
+                    serde_json::json!([
+                        {"sequence":6,"revision":101,"patches":[{"path":["name"],"exists":true,"value":"stale"}]},
+                        {"sequence":8,"revision":1,"patches":[{"path":["name"],"exists":true,"value":"kept"}]}
+                    ])
+                }
+                1 => serde_json::json!([
+                    {"sequence":0,"revision":101,"patches":[{"path":["name"],"exists":true,"value":"stale"}]},
+                    {"sequence":1,"revision":1,"patches":[{"path":["name"],"exists":true,"value":"kept"}]}
+                ]),
+                _ => serde_json::json!([
+                    {"revision":99,"patches":[{"path":["name"],"exists":true,"value":"stale"}]},
+                    {"revision":101,"patches":[{"path":["name"],"exists":true,"value":"kept"}]}
+                ]),
+            };
+            let raw = if stringified {
+                serde_json::Value::String(envelope.to_string())
+            } else {
+                envelope
+            };
+            let bytes = raw.to_string().into_bytes();
+            std::fs::write(dir.path("store/project.P.json"), &bytes).unwrap();
+            std::fs::write(dir.path("store/projectJournal.P.json"), entries.to_string()).unwrap();
+            let loaded = LibraryStore::open(&dir.0).load("P").unwrap().unwrap();
+            assert_eq!(
+                loaded.project.get("name"),
+                Some(&Value::from("kept")),
+                "mode={mode}, stringified={stringified}"
+            );
+            assert_eq!((loaded.journal_applied, loaded.journal_skipped), (1, 1));
+            assert_eq!(
+                std::fs::read(dir.path("store/project.P.json")).unwrap(),
+                bytes,
+                "opening never rewrites input"
+            );
+        }
+    }
+}
+
+/// A project's saved workspace is read as its open takes it, for the window
+/// to lay out while the project opens: its own workspace record, else the
+/// one in its session record (newer meta first, then the older state).
+#[test]
+fn a_projects_saved_workspace_is_read_as_its_open_takes_it() {
+    let root = std::env::temp_dir().join(format!("pm-saved-workspace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("store")).unwrap();
+    let write = |key: &str, text: &str| std::fs::write(root.join(format!("store/{key}.json")), text).unwrap();
+    let store = LibraryStore::open(&root);
+    let id = |w: Option<Value>| w.and_then(|w| w.get("id").and_then(Value::as_str).map(str::to_owned));
+    assert_eq!(store.saved_workspace("P"), None, "none saved");
+    write("projectState.P", r#"{"workspace":{"id":"state"}}"#);
+    assert_eq!(id(store.saved_workspace("P")).as_deref(), Some("state"));
+    write("projectMeta.P", r#"{"time":3,"workspace":{"id":"meta"}}"#);
+    assert_eq!(id(store.saved_workspace("P")).as_deref(), Some("meta"));
+    write("projectWorkspace.P", r#"{"id":"own"}"#);
+    assert_eq!(id(store.saved_workspace("P")).as_deref(), Some("own"));
+    assert_eq!(store.saved_workspace("Q"), None, "another project's is not its");
+    std::fs::remove_dir_all(&root).unwrap();
+}

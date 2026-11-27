@@ -1,0 +1,467 @@
+//! The Project Library under real input events, over a real kernel and library.
+use super::*;
+use gpui::{Modifiers, TestAppContext, VisualTestContext};
+use pm_design::{Accessibility, Scheme};
+use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::ShellCall};
+use std::{
+    cell::RefCell,
+    time::{Duration, Instant},
+};
+
+fn value(text: &str) -> pm_model::json::Value {
+    pm_model::json::parse(text).unwrap()
+}
+struct Fixture {
+    actor: KernelActor,
+    _temp: tempfile::TempDir,
+    profile: PathBuf,
+}
+/// Two library projects, written the way the kernel writes them.
+fn fixture() -> Fixture {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().canonicalize().unwrap();
+    {
+        let writer =
+            pm_kernel::persistence::LibraryWriter::open(&profile, DiskFormat::V1_2, None).unwrap();
+        for (id, name) in [("first", "First Film"), ("second", "Second Film")] {
+            let project = format!(
+                r##"{{"id":"{id}","name":"{name}","compId":"c","compName":"Main","comps":{{}},"w":1920,"h":1080,"fps":30,"dur":2,"work":[0,2],"bg":"#000000","assets":{{}},"layers":[],"params":{{}},"markers":[]}}"##
+            );
+            writer
+                .save_project(
+                    id,
+                    value(&project),
+                    value(r#"{"version":1,"paths":"composition","index":-1,"entries":[]}"#),
+                    value("{}"),
+                    value("{}"),
+                )
+                .unwrap();
+        }
+    }
+    let actor = KernelActor::spawn(KernelConfig::default());
+    actor
+        .handle()
+        .shell(ShellCall::AttachLibrary {
+            profile: profile.clone(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    Fixture {
+        actor,
+        _temp: temp,
+        profile,
+    }
+}
+type Log = Rc<RefCell<Vec<String>>>;
+fn open<'a>(
+    cx: &'a mut TestAppContext,
+    fixture: &Fixture,
+) -> (Entity<ProjectLibrary>, &'a mut VisualTestContext, Log) {
+    let log: Log = Rc::default();
+    let sink: Sink = {
+        let log = log.clone();
+        Rc::new(move |outbound, _| {
+            log.borrow_mut().push(match outbound {
+                Outbound::Opened { name, .. } => format!("opened {name}"),
+                Outbound::FocusProject(id) => format!("focus {id}"),
+                Outbound::HideHome => "hide home".into(),
+                Outbound::Command(name) => format!("command {name}"),
+                Outbound::Opening { name, .. } => format!("ghost {name}"),
+                Outbound::OpenEnded => "ghost ended".into(),
+            })
+        })
+    };
+    let (port, rx) = ProjectLibrary::port(fixture.actor.handle(), fixture.profile.clone()).unwrap();
+    let tokens = Tokens::new(Scheme::Light, Accessibility::default());
+    let kernel = fixture.actor.handle();
+    let (view, cx) = cx.add_window_view(move |_, cx| {
+        ProjectLibrary::new(port, rx, tokens, sink, None, kernel, cx)
+    });
+    cx.update(|window, cx| {
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+    });
+    view.update(cx, |v, cx| {
+        let mut query = v.controller.query.clone();
+        query.section = Section::All;
+        v.controller.set_query(query).unwrap();
+        v.pump(cx);
+    });
+    settle(&view, cx, |v| !v.controller.rows.is_empty());
+    (view, cx, log)
+}
+/// Waits on the worker for real; the test scheduler can't see its thread.
+fn settle(
+    view: &Entity<ProjectLibrary>,
+    cx: &mut VisualTestContext,
+    done: impl Fn(&ProjectLibrary) -> bool,
+) {
+    let start = Instant::now();
+    loop {
+        view.update(cx, |v, cx| v.pump(cx));
+        cx.run_until_parked();
+        if view.read_with(cx, |v, _| done(v)) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "library never settled"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+fn names(view: &Entity<ProjectLibrary>, cx: &mut VisualTestContext) -> Vec<String> {
+    view.read_with(cx, |v, _| {
+        v.controller.rows.iter().map(|r| r.name.clone()).collect()
+    })
+}
+
+#[::core::prelude::v1::test]
+fn lists_the_library_filters_by_search_and_escape_clears_then_leaves() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    assert_eq!(names(&view, cx).len(), 2);
+    // The search field is AppKit's; what it reports drives the same query.
+    view.update(cx, |v, cx| v.set_text("sec".into(), cx));
+    settle(&view, cx, |v| v.controller.rows.len() == 1);
+    assert_eq!(names(&view, cx), ["Second Film"]);
+    cx.simulate_keystrokes("escape");
+    settle(&view, cx, |v| v.controller.rows.len() == 2);
+    assert!(log.borrow().is_empty());
+    // With no search, Escape goes back to the project behind Home (v1).
+    cx.simulate_keystrokes("escape");
+    assert_eq!(*log.borrow(), ["hide home"]);
+}
+#[::core::prelude::v1::test]
+fn header_buttons_run_the_window_commands_and_sort_reorders() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    for (id, command) in [
+        ("home-open", "command open"),
+        ("home-new", "command newProject"),
+        ("home-store", "command store"),
+        ("home-account", "command cloudSignIn"),
+    ] {
+        let bounds = cx.debug_bounds(id).expect("control on screen");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(log.borrow().last().map(String::as_str), Some(command));
+    }
+    let by_name = |v: &ProjectLibrary| {
+        let names: Vec<_> = v.controller.rows.iter().map(|r| r.name.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        names.len() == 2 && names == sorted
+    };
+    view.update(cx, |v, cx| v.set_sort(Sort::Name, cx));
+    settle(&view, cx, by_name);
+    assert_eq!(names(&view, cx), ["First Film", "Second Film"]);
+    // The choice is v1's `projectsSort`, written through the kernel.
+    let start = Instant::now();
+    while fixture.actor.handle().state().settings.get("projectsSort")
+        != Some(&pm_model::Value::String("name".into()))
+    {
+        assert!(start.elapsed() < Duration::from_secs(10), "never stored");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+/// Home's button menus are the system's (NSMenu): none is drawn in the
+/// window, a press elsewhere goes where it lands, and the account menu's
+/// items run their commands (its separator runs nothing).
+#[::core::prelude::v1::test]
+fn home_menus_are_system_menus_whose_items_run_their_commands() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    let sort = cx.debug_bounds("home-sort").unwrap().center();
+    let open = cx.debug_bounds("home-open").unwrap().center();
+    let modifiers = Modifiers::none();
+    cx.simulate_click(sort, modifiers);
+    cx.run_until_parked();
+    // No AppKit window here: the system menu closed unchosen.
+    assert!(view.read_with(cx, |v, _| v.menu.is_none()));
+    let sorts = crate::v4_native::last_menu();
+    assert_eq!(
+        sorts.iter().filter(|(_, checked)| *checked).count(),
+        1,
+        "{sorts:?}"
+    );
+    assert!(cx.debug_bounds("home-menu").is_none());
+    cx.simulate_click(open, modifiers);
+    assert_eq!(*log.borrow(), ["command open"]);
+    log.borrow_mut().clear();
+    for index in 0..4 {
+        view.update(cx, |v, cx| v.choose(super::Menu::Account, index, cx));
+    }
+    assert_eq!(
+        *log.borrow(),
+        ["command store", "command settings", "command cloudSignOut"]
+    );
+}
+#[::core::prelude::v1::test]
+fn newer_work_in_the_original_app_is_one_line_that_offers_to_bring_it_in() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    assert!(cx.debug_bounds("home-recent-work").is_none());
+    crate::recent_work::set_newer(true);
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("home-recent-work").expect("the line shows");
+    cx.simulate_click(bounds.center(), Modifiers::default());
+    cx.run_until_parked();
+    crate::recent_work::set_newer(false);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("command bringInRecentWork")
+    );
+}
+#[::core::prelude::v1::test]
+fn a_click_selects_and_return_opens_through_the_kernel() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    let row = view.read_with(cx, |v, _| {
+        v.controller
+            .rows
+            .iter()
+            .position(|r| r.id == "first")
+            .unwrap()
+    });
+    assert!(row < 2);
+    let bounds = cx.debug_bounds("project-first").expect("row on screen");
+    cx.simulate_click(bounds.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.controller.selected.clone())
+            .as_deref(),
+        Some("first")
+    );
+    cx.simulate_keystrokes("enter");
+    // Ghost loading: the window hears of the open at once, before the
+    // project has been read.
+    view.update(cx, |v, cx| v.pump(cx));
+    assert_eq!(
+        log.borrow().first().map(String::as_str),
+        Some("ghost First Film")
+    );
+    assert!(!log.borrow().iter().any(|l| l.starts_with("opened")));
+    let start = Instant::now();
+    while !log.borrow().iter().any(|l| l.starts_with("opened")) {
+        view.update(cx, |v, cx| v.pump(cx));
+        cx.run_until_parked();
+        assert!(start.elapsed() < Duration::from_secs(10), "never opened");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        *log.borrow(),
+        ["ghost First Film", "ghost ended", "opened First Film"]
+    );
+    log.borrow_mut().clear();
+    assert!(fixture.actor.handle().published("first").is_some());
+    // Opening it again, from this or another window's list, brings forward the
+    // window that shows it: no second open, no alert.
+    cx.simulate_keystrokes("enter");
+    let start = Instant::now();
+    while !log.borrow().iter().any(|l| l.starts_with("focus")) {
+        view.update(cx, |v, cx| v.pump(cx));
+        cx.run_until_parked();
+        assert!(start.elapsed() < Duration::from_secs(10), "never answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(log.borrow().iter().any(|l| l == "focus first"));
+}
+#[::core::prelude::v1::test]
+fn sections_switch_and_an_empty_trash_says_so() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, _) = open(&mut cx, &fixture);
+    let bounds = cx.debug_bounds("home-trash").expect("section on screen");
+    cx.simulate_click(bounds.center(), Modifiers::default());
+    settle(&view, cx, |v| v.controller.rows.is_empty());
+    assert!(view.read_with(cx, |v, _| matches!(
+        v.controller.content(),
+        Content::Empty(_)
+    )));
+}
+
+#[::core::prelude::v1::test]
+fn a_window_without_a_project_uses_the_shipped_defaults() {
+    use crate::library_surface::form::NewProjectForm;
+    let form = NewProjectForm::new(
+        String::new(),
+        current_format(None).as_ref(),
+        &default_format(),
+        &[],
+    );
+    assert_eq!(
+        (form.width.as_str(), form.height.as_str(), form.fps.as_str()),
+        ("1920", "1080", "30")
+    );
+    assert_eq!(form.background, "#09090A");
+    assert_eq!(form.preset, Some(1));
+}
+
+#[::core::prelude::v1::test]
+fn create_opens_a_library_project_with_the_forms_format_and_saves_it() {
+    use crate::library_surface::{
+        controller::{Command, Outcome},
+        form::NewProjectForm,
+        kernel::KernelLibrary,
+    };
+    use pm_kernel::session::ShellReply;
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().canonicalize().unwrap();
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(profile.join("journals")),
+        ..Default::default()
+    });
+    actor
+        .handle()
+        .shell(ShellCall::AttachLibrary {
+            profile: profile.clone(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let current = Format {
+        width: 1080,
+        height: 1920,
+        fps: 24.,
+        duration: 5.,
+        background: "#112233".into(),
+    };
+    let mut form = NewProjectForm::new(
+        String::new(),
+        Some(&current),
+        &default_format(),
+        &["Untitled".into()],
+    );
+    assert_eq!(form.name, "Untitled 2", "names stay unique");
+    form.choose_preset(Some(1)).unwrap();
+    let mut service = KernelLibrary {
+        kernel: actor.handle(),
+        profile: profile.clone(),
+    };
+    let Outcome::Opened(ShellReply::Opened { session, .. }) = service
+        .execute(Command::Create(form.values().unwrap()))
+        .unwrap()
+    else {
+        panic!("a new project opens without recovery");
+    };
+    let published = actor.handle().published(&session.project).unwrap();
+    assert_eq!(
+        current_format(Some(&published)),
+        Some(Format {
+            width: 1920,
+            height: 1080,
+            fps: 24.,
+            duration: 5.,
+            background: "#112233".into(),
+        }),
+        "the next New Project starts from this one"
+    );
+    let root = published.snapshot.root().unwrap();
+    assert_eq!(
+        root.get("name").and_then(crate::node_string),
+        Some("Untitled 2")
+    );
+    actor
+        .handle()
+        .shell(ShellCall::Save(session.clone()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    actor.shutdown();
+    assert!(
+        pm_kernel::LibraryStore::open(&profile)
+            .load(&session.project)
+            .unwrap()
+            .is_some(),
+        "the new project is in the library"
+    );
+}
+
+/// Headless pictures of Home with and without the newer-work line. Run on
+/// demand: `PM_WELCOME_CAPTURE=<dir> cargo test -p pm-native-app capture_home_recent_work -- --ignored`
+#[::core::prelude::v1::test]
+#[ignore = "writes PNGs; set PM_WELCOME_CAPTURE"]
+fn capture_home_recent_work() {
+    use gpui::{HeadlessAppContext, px, size};
+    let dir = std::env::var("PM_WELCOME_CAPTURE").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, newer) in [
+        ("home-without-line", false),
+        ("after-home-newer-work-line", true),
+    ] {
+        objc2::rc::autoreleasepool(|_| {
+            let fixture = fixture();
+            crate::recent_work::set_newer(newer);
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(
+                    gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                        .with_automatic_optical_sizing(),
+                ),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let (port, rx) =
+                ProjectLibrary::port(fixture.actor.handle(), fixture.profile.clone()).unwrap();
+            let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+            let kernel = fixture.actor.handle();
+            let sink: Sink = Rc::new(|_, _| {});
+            let fill = tokens.colors.window;
+            let window = cx
+                .open_window(size(px(1100.), px(640.)), move |_, cx| {
+                    let view =
+                        cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, None, kernel, cx));
+                    cx.new(|_| Backed { view, fill })
+                })
+                .unwrap();
+            let library = window
+                .update(&mut cx, |root, _, _| root.view.clone())
+                .unwrap();
+            library.update(&mut cx, |v, cx| {
+                let mut query = v.controller.query.clone();
+                query.section = Section::All;
+                v.controller.set_query(query).unwrap();
+            });
+            for _ in 0..60 {
+                library.update(&mut cx, |v, cx| v.pump(cx));
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            image.save(format!("{dir}/{name}.png")).unwrap();
+            crate::recent_work::set_newer(false);
+        });
+    }
+}
+struct Backed {
+    view: Entity<ProjectLibrary>,
+    fill: u32,
+}
+impl gpui::Render for Backed {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div()
+            .size_full()
+            .bg(gpui::rgb(self.fill))
+            .font_family(pm_design::TEXT_FONT)
+            .child(self.view.clone())
+    }
+}

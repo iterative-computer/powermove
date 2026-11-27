@@ -1,0 +1,419 @@
+//! The evaluation scope layer queries run in: an [`Evaluator`], the
+//! composition being evaluated (`PM.curComp()`), and the open composition
+//! (`PM.proj`).
+//!
+//! The legacy layer queries (`localMatrix`, `worldMatrix`, the 2.5D space,
+//! bounds, picking, text animation, ...) read three globals: the evaluator
+//! state, `PM.curComp()` (the top of `PM.scope`, the composition a nested
+//! render is drawing), and `PM.proj` (the open composition, whose size some
+//! fallbacks read even inside a nested composition). [`Scope`] carries all
+//! three explicitly, so every query is a pure function of its arguments.
+//!
+//! Lookups follow the legacy indexes exactly:
+//!
+//! - [`Scope::parent_of`] is `anim.ts`'s `parentOf`: the *first* layer of
+//!   `comp.layers` with the parent's id (any id type, `SameValueZero`).
+//! - [`Scope::layer_by_id`] is `PM.L`: the *last* layer with a string id
+//!   (`ProjectIndex.byId`); non-string ids find nothing.
+//! - [`Scope::group_ancestors`] is `PM.groupAncestors` (last layer per id).
+
+use std::sync::Arc;
+
+use pm_model::{JsString, Node};
+
+use crate::comp::{Comp, IdKey, LayerIndex};
+use crate::evaluator::Evaluator;
+use crate::js_sem::{JsResult, JsThrow, JsValue};
+use crate::node::{self, Got};
+
+/// A composition being evaluated, with the open composition beside it.
+pub struct Scope<'a, 'd> {
+    pub ev: &'a mut Evaluator,
+    /// `PM.curComp()`.
+    pub comp: &'a Comp<'d>,
+    /// `PM.proj`: the open composition (the same as `comp` unless a nested
+    /// composition is being evaluated).
+    pub project: &'a Comp<'d>,
+    /// Transient editor camera for this composition.
+    pub view_camera: Option<crate::space3d::Camera3d>,
+    pub(crate) active_camera: Option<(u64, Option<crate::space3d::Camera3d>)>,
+    pub(crate) active_camera_dof: Option<(u64, Option<(f64, f64)>)>,
+    /// Local matrices and group ancestry computed in this scope, when
+    /// memoized ([`Scope::memoize_transforms`]).
+    pub(crate) local_memo: Option<LocalMemo<'d>>,
+}
+
+/// Local matrices by layer node and time, and group ancestors by layer node.
+/// The document is borrowed for the scope's whole life, so a node's address
+/// names one node and its content cannot change while the memo exists.
+#[derive(Default)]
+pub(crate) struct LocalMemo<'d> {
+    index: Option<Arc<LayerIndex>>,
+    local: std::collections::HashMap<(usize, u64), crate::transform::Mat2d, BuildAddressHasher>,
+    ancestors: std::collections::HashMap<usize, Vec<&'d Node>, BuildAddressHasher>,
+    pub(crate) is_3d: std::collections::HashMap<usize, bool, BuildAddressHasher>,
+    /// `local3D`, `world3D` and `parent3D` (its own parent lookup), by node and time:
+    /// depth ordering and each plane matrix walk the same group and parent
+    /// chains.
+    pub(crate) local3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) world3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) parent3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) path_geom: std::collections::HashMap<
+        (usize, u64),
+        Arc<crate::bounds::PathGeometry>,
+        BuildAddressHasher,
+    >,
+}
+
+pub(crate) fn address(layer: &Node) -> usize {
+    std::ptr::from_ref(layer) as usize
+}
+
+impl<'d> LocalMemo<'d> {
+    pub(crate) fn get(&self, layer: &Node, time: f64) -> Option<crate::transform::Mat2d> {
+        self.local.get(&(address(layer), time.to_bits())).copied()
+    }
+
+    pub(crate) fn insert(&mut self, layer: &Node, time: f64, m: crate::transform::Mat2d) {
+        self.local.insert((address(layer), time.to_bits()), m);
+    }
+}
+
+/// A multiplicative hasher for (address, time bits) keys (SipHash costs more
+/// than the lookup it guards).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct BuildAddressHasher;
+
+#[derive(Default)]
+pub(crate) struct AddressHasher(u64);
+
+impl std::hash::BuildHasher for BuildAddressHasher {
+    type Hasher = AddressHasher;
+    fn build_hasher(&self) -> AddressHasher {
+        AddressHasher(0)
+    }
+}
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+
+impl<'a, 'd> Scope<'a, 'd> {
+    pub fn new(ev: &'a mut Evaluator, comp: &'a Comp<'d>, project: &'a Comp<'d>) -> Self {
+        Scope {
+            ev,
+            comp,
+            project,
+            view_camera: None,
+            active_camera: None,
+            active_camera_dof: None,
+            local_memo: None,
+        }
+    }
+
+    /// The open composition evaluated as itself (`PM.scope` empty).
+    pub fn open(ev: &'a mut Evaluator, comp: &'a Comp<'d>) -> Self {
+        Scope {
+            ev,
+            comp,
+            project: comp,
+            view_camera: None,
+            active_camera: None,
+            active_camera_dof: None,
+            local_memo: None,
+        }
+    }
+
+    /// Remembers each layer's local matrix per time and its group ancestors
+    /// for the rest of this scope (the legacy evaluation window, `PM.beginEval`, memoizes
+    /// transforms the same way). Every member of a group otherwise
+    /// re-evaluates the group's transform channels, and each of its parents'
+    /// (docs/engine/perf.md). Local matrices are pure functions of the layer
+    /// and the time, so answers are unchanged; renderers enable it for one
+    /// frame's plan.
+    pub fn memoize_transforms(&mut self) {
+        if self.local_memo.is_none() {
+            self.local_memo = Some(LocalMemo::default());
+        }
+    }
+
+    /// The composition's layers (`comp.layers`, or none).
+    pub fn layers(&self) -> &'d [Node] {
+        self.comp.layers()
+    }
+
+    pub(crate) fn index(&mut self) -> Arc<LayerIndex> {
+        if let Some(memo) = &mut self.local_memo {
+            memo.index
+                .get_or_insert_with(|| self.ev.layer_index(self.comp))
+                .clone()
+        } else {
+            self.ev.layer_index(self.comp)
+        }
+    }
+
+    /// The composition's layer index (ids to positions, duplicated ids),
+    /// shared with the lookups of this scope.
+    pub fn layer_index(&mut self) -> Arc<LayerIndex> {
+        self.index()
+    }
+
+    /// `parentOf(L)` (`anim.ts`): the first layer whose `id` is `L.parent`.
+    /// Throws when some element of `comp.layers` is `null` (building the
+    /// index reads every layer's `id`).
+    pub fn parent_of(&mut self, layer: &'d Node) -> JsResult<Option<&'d Node>> {
+        let parent = node::get(layer, b"parent");
+        if !parent.truthy() {
+            return Ok(None);
+        }
+        let index = self.index();
+        if index.has_nullish {
+            return Err(JsThrow::type_error(
+                "Cannot read properties of null (reading 'id')",
+            ));
+        }
+        Ok(IdKey::of(&parent)
+            .and_then(|k| index.first.get(&k))
+            .map(|&i| &self.layers()[i]))
+    }
+
+    /// `PM.L(id)`: the last layer with this string id in the composition.
+    pub fn layer_by_id(&mut self, id: &Got<'_>) -> Option<&'d Node> {
+        let JsValue::String(s) = id.to_js() else {
+            return None;
+        };
+        let index = self.index();
+        index
+            .last
+            .get(&IdKey::String(s))
+            .map(|&i| &self.layers()[i])
+    }
+
+    /// `PM.L(L.parent)` when `L.parent` is truthy (the 3D hierarchy's lookup).
+    pub fn parent_by_id(&mut self, layer: &'d Node) -> Option<&'d Node> {
+        let parent = node::get(layer, b"parent");
+        if !parent.truthy() {
+            return None;
+        }
+        self.layer_by_id(&parent)
+    }
+
+    /// `PM.groupAncestors(L)`: enclosing groups, innermost first.
+    pub fn group_ancestors(&mut self, layer: &'d Node) -> JsResult<Vec<&'d Node>> {
+        if let Some(found) = self
+            .local_memo
+            .as_ref()
+            .and_then(|memo| memo.ancestors.get(&address(layer)))
+        {
+            return Ok(found.clone());
+        }
+        let groups = self.ev.group_ancestors(self.comp, layer)?;
+        if let Some(memo) = self.local_memo.as_mut() {
+            memo.ancestors.insert(address(layer), groups.clone());
+        }
+        Ok(groups)
+    }
+
+    /// `PM.ev(L, key, T)`.
+    pub fn channel(&mut self, layer: &'d Node, key: &str, time: f64) -> JsResult<JsValue> {
+        self.ev.ev_key(self.comp, Some(layer), key, time)
+    }
+
+    /// `Number(PM.ev(L, key, T))` (JavaScript's `ToNumber`, as arithmetic
+    /// on the result applies it).
+    pub fn num(&mut self, layer: &'d Node, key: &str, time: f64) -> JsResult<f64> {
+        Ok(self.channel(layer, key, time)?.to_number())
+    }
+
+    /// `PM.evP(L, prop, T, key)`.
+    pub fn channel_p(
+        &mut self,
+        layer: &'d Node,
+        prop: Option<&'d Node>,
+        time: f64,
+        key: &str,
+    ) -> JsResult<JsValue> {
+        self.ev
+            .ev_p(self.comp, Some(layer), prop, time, &JsString::from(key))
+    }
+
+    /// What [`Self::evaluated`] answers for `value` at any time and key, when
+    /// that needs neither (see [`crate::Evaluator::static_channel`]).
+    pub fn static_value(&self, layer: &'d Node, value: Option<&'d Node>) -> Option<JsValue> {
+        if node::is_property(value) {
+            self.ev.static_channel(self.comp, layer, value)
+        } else {
+            Some(node::js_value_opt(value))
+        }
+    }
+
+    /// `isProperty(v) ? PM.evP(L, v, T, key) : v` (`evaluatedValue`).
+    pub fn evaluated(
+        &mut self,
+        layer: &'d Node,
+        value: Option<&'d Node>,
+        time: f64,
+        key: &str,
+    ) -> JsResult<JsValue> {
+        if node::is_property(value) {
+            self.channel_p(layer, value, time, key)
+        } else {
+            Ok(node::js_value_opt(value))
+        }
+    }
+
+    /// `PM.active(L, T)`.
+    pub fn active(&mut self, layer: &'d Node, time: f64) -> JsResult<bool> {
+        self.ev.active(self.comp, Some(layer), time)
+    }
+
+    /// `PM.active({ ...L, on: true }, T)` (a track matte source).
+    pub fn active_forced_on(&mut self, layer: &'d Node, time: f64) -> JsResult<bool> {
+        self.ev.active_forced_on(self.comp, Some(layer), time)
+    }
+
+    /// `Number(PM.proj.w)` and `Number(PM.proj.h)`.
+    pub fn project_size(&self) -> (f64, f64) {
+        (
+            node::to_number(self.project.member("w")),
+            node::to_number(self.project.member("h")),
+        )
+    }
+
+    /// `Number(comp.w)` and `Number(comp.h)` of the current composition.
+    pub fn comp_size(&self) -> (f64, f64) {
+        (
+            node::to_number(self.comp.member("w")),
+            node::to_number(self.comp.member("h")),
+        )
+    }
+}
+
+/// Whether two optional nodes are the same object.
+pub(crate) fn same(a: &Node, b: &Node) -> bool {
+    std::ptr::eq(a, b)
+}
+
+/// `layer.d.paths?.length` truthy (throws when `layer.d` is nullish).
+pub(crate) fn has_paths(layer: &Node) -> JsResult<bool> {
+    let d = node::get_checked(Some(layer), b"d")?;
+    let paths = match &d {
+        Got::Node(d) if !node::is_nullish(Some(d)) => node::get(d, b"paths"),
+        Got::Value(v) if !matches!(v, JsValue::Undefined | JsValue::Null) => Got::Undefined,
+        _ => {
+            return Err(JsThrow::type_error(
+                "Cannot read properties of undefined (reading 'paths')",
+            ));
+        }
+    };
+    Ok(match paths {
+        Got::Node(p) if !node::is_nullish(Some(p)) => node::get(p, b"length").truthy(),
+        Got::Value(v) => v.to_js_string().utf16_len() > 0,
+        _ => false,
+    })
+}
+
+/// `layer.type === name`.
+pub(crate) fn is_type(layer: &Node, name: &str) -> bool {
+    node::is_str(node::member(Some(layer), "type"), name)
+}
+
+/// `!!layer[key]`.
+pub(crate) fn flag(layer: &Node, key: &str) -> bool {
+    node::truthy(node::member(Some(layer), key))
+}
+
+/// `PM.clamp(v, a, b)`: `v < a ? a : v > b ? b : v` (NaN passes through).
+#[inline]
+pub(crate) fn clamp(v: f64, a: f64, b: f64) -> f64 {
+    if v < a {
+        a
+    } else if v > b {
+        b
+    } else {
+        v
+    }
+}
+
+/// `Number(x) || 0` for a number: NaN and `-0` become `+0`.
+#[inline]
+pub(crate) fn or0(x: f64) -> f64 {
+    if x.is_nan() || x == 0.0 { 0.0 } else { x }
+}
+
+/// `Math.max(a, b)` (NaN wins; `+0` beats `-0`).
+#[inline]
+pub(crate) fn js_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == b {
+        if a.is_sign_negative() { b } else { a }
+    } else if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// `Math.min(a, b)` (NaN wins; `-0` beats `+0`).
+#[inline]
+pub(crate) fn js_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == b {
+        if a.is_sign_negative() { a } else { b }
+    } else if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// `Math.hypot(...values)` with V8's algorithm (scaled, Kahan-compensated).
+pub(crate) fn js_hypot(values: &[f64]) -> f64 {
+    let mut max = 0.0f64;
+    let mut nan = false;
+    for &v in values {
+        let a = v.abs();
+        if a.is_nan() {
+            nan = true;
+        } else if a > max {
+            max = a;
+        }
+    }
+    if max == f64::INFINITY {
+        return f64::INFINITY;
+    }
+    if nan {
+        return f64::NAN;
+    }
+    if max == 0.0 {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    let mut compensation = 0.0f64;
+    for &v in values {
+        let n = v.abs() / max;
+        let summand = n * n - compensation;
+        let preliminary = sum + summand;
+        compensation = (preliminary - sum) - summand;
+        sum = preliminary;
+    }
+    sum.sqrt() * max
+}

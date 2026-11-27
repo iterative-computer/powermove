@@ -1,0 +1,41 @@
+//! Font registry, subsetting, shaping, and layout (plan section 12, with the
+//! section 26 amendment 10).
+//!
+//! - `compat`: level 1 layout, today's Canvas2D text layout reproduced
+//!   exactly (the Rust port of Blink's `measureText` over HarfRust in
+//!   `blink`, the `text-layout.ts` wrapping, raster.ts baselines and carets).
+//! - `level2` (feature `level2`): layout on Parley with grapheme-aware
+//!   breaking and font metrics.
+//! - `registry` (feature `system`, macOS): the native font registry
+//!   (CoreText matching as Blink does it, project fonts, enumeration, the
+//!   fallback manifest).
+//! - `answers`: the registry boundary as data, so `pm-wasm` lays text out
+//!   from recorded answers and metrics-and-shaping subsets (`subset`).
+//! - `served`: a resolver answered synchronously by a registry on another
+//!   thread, over full fonts (the engines' render threads).
+//! - `corpus`: the S4 corpus and its comparison with Canvas2D captures.
+//! - `render` (feature `render`): unhinted glyph outlines, color glyphs,
+//!   the ordered text scene, and float CPU paint (`docs/engine/text-render.md`).
+//!
+//! Layout never calls a platform API; native and WASM builds run the same
+//! code over the same answers and produce bit-identical results.
+
+pub mod answers;
+pub mod blink;
+pub mod compat;
+pub mod corpus;
+pub mod fallback_cache;
+pub mod file_version;
+pub mod font;
+pub mod host;
+#[cfg(feature = "level2")]
+pub mod level2;
+pub mod measure;
+pub mod registry;
+#[cfg(feature = "ink")]
+pub mod render;
+pub mod sanitize;
+pub mod served;
+pub mod sfnt;
+pub mod subset;
+pub mod system_fonts;

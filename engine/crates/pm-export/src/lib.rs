@@ -1,0 +1,244 @@
+//! Encoders, muxers, verification (plan section 17).
+//!
+//! * [`settings`]: what an export produces (codec, container, tags, alpha, dither,
+//!   audio, timecode, destination).
+//! * [`convert`]: the encoder input on the CPU — matrix, siting-aware chroma,
+//!   deterministic [`dither`], codable-range clipping — into `y416`, `v216`, `420v`.
+//! * [`pipeline`]: frames and audio into a [`pipeline::Sink`]; test-only sinks capture
+//!   encoder input (`test-sinks` feature).
+//! * `mac` (macOS): VideoToolbox ProRes, H.264, and HEVC with session-property color
+//!   tags, AVAssetWriter MOV/MP4 with section 17 timescales and a `tmcd` track, then
+//!   [`verify`] and an [`atomic`] move into place.
+//! * `webm` (macOS engine integration): VP9 and VP8 (with alpha) through libvpx and Opus through libopus,
+//!   muxed by FFmpeg, verified by demuxing and decoding.
+//! * `stills` (macOS engine integration): Import Image Sequence's lossless VP9 WebM.
+//! * [`png`]: PNG sequences and stills, 8 or 16-bit, verified losslessly.
+//! * [`software`]: headless FFmpeg software codecs through the same [`Sink`] trait.
+//! * [`export`]: platform delivery for every format ([`OutputSink`]).
+//! * [`mp4box`]: the container reader verification uses.
+//! * `render` (macOS engine integration): the job engine's export and agent-still pipeline: capability
+//!   routing, pm-render frames (sliced through a `render::GpuGate`), pm-audio's
+//!   offline mix, and the encoder above.
+
+pub mod atomic;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod chroma_policy;
+pub mod convert;
+pub mod dither;
+pub mod evidence;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod gpu_time;
+pub mod hdr;
+pub mod mp4box;
+pub(crate) mod par;
+pub mod pipeline;
+pub mod png;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod raster;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+mod readback;
+pub mod render;
+pub mod schedule;
+pub mod settings;
+pub mod software;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod stills;
+pub mod timescale;
+pub mod verify;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod webm;
+
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod mac;
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+
+pub use convert::{EncoderInput, WorkingFrame};
+pub use pipeline::{Pipeline, Sink};
+pub use settings::*;
+pub use verify::VerifyReport;
+
+/// A delivered, verified output: a file, or for PNG sequences a folder.
+#[derive(Clone, Debug)]
+pub struct Delivered {
+    pub path: PathBuf,
+    pub report: VerifyReport,
+}
+
+/// The sink of one export, by container.
+pub enum OutputSink {
+    #[cfg(all(feature = "engine", target_os = "macos"))]
+    VideoToolbox(Box<mac::VideoToolboxSink>),
+    /// libvpx encodes on the calling thread, so it runs one frame behind
+    /// the conversion.
+    #[cfg(all(feature = "engine", target_os = "macos"))]
+    Webm(Box<pipeline::Overlapped<webm::WebmSink>>),
+    Software(Box<software::SoftwareSink>),
+    Png(Box<png::PngSink>),
+}
+
+impl OutputSink {
+    /// Opens the encoder, muxer, and temporary output `spec` asks for. Every
+    /// format takes the engine's own conversion from the working frames
+    /// (`convert`: matrix, siting-aware chroma, dither) and f32 audio.
+    pub fn new(spec: &ExportSpec) -> Result<OutputSink, Error> {
+        match spec.container {
+            Container::Mov | Container::Mp4 => {
+                #[cfg(all(feature = "engine", target_os = "macos"))]
+                {
+                    Ok(OutputSink::VideoToolbox(Box::new(
+                        mac::VideoToolboxSink::new(spec)?,
+                    )))
+                }
+                #[cfg(not(all(feature = "engine", target_os = "macos")))]
+                {
+                    Ok(OutputSink::Software(Box::new(software::SoftwareSink::new(
+                        spec,
+                    )?)))
+                }
+            }
+            Container::Webm => {
+                #[cfg(all(feature = "engine", target_os = "macos"))]
+                {
+                    Ok(OutputSink::Webm(Box::new(pipeline::Overlapped::new(
+                        webm::WebmSink::new(spec)?,
+                    )?)))
+                }
+                #[cfg(not(all(feature = "engine", target_os = "macos")))]
+                {
+                    Ok(OutputSink::Software(Box::new(software::SoftwareSink::new(
+                        spec,
+                    )?)))
+                }
+            }
+            Container::PngSequence | Container::PngStill => {
+                Ok(OutputSink::Png(Box::new(png::PngSink::new(spec)?)))
+            }
+        }
+    }
+}
+
+impl Sink for OutputSink {
+    type Output = Delivered;
+
+    fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.video(index, input),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::Webm(s) => s.video(index, input),
+            OutputSink::Software(s) => s.video(index, input),
+            OutputSink::Png(s) => s.video(index, input),
+        }
+    }
+
+    fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.video(index, &input),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::Webm(s) => s.video_owned(index, input),
+            OutputSink::Software(s) => s.video_owned(index, input),
+            OutputSink::Png(s) => s.video(index, &input),
+        }
+    }
+
+    fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.audio(interleaved),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::Webm(s) => s.audio(interleaved),
+            OutputSink::Software(s) => s.audio(interleaved),
+            OutputSink::Png(s) => s.audio(interleaved),
+        }
+    }
+
+    fn idle(&mut self) -> Result<(), Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.idle(),
+            _ => Ok(()),
+        }
+    }
+
+    fn finish(self) -> Result<Delivered, Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.finish(),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::Webm(s) => s.finish(),
+            OutputSink::Software(s) => s.finish(),
+            OutputSink::Png(s) => s.finish(),
+        }
+    }
+
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.count_checked(checked),
+            OutputSink::Software(s) => s.count_checked(checked),
+            _ => {}
+        }
+    }
+
+    fn with_mix(mut output: Delivered, mix: Option<verify::MixLevels>) -> Delivered {
+        output.report.mix = mix;
+        output
+    }
+
+    fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<Delivered, Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.finish_with_cancel(cancel),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::Webm(s) => s.finish_with_cancel(cancel),
+            OutputSink::Software(s) => s.finish_with_cancel(cancel),
+            OutputSink::Png(s) => s.finish_with_cancel(cancel),
+        }
+    }
+}
+
+/// An export in progress.
+pub type Export = Pipeline<OutputSink>;
+
+/// Starts an export of any format: validates, prepares the temporary output next to
+/// the destination, and opens the encoder and muxer.
+pub fn export(spec: ExportSpec) -> Result<Export, Error> {
+    let sink = OutputSink::new(&spec)?;
+    Pipeline::new(spec, sink)
+}
+
+/// Export errors.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("cancelled")]
+    Cancelled,
+    #[error("invalid export settings: {0}")]
+    InvalidSpec(String),
+    #[error("invalid frame: {0}")]
+    InvalidFrame(String),
+    #[error("{} already exists", .0.display())]
+    Exists(PathBuf),
+    #[error("file error: {0}")]
+    Io(String),
+    #[error("encoder: {0}")]
+    Encode(String),
+    #[error("encoder: {0}")]
+    EncoderBackpressure(String),
+    #[error("muxer: {0}")]
+    Mux(String),
+    /// The written file failed its check (section 17): what was found,
+    /// every problem joined by "; ". It is shown as one sentence naming
+    /// the first; the file is removed and nothing is retried.
+    #[error("{}", checked_sentence(.0))]
+    Verify(String),
+}
+
+/// What the person is told when the written file fails its check: one
+/// sentence, the first thing found, and that the file is gone.
+fn checked_sentence(problems: &str) -> String {
+    let first = problems.split("; ").next().unwrap_or(problems).trim();
+    format!("The exported file failed its check and was removed: {first}.")
+}

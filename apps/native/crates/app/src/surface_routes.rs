@@ -1,0 +1,984 @@
+//! Menu commands that open a surface. Each route captures the document it was
+//! opened for, does kernel and scratch-store work off main, and refuses a stale
+//! target instead of guessing. Other lanes add their own commands in `session.rs`.
+use crate::{
+    dialogs::{
+        CompositionDraft, DialogId, WindowId,
+        kernel::{Context as Dialog, DialogError},
+        number_text,
+    },
+    project_library::{Outbound, ProjectLibrary, Sink, current_format, default_format},
+    session::Controller,
+    sheets::{OpenSheet, from_surface},
+};
+use gpui::{prelude::*, *};
+use pm_builtins::RESOLUTIONS;
+use pm_kernel::Call;
+use std::rc::Rc;
+
+/// The least time between two posters written by saves of one project.
+const POSTER_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+impl Controller {
+    pub fn surface_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        if self.page_command(name, cx) {
+            return true;
+        }
+        // Home and a project's own tab leave a page showing over it.
+        if matches!(name, "home" | "projects" | "leaveHome") && self.pages.shown.is_some() {
+            self.leave_page(cx);
+            if name == "leaveHome" {
+                self.hide_home(cx);
+                return true;
+            }
+            if !self.home_shown() {
+                self.show_home(cx);
+            }
+            return true;
+        }
+        match name {
+            "newProject" => self.new_project(cx),
+            "newExtension" => {
+                let (owner, tokens) = {
+                    let host = self.host.borrow();
+                    (host.window.clone(), host.tokens.clone())
+                };
+                let this = cx.entity().downgrade();
+                crate::extension_template::open(
+                    self.profile.clone(),
+                    &owner,
+                    &tokens,
+                    cx,
+                    move |cx| {
+                        let _ = this.update(cx, |v, cx| {
+                            if let Some(store) = v.store.clone() {
+                                store.update(cx, |store, cx| store.show_made_library(cx));
+                            }
+                            v.note(
+                                "Extension created. Find it in Store Library under Made by You."
+                                    .into(),
+                                cx,
+                            );
+                        });
+                    },
+                );
+            }
+            "addDefaultTransition" => self.add_default_transition(cx),
+            "openRecent" => self.show_home(cx),
+            // The toolbar's Home and ⌘P (v1's `ProjectsScreen.toggle`): Home,
+            // or the project behind it.
+            "home" | "projects" if self.home_shown() && self.session.is_some() => {
+                self.hide_home(cx)
+            }
+            "home" | "projects" => self.show_home(cx),
+            // The project's own tab pressed on Home.
+            "leaveHome" => {
+                if self.home_shown() && self.session.is_some() {
+                    self.hide_home(cx)
+                }
+            }
+            // Development builds: the app's appearance as Settings › General
+            // › Appearance sets it (`reviewAppearance:light|dark|system`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewAppearance:") => {
+                use crate::appearance::{Mode, apply_later};
+                apply_later(match &command["reviewAppearance:".len()..] {
+                    "light" => Mode::Light,
+                    "dark" => Mode::Dark,
+                    _ => Mode::System,
+                });
+            }
+            // Development builds: an event on a built-in panel's node, by
+            // semantic id (`reviewPanel:<panel>:<event>:<semantic>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewPanel:") => {
+                let mut parts = command.splitn(4, ':').skip(1);
+                if let (Some(panel), Some(event), Some(semantic)) =
+                    (parts.next(), parts.next(), parts.next())
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_send(semantic, event, cx));
+                }
+            }
+            // Development builds: a panel's scroller put some points down
+            // its content (`reviewScrollTo:<panel>:<points>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewScrollTo:") => {
+                let mut parts = command.splitn(3, ':').skip(1);
+                if let (Some(panel), Some(Ok(points))) =
+                    (parts.next(), parts.next().map(str::parse::<f32>))
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_scroll_to(points, cx));
+                }
+            }
+            // Development builds: a panel's scroller swept for some seconds
+            // (`reviewScroll:<panel>:<seconds>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewScroll:") => {
+                let mut parts = command.splitn(3, ':').skip(1);
+                if let (Some(panel), Some(Ok(seconds))) =
+                    (parts.next(), parts.next().map(str::parse::<f32>))
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_scroll(seconds, cx));
+                }
+            }
+            // Development builds: a panel's own command with its intent, as
+            // its controls send it, for actions that sit behind a context
+            // menu (`reviewIntent:<panel>:<command>:<the JSON intent in hex>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewIntent:") => {
+                let mut parts = command.splitn(4, ':').skip(1);
+                let intent = |hex: &str| -> Option<serde_json::Value> {
+                    let bytes: Option<Vec<u8>> = (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+                        .collect();
+                    serde_json::from_slice(&bytes?).ok()
+                };
+                if let (Some(panel), Some(name), Some(hex)) =
+                    (parts.next(), parts.next(), parts.next())
+                    && let Some(runtime) = self.builtins.runtime.clone()
+                    && let Some(intent) = intent(hex)
+                    && let Ok(ticket) = runtime.panel_command(panel, name, &intent)
+                {
+                    cx.spawn(async move |this, cx| {
+                        let _ = ticket.await;
+                        let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                    })
+                    .detach();
+                }
+            }
+            // Development builds: hold a modifier for the pointer input
+            // an on-screen review sends (`reviewModifiers:alt`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewModifiers:") => {
+                crate::panel_bridge::hold_review_modifier(&command["reviewModifiers:".len()..]);
+            }
+            // Development builds: the control kit in every state, on Home.
+            #[cfg(debug_assertions)]
+            "reviewKit" => {
+                pm_shell::kit::GALLERY.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.show_home(cx)
+            }
+            "newComposition" => self.composition_sheet(false, None, cx),
+            "compositionSettings" => self.composition_sheet(true, None, cx),
+            "interpretFootage" => self.interpret_footage_sheet(cx),
+            "speedDuration" => self.speed_sheet(cx),
+            command if crate::keyframe_sheets::Kind::of(command).is_some() => {
+                self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
+            }
+            "bringSignIns" => self.bring_sign_ins(cx),
+            "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
+            "welcomeIntro" => crate::first_run_stage::replay(cx),
+            "errorLog" => crate::error_log::open(self.errors.clone(), cx),
+            "panelLibrary" => self.open_panel_library(cx),
+            "openTelemetryDocs" => {
+                crate::platform::open_url(pm_telemetry::DOCS_URL);
+            }
+            // Settings › General › Agent Notifications, when macOS says no.
+            "openNotificationSettings" => {
+                let id = crate::platform::bundle_id().unwrap_or_default();
+                crate::platform::open_url(&format!(
+                    "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={id}"
+                ));
+            }
+            "checkForUpdates" => {
+                let window = self.host.borrow().window.clone();
+                crate::updates::check_now(self.profile.clone(), window, cx)
+            }
+            "backgroundTasks" => self.open_tasks_window(cx),
+            "cloudSignIn" => {
+                let window = self.account_window(cx);
+                crate::cloud::open_sign_in(window, cx)
+            }
+            "cloudSignOut" => crate::cloud::sign_out(cx),
+            "cloudPortal" => crate::cloud::manage_billing(cx),
+            "cloudCheckoutCancel" => crate::cloud::cancel_checkout(cx),
+            "cloudBilling" => crate::cloud::refresh_billing(cx),
+            command if command.starts_with("cloudCheckout.") => {
+                let plan = command.trim_start_matches("cloudCheckout.").to_owned();
+                crate::cloud::subscribe(plan, cx)
+            }
+            "providerSetUp" => {
+                let window = self.account_window(cx);
+                crate::providers::open(window, cx)
+            }
+            "providerDisconnect" => crate::providers::disconnect(cx),
+            "providerKey.openai" | "providerKey.anthropic" => {
+                let kind = if name == "providerKey.openai" {
+                    crate::provider_keys::Kind::OpenAi
+                } else {
+                    crate::provider_keys::Kind::Anthropic
+                };
+                let accounts = self.builtins.runtime.as_ref().and_then(|r| r.agent_accounts());
+                if let Some(accounts) = accounts {
+                    let window = self.account_window(cx);
+                    crate::provider_keys::open(kind, window, accounts, cx)
+                }
+            }
+            "agentClientsCopy" => crate::agent_clients::copy_setup(cx),
+            command
+                if command.starts_with("agentClientAdd.")
+                    || command.starts_with("agentClientRemove.") =>
+            {
+                let (verb, id) = command.split_once('.').unwrap_or_default();
+                let window = self.account_window(cx);
+                crate::agent_clients::request(id.into(), verb == "agentClientAdd", window, cx)
+            }
+            command if command.starts_with("extensionReload.") => {
+                let id = &command["extensionReload.".len()..];
+                pm_compat_runner::host::reload_all(id);
+            }
+            command if command.starts_with("extensionReveal.") => {
+                let id = command["extensionReveal.".len()..].to_owned();
+                self.reveal_extension(id, cx)
+            }
+            command if command.starts_with("extensionArchive.") => {
+                let id = command["extensionArchive.".len()..].to_owned();
+                self.archive_extension(id, cx)
+            }
+            // Settings › General › Timeline › Hover to Scrub.
+            "skimmingOn" => self.set_skimming(true, cx),
+            "skimmingOff" => self.set_skimming(false, cx),
+            "cloudRememberOn" => crate::cloud::set_remember(true, cx),
+            "cloudRememberOff" => crate::cloud::set_remember(false, cx),
+            "cloudDeleteAccount" => {
+                let window = self.account_window(cx);
+                crate::cloud::delete_account(window, cx)
+            }
+            // As the gear does Settings: the Store showing closes, back to
+            // the tab it came forward over; otherwise it comes forward.
+            "store" if self.pages.toggle_closes("store") => self.close_tab_page("store", cx),
+            "store" => self.open_tab_page("store", cx),
+            _ => return false,
+        }
+        true
+    }
+    /// Settings › Extensions › Show in Finder: the extension's folder.
+    fn reveal_extension(&mut self, id: String, cx: &mut Context<Self>) {
+        if !pm_compat_runner::manifest::extension_id(&id) {
+            return;
+        }
+        let folder = self.profile.join("extensions").join(&id);
+        let found = cx.background_spawn(async move { folder.is_dir().then_some(folder) });
+        cx.spawn(async move |_, _| {
+            if let Some(folder) = found.await {
+                crate::platform::reveal(&folder);
+            }
+        })
+        .detach();
+    }
+    /// Settings › Extensions › Delete…: asks first (default Cancel), then the
+    /// folder moves to the archive and the extension unloads everywhere.
+    fn archive_extension(&mut self, id: String, cx: &mut Context<Self>) {
+        use crate::alert::{Alert, Button};
+        let name = self
+            .kernel
+            .state()
+            .extensions
+            .get(&id)
+            .and_then(|e| e.source.get("hostRecord"))
+            .and_then(|r| r.get("name"))
+            .and_then(pm_model::Value::as_str)
+            .map_or_else(|| id.clone(), str::to_owned);
+        let window = self.account_window(cx);
+        let rx = Alert::new(
+            format!("Delete {name}?"),
+            "Its files move to the archive in your Powermove profile, and its settings are kept.",
+            vec![
+                Button::new("Cancel", false).default().cancel(),
+                Button::new("Delete", true).destructive(),
+            ],
+        )
+        .sheet(&window);
+        let (kernel, profile) = (self.kernel.clone(), self.profile.clone());
+        cx.spawn(async move |_, cx| {
+            if rx.recv().await != Ok(Some(true)) {
+                return;
+            }
+            let done = cx
+                .background_spawn(async move {
+                    let result = pm_compat_runner::store_install::archive(&kernel, &profile, &id);
+                    if result.is_ok() {
+                        mark_archived(&kernel, &id);
+                        pm_compat_runner::host::rescan_all();
+                    }
+                    result.map_err(|e| e.to_string())
+                })
+                .await;
+            if let Err(error) = done {
+                cx.update(|_| {
+                    let rx = Alert::new(
+                        format!("{name} couldn’t be deleted."),
+                        error,
+                        vec![Button::new("OK", ()).default()],
+                    )
+                    .sheet(&window);
+                    drop(rx);
+                });
+            }
+        })
+        .detach();
+    }
+    /// Account sheets attach to Settings when it is open, else to this editor.
+    fn account_window(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> objc2::rc::Retained<objc2_app_kit::NSWindow> {
+        self.builtins
+            .windows
+            .get("settings")
+            .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten()
+            .unwrap_or_else(|| self.host.borrow().window.clone())
+    }
+    pub(crate) fn library(&mut self, cx: &mut Context<Self>) -> Option<Entity<ProjectLibrary>> {
+        if let Some(library) = &self.library {
+            return Some(library.clone());
+        }
+        let this = cx.entity().downgrade();
+        let sink: Sink = Rc::new(move |outbound, cx| {
+            let _ = this.update(cx, |v, cx| match outbound {
+                // Open in New Window: a window of its own. Any other Home
+                // open is this window's (`adopt_reply`: a tab of it when it
+                // already shows a project).
+                Outbound::Opened {
+                    reply,
+                    name,
+                    file,
+                    new_window: true,
+                } => {
+                    crate::entry::open_in_new_window(
+                        crate::entry::Pending::Adopt { reply, name, file },
+                        cx,
+                    );
+                }
+                Outbound::Opened {
+                    reply, name, file, ..
+                } => {
+                    v.home = false;
+                    v.adopt_reply(*reply, name, file, cx)
+                }
+                Outbound::FocusProject(id) => {
+                    if v.session.as_ref().is_some_and(|s| s.project == id) {
+                        v.hide_home(cx);
+                    } else {
+                        v.focus_project(&id, cx);
+                    }
+                }
+                Outbound::HideHome => v.hide_home(cx),
+                // Home's line about newer work in the original app.
+                Outbound::Command("bringInRecentWork") => {
+                    let window = v.host.borrow().window.clone();
+                    v.bring_in_recent_work(window, cx);
+                }
+                // Home's Sign In row: the sign-in sheet on this window. It is
+                // the app's command, not the kernel's, and it runs after this
+                // click's window update: the sheet looks its parent up among
+                // the app's windows, which can't read the window it's inside.
+                Outbound::Command("cloudSignIn") => {
+                    let window = v.host.borrow().window.clone();
+                    cx.defer(move |cx| crate::cloud::open_sign_in(window, cx));
+                }
+                Outbound::Command(name) => v.host.borrow().send_command(name, vec![]),
+                // Ghost loading from Home: a window with no project shows the
+                // editor's ghost at once (one with a project keeps it until
+                // the replacing open, `replace_project`).
+                Outbound::Opening {
+                    name,
+                    project,
+                    aspect,
+                } => {
+                    if v.session.is_none() && !v.opening {
+                        if let Some(project) = &project {
+                            v.stage_open(project);
+                        }
+                        v.begin_ghost(&name, aspect, cx);
+                    }
+                }
+                // Checked after this update: an open that succeeded hands
+                // its project over (`Opened`) in the same update.
+                Outbound::OpenEnded => {
+                    let this = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        let _ = this.update(cx, |v, cx| {
+                            if v.session.is_none() && !v.opening && v.opening_name.is_some() {
+                                v.end_ghost(cx);
+                            }
+                        });
+                    });
+                }
+            });
+        });
+        let tokens = self.host.borrow().tokens.clone();
+        let (port, rx) = match ProjectLibrary::port(self.kernel.clone(), self.profile.clone()) {
+            Ok(port) => port,
+            Err(error) => {
+                self.message = format!("Your projects can’t be shown: {error}");
+                return None;
+            }
+        };
+        let editor = Some(self.host.borrow().window.clone());
+        let kernel = self.kernel.clone();
+        let library = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, editor, kernel, cx));
+        self.library = Some(library.clone());
+        Some(library)
+    }
+    /// File ▸ Projects… and the toolbar's Home: Home in this window, over
+    /// the project it shows (which stays open), with fresh rows.
+    /// Home's poster of the open project as it stands now (`crate::poster`),
+    /// rendered off the main thread: after a save, at most once in
+    /// `POSTER_EVERY`, so saving often never queues renders behind the
+    /// editor's own. Once per revision.
+    pub(crate) fn write_poster(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let Some(published) = self.kernel.published(&project) else {
+            return;
+        };
+        let revision = (project.clone(), published.revision());
+        if self.poster_revision.as_ref().map(|(at, _)| at) == Some(&revision) {
+            return;
+        }
+        if self
+            .poster_revision
+            .as_ref()
+            .is_some_and(|((last, _), at)| *last == project && at.elapsed() < POSTER_EVERY)
+        {
+            return;
+        }
+        let Ok(renderer) = crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+            self.job_overrides.clone(),
+            crate::mcp_services::Capture::Poster,
+        ) else {
+            return;
+        };
+        self.poster_revision = Some((revision, std::time::Instant::now()));
+        let dir = self.profile.join("caches").join("thumbnails");
+        let (size, duration) = crate::poster::frame_of(&published);
+        let taken = crate::poster::now_ms();
+        cx.spawn(async move |this, cx| {
+            let id = project.clone();
+            let written = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::poster::write(
+                        &renderer,
+                        Some(published),
+                        &dir,
+                        &id,
+                        taken,
+                        size,
+                        duration,
+                    )
+                    .is_some()
+                })
+                .await;
+            // Home, if it is showing, takes the new poster at once.
+            if written {
+                let _ = this.update(cx, |v, cx| {
+                    if let Some(library) = v.library(cx) {
+                        library.update(cx, |home, cx| home.poster_written(&project, cx));
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    /// The picture the viewer presented last, kept as the open project's
+    /// last frame (`crate::poster::write_last_frame`) unless it already is:
+    /// the engine's held picture of that frame, read and written on a
+    /// background thread, no render. Never while the project's effects
+    /// load (the picture would leave them out). The channel hears once it
+    /// is written, or at `deadline`: a quit waits on it
+    /// (`lifecycle::complete_close`).
+    pub(crate) fn keep_last_frame(
+        &mut self,
+        deadline: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) -> Option<async_channel::Receiver<()>> {
+        self.try_keep_last_frame(deadline, cx).1
+    }
+    /// [`Self::keep_last_frame`], saying what came of it (`poster::Kept`).
+    fn try_keep_last_frame(
+        &mut self,
+        deadline: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) -> (crate::poster::Kept, Option<async_channel::Receiver<()>>) {
+        use crate::poster::Kept;
+        if self.settling.is_some() || self.awaiting_extension_effects() {
+            crate::diag::line(serde_json::json!({"last_frame": "loading"}));
+            return (Kept::NotYet, None);
+        }
+        let (Some(session), Some(published), Some(viewer)) =
+            (self.session.as_ref(), self.published.as_ref(), self.viewer.as_ref())
+        else {
+            return (Kept::Nothing, None);
+        };
+        // A window not shown keeps its picture as it hides (`follow_shown`)
+        // and settles none meanwhile: nothing to look at again.
+        if !pm_shell::window_shown(&self.host.borrow().window) {
+            return (Kept::Nothing, None);
+        }
+        let (project, doc) = (session.project.clone(), published.snapshot.doc_id);
+        let status = viewer.status();
+        let (Some(frame), Some(picture)) = (status.frame, status.settled_picture) else {
+            crate::diag::line(serde_json::json!({"last_frame": "not settled"}));
+            return (Kept::NotYet, None);
+        };
+        // This project's own picture (a viewer replaced for another project
+        // may still hold the last one's), and of the frame shown now.
+        if picture.stamp.doc_id != doc
+            || picture.stamp.revision != frame.stamp.revision
+            || picture.time != frame.time
+        {
+            crate::diag::line(serde_json::json!({"last_frame": "not this frame's"}));
+            return (Kept::NotYet, None);
+        }
+        let time = picture.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        let mark = crate::poster::last_frame_mark(picture.stamp.revision, time);
+        if crate::poster::last_frame_current(&self.profile, &project, &mark) {
+            return (Kept::Current, None);
+        }
+        let profile = self.profile.clone();
+        let (done, heard) = async_channel::bounded(1);
+        if let Some(deadline) = deadline {
+            let late = done.clone();
+            let timer = cx.background_executor().timer(deadline);
+            cx.background_executor()
+                .spawn(async move {
+                    timer.await;
+                    let _ = late.try_send(());
+                })
+                .detach();
+        }
+        cx.background_executor()
+            .spawn(async move {
+                let started = std::time::Instant::now();
+                let stored = crate::poster::write_last_frame(&picture, &profile, &project, &mark);
+                crate::diag::line(serde_json::json!({"last_frame": if stored { "stored" } else { "failed" },
+                    "time": time, "ms": started.elapsed().as_secs_f64() * 1000.}));
+                let _ = done.try_send(());
+            })
+            .detach();
+        (Kept::Writing, Some(heard))
+    }
+    /// Keeps the picture now (a save), or, if it is not ready yet, watches
+    /// it until it is.
+    pub(crate) fn keep_or_watch_last_frame(&mut self, cx: &mut Context<Self>) {
+        if self.try_keep_last_frame(None, cx).0 == crate::poster::Kept::NotYet
+            && !std::mem::replace(&mut self.last_frame_watch.watching, true)
+        {
+            self.look_still_after(crate::poster::LAST_FRAME_RETRY, cx);
+        }
+    }
+    /// The viewer showed `frame`: once its picture has held still
+    /// (`poster::still`) it is kept as the project's last frame, so a launch
+    /// after a kill or a signal quit, which keep nothing, still opens on a
+    /// recent picture of the project (PM-384).
+    pub(crate) fn watch_still(
+        &mut self,
+        frame: Option<&pm_engine_service::FrameReport>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(frame) = frame else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if self.last_frame_watch.saw(frame.stamp.revision, frame.time.get(), now) {
+            self.look_still_after(crate::poster::LAST_FRAME_STILL, cx);
+        }
+    }
+    /// The still picture's watch: looks after `wait`, then as `look_still` says.
+    fn look_still_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut wait = wait;
+            loop {
+                cx.background_executor().timer(wait).await;
+                match this.update(cx, |v, cx| v.look_still(cx)) {
+                    Ok(Some(next)) => wait = next,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+    /// The still picture's watch looks again: how long until the next look,
+    /// or none when it rendered (or there is nothing to keep).
+    fn look_still(&mut self, cx: &mut Context<Self>) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let watch = &self.last_frame_watch;
+        let held = watch.held(now);
+        let since = watch.stored.map(|at| now - at);
+        let busy = self.playing() || self.settling.is_some() || self.awaiting_extension_effects();
+        if busy && crate::diag::enabled() {
+            crate::diag::line(serde_json::json!({"last_frame": "busy", "playing": self.playing(),
+                "settling": self.settling.is_some(), "awaiting": self.awaiting_extension_effects()}));
+        }
+        match crate::poster::still(held, since, watch.writing, busy) {
+            crate::poster::Still::Wait(next) => Some(next),
+            crate::poster::Still::Store => {
+                let (kept, done) = self.try_keep_last_frame(None, cx);
+                if let Some(done) = done {
+                    self.last_frame_watch.writing = true;
+                    self.last_frame_watch.stored = Some(now);
+                    cx.spawn(async move |this, cx| {
+                        let _ = done.recv().await;
+                        let _ = this.update(cx, |v, _| v.last_frame_watch.writing = false);
+                    })
+                    .detach();
+                }
+                // Not ready yet: looked at again until it is kept.
+                let next = crate::poster::look_again(&kept);
+                if next.is_none() {
+                    self.last_frame_watch.watching = false;
+                }
+                next
+            }
+        }
+    }
+    pub(crate) fn show_home(&mut self, cx: &mut Context<Self>) {
+        self.home = true;
+        if let Some(library) = self.library(cx) {
+            library.update(cx, |v, cx| {
+                let _ = v.controller.refresh();
+                v.pump(cx);
+            });
+        }
+        cx.notify();
+    }
+    /// Back to the project behind Home; a window without one keeps Home.
+    pub(crate) fn hide_home(&mut self, cx: &mut Context<Self>) {
+        self.home = false;
+        cx.notify();
+    }
+    /// Home shows when asked for, and whenever the window has no project and
+    /// isn't opening one (launch with nothing to reopen, the last project
+    /// closed).
+    pub(crate) fn home_shown(&self) -> bool {
+        self.home
+            || (self.session.is_none()
+                && !self.opening
+                && !self.reopening
+                && self.opening_name.is_none()
+                && !self.recovery_pending)
+    }
+    /// The shell window id of this editor (for joining its tab group).
+    pub(crate) fn shell_window_id(&self, cx: &App) -> u64 {
+        self.shell
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .map_or(0, |s| s.read(cx).window_id)
+    }
+    /// Home for the shell to draw in place of the docks, or `None`.
+    pub(crate) fn home_element(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let shown = self.home_shown();
+        let appeared = shown && !self.home_visible;
+        if shown != self.home_visible
+            && let Some(wake) = &self.playback_wake
+        {
+            let _ = wake.try_send(());
+        }
+        self.home_visible = shown;
+        self.host.borrow().set_home(shown);
+        if !shown {
+            return None;
+        }
+        // The timeline's playhead layers follow its place: none under Home.
+        self.builtins.timeline_place = None;
+        self.builtins.viewer_place = None;
+        let library = self.library(cx)?;
+        let active = self.session.as_ref().map(|s| s.project.clone());
+        // Home's own thumbnails: the cache under this profile, and the frame
+        // renderer of the project this window has open.
+        let factory: Rc<dyn Fn(&str) -> Option<pm_compat_runner::FrameRenderer>> = {
+            let (kernel, profile, overrides) =
+                (self.kernel.clone(), self.profile.clone(), self.job_overrides.clone());
+            Rc::new(move |project: &str| {
+                crate::mcp_services::frame_renderer(
+                    kernel.clone(),
+                    project.to_owned(),
+                    profile.clone(),
+                    overrides.clone(),
+                    crate::mcp_services::Capture::Poster,
+                )
+                .ok()
+            })
+        };
+        let thumbnails = appeared.then(|| crate::project_library::ThumbnailSource {
+            dir: self.profile.join("caches").join("thumbnails"),
+            profile: self.profile.clone(),
+            factory: Some(factory),
+            published: self.published.clone(),
+            renderer: active.clone().and_then(|project| {
+                crate::mcp_services::frame_renderer(
+                    self.kernel.clone(),
+                    project,
+                    self.profile.clone(),
+                    self.job_overrides.clone(),
+                    crate::mcp_services::Capture::Poster,
+                )
+                .ok()
+            }),
+        });
+        let tokens = self.host.borrow().tokens.clone();
+        library.update(cx, |v, cx| {
+            v.active = active;
+            v.set_tokens(tokens, cx);
+            if let Some(thumbnails) = thumbnails {
+                v.show_posters(thumbnails);
+            }
+            if appeared {
+                let _ = v.controller.refresh();
+                v.pump(cx);
+            }
+        });
+        if appeared {
+            let focus = library.read(cx).focus_handle();
+            window.focus(&focus, cx);
+            // A window with no project is Home (its tab's name too).
+            if self.session.is_none() {
+                self.host.borrow().set_home_title();
+            }
+        }
+        Some(library.into_any_element())
+    }
+    fn new_project(&mut self, cx: &mut Context<Self>) {
+        let current = current_format(self.published.as_deref());
+        let owner = self
+            .session
+            .as_ref()
+            .map_or_else(String::new, |s| s.project.clone());
+        if let Some(library) = self.library(cx) {
+            library.update(cx, |v, cx| {
+                let _ = v.controller.refresh();
+                let _ = v
+                    .controller
+                    .begin_new(owner, current.as_ref(), &default_format());
+                v.pump(cx);
+            });
+        }
+    }
+    /// Settings ▸ Accounts retry. The Keychain is touched only after this click,
+    /// and the library stays attached: locators go through the kernel.
+    fn bring_sign_ins(&mut self, cx: &mut Context<Self>) {
+        use pm_first_launch::{Config, KeychainDenied, SecretRetryOutcome, secrets};
+        let Some(electron_profile) = self.electron.clone() else {
+            self.message = "There’s no original app on this Mac.".into();
+            cx.notify();
+            return;
+        };
+        let config = Config {
+            electron_profile,
+            native_profile: self.profile.clone(),
+        };
+        use crate::alert::{Alert, Button};
+        let rx = Alert::new(
+            "Keep Your Sign-Ins",
+            secrets::PROMPT,
+            vec![
+                Button::new("Continue", true).default(),
+                Button::new("Not Now", false).cancel(),
+            ],
+        )
+        .sheet(&self.host.borrow().window);
+        let kernel = self.kernel.clone();
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await != Ok(Some(true)) {
+                return;
+            }
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    pm_first_launch::retry_secret_consent_in_library(
+                        &config,
+                        &kernel,
+                        &mut secrets::MacKeychain::after_user_consent(),
+                        |_| Ok(()),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(SecretRetryOutcome::Complete) => "Your sign-ins came across.".into(),
+                    Ok(SecretRetryOutcome::WaitingForElectron) => {
+                        "Quit the original app, then try again.".into()
+                    }
+                    Err(error) if error.downcast_ref::<KeychainDenied>().is_some() => {
+                        "Keychain access wasn’t allowed. Your sign-ins stay in the original app."
+                            .into()
+                    }
+                    Err(_) => "Your sign-ins couldn’t be copied. Try again.".into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn dialog_owner(&self) -> Option<(String, WindowId)> {
+        let project = self.session.as_ref()?.project.clone();
+        Some((project.clone(), WindowId(project)))
+    }
+    /// `target` is the composition to edit; the open one when there's none.
+    pub fn composition_sheet(
+        &mut self,
+        settings: bool,
+        target: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((project, owner)) = self.dialog_owner() else {
+            self.message = "Open a project first.".into();
+            cx.notify();
+            return;
+        };
+        let mut context = match Dialog::capture(&self.kernel, &project) {
+            Ok(context) => context,
+            Err(error) => return self.report_dialog_error(error, cx),
+        };
+        if let Some(target) = target {
+            context.composition = target;
+        }
+        let draft = match context.composition_draft(settings) {
+            Ok(draft) => draft,
+            Err(error) => return self.report_dialog_error(error, cx),
+        };
+        let surface = draft.surface(
+            DialogId(format!("composition:{project}")),
+            owner,
+            settings,
+            0,
+        );
+        let tokens = self.host.borrow().tokens.clone();
+        let (muted, warning) = (tokens.colors.muted, tokens.colors.warning);
+        let open = OpenSheet::present(
+            from_surface(&surface, &tokens),
+            &self.host.borrow().window,
+            surface.first_selected.as_deref(),
+        );
+        let (actions, kernel) = (open.actions.clone(), self.kernel.clone());
+        let open = Rc::new(open);
+        cx.spawn(async move |this, cx| {
+            while let Ok(action) = actions.recv().await {
+                match action.as_str() {
+                    "cancel" => {
+                        open.close();
+                        return;
+                    }
+                    "apply" => {
+                        let draft = read_composition(&open, &draft);
+                        if !draft.errors().is_empty() {
+                            continue;
+                        }
+                        let (context, kernel) = (context.clone(), kernel.clone());
+                        let result =
+                            cx.background_executor()
+                                .spawn(async move {
+                                    apply_composition(&context, &kernel, &draft, settings)
+                                })
+                                .await;
+                        open.close();
+                        let _ = this.update(cx, |v, cx| match result {
+                            Ok(Some((comp_id, document))) => {
+                                v.call(Call::OpenComposition { comp_id, document }, cx)
+                            }
+                            Ok(None) => v.refresh(cx),
+                            Err(error) => v.report_dialog_error(error, cx),
+                        });
+                        return;
+                    }
+                    action => {
+                        if action == "resolution" {
+                            choose_resolution(&open, &draft);
+                        }
+                        let current = read_composition(&open, &draft);
+                        open.select("resolution", current.resolution_index());
+                        open.enable("apply", current.errors().is_empty());
+                        let cut = if settings {
+                            context.layers_cut_by(current.duration).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let (detail, warns) = current.duration_detail(cut);
+                        open.describe("duration", &detail, if warns { warning } else { muted });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+    pub fn report_dialog_error(&mut self, error: DialogError, cx: &mut Context<Self>) {
+        self.message = match error {
+            DialogError::Invalid(text) => text.into(),
+            DialogError::Stale => "The project was changed, so the dialog closed.".into(),
+            DialogError::MissingBacking(_) | DialogError::Kernel(_) => {
+                "That change couldn’t be made. The project wasn’t changed.".into()
+            }
+        };
+        self.errors.borrow_mut().push("Editor", &self.message);
+        cx.notify();
+    }
+}
+/// The sheet's fields as a draft (`CompositionDraft::read`).
+fn read_composition(open: &OpenSheet, seed: &CompositionDraft) -> CompositionDraft {
+    seed.read(|id| open.text(id), open.changed_colour("background"))
+}
+/// A resolution preset fills the size fields. `Custom` leaves them alone.
+fn choose_resolution(open: &OpenSheet, seed: &CompositionDraft) {
+    let mut draft = read_composition(open, seed);
+    let Some((label, ..)) = open.popup("resolution").and_then(|i| RESOLUTIONS.get(i)) else {
+        return;
+    };
+    if draft.choose_resolution(label) {
+        open.set_text("size.0", &number_text(draft.width));
+        open.set_text("size.1", &number_text(draft.height));
+    }
+}
+/// Off main: the scratch store rebuilds the document to prove the edit.
+fn apply_composition(
+    context: &Dialog,
+    kernel: &pm_kernel::KernelHandle,
+    draft: &CompositionDraft,
+    settings: bool,
+) -> Result<Option<(String, u64)>, DialogError> {
+    let new_id = (!settings).then(|| pm_kernel::new_id("C"));
+    let edit = context.composition_edit(draft, new_id.as_deref())?;
+    let document = edit.document();
+    edit.submit(kernel, 0)
+        .wait()
+        .ok_or(DialogError::Stale)?
+        .map_err(|e| DialogError::Kernel(e.to_string()))?;
+    Ok(new_id.map(|id| (id, document)))
+}
+
+/// The kernel keeps an archived extension's entry (its saved values live
+/// there); `archived` keeps it out of Settings until a reinstall republishes
+/// a fresh host record.
+fn mark_archived(kernel: &pm_kernel::KernelHandle, id: &str) {
+    let Some(mut entry) = kernel.state().extensions.get(id).cloned() else {
+        return;
+    };
+    if let Some(source) = entry.source.as_object_mut() {
+        let mut record = source
+            .get("hostRecord")
+            .and_then(pm_model::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        record.insert("archived", pm_model::Value::Bool(true));
+        source.insert("hostRecord", pm_model::Value::Object(record));
+    }
+    let _ = kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Extension(entry)],
+        })
+        .wait();
+}

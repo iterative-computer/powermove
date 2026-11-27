@@ -1,0 +1,465 @@
+use super::*;
+use pm_mcp::extensions::{ExtensionHost, fork};
+use serde_json::json;
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(pm_kernel::new_id(name));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+fn write(dir: &Path, manifest: Value, files: &[(&str, &str)]) -> Value {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    for (name, text) in files {
+        fs::write(dir.join(name), text).unwrap();
+    }
+    manifest::parse(&manifest).unwrap()
+}
+
+#[test]
+fn shipped_api_pack_includes_hand_editing_guidance() {
+    for (index, path) in [
+        ("EXTENSIONS.md", "HANDOFF.md"),
+        ("v3/EXTENSIONS.md", "v3/HANDOFF.md"),
+    ] {
+        let read = |path| PACK.iter().find(|entry| entry.0 == path).unwrap().1;
+        assert!(read(index).contains("[Leave the project ready for hand editing](HANDOFF.md)"));
+        assert!(read(path).starts_with("## Leave the project ready for hand editing"));
+        assert_eq!(read(path), HANDOFF_GUIDE);
+    }
+}
+
+#[test]
+fn the_shipped_sample_and_a_v3_extension_pass_and_broken_code_reports_why() {
+    let root = scratch("pm-authoring-check");
+    let sample = PACK
+        .iter()
+        .filter_map(|(n, t)| n.strip_prefix("samples/hello-panel/").map(|n| (n, *t)))
+        .collect::<Vec<_>>();
+    let raw: Value = serde_json::from_str(
+        sample
+            .iter()
+            .find(|(n, _)| *n == "manifest.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    let parsed = write(&root.join("hello-panel"), raw, &sample);
+    check(&root.join("hello-panel"), &parsed).unwrap();
+
+    let v3 = write(
+        &root.join("v3-command"),
+        json!({"id":"v3-command","name":"V3","version":"1.0.0","apiVersion":3,"entry":"index.ts"}),
+        &[("index.ts", "export default function activate() {}")],
+    );
+    check(&root.join("v3-command"), &v3).unwrap();
+
+    let broken = write(
+        &root.join("broken"),
+        json!({"id":"broken","name":"Broken","version":"1.0.0","apiVersion":4,"entry":"index.tsx"}),
+        &[("index.tsx", "export const nothing = 1;")],
+    );
+    let error = check(&root.join("broken"), &broken).unwrap_err();
+    assert!(error.contains("exports view() or mount(env)"), "{error}");
+    // A compile error names the file, line and column, as main's did.
+    fs::write(
+        root.join("broken/index.tsx"),
+        "export const a = 1;\nexport function view( {",
+    )
+    .unwrap();
+    let error = check(&root.join("broken"), &broken).unwrap_err();
+    assert!(error.starts_with("index.tsx:2:"), "{error}");
+    assert!(!error.contains("OxcDiagnostic"), "{error}");
+    fs::write(
+        root.join("broken/index.tsx"),
+        "import { readFileSync } from 'node:fs'; export const view = () => String(readFileSync);",
+    )
+    .unwrap();
+    assert!(
+        check(&root.join("broken"), &broken)
+            .unwrap_err()
+            .contains("node:fs")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Every built-in panel ships its source; a fork of each compiles with the
+/// native compiler and draws its panel in a real panel isolate.
+#[test]
+fn every_built_in_forks_compiles_and_mounts_in_place_of_the_built_in() {
+    let profile = scratch("pm-authoring-forks");
+    let host = AppExtensions::new(profile.clone());
+    let stage = profile.join("stage");
+    let builtins = host.builtins().unwrap();
+    for panel in pm_builtins::BUILTIN_PANELS.iter().map(|p| p.id.as_str()) {
+        assert!(
+            builtins.join(panel).join("manifest.json").exists(),
+            "{panel}"
+        );
+        let forked = fork(&host, panel, None, &stage).unwrap();
+        let dir = PathBuf::from(forked["dir"].as_str().unwrap());
+        let raw: Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        let parsed = host.manifest(&raw).unwrap();
+        assert_eq!(replaced_panel(&parsed), Some(panel));
+        check(&dir, &parsed).unwrap_or_else(|e| panic!("{panel} fork: {e}"));
+    }
+    // The copy is content-addressed: a second call reuses it.
+    assert_eq!(host.builtins().unwrap(), builtins);
+    let _ = fs::remove_dir_all(profile);
+}
+
+const PROJECT: &str = r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+
+/// The live extension's panel as a window would draw it: compiled from the
+/// user folder and mounted on a real kernel, in place of a built-in for a fork.
+fn drawn(live: &Path, id: &str) -> (String, Vec<String>) {
+    let raw: Value =
+        serde_json::from_slice(&fs::read(live.join(id).join("manifest.json")).unwrap()).unwrap();
+    let parsed = manifest::parse(&raw).unwrap();
+    let runner = CompatRunner::new(&pm_compat_runner::initial()).unwrap();
+    let graph = runner
+        .compile(&live.join(id), parsed["entry"].as_str().unwrap(), 4)
+        .unwrap()
+        .to_json();
+    drop(runner);
+    let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+    actor
+        .handle()
+        .open(
+            "synthetic",
+            pm_kernel::OpenSource::Untitled(pm_model::json::parse(PROJECT).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let panel = replaced_panel(&parsed).unwrap_or(id).to_owned();
+    let ticket = match replaced_panel(&parsed) {
+        Some(built_in) => panels.replace(built_in, id, &graph),
+        None => panels.mount_extension(id, &graph, None),
+    };
+    settle(ticket.unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let texts = loop {
+        let _ = panels.publish();
+        if let Some(p) = panels
+            .take_publications()
+            .into_iter()
+            .rev()
+            .find(|p| p.panel == panel)
+        {
+            break p
+                .surface
+                .nodes()
+                .values()
+                .map(|n| n.text.clone())
+                .collect::<Vec<_>>();
+        }
+        assert!(Instant::now() < deadline, "{id} never drew {panel}");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    panels.close();
+    actor.shutdown();
+    (panel, texts)
+}
+
+/// Item 4's agent flow, headless: through the MCP session an agent writes a
+/// panel, forks the timeline to add a column, adds a viewer overlay, and the
+/// user undoes the last change. Each step is its own change set.
+#[test]
+fn an_agent_adds_a_panel_a_timeline_column_and_a_viewer_overlay_then_one_is_undone() {
+    use pm_mcp::{Automation, McpSession};
+    use std::sync::{Arc, Mutex};
+    let profile = scratch("pm-authoring-flow");
+    let live = profile.join("extensions");
+    let mut automation = Automation::new(profile.clone(), profile.join("exports")).unwrap();
+    automation
+        .create_project(&json!({"name":"Synthetic"}))
+        .unwrap();
+    let extensions = AppExtensions {
+        profile: profile.clone(),
+        roots: vec![live.clone()],
+    };
+    automation.extensions = Some(Arc::new(extensions));
+    let host = Arc::new(Mutex::new(automation));
+    let mut session = McpSession::new(host.clone());
+    let call = |session: &mut McpSession, name: &str, args: Value| -> Value {
+        let result = session.call(name, args);
+        assert_eq!(result["isError"], false, "{name}: {result}");
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let started = call(
+        &mut session,
+        "start_session",
+        json!({"prompt":"Customise the app","includeExtensionStaging":true}),
+    );
+    let stage = |value: &Value| PathBuf::from(value["stagingDirectory"].as_str().unwrap());
+    let staging = stage(&started);
+    assert!(
+        PathBuf::from(started["apiPackDirectory"].as_str().unwrap())
+            .join("EXTENSIONS.md")
+            .exists()
+    );
+
+    // 1. A new panel.
+    fs::create_dir_all(staging.join("shot-notes")).unwrap();
+    fs::write(staging.join("shot-notes/manifest.json"), json!({"id":"shot-notes","name":"Shot Notes","version":"1.0.0","apiVersion":4,"entry":"index.tsx"}).to_string()).unwrap();
+    fs::write(
+        staging.join("shot-notes/index.tsx"),
+        "export const view = () => <text>Shots reviewed: 0</text>;",
+    )
+    .unwrap();
+    let published = call(
+        &mut session,
+        "publish_extensions",
+        json!({"extensions":[{"id":"shot-notes","action":"created","summary":"Shot notes panel"}]}),
+    );
+    assert_eq!(stage(&published), staging);
+    let (_, texts) = drawn(&live, "shot-notes");
+    assert!(texts.contains(&"Shots reviewed: 0".to_owned()), "{texts:?}");
+
+    // 2. The timeline with an extra column on every layer row.
+    let forked = call(
+        &mut session,
+        "fork_builtin_extension",
+        json!({"id":"timeline"}),
+    );
+    let panel = PathBuf::from(forked["dir"].as_str().unwrap()).join("panel.tsx");
+    let source = fs::read_to_string(&panel).unwrap();
+    let row = "<Layer\n            row={row}\n            send={send}\n            single={single}\n            lit={row.selected && focused}\n          />";
+    assert!(source.contains(row));
+    fs::write(
+        &panel,
+        source.replacen(
+            row,
+            &format!("<>{row}<text style={{text}}>{{`Take ${{row.depth + 1}}`}}</text></>"),
+            1,
+        ),
+    )
+    .unwrap();
+    let published = call(
+        &mut session,
+        "publish_extensions",
+        json!({"extensions":[{"id":"timeline-fork","action":"created","summary":"Take column"}]}),
+    );
+    assert_eq!(stage(&published), staging);
+    let (panel, texts) = drawn(&live, "timeline-fork");
+    assert_eq!(panel, "timeline");
+    assert!(texts.contains(&"Take 1".to_owned()), "{texts:?}");
+
+    // 3. A viewer overlay.
+    call(
+        &mut session,
+        "fork_builtin_extension",
+        json!({"id":"viewer"}),
+    );
+    let panel = staging.join("viewer-fork/panel.tsx");
+    let source = fs::read_to_string(&panel).unwrap();
+    let gizmos = "label=\"Transform gizmos\"\n          style={{ position: \"absolute\", inset: \"fill\" }}\n        />";
+    assert!(source.contains(gizmos));
+    fs::write(
+        &panel,
+        source.replacen(
+            gizmos,
+            &format!("{gizmos}\n        <text style={{{{ position: \"absolute\" }}}}>REC</text>"),
+            1,
+        ),
+    )
+    .unwrap();
+    let published = call(
+        &mut session,
+        "publish_extensions",
+        json!({"extensions":[{"id":"viewer-fork","action":"created","summary":"REC overlay"}]}),
+    );
+    let (panel, texts) = drawn(&live, "viewer-fork");
+    assert_eq!(panel, "viewer");
+    assert!(texts.contains(&"REC".to_owned()), "{texts:?}");
+    call(&mut session, "finish_session", json!({"commit":true}));
+
+    // 4. Undo Extension Change takes back only the newest: the overlay.
+    let extensions = AppExtensions {
+        profile: profile.clone(),
+        roots: vec![live.clone()],
+    };
+    let project = host.lock().unwrap().active_project().unwrap();
+    let newest =
+        pm_mcp::extensions::change_sets(&pm_mcp::extensions::history_for(&extensions, &project));
+    assert_eq!(newest[0]["id"], published["changeSetId"]);
+    pm_mcp::extensions::restore(&extensions, &project, newest[0]["id"].as_str().unwrap()).unwrap();
+    assert!(!live.join("viewer-fork").exists());
+    assert!(live.join("timeline-fork").exists() && live.join("shot-notes").exists());
+    let _ = fs::remove_dir_all(profile);
+}
+
+#[test]
+fn pm555_unknown_fork_lists_builtin_ids() {
+    let profile = scratch("pm-effect-reference");
+    let host = AppExtensions::new(profile.clone());
+    let error = fork(&host, "effects", None, &profile.join("stage")).unwrap_err();
+    for panel in pm_builtins::BUILTIN_PANELS.iter() {
+        assert!(
+            error.message.contains(panel.id.as_str()),
+            "{}",
+            error.message
+        );
+    }
+    fs::remove_dir_all(profile).unwrap();
+}
+
+#[test]
+fn pm555_builtin_effect_reference_is_in_the_working_api_pack() {
+    use pm_mcp::{Automation, McpSession};
+    use std::sync::{Arc, Mutex};
+
+    let profile = scratch("pm-effect-reference");
+    let mut host = Automation::new(profile.clone(), profile.join("exports")).unwrap();
+    host.create_project(&json!({"name":"Synthetic"})).unwrap();
+    host.extensions = Some(Arc::new(AppExtensions::new(profile.clone())));
+    let mut session = McpSession::new(Arc::new(Mutex::new(host)));
+    let started = session
+        .dispatch("start_session", &json!({"prompt":"Read built-in effects","includeExtensionStaging":true}))
+        .unwrap();
+    let path =
+        PathBuf::from(started["apiPackDirectory"].as_str().unwrap()).join("builtin-effects.json");
+    let source = fs::read_to_string(&path).expect("built-in effects reference");
+    let reference: Value = serde_json::from_str(&source).unwrap();
+    assert!(fs::metadata(&path).unwrap().permissions().readonly());
+    let effects = reference["effects"].as_array().unwrap();
+    assert_eq!(effects.len(), 43);
+    assert!(
+        effects
+            .iter()
+            .all(|effect| effect["frag"].is_string() && effect["params"].is_array())
+    );
+    fs::remove_dir_all(profile).unwrap();
+}
+
+#[test]
+fn pm555_publishing_checks_compat_and_v4_effect_shaders() {
+    use pm_mcp::{Automation, McpSession};
+    use std::sync::{Arc, Mutex};
+
+    let profile = scratch("pm-effect-publish");
+    let live = profile.join("extensions");
+    let mut host = Automation::new(profile.clone(), profile.join("exports")).unwrap();
+    host.create_project(&json!({"name":"Synthetic"})).unwrap();
+    host.extensions = Some(Arc::new(AppExtensions {
+        profile: profile.clone(),
+        roots: vec![live.clone()],
+    }));
+    let mut session = McpSession::new(Arc::new(Mutex::new(host)));
+    let started = session
+        .dispatch("start_session", &json!({"prompt":"Create an effect","includeExtensionStaging":true}))
+        .unwrap();
+    let staging = PathBuf::from(started["stagingDirectory"].as_str().unwrap());
+    for (id, api, entry, install) in [
+        (
+            "compat-effect",
+            3,
+            "index.ts",
+            "export default function activate(api) { api.effects.register(definition); }",
+        ),
+        (
+            "v4-effect",
+            4,
+            "index.tsx",
+            "export async function mount(env) { env.effects.register(definition); const root = env.root(); await root.render(null); return {root, dispose: () => root.dispose()}; }",
+        ),
+    ] {
+        let dir = staging.join(id);
+        let definition = json!({
+            "id": "sample.broken", "label": "Broken", "group": "Test", "params": [],
+            "passes": 2, "backdrop": true, "frag": "\no = vec4(u_missing);"
+        });
+        let code = format!("const definition = {definition};\n{install}");
+        write(
+            &dir,
+            json!({"id":id,"name":"Sample Effect","version":"1.0.0","apiVersion":api,"entry":entry}),
+            &[(entry, &code)],
+        );
+        let change = json!({"extensions":[{"id":id,"action":"created","summary":"Shader"}]});
+        let error = session.dispatch("publish_extensions", &change).unwrap_err();
+        for detail in ["sample.broken", "pass 1 through 2", "line 2", "u_missing"] {
+            assert!(error.message.contains(detail), "{}", error.message);
+        }
+        assert!(!live.join(id).exists());
+        assert!(dir.join(entry).exists());
+        // Remove the failed folder before trying a different extension.
+        fs::remove_dir_all(dir).unwrap();
+    }
+    fs::remove_dir_all(profile).unwrap();
+}
+
+#[test]
+fn words_starter_templates_are_complete_discoverable_and_loadable() {
+    use crate::extension_template::{Kind, create};
+    let profile = tempfile::tempdir().unwrap();
+    let root = profile.path().join("extensions");
+    let name = "A \"starter\" / example";
+    let panel = create(profile.path(), name, Kind::Panel).unwrap();
+    let effect = create(profile.path(), name, Kind::Effect).unwrap();
+    assert_eq!(panel, "a-starter-example");
+    assert_eq!(effect, "a-starter-example-2");
+    assert!(create(profile.path(), "   ", Kind::Effect).is_err());
+
+    let found = pm_compat_runner::discovery::scan(&[root]);
+    assert_eq!(found.len(), 2);
+    for (item, entry, api) in [
+        (&found[0], "index.tsx", 4),
+        (&found[1], "index.ts", 3),
+    ] {
+        let manifest = item.manifest.as_ref().unwrap();
+        assert_eq!(manifest["id"], item.id);
+        assert_eq!(manifest["name"], name);
+        assert_eq!(manifest["version"], "1.0.0");
+        assert_eq!(manifest["entry"], entry);
+        assert_eq!(manifest["apiVersion"], api);
+        assert_eq!(manifest["author"], "user");
+        assert!(item.directory.join(entry).is_file());
+        check(&item.directory, manifest).unwrap();
+    }
+    let effect_code = fs::read_to_string(found[1].directory.join("index.ts")).unwrap();
+    assert!(effect_code.contains("a-starter-example-2.effect"));
+    assert!(effect_code.contains(&json!(name).to_string()));
+    let made = crate::store_window::yours(profile.path());
+    assert_eq!(made.len(), 2);
+    assert!(made.iter().all(|item| item.name == name && item.broken.is_none()));
+}
+
+#[test]
+fn words_new_extension_sheet_uses_the_standard_name_and_kind_fields() {
+    let sheet = crate::extension_template::surface();
+    assert_eq!(sheet.title, "New Extension");
+    assert_eq!(sheet.fields[0].id, "name");
+    assert_eq!(sheet.fields[0].placeholder, Some("My Extension"));
+    assert!(sheet.fields[0].description.is_none());
+    assert!(sheet.result_line.is_none());
+    assert_eq!(sheet.fields[1].values, ["Panel", "Effect"]);
+    assert_eq!(sheet.buttons[0], crate::dialogs::Button::cancel(false));
+    let create = &sheet.buttons[1];
+    assert_eq!(create.label, "Create");
+    assert_eq!(create.id, "apply");
+    assert!(create.default);
+    assert!(!create.enabled);
+}
+
+#[test]
+fn words_file_new_menu_offers_extension_creation() {
+    let menus = pm_shell::menu::menus();
+    let file = menus.iter().find(|(name, _)| *name == "File").unwrap();
+    assert!(
+        file.1
+            .iter()
+            .any(|item| item.label == "New" && item.command == "newFile")
+    );
+    assert!(
+        pm_shell::menu::new_file()
+            .iter()
+            .any(|item| item.label == "Extension…" && item.command == "newExtension")
+    );
+}

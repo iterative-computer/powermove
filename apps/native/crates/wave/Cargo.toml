@@ -1,0 +1,14 @@
+[package]
+name = "pm-wave"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+publish = false
+
+[dependencies]
+image = { version = "0.25", default-features = false }
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.33"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

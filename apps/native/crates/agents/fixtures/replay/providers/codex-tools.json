@@ -1,0 +1,812 @@
+{
+  "baseline": "v1.2.0",
+  "source": "apps/desktop/src/main/codex/app-server-runner.test.ts; unmodified runner, FakeAppServer test pattern",
+  "frames": [
+    {
+      "kind": "run",
+      "value": {
+        "id": "oracle-run",
+        "cwd": "/workspace/agent",
+        "prompt": "Make a progressive blur effect",
+        "schema": {
+          "type": "object"
+        },
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "ultra",
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialize",
+        "id": 1,
+        "params": {
+          "clientInfo": {
+            "name": "powermove_agent",
+            "title": "Powermove Agent",
+            "version": "1.0.0"
+          },
+          "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialized",
+        "params": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "thread/start",
+        "id": 2,
+        "params": {
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+          "ephemeral": true,
+          "config": {
+            "mcp_servers": {}
+          },
+          "model": "gpt-6.1-sol",
+          "serviceName": "powermove"
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "thr_123"
+          }
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/start",
+        "id": 3,
+        "params": {
+          "threadId": "thr_123",
+          "input": [
+            {
+              "type": "text",
+              "text": "Make a progressive blur effect"
+            }
+          ],
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandboxPolicy": {
+            "type": "readOnly"
+          },
+          "model": "gpt-6.1-sol",
+          "effort": "ultra",
+          "outputSchema": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 3,
+        "result": {
+          "turn": {
+            "id": "turn_456",
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "cmd",
+            "type": "commandExecution",
+            "command": "printf first\nprintf second",
+            "aggregatedOutput": "one\ntwo",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "cmd",
+        "toolName": "bash",
+        "label": "Run",
+        "detail": "printf first ⏎ printf second"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "cmd",
+            "type": "commandExecution",
+            "command": "printf first\nprintf second",
+            "aggregatedOutput": "one\ntwo",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "cmd",
+        "isError": false,
+        "output": "one\ntwo"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "files",
+            "type": "fileChange",
+            "changes": [
+              {
+                "path": "/staged/a.ts"
+              },
+              {
+                "path": "b.ts"
+              },
+              {
+                "path": "c.ts"
+              },
+              {
+                "path": "d.ts"
+              }
+            ],
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "files",
+        "toolName": "edit",
+        "label": "Edit",
+        "detail": "a.ts, b.ts, c.ts, d.ts"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "files",
+            "type": "fileChange",
+            "changes": [
+              {
+                "path": "/staged/a.ts"
+              },
+              {
+                "path": "b.ts"
+              },
+              {
+                "path": "c.ts"
+              },
+              {
+                "path": "d.ts"
+              }
+            ],
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "files",
+        "isError": false,
+        "output": "4 files changed"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "search",
+            "type": "webSearch",
+            "query": "motion graphics",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "search",
+        "toolName": "search",
+        "label": "Search",
+        "detail": "motion graphics"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "search",
+            "type": "webSearch",
+            "query": "motion graphics",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "search",
+        "isError": false,
+        "output": "motion graphics"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "mcp",
+            "type": "mcpToolCall",
+            "tool": "mcp__powermove__sample_media_frames",
+            "arguments": {
+              "assetId": "asset-1",
+              "times": [
+                0,
+                1
+              ],
+              "target": "source"
+            },
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "sampled"
+                }
+              ]
+            },
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "mcp",
+        "toolName": "mcp__powermove__sample_media_frames",
+        "label": "Sample media frames",
+        "detail": "mcp__powermove__sample_media_frames",
+        "subject": {
+          "assetId": "asset-1",
+          "frames": 2,
+          "target": "source"
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "mcp",
+            "type": "mcpToolCall",
+            "tool": "mcp__powermove__sample_media_frames",
+            "arguments": {
+              "assetId": "asset-1",
+              "times": [
+                0,
+                1
+              ],
+              "target": "source"
+            },
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "sampled"
+                }
+              ]
+            },
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "mcp",
+        "isError": false,
+        "output": "sampled"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "dynamic",
+            "type": "dynamicToolCall",
+            "tool": "read_file",
+            "contentItems": [
+              {
+                "text": "contents"
+              }
+            ],
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "dynamic",
+        "toolName": "read_file",
+        "label": "Read file",
+        "detail": "read_file"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "dynamic",
+            "type": "dynamicToolCall",
+            "tool": "read_file",
+            "contentItems": [
+              {
+                "text": "contents"
+              }
+            ],
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "dynamic",
+        "isError": false,
+        "output": "contents"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "wait",
+            "type": "sleep",
+            "durationMs": 1500,
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "wait",
+        "toolName": "wait",
+        "label": "Wait",
+        "detail": "2s"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "wait",
+            "type": "sleep",
+            "durationMs": 1500,
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "wait",
+        "isError": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "collab",
+            "type": "collabAgentToolCall",
+            "tool": "spawnAgent",
+            "prompt": "inspect composition",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "collab",
+        "toolName": "agent",
+        "label": "Start subagent",
+        "detail": "inspect composition"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "collab",
+            "type": "collabAgentToolCall",
+            "tool": "spawnAgent",
+            "prompt": "inspect composition",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "collab",
+        "isError": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "view",
+            "type": "imageView",
+            "path": "/artifacts/frame.png",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "view",
+        "toolName": "view_image",
+        "label": "View image",
+        "detail": "frame.png"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "view",
+            "type": "imageView",
+            "path": "/artifacts/frame.png",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "view",
+        "isError": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "computer",
+            "type": "computerUse",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "computer",
+        "toolName": "computer",
+        "label": "Computer"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "computer",
+            "type": "computerUse",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "computer",
+        "isError": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "image",
+            "type": "imageGeneration",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "image",
+        "toolName": "image",
+        "label": "Image"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "image",
+            "type": "imageGeneration",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "image",
+        "isError": false
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/started",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "failed",
+            "type": "commandExecution",
+            "command": "synthetic failure",
+            "status": "failed",
+            "error": {
+              "message": "refused"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-start",
+        "itemId": "failed",
+        "toolName": "bash",
+        "label": "Run",
+        "detail": "synthetic failure"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "failed",
+            "type": "commandExecution",
+            "command": "synthetic failure",
+            "status": "failed",
+            "error": {
+              "message": "refused"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "tool-end",
+        "itemId": "failed",
+        "isError": true,
+        "output": "refused"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/agentMessage/delta",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "itemId": "answer",
+          "delta": "{\"kind\":\"scene\"}"
+        }
+      }
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "kind": "answer",
+        "text": "{\"kind\":\"scene\"}"
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turnId": "turn_456",
+          "item": {
+            "id": "answer",
+            "type": "agentMessage",
+            "text": "{\"kind\":\"scene\"}"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turn": {
+            "id": "turn_456",
+            "status": "completed",
+            "error": null
+          }
+        }
+      }
+    },
+    {
+      "kind": "result",
+      "value": {
+        "ok": true,
+        "text": "{\"kind\":\"scene\"}",
+        "access": "editor"
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+ "name": "lava-lamp",
+ "kind": "shader",
+ "covers": [
+  "helper-fbm",
+  "helper-palette",
+  "param-color",
+  "iTime"
+ ],
+ "prompt": "Lava lamp: big warm blobs rising slowly; two color pickers for the blob and background colors.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "5e43bf59626de47b9f78c49a70e230dae2978b14c64d686960e0663868549ad3",
+  "seconds": 28.376,
+  "generated": "2026-10-17T07:33:10.459Z"
+ },
+ "code": "// Lava lamp — warm metaballs rising slowly over a lit background.\nuniform vec3  uBlob;        // @param #FF5A1F\nuniform vec3  uBackground;  // @param #1C0716\nuniform float uSpeed;       // @param 0.3 0 2\nuniform float uSize;        // @param 1.0 0.5 1.8\n\nvoid main() {\n  float asp = iResolution.x / iResolution.y;\n  vec2 p = (uv - 0.5) * vec2(asp, 1.0);\n  float t = iTime * uSpeed;\n\n  // Gentle wobble of the whole wax so blobs don't look rigid.\n  vec2 q = p + 0.03 * vec2(noise(p * 3.0 + t * 0.5) - 0.5, noise(p * 3.0 - t * 0.4 + 7.0) - 0.5);\n\n  float field = 0.0;\n  for (int i = 0; i < 9; i++) {\n    float fi = float(i);\n    float h  = hash1(fi + 1.37);\n    float h2 = hash1(fi * 3.71 + 0.53);\n    float r  = (0.09 + 0.08 * h2) * uSize;\n    // Slow upward travel; spawn/despawn happens off-screen.\n    float cyc = fract(t * (0.05 + 0.045 * h) + h2);\n    float y = mix(-0.5 - r * 2.2, 0.5 + r * 2.2, cyc);\n    float x = (h - 0.5) * asp * 0.75 + 0.07 * sin(t * 0.6 + fi * 2.1 + y * 2.5);\n    vec2 d = q - vec2(x, y);\n    d *= vec2(1.0 + 0.12 * sin(t * 0.9 + fi), 1.0 - 0.1 * sin(t * 0.9 + fi)); // squash/stretch\n    field += r * r / (dot(d, d) + 1e-4);\n  }\n  // Molten pool at the bottom and a thin cap at the top, like a real lamp.\n  float pool = q.y + 0.5 + 0.02 * sin(q.x * 9.0 + t * 1.3);\n  field += 0.010 / max(pool * pool, 1e-4) * 0.5 + 0.004 / max(pow(0.52 - q.y, 2.0), 1e-4) * 0.3;\n\n  float w = max(fwidth(field), 0.01);\n  float m = smoothstep(1.0 - w, 1.0 + w, field);\n\n  // Background: warmer near the bulb at the bottom, glow halo around wax.\n  vec3 bg = uBackground * (1.25 - 0.65 * uv.y);\n  bg += uBlob * 0.28 * smoothstep(0.25, 1.0, field) * (1.0 - m);\n  bg += uBlob * 0.12 * exp(-6.0 * (uv.y)) ;\n\n  // Wax shading: dark rim, hot luminous core, soft specular.\n  float inner = clamp((field - 1.0) / 2.5, 0.0, 1.0);\n  vec3 wax = uBlob * (0.55 + 0.75 * sqrt(inner));\n  wax = mix(wax, vec3(1.0, 0.86, 0.55), 0.3 * inner * inner);\n  wax += 0.08 * smoothstep(0.0, 0.5, inner) * (0.5 - uv.y + 0.5) * uBlob;\n\n  vec3 col = mix(bg, wax, m);\n  float vig = 1.0 - 0.55 * dot(p * vec2(0.8, 1.0), p * vec2(0.8, 1.0));\n  col *= vig;\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote the lava lamp shader layer. It has 9 large metaballs that rise slowly and wobble, sitting in a molten pool at the bottom. Color pickers: uBlob (#FF5A1F) and uBackground (#1C0716); uSpeed and uSize sliders are included too. I didn't compile it or render frames because no live Powermove tools were attached to this run."
+}

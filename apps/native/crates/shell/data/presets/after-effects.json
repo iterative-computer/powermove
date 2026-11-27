@@ -1,0 +1,48 @@
+{
+ "preset": "after-effects",
+ "label": "After Effects",
+ "bindings": [
+  {
+   "command": "fitView",
+   "args": [],
+   "keys": [
+    "shift+\\"
+   ]
+  },
+  {
+   "command": "prevEdge",
+   "args": [],
+   "keys": [
+    "alt+up"
+   ]
+  },
+  {
+   "command": "nextEdge",
+   "args": [],
+   "keys": [
+    "alt+down"
+   ]
+  },
+  {
+   "command": "prevSelectedEvent",
+   "args": [],
+   "keys": [
+    "alt+shift+up"
+   ]
+  },
+  {
+   "command": "nextSelectedEvent",
+   "args": [],
+   "keys": [
+    "alt+shift+down"
+   ]
+  },
+  {
+   "command": "keyboardShortcuts",
+   "args": [],
+   "keys": [
+    "cmd+alt+'"
+   ]
+  }
+ ]
+}

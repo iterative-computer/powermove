@@ -1,0 +1,894 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
+// Rust allocations use the system allocator. The bundle launches with
+// `MallocLargeCache=0` (Info.plist LSEnvironment, `packaging/package.py`), so
+// freed large blocks go back to macOS at once; small blocks return per 16 KiB
+// page (`pm_memory::pressure_relief`). mimalloc kept whole 64 KiB pages of
+// the project load's long-lived nodes, about 140 MB more with Paper open
+// (installed app: idle 563 → 416 MB, stopped 700 → 522 MB). Memory reviews:
+// the Rust heap is "Malloc Small/Large" (not mimalloc's tag-100
+// "IOAccelerator"). A bare binary needs `MallocLargeCache=0` exported to match.
+
+mod action_toast;
+mod access;
+#[cfg(test)]
+#[path = "../../../vendor/gpui-ce/crates/gpui_macos/src/native_text_selection.rs"]
+mod native_text_selection;
+mod after_open;
+mod agent_coedit;
+mod agent_clients;
+mod alert;
+mod appearance;
+mod builtins;
+mod tabs;
+#[cfg(test)]
+mod builtins_tests;
+mod cloud;
+mod cloud_human;
+mod cloud_media;
+#[cfg(test)]
+mod cloud_tests;
+mod colour;
+mod colour_panel;
+mod colour_model;
+mod colour_picker;
+mod diag;
+#[path = "surfaces/dialogs.rs"]
+mod dialogs;
+mod entry;
+mod effect_lab;
+mod error_log;
+mod export_coordinator;
+mod render_queue;
+mod expression_sheet;
+mod extension_authoring;
+mod extension_template;
+mod extension_transfer;
+mod extension_vars;
+mod ext_capabilities;
+mod extensions;
+mod figma_paste;
+mod file_coordination;
+mod first_run;
+mod fork_auto_rebase;
+mod sign_in;
+mod first_run_stage;
+// Development builds only (it draws with `pm_shell::capture_app`); the
+// stage tests run in them.
+#[cfg(debug_assertions)]
+mod stage_capture;
+mod generated_panel;
+mod gizmo;
+mod gizmo_layer;
+#[cfg(all(test, target_os = "macos"))]
+mod gpui_memory_tests;
+mod infinite_drag;
+mod interpret_sheet;
+mod interaction_work;
+mod keyframe_sheets;
+mod poster;
+
+mod agent_commands;
+mod agent_speech;
+mod captions_generate;
+mod captions_panel;
+#[cfg(test)]
+mod gizmo_tests;
+mod layer_commands;
+mod frame_facts;
+#[path = "surfaces/library.rs"]
+mod library_surface;
+mod lifecycle;
+mod mcp;
+mod mcp_extensions;
+mod mcp_services;
+mod media;
+mod media_import;
+mod transitions;
+mod media_refresh;
+mod linked_sync;
+mod media_thumbs;
+mod quick_look;
+mod media_sequence;
+#[cfg(debug_assertions)]
+mod memory_review;
+mod migration_report;
+mod mixer_panel;
+mod notes_panel;
+mod notifications;
+mod panel_bridge;
+#[cfg(all(test, target_os = "macos"))]
+mod panel_capture_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod project_capture_tests;
+mod project_extensions;
+mod panel_library;
+mod panel_library_preview;
+mod ghost;
+mod panels;
+#[cfg(test)]
+mod parity_tests;
+mod perf_gate;
+mod perf_panel;
+mod document_paths;
+mod platform;
+mod popover_drag;
+mod play_range;
+mod playback;
+mod playhead;
+#[cfg(test)]
+mod pro_edit_tests;
+mod pro_media;
+mod project_library;
+mod provider_keys;
+mod providers;
+mod publish;
+mod quit_limit;
+mod raster_overrides;
+mod render_frames;
+mod recent_work;
+mod rows;
+mod session;
+mod speed_sheet;
+mod region_attach;
+mod settings_window;
+mod shader_panel;
+mod shape_tool;
+mod sheets;
+mod shortcuts;
+mod shuttle;
+mod skimming;
+mod smoke;
+mod storage;
+mod pages;
+mod store_motion;
+mod store_window;
+#[cfg(test)]
+mod store_window_tests;
+mod surface_routes;
+mod surfaces;
+#[cfg(test)]
+mod takes_notes_tests;
+mod takes_panel;
+mod tasks_window;
+mod telemetry;
+mod text_host;
+mod ticket;
+mod timeline_surface;
+#[cfg(test)]
+mod timeline_tests;
+mod transcription;
+mod updates;
+mod v4_compile;
+mod v4_control;
+mod v4_native;
+mod v4_quote;
+mod v4_view;
+#[cfg(test)]
+mod v4_view_tests;
+#[cfg(test)]
+mod ui_latency_bench;
+mod gesture_publish;
+mod studio_panes;
+mod studio_estimate_probe;
+mod viewer2;
+mod viewer_overlays;
+mod waveforms;
+mod workspaces;
+use anyhow::{Context, Result};
+use gpui::AppContext;
+use pm_render::text::host::RenderFonts;
+use pm_text::host::{FontBroker, FontService};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
+
+/// MCP's host export folder is ~/Powermove for the default native profile.
+/// An explicit test or lane profile keeps its exports to itself.
+fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) -> PathBuf {
+    let home = home.filter(|home| !home.is_empty()).map(PathBuf::from);
+    match home {
+        Some(home)
+            if pm_first_launch::default_paths(&home.join("Library/Application Support"))
+                .native_profile
+                == profile =>
+        {
+            home.join("Powermove")
+        }
+        _ => profile.join("exports"),
+    }
+}
+
+/// Why this start is refused, if it is: a build that is not the released
+/// product (a debug build always; a bundle the dev bundler marked with
+/// `PMRequireProfile`, or `PM_NATIVE_REQUIRE_PROFILE=1`, or a lane's older
+/// `PMLaneProfile`) runs only on a profile it was given (`--profile`, or
+/// `PM_NATIVE_PROFILE`), and never on the product's own profiles (the
+/// native one and v1's) under `home`. Started bare (macOS reopening it, an
+/// activation by bundle id) it would open the person's real library.
+/// Children the app starts itself (`--engine-job`, the 3D estimate probe)
+/// and the smoke tools open no profile and pass.
+fn profile_refusal(
+    args: &[std::ffi::OsString],
+    info_plist: Option<&str>,
+    require_env: Option<&std::ffi::OsStr>,
+    profile_env: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    debug: bool,
+) -> Option<String> {
+    if args.first().is_some_and(|a| {
+        a == "--engine-job"
+            || a == "--studio3d-estimate-probe"
+            || a == "--smoke"
+            || a == "--gate-p1-smoke"
+    }) {
+        return None;
+    }
+    let marked = info_plist.is_some_and(|plist| {
+        plist.contains("<key>PMRequireProfile</key>") || plist.contains("<key>PMLaneProfile</key>")
+    });
+    if !(debug || marked || require_env.is_some_and(|v| v == "1")) {
+        return None;
+    }
+    let given = args
+        .iter()
+        .position(|a| a == "--profile")
+        .map(|i| args.get(i + 1).map(PathBuf::from))
+        .unwrap_or_else(|| profile_env.filter(|p| !p.is_empty()).map(PathBuf::from));
+    let Some(given) = given else {
+        return Some(
+            "This development build runs only with --profile <folder>; quitting without opening anything."
+                .into(),
+        );
+    };
+    // The product's profiles, however the path is spelled (a symlink, `..`,
+    // a folder not made yet): `..` and `.` taken first, then the deepest
+    // part that exists read through its links.
+    let resolved = |p: &std::path::Path| {
+        use std::path::Component;
+        let mut plain = PathBuf::new();
+        for part in std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_owned())
+            .components()
+        {
+            match part {
+                Component::ParentDir => {
+                    plain.pop();
+                }
+                Component::CurDir => {}
+                other => plain.push(other),
+            }
+        }
+        let mut rest = vec![];
+        let mut base = plain.as_path();
+        loop {
+            if let Ok(real) = base.canonicalize() {
+                return rest
+                    .iter()
+                    .rev()
+                    .fold(real, |path: PathBuf, part| path.join(part));
+            }
+            match (base.file_name(), base.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name.to_owned());
+                    base = parent;
+                }
+                _ => return plain,
+            }
+        }
+    };
+    let home = home.filter(|h| !h.is_empty()).map(PathBuf::from)?;
+    let product = pm_first_launch::default_paths(&home.join("Library/Application Support"));
+    let mine = resolved(&given);
+    [product.native_profile, product.electron_profile]
+        .iter()
+        .any(|p| resolved(p) == mine)
+        .then(|| {
+            format!(
+                "This development build never opens the product's own profile ({}); quitting.",
+                given.display()
+            )
+        })
+}
+
+#[cfg(test)]
+mod profile_guard_tests {
+    use std::ffi::{OsStr, OsString};
+    fn args(a: &[&str]) -> Vec<OsString> {
+        a.iter().map(OsString::from).collect()
+    }
+    const MARKED: &str = "<dict><key>PMRequireProfile</key><true/></dict>";
+    const PLAIN: &str =
+        "<dict><key>CFBundleIdentifier</key><string>com.powermove.native</string></dict>";
+    /// A marked bundle or a debug build started bare refuses; with its own
+    /// profile it runs; on the product's profiles it refuses; the released
+    /// product (unmarked, release) always runs; the app's own children pass.
+    #[test]
+    fn a_development_build_runs_only_on_a_profile_it_was_given() {
+        let home = tempfile::tempdir().unwrap();
+        let h = Some(home.path().as_os_str());
+        let refuse = |a: &[&str], plist: Option<&str>, debug: bool| {
+            super::profile_refusal(&args(a), plist, None, None, h, debug).is_some()
+        };
+        assert!(refuse(&[], Some(MARKED), false));
+        assert!(refuse(&["project.pmv"], Some(MARKED), false));
+        assert!(refuse(&[], None, true));
+        assert!(refuse(&["--profile"], None, true));
+        assert!(!refuse(
+            &["--profile", "/lane/profile"],
+            Some(MARKED),
+            false
+        ));
+        assert!(!refuse(
+            &["--powermove-mcp", "--profile", "/lane/profile"],
+            None,
+            true
+        ));
+        assert!(!refuse(&[], Some(PLAIN), false));
+        assert!(!refuse(&[], None, false));
+        assert!(!refuse(&["--engine-job"], Some(MARKED), true));
+        // The environment marks and names a profile as the bundle can.
+        assert!(super::profile_refusal(&[], None, Some(OsStr::new("1")), None, h, false).is_some());
+        assert!(
+            super::profile_refusal(
+                &[],
+                None,
+                Some(OsStr::new("1")),
+                Some(OsStr::new("/lane")),
+                h,
+                false
+            )
+            .is_none()
+        );
+        // The product's native and v1 profiles, spelled any way, refuse.
+        let support = home.path().join("Library/Application Support");
+        std::fs::create_dir_all(support.join("com.zellzoi.powermove.native-beta")).unwrap();
+        let native = support.join("com.zellzoi.powermove.native-beta");
+        let roundabout = support.join("Powermove/../com.zellzoi.powermove.native-beta");
+        let v1 = support.join("Powermove");
+        for p in [&native, &roundabout, &v1] {
+            let a = vec![OsString::from("--profile"), p.clone().into_os_string()];
+            assert!(
+                super::profile_refusal(&a, Some(MARKED), None, None, h, false).is_some(),
+                "{p:?}"
+            );
+            assert!(
+                super::profile_refusal(&a, None, None, None, h, true).is_some(),
+                "{p:?}"
+            );
+        }
+        let link = home.path().join("lane-link");
+        std::os::unix::fs::symlink(&native, &link).unwrap();
+        let a = vec![OsString::from("--profile"), link.into_os_string()];
+        assert!(super::profile_refusal(&a, None, None, None, h, true).is_some());
+    }
+}
+
+fn main() -> Result<()> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // First, before anything is opened: a development build never starts
+    // without a profile of its own (`profile_refusal`).
+    let info_plist = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
+        .and_then(|plist| std::fs::read_to_string(plist).ok());
+    {
+        if let Some(refusal) = profile_refusal(
+            &args,
+            info_plist.as_deref(),
+            std::env::var_os("PM_NATIVE_REQUIRE_PROFILE").as_deref(),
+            std::env::var_os("PM_NATIVE_PROFILE").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+            cfg!(debug_assertions),
+        ) {
+            eprintln!("{refusal}");
+            std::process::exit(64);
+        }
+    }
+    #[cfg(debug_assertions)]
+    if args.first().is_some_and(|a| a == "--capture-settings-form") {
+        let inputs = args
+            .get(1)
+            .context("Settings capture needs a fixture directory")?;
+        let output = args
+            .get(2)
+            .context("Settings capture needs an output directory")?;
+        return settings_window::form::capture(
+            std::path::Path::new(inputs),
+            std::path::Path::new(output),
+        );
+    }
+    diag::mark_start();
+    gpui_macos::launch::mark("main");
+    // Development builds: the first-run stage drawn offscreen (stills, a
+    // recording and frame costs) into a folder; no window opens.
+    #[cfg(debug_assertions)]
+    if args.first().is_some_and(|a| a == "--stage-capture") {
+        let out = args.get(1).context(
+            "Usage: powermove-native --stage-capture <folder> [stills|reduced|pacing|window|offer]",
+        )?;
+        return match args.get(2).and_then(|a| a.to_str()) {
+            Some("pacing") => stage_capture::pacing(std::path::Path::new(out)),
+            Some("window") => stage_capture::native_stills(
+                PathBuf::from(out),
+                metal::Device::system_default().context("no Metal device")?,
+            ),
+            Some("reduced") => stage_capture::run(PathBuf::from(out), true, true),
+            Some("offer") => stage_capture::offer_stills(PathBuf::from(out)),
+            mode => stage_capture::run(PathBuf::from(out), mode == Some("stills"), false),
+        };
+    }
+    if args.first().is_some_and(|a| a == "--cold-playback-bench") {
+        return pro_media::cold_playback_bench();
+    }
+    let headless = args
+        .first()
+        .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
+        || args.iter().any(|a| a == "--powermove-mcp" || a == "--listen")
+        || args.first().is_some_and(|a| a == "--studio3d-estimate-probe");
+    if !headless {
+        platform::route_sigterm();
+    }
+    if args.first().is_some_and(|a| a == "--studio3d-estimate-probe") {
+        return studio_estimate_probe::run(&args[1..]);
+    }
+    if args.first().is_some_and(|a| a == "--engine-job") {
+        return pm_engine_service::jobs::run_child();
+    }
+    if args.first().is_some_and(|a| a == "--smoke") {
+        return pm_shell::smoke();
+    }
+    if args.first().is_some_and(|a| a == "--gate-p1-smoke") {
+        let manifest = args
+            .get(1)
+            .context("Usage: powermove-native --gate-p1-smoke <manifest.json>")?;
+        return smoke::run(PathBuf::from(manifest));
+    }
+    let mcp_mode = args.iter().any(|a| a == "--powermove-mcp");
+    let eval_host = args.iter().any(|a| a == "--listen");
+    let mut eval_exports = None;
+    let mut launch = None;
+    let mut agent_run = None;
+    let mut profile = std::env::var_os("PM_NATIVE_PROFILE").map(PathBuf::from);
+    let mut lane_flags: Vec<&'static str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--powermove-mcp" || args[i] == "--listen" {
+            // Same app executable and newline-delimited stdio contract.
+        } else if args[i] == "--exports" && eval_host {
+            i += 1;
+            eval_exports = Some(PathBuf::from(args.get(i).context("--exports needs a directory")?));
+        } else if args[i] == "--agent-run" && mcp_mode {
+            // The provider run this tool server belongs to (orchestration).
+            i += 1;
+            agent_run = Some(
+                args.get(i)
+                    .context("--agent-run needs a run id")?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        } else if args[i] == "--profile" {
+            i += 1;
+            profile = Some(PathBuf::from(
+                args.get(i).context("--profile needs a directory")?,
+            ));
+        } else if let Some(name) = review_override(&args[i], cfg!(debug_assertions)) {
+            lane_flags.push(name);
+            i += 1;
+            let value = args.get(i).context("development overrides need a value")?;
+            // SAFETY: single-threaded here; nothing has read the environment yet.
+            unsafe { std::env::set_var(name, value) };
+        } else if args[i].to_string_lossy().starts_with('-') {
+            anyhow::bail!("Unknown argument: {}", args[i].to_string_lossy());
+        } else {
+            anyhow::ensure!(launch.is_none(), "Open one launch path at a time");
+            launch = Some(PathBuf::from(&args[i]));
+        }
+        i += 1;
+    }
+    if eval_host {
+        anyhow::ensure!(!mcp_mode, "Choose one MCP host mode");
+        let profile = profile.context("Supply --profile with an isolated eval profile")?;
+        let exports = eval_exports.context("Supply --exports with an isolated eval output folder")?;
+        anyhow::ensure!(profile.is_absolute() && exports.is_absolute(), "Use absolute eval paths");
+        let checked = first_run::Plan::resolve(Some(profile.clone()), None, std::env::var_os("HOME"))
+            .context("Use an isolated native eval profile")?;
+        anyhow::ensure!(checked.launch != pm_first_launch::Launch::Migrate, "Eval never migrates a profile");
+        return mcp_services::headless(profile, exports, launch, true);
+    }
+    // A person's app is never started with a profile or a lane flag.
+    let development = args.iter().any(|a| a == "--profile")
+        || std::env::var_os("PM_NATIVE_PROFILE").is_some()
+        || !lane_flags.is_empty();
+    // The lane launcher's development flag (never the environment): sheets
+    // wait while the app is inactive, and with `--open` stand for captures.
+    #[cfg(debug_assertions)]
+    if let Some(stage) = sheet_hold(&lane_flags) {
+        gpui_macos::child_window::hold_sheets_while_inactive(stage);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = lane_flags;
+    diag::trace_unhide();
+    let plan = first_run::Plan::resolve(
+        profile,
+        std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
+        std::env::var_os("HOME"),
+    )
+    .context("HOME is required when no native profile override is provided")?;
+    let profile = plan.profile.clone();
+    // Development builds: a profile holding `cage-report.json` gets the cage
+    // account written there each second, for memory reviews of many windows.
+    if cfg!(debug_assertions) && profile.join("cage-report.json").exists() {
+        cage_report(profile.join("cage-report.json"));
+    }
+    anyhow::ensure!(
+        profile.is_absolute(),
+        "Use an absolute isolated native profile"
+    );
+    let exports = export_folder(&profile, std::env::var_os("HOME"));
+    if mcp_mode {
+        if pm_mcp::transport::has_running_host(&profile)? {
+            anyhow::ensure!(
+                launch.is_none(),
+                "Open projects in the running app before attaching MCP"
+            );
+            return std::thread::spawn(move || pm_mcp::transport::proxy_stdio(&profile, agent_run))
+                .join()
+                .map_err(|_| anyhow::anyhow!("MCP proxy panicked"))?
+                .map_err(Into::into);
+        }
+        // A library made here would stop the first launch copy from ever running.
+        anyhow::ensure!(
+            plan.launch != pm_first_launch::Launch::Migrate,
+            "Open Powermove once to finish copying your library"
+        );
+        return mcp_services::headless(profile, exports, launch, false);
+    }
+    std::fs::create_dir_all(&profile)?;
+    transcription::install(&profile);
+    // Set before any worker exists. This also disables shell NSUserDefaults restoration.
+    unsafe {
+        std::env::set_var("PM_NATIVE_SHELL_STATE", profile.join("shell-layouts.json"));
+    }
+    let broker = FontBroker::new();
+    let (wake_tx, wake_rx) = async_channel::bounded(1);
+    broker.set_wake(Arc::new(move || {
+        let _ = wake_tx.try_send(());
+    }));
+    let fonts = RenderFonts::new(broker.clone());
+    let text_fonts = fonts.clone();
+    let worker_profile = profile.clone();
+    let (bridge, bridge_calls) = panel_bridge::channel();
+    let bridge_windows = panel_bridge::Shared::default();
+    let job_overrides = raster_overrides::OverrideWindows::default();
+    let agent_overrides = job_overrides.clone();
+    let jobs_broker = broker.clone();
+    let (actor, engine, mcp_host, tools) = std::thread::spawn(move || -> Result<_> {
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
+            journal_root: Some(worker_profile.join("journals")),
+            text: Some(text_host::text_host(&text_fonts)),
+            backup_root: Some(worker_profile.join("backups")),
+            defer_backup_retention: true,
+            write_coordinator: Some(file_coordination::system()),
+            trash: Some(file_coordination::trash()),
+            idle_memory_relief: Some(pm_engine_service::memory::pressure_relief),
+            ..Default::default()
+        });
+        let mcp_host = mcp::Host::new(actor.handle(), worker_profile.clone());
+        // Export files an earlier session ended by force left (only those
+        // its ledger names), before any export runs (PM-478).
+        let removed =
+            pm_engine_service::jobs::adopt_export_ledger(worker_profile.join("exports-in-progress"));
+        if !removed.is_empty() {
+            eprintln!("Powermove removed {} unfinished export file(s) a forced quit left.", removed.len());
+        }
+        let gpu = pm_gpu::Gpu::new("powermove-native")?;
+        let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
+            gpu,
+            fonts,
+            Some(worker_profile.join("shader-cache")),
+        )?);
+        let tools = mcp::Tools::new(mcp_host.clone(), exports);
+        // A project no window has open draws with the windows' own worker and fonts.
+        agent_overrides.set_painters(raster_overrides::Painters {
+            layers: engine.layer_rasters(),
+            fonts: jobs_broker,
+        });
+        mcp_services::connect_engine(&tools, engine.export_activity(), agent_overrides)?;
+        tools.keep_for_stills();
+        {
+            let mut automation = tools.automation.lock().unwrap();
+            automation.surfaces = Some(Arc::new(bridge));
+            // Only tokens this process issued to its provider runs resolve.
+            automation.agent_workspace = Some(Arc::new(pm_agents::launch::grants::workspace));
+            automation.agent_grants = Some(Arc::new(|token: &str| {
+                pm_agents::launch::grants::resolve(token).map(|(run, access)| {
+                    let access = if access == pm_agents::Access::Editor {
+                        "editor"
+                    } else {
+                        "project"
+                    };
+                    (run, access.to_owned())
+                })
+            }));
+            automation.agent_projects = Some(Arc::new(pm_agents::launch::grants::project));
+        }
+        // The server itself starts once the library is attached (first_run).
+        Ok((actor, engine, mcp_host, tools))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
+    diag::line(serde_json::json!({"startup":"engine"}));
+    gpui_macos::launch::mark("engine");
+    // Filled once the library is attached; the MCP server waits for that too.
+    let server = Arc::new(std::sync::Mutex::new(None));
+    let handle = actor.handle();
+    let device = engine.metal_device();
+    let telemetry_mode = telemetry::init(&profile, info_plist.as_deref(), development, &device);
+    diag::line(serde_json::json!({"telemetry": format!("{telemetry_mode:?}")}));
+    let service = Rc::new(RefCell::new(
+        FontService::new().map_err(anyhow::Error::msg)?,
+    ));
+    let started = Rc::new(Cell::new(false));
+    let electron = plan.electron();
+    let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
+    // Projects open as tabs or in windows of their own, by the setting,
+    // before any window is restored.
+    pm_shell::set_tabs_mode(tabs::setting(&handle));
+    // The command-line project opens in the first window only.
+    let launch = Cell::new(launch);
+    let drop_directory = profile.join("media/received");
+    let result = pm_shell::run_gated(
+        device,
+        Rc::new({
+            let engine = engine.clone();
+            let broker = broker.clone();
+            move |host, window, cx| {
+                if !started.replace(true) {
+                    diag::line(serde_json::json!({"startup":"window"}));
+                    // Development builds: the first-run intro again, over the
+                    // app (`--replay-onboarding 1`), as Help › Replay Intro.
+                    #[cfg(debug_assertions)]
+                    if std::env::var_os("PM_NATIVE_REPLAY_ONBOARDING").is_some() {
+                        cx.defer(first_run_stage::replay);
+                    }
+                    diag::install_probe(cx);
+                    telemetry::install(window, cx);
+                    error_log::persist(&profile, cx);
+                    storage::install_cleanup(profile.clone(), cx);
+                    notifications::install(cx);
+                    // Background work (the background render) waits while the
+                    // person works: every press in an editor and every key.
+                    pm_shell::input::on_input(pm_engine_service::jobs::note_input);
+                    cx.observe_keystrokes(|_, _, _| pm_engine_service::jobs::note_input())
+                        .detach();
+                    panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
+                    let rx = wake_rx.clone();
+                    let broker = broker.clone();
+                    let service = service.clone();
+                    cx.spawn(async move |_| {
+                        while rx.recv().await.is_ok() {
+                            pm_text::host::serve(&mut *service.borrow_mut(), broker.take_asks());
+                        }
+                    })
+                    .detach();
+                }
+                let entity = cx.new(|cx| {
+                    session::Controller::new(
+                        handle.clone(),
+                        engine.clone(),
+                        profile.clone(),
+                        electron.clone(),
+                        mcp_host.clone(),
+                        host,
+                        cx,
+                    )
+                });
+                window.set_external_drop_target({
+                    let controller = entity.downgrade();
+                    move |cx| {
+                        let controller = controller.upgrade()?;
+                        controller
+                            .read(cx)
+                            .published
+                            .as_ref()
+                            .map(|p| p.snapshot.doc_id)
+                    }
+                });
+                window.on_external_drop_progress({
+                    let controller = entity.downgrade();
+                    move |pending, cx| {
+                        let _ = controller.update(cx, |v, _| {
+                            v.host.borrow_mut().set_receiving_drops(pending);
+                        });
+                    }
+                });
+                let font_broker = broker.clone();
+                entity.update(cx, |v, _| {
+                    v.font_broker = Some(font_broker);
+                    v.job_overrides = job_overrides.clone();
+                });
+                render_frames::serve_background(&engine, job_overrides.clone());
+                panel_bridge::register(&bridge_windows, &entity, window.window_handle());
+                lifecycle::install(&entity, window, cx);
+                viewer2::install(&entity, cx);
+                entity.update(cx, |c, cx| {
+                    c.apply_skimming(cx);
+                    c.load_skimming(cx);
+                    c.load_playback(cx);
+                });
+                // Each window owns its project: MCP's slot for this window, and
+                // the window wakes only when MCP changes that slot.
+                let key = window.window_handle().window_id().as_u64();
+                let rx = mcp_host.attach_window(key);
+                entity.update(cx, |v, cx| {
+                    v.window_key = key;
+                    let host = v.mcp.clone();
+                    cx.on_release(move |_, _| host.detach_window(key)).detach();
+                });
+                let weak = entity.downgrade();
+                cx.spawn(async move |cx| {
+                    while rx.recv().await.is_ok() {
+                        if weak.update(cx, |v, cx| v.follow_mcp(cx)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                playback::install(&entity, cx);
+                #[cfg(debug_assertions)]
+                memory_review::install(&entity, service.clone(), cx);
+                let opening = entry::take_for_new_window(cx)
+                    .or_else(|| launch.take().map(entry::Pending::File));
+                entity.update(cx, |v, cx| v.initialize(opening, cx));
+                entry::register(&entity, window.window_handle(), cx);
+                cloud::init(profile.clone(), cx);
+                providers::init(profile.clone(), cx);
+                agent_clients::init(profile.clone(), cx);
+                if let Some(ns) = platform::ns_window(window) {
+                    updates::after_launch(profile.clone(), ns, cx);
+                }
+                perf_gate::install(&entity, cx);
+                Rc::new(session::Bridge(entity))
+            }
+        }),
+        gate,
+        Rc::new(entry::receive),
+        drop_directory,
+    );
+    broker.close();
+    std::thread::spawn(move || {
+        drop(server.lock().map(|mut s| s.take()));
+        drop(engine);
+        actor.shutdown();
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Engine shutdown panicked"))?;
+    result
+}
+
+fn node_number(node: &pm_model::Node) -> Option<f64> {
+    match node.kind() {
+        pm_model::NodeKind::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+fn node_string(node: &pm_model::Node) -> Option<&str> {
+    match node.kind() {
+        pm_model::NodeKind::String(s) => s.as_str(),
+        _ => None,
+    }
+}
+
+/// Review captures may force a scheme or accessibility setting for one
+/// process (`--appearance`, `--accessibility`) or open surfaces by command
+/// (`--open settings,palette`), in development builds only;
+/// a release build treats them as unknown arguments.
+fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
+    if !dev {
+        return None;
+    }
+    match arg.to_str()? {
+        "--appearance" => Some("PM_NATIVE_APPEARANCE"),
+        "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
+        "--open" => Some("PM_NATIVE_REVIEW_OPEN"),
+        "--draw-occluded" => Some("PM_NATIVE_DRAW_OCCLUDED"),
+        "--save-dir" => Some("PM_NATIVE_REVIEW_SAVE_DIR"),
+        // A fixture Store on this Mac and its test signing key (store_install).
+        "--dev-store-origin" => Some("PM_DEV_STORE_ORIGIN"),
+        "--dev-store-key" => Some("PM_DEV_STORE_KEY"),
+        // A scratch home whose agent apps a review registers (agent_clients).
+        "--dev-agent-home" => Some("PM_DEV_AGENT_HOME"),
+        // A stand-in cloud for files on demand (cloud_media::Fixture).
+        "--cloud-fixture" => Some("PM_CLOUD_FIXTURE"),
+        // The v1 profile a review migrates from: a clone, never the live one.
+        "--electron-profile" => Some("PM_NATIVE_ELECTRON_PROFILE"),
+        // Onboarding on an isolated profile (it runs only on the default one).
+        "--review-onboarding" => Some("PM_NATIVE_REVIEW_ONBOARDING"),
+        // The first-run intro again, over the app (Help).
+        "--replay-onboarding" => Some("PM_NATIVE_REPLAY_ONBOARDING"),
+        // Presses the extension step's buttons by id (extension_transfer::review).
+        "--review-welcome" => Some("PM_NATIVE_REVIEW_WELCOME"),
+        _ => None,
+    }
+}
+
+/// A lane launch (the launcher always passes `--draw-occluded`) holds sheets
+/// while the app is inactive; with `--open` it also stands them for review
+/// captures. Read from this process's own command-line flags only: an
+/// inherited environment variable never turns it on.
+#[cfg(any(debug_assertions, test))]
+fn sheet_hold(flags: &[&str]) -> Option<bool> {
+    flags
+        .contains(&"PM_NATIVE_DRAW_OCCLUDED")
+        .then(|| flags.contains(&"PM_NATIVE_REVIEW_OPEN"))
+}
+
+/// The isolate cage account (`pm_runtime_v8::Admission::cage`), once a second.
+fn cage_report(path: PathBuf) {
+    std::thread::spawn(move || {
+        let cage = pm_runtime_v8::Admission::cage();
+        loop {
+            let _ = std::fs::write(
+                &path,
+                serde_json::json!({
+                    "usedMiB": cage.used() >> 20,
+                    "peakMiB": cage.peak() >> 20,
+                    "budgetMiB": cage.budget() >> 20,
+                    "isolates": cage.isolates(),
+                })
+                .to_string(),
+            );
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
+}
+
+#[cfg(test)]
+mod review_override_tests {
+    #[test]
+    fn release_builds_reject_the_review_overrides() {
+        use std::ffi::OsStr;
+        for arg in [
+            "--appearance",
+            "--accessibility",
+            "--open",
+            "--draw-occluded",
+            "--dev-store-origin",
+            "--dev-store-key",
+            "--dev-agent-home",
+            "--cloud-fixture",
+            "--electron-profile",
+            "--review-onboarding",
+            "--replay-onboarding",
+        ] {
+            assert_eq!(super::review_override(OsStr::new(arg), false), None);
+            assert!(super::review_override(OsStr::new(arg), true).is_some());
+        }
+        assert_eq!(super::review_override(OsStr::new("--profile"), true), None);
+    }
+    #[test]
+    fn only_the_lane_flag_holds_sheets_and_only_with_open_stands_them() {
+        // Flags this process was launched with, never the environment:
+        // `--open` alone (or an inherited variable) holds nothing.
+        assert_eq!(super::sheet_hold(&[]), None);
+        assert_eq!(super::sheet_hold(&["PM_NATIVE_REVIEW_OPEN"]), None);
+        assert_eq!(super::sheet_hold(&["PM_NATIVE_DRAW_OCCLUDED"]), Some(false));
+        assert_eq!(
+            super::sheet_hold(&["PM_NATIVE_REVIEW_OPEN", "PM_NATIVE_DRAW_OCCLUDED"]),
+            Some(true)
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod utility_capture_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod transition_capture_tests;
+
+#[cfg(all(test, target_os = "macos", debug_assertions))]
+mod stage_tests;

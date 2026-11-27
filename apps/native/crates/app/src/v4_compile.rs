@@ -1,0 +1,1875 @@
+//! Publication-time compilation of accepted surfaces into immutable render facts.
+//! Runs on a worker. Render reads these facts; it never parses JSON or token paths.
+use gpui::{Styled, *};
+use pm_design::Tokens;
+use pm_surface::{
+    Id, Node, Surface,
+    kit::{Component, Decoration, Panel},
+};
+use serde_json::Value;
+use std::{collections::HashMap, sync::Arc};
+
+/// One flattened lookup per token set. Rebuilt only when the theme changes.
+pub struct TokenTable {
+    pub tokens: Tokens,
+    values: HashMap<String, Value>,
+}
+impl TokenTable {
+    pub fn new(tokens: Tokens) -> Self {
+        fn flatten(prefix: String, value: Value, out: &mut HashMap<String, Value>) {
+            if let Value::Object(map) = value {
+                for (key, value) in map {
+                    let path = if prefix.is_empty() {
+                        key
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    flatten(path, value, out);
+                }
+            } else {
+                out.insert(prefix, value);
+            }
+        }
+        let mut values = HashMap::new();
+        flatten(
+            String::new(),
+            serde_json::to_value(&tokens).expect("finite pm-design tokens"),
+            &mut values,
+        );
+        Self { tokens, values }
+    }
+    fn resolve<'a>(&'a self, value: &'a Value) -> &'a Value {
+        value
+            .get("token")
+            .and_then(Value::as_str)
+            .map_or(value, |name| self.values.get(name).unwrap_or(&Value::Null))
+    }
+    pub(crate) fn number(&self, value: &Value) -> Option<f32> {
+        self.resolve(value).as_f64().map(|n| n as f32)
+    }
+    fn color(&self, value: &Value) -> Option<u32> {
+        match self.resolve(value) {
+            Value::Number(n) => n.as_u64().map(|n| n as u32),
+            Value::String(s) => parse_hex(s),
+            _ => None,
+        }
+    }
+}
+/// A value well's fill: the ink at the wash step, so every well of a row
+/// (a field, a pop-up, a colour, a menu trigger) is one value on a
+/// translucent panel as on a solid one. An opaque `colors.field` nearly
+/// vanished on the panel's composite.
+pub fn well(t: &pm_design::Tokens) -> gpui::Rgba {
+    pm_shell::kit::ink(t.colors.text, t.translucency.hover)
+}
+pub fn parse_hex(text: &str) -> Option<u32> {
+    let hex = text.strip_prefix('#')?;
+    let value = u32::from_str_radix(hex.get(..6)?, 16).ok()?;
+    Some(value)
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Events {
+    pub click: bool,
+    pub double_click: bool,
+    pub context_menu: bool,
+    pub pointer_down: bool,
+    pub pointer_move: bool,
+    pub pointer_up: bool,
+    pub hover: bool,
+    pub wheel: bool,
+    /// Takes files dropped from Finder (`data-pm-drop="files"`), and the
+    /// panel's own items dragged onto it.
+    pub file_drop: bool,
+    /// Starts a drag of a panel item (`onDragStart`): onto the panel's own
+    /// targets, the timeline or the viewer.
+    pub drag_start: bool,
+    pub key_down: bool,
+}
+impl Events {
+    fn of(node: &Node) -> Self {
+        let has = |name: &str| node.listeners.contains_key(name);
+        Self {
+            click: has("click"),
+            double_click: has("doubleclick"),
+            context_menu: has("contextmenu"),
+            pointer_down: has("pointerdown"),
+            pointer_move: has("pointermove"),
+            pointer_up: has("pointerup"),
+            hover: has("pointerenter") || has("pointerleave"),
+            wheel: has("wheel"),
+            file_drop: (has("drop") || has("dragover"))
+                && node.props.get("data-pm-drop").and_then(Value::as_str) == Some("files"),
+            key_down: has("keydown"),
+            drag_start: has("dragstart"),
+        }
+    }
+    pub fn pointer(self) -> bool {
+        self.pointer_down || self.pointer_move || self.pointer_up
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct Ax {
+    pub role: Option<Role>,
+    pub label: Option<SharedString>,
+    pub value: Option<SharedString>,
+    pub disabled: bool,
+    pub selected: Option<bool>,
+    pub expanded: Option<bool>,
+    /// Checked state of radios, checkboxes and pressed buttons.
+    pub toggled: Option<Toggled>,
+}
+/// Facts that vary by kit component and have no generic style expression.
+#[derive(Clone, Debug, Default)]
+pub enum Kit {
+    #[default]
+    None,
+    Check(bool),
+    Swatch {
+        color: Option<u32>,
+        keyline: u32,
+    },
+    Progress(Option<f32>),
+    QueueProgress { value: f32, ring: bool },
+    Anchored {
+        anchor: Option<Id>,
+        point: Option<(f32, f32)>,
+        dismiss: bool,
+    },
+    Gizmo {
+        position: (f32, f32),
+        size: f32,
+        fill: u32,
+        stroke: u32,
+        keyline: f32,
+        round: bool,
+    },
+    Banner {
+        symbol: Option<(SharedString, f32, u32)>,
+    },
+    Secure,
+    Disclosure {
+        open: bool,
+        always_show: bool,
+    },
+    /// A colour wheel: its red, green and blue, where they are neutral, and
+    /// the limits of one channel.
+    Wheel {
+        rgb: [f64; 3],
+        neutral: f64,
+        range: [f64; 2],
+        /// Its master's push from neutral, -1 to 1 of the master's range
+        /// (shown on the wheel's bezel).
+        master: Option<f64>,
+        /// The master as its strip under the wheel sets it: its value and
+        /// range, and the binding a drag there writes.
+        master_strip: Option<(f64, [f64; 2], SharedString)>,
+    },
+    /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
+    Curve {
+        values: Vec<f64>,
+        channel: usize,
+    },
+    /// An easing curve `[x1, y1, x2, y2]`: the editor, or a thumbnail.
+    Ease {
+        curve: [f64; 4],
+        thumbnail: bool,
+        preview: Option<[f64; 4]>,
+    },
+    /// v1's point pad: the point (X, Y) and its bounds.
+    Pad {
+        point: [f64; 2],
+        min: [f64; 2],
+        max: [f64; 2],
+    },
+    /// v1's gradient bar: its ends (`0xRRGGBB`) and, when it has one, its
+    /// midpoint and the midpoint's range.
+    Ramp {
+        start: u32,
+        end: u32,
+        midpoint: Option<f64>,
+        range: [f64; 2],
+    },
+}
+#[derive(Clone, Debug)]
+pub struct NodeView {
+    /// A hosted control in a row's value column: field high, on the row's
+    /// drawn well (a pop-up has no bezel of its own there).
+    pub well: bool,
+    /// A text field inside a well its row draws (a colour's hex).
+    pub bare: bool,
+    /// A text field for source text (`metadata.code`): the fixed-width
+    /// face, no spelling or substitutions.
+    pub code: bool,
+    pub id: Id,
+    pub parent: Option<Id>,
+    pub children: Vec<Id>,
+    pub component: Option<Component>,
+    pub style: StyleRefinement,
+    pub hidden: bool,
+    pub scroll_y: bool,
+    /// `metadata.scrollEdge` (a colour token, the ground under the
+    /// scroller): content past an edge fades into that ground there, so a
+    /// region with no scroller still says there is more (a sheet body).
+    pub scroll_edge: Option<u32>,
+    pub scroll_x: bool,
+    pub semantic: Option<SharedString>,
+    pub text: Option<SharedString>,
+    pub symbol: Option<SharedString>,
+    pub symbol_size: f32,
+    /// An `img`'s resource: an opaque key the host resolves (a Project
+    /// panel thumbnail, `media_thumbs`), never a path.
+    pub resource: Option<SharedString>,
+    /// `metadata.fit: "contain"`: the picture shows whole, letterboxed;
+    /// otherwise it covers the node.
+    pub contain: bool,
+    pub disabled: bool,
+    pub events: Events,
+    pub ax: Option<Ax>,
+    pub tab_index: Option<isize>,
+    pub title: Option<SharedString>,
+    pub row_count: Option<usize>,
+    pub native: Option<SharedString>,
+    pub kit: Kit,
+    pub virtual_window: Option<pm_builtins::virtualization::Window>,
+    /// What a dragged item is, for its drop targets (`metadata.item` as
+    /// text: an Effects row's effect id).
+    pub drag_item: Option<SharedString>,
+    /// A virtual list whose items are each exactly its `itemSize` tall
+    /// (`metadata.fixedItems`), so an item may fill its height.
+    pub fixed_items: bool,
+    pub is_plain_text: bool,
+    /// A line of text led by a symbol (a warning's triangle): the glyph
+    /// stands before the words, not over them.
+    pub symbol_leads: bool,
+    pub binding: Option<SharedString>,
+    pub number: Option<NumberFacts>,
+    pub local_change: bool,
+    pub commit_on_release: bool,
+    /// Escape reports an empty change, so a transient editor can close.
+    pub cancel_change: bool,
+    /// A click (1) or a double-click (2) here opens a text field
+    /// (`opensField`): what is typed after it waits for that field.
+    pub opens_field: Option<usize>,
+    pub timeline_scrub: Option<(SharedString, SharedString)>,
+    /// The timeline's layer name: a press there can lift into a reorder.
+    pub timeline_layer_drag: Option<SharedString>,
+    pub timeline_parent_pick: Option<SharedString>,
+    /// A layer row switch (`threeD`, `visibility`, `lock`, `solo`, `shy`) that
+    /// supports multi-select toggling and After Effects–style vertical drag painting.
+    pub timeline_switch: Option<(pm_panel_timeline::LayerSwitch, SharedString)>,
+    pub outline_column: bool,
+    pub outline_first: Option<SharedString>,
+    pub outline_window: Option<(usize, usize)>,
+    pub outline_retained: bool,
+    /// A number field's unit, drawn after the value in `muted` (language §5).
+    pub unit: Option<SharedString>,
+    /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
+    /// its own font, so a changing readout (timecode) never reflows its row.
+    pub fixed_width: Option<SharedString>,
+    /// `metadata.fitsLabels`: the node is at least as wide as the widest of
+    /// these texts in its own font plus the room around it (its own
+    /// horizontal padding and `metadata.fitsInsetToken`, its rows' indent),
+    /// so none of a rail's names is cut (the Effects rail, PM-455).
+    pub fits_labels: Option<(Arc<Vec<SharedString>>, f32)>,
+    /// `data-pm-slot="body"`: the part of a sheet between its title and its
+    /// actions, which gives way while the sheet's height changes.
+    pub sheet_body: bool,
+    /// `metadata.hoverGroup`: the host keeps whether the pointer is over
+    /// this node (a row), and draws its hover itself: no publication.
+    pub hover_group: bool,
+    /// `metadata.hoverStyle`: the group's look while hovered (its
+    /// `background`), compiled as `style` is.
+    pub hover_background: Option<gpui::Fill>,
+    /// `metadata.hoverOnly` (`Some(true)`) or `metadata.hoverHide`
+    /// (`Some(false)`): drawn only while, or only until, the nearest hover
+    /// group holding it is hovered (a row's switch and the blank that keeps
+    /// its column).
+    pub hover_shows: Option<bool>,
+    /// `metadata.pill`: the composer pill's split hover (`pm_shell::pill`).
+    pub pill: Option<pm_shell::pill::Role>,
+    /// `metadata.turn`: a chevron that springs half a turn to point up
+    /// while `true` (its menu is open) and back when `false`.
+    pub turn: Option<bool>,
+    /// `metadata.runs`: one wrapped paragraph whose words differ in style
+    /// (prose with bold, italic, code and links), drawn as one text.
+    pub rich: Option<Rich>,
+}
+/// A paragraph of styled runs. Each range carries [`Rich`] style bits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rich {
+    pub text: SharedString,
+    pub runs: Arc<Vec<(std::ops::Range<usize>, u8)>>,
+    pub links: Arc<Vec<(std::ops::Range<usize>, String)>>,
+}
+fn safe_prose_link(href: &str) -> bool {
+    url::Url::parse(href).is_ok_and(|u| matches!(u.scheme(), "https" | "http" | "mailto"))
+}
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn prose_links_only_open_web_and_mail_addresses() {
+    assert!(safe_prose_link("https://example.com/help"));
+    assert!(safe_prose_link("mailto:help@example.com"));
+    for bad in [
+        "file:///private/file",
+        "javascript:alert(1)",
+        "powermove://run",
+        "relative/path",
+    ] {
+        assert!(!safe_prose_link(bad));
+    }
+}
+impl Rich {
+    pub const BOLD: u8 = 1;
+    pub const ITALIC: u8 = 2;
+    pub const CODE: u8 = 4;
+    pub const LINK: u8 = 8;
+    /// `[{t, b?, i?, c?, a?}]`; plain runs need no style. Capped like any
+    /// node text, so a runaway reply stays bounded.
+    fn of(node: &Node) -> Option<Self> {
+        let runs = node.props.get("metadata")?.get("runs")?.as_array()?;
+        let (mut text, mut styled, mut links) = (String::new(), vec![], vec![]);
+        for run in runs.iter().take(4096) {
+            let Some(part) = run.get("t").and_then(Value::as_str) else {
+                continue;
+            };
+            let on = |k: &str| {
+                run.get(k)
+                    .is_some_and(|v| v == &Value::Bool(true) || v == 1)
+            };
+            let bits = u8::from(on("b")) * Self::BOLD
+                | u8::from(on("i")) * Self::ITALIC
+                | u8::from(on("c")) * Self::CODE
+                | u8::from(on("a")) * Self::LINK;
+            let start = text.len();
+            text.push_str(part);
+            if let Some(href) = run
+                .get("href")
+                .and_then(Value::as_str)
+                .filter(|h| safe_prose_link(h))
+            {
+                links.push((start..text.len(), href.to_owned()));
+            }
+            if bits != 0 && !part.is_empty() {
+                styled.push((start..text.len(), bits));
+            }
+        }
+        (!text.is_empty()).then(|| Self {
+            text: text.into(),
+            runs: Arc::new(styled),
+            links: Arc::new(links),
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NumberFacts {
+    pub value: f64,
+    pub step: f64,
+    pub speed: f64,
+    pub min: f64,
+    pub max: f64,
+    pub precision: Option<u32>,
+}
+pub struct Prepared {
+    pub nodes: HashMap<Id, NodeView>,
+    pub semantics: HashMap<String, Id>,
+    pub header: Option<Id>,
+    pub has_keydown: bool,
+    pub anchors: Vec<Id>,
+    /// The clock button and its containing transport group.
+    pub timeline_time: Option<(Id, Id)>,
+}
+impl NumberFacts {
+    /// The shipped field's reading: the declared precision, else two places
+    /// for fine steps, one under ten and none above; trailing zeros trimmed.
+    /// Without a declared precision, a small value keeps two significant
+    /// digits.
+    pub fn text(self, value: f64) -> String {
+        let mut places = self.precision.map_or(
+            if self.step > 0. && self.step < 1. {
+                2
+            } else if value.abs() < 10. {
+                1
+            } else {
+                0
+            },
+            |digits| digits as usize,
+        );
+        // A field without a declared precision keeps two significant digits
+        // of a small value (fog density 0.002, not "0").
+        if self.precision.is_none()
+            && value != 0.
+            && value.is_finite()
+            && value.abs() * 10f64.powi(places as i32) < 10.
+        {
+            places = places.max(((-value.abs().log10()).ceil() as usize + 1).min(6));
+        }
+        let mut text = format!("{value:.places$}");
+        if places > 0 && text.contains('.') {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
+        }
+        if text == "-0" {
+            text = "0".into();
+        }
+        text
+    }
+}
+impl Prepared {
+    pub fn new(surface: Arc<Surface>, table: &TokenTable) -> Self {
+        let panel = Panel::prepare(
+            surface.clone(),
+            &table.tokens,
+            &Default::default(),
+            None,
+            false,
+        );
+        let mut axes: HashMap<Id, Ax> = panel
+            .accessibility
+            .nodes
+            .iter()
+            .map(|(id, n)| {
+                (
+                    id.0,
+                    Ax {
+                        role: (n.role() != Role::GenericContainer).then(|| n.role()),
+                        label: n.label().map(|s| s.to_owned().into()),
+                        value: n.value().map(|s| s.to_owned().into()),
+                        disabled: n.is_disabled(),
+                        selected: n.is_selected(),
+                        expanded: n.is_expanded(),
+                        toggled: n.toggled(),
+                    },
+                )
+            })
+            .collect();
+        let mut nodes = HashMap::with_capacity(surface.nodes().len());
+        let mut semantics = HashMap::new();
+        let mut anchors = vec![];
+        let mut has_keydown = false;
+        for node in surface.nodes().values() {
+            let view = compile(&surface, node, &panel, table, axes.remove(&node.id));
+            if let Some(semantic) = &view.semantic {
+                semantics.entry(semantic.to_string()).or_insert(node.id);
+            }
+            if let Kit::Anchored {
+                anchor: Some(id), ..
+            } = view.kit
+            {
+                anchors.push(id);
+            }
+            // A control that opens a menu: the menu hangs from where it is.
+            if node.props.contains_key("aria-haspopup") {
+                anchors.push(node.id);
+            }
+            has_keydown |= view.events.key_down;
+            nodes.insert(node.id, view);
+        }
+        // The timeline's display-link layer follows the actual GPUI layout.
+        // The leading group is also the clip for a squeezed header.
+        let timeline_time = semantics
+            .get("timeline:time")
+            .and_then(|&time| Some((time, nodes.get(&time)?.parent?)));
+        if let Some((time, transport)) = timeline_time {
+            anchors.extend([time, transport]);
+        }
+        let header = header(&surface);
+        Self {
+            nodes,
+            semantics,
+            header,
+            has_keydown,
+            anchors,
+            timeline_time,
+        }
+    }
+    pub fn node(&self, id: Id) -> Option<&NodeView> {
+        self.nodes.get(&id)
+    }
+}
+/// The root's child the panel declares as its header (`data-pm-slot="header"`):
+/// the shell shows it in the panel's header row.
+fn header(surface: &Surface) -> Option<Id> {
+    let root = surface
+        .node(0)?
+        .children
+        .first()
+        .and_then(|id| surface.node(*id))?;
+    root.children.iter().copied().find(|id| {
+        surface.node(*id).is_some_and(|node| {
+            node.props.get("data-pm-slot").and_then(Value::as_str) == Some("header")
+        })
+    })
+}
+/// How the host presents an element (`data-pm-variant`).
+pub fn variant(node: &Node) -> Option<&str> {
+    node.props.get("data-pm-variant").and_then(Value::as_str)
+}
+/// The variant of node `id` of `surface`.
+pub fn variant_of(surface: &Surface, id: Id) -> Option<&str> {
+    surface.node(id).and_then(variant)
+}
+// Frame decoration belongs to the shell; authored controls keep their styling.
+fn native_panel_root(style: &mut serde_json::Map<String, Value>, root: bool) {
+    if root {
+        for key in [
+            "background",
+            "backgroundColor",
+            "border",
+            "borderWidth",
+            "borderColor",
+            "borderTop",
+            "borderBottom",
+            "borderLeft",
+            "borderRight",
+            "borderTopWidth",
+            "borderBottomWidth",
+            "borderLeftWidth",
+            "borderRightWidth",
+            "borderRadius",
+            "boxShadow",
+            "margin",
+            "marginTop",
+            "marginBottom",
+            "marginLeft",
+            "marginRight",
+        ] {
+            style.remove(key);
+        }
+    }
+}
+/// The native pop-up's published title for hosts without AppKit slots.
+fn popup_title(node: &Node) -> Option<SharedString> {
+    let display = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|k| k.get("display"))
+        .and_then(Value::as_str);
+    let value = node.props.get("value");
+    let selected = node
+        .props
+        .get("options")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options.iter().find_map(|option| {
+                if Some(option) == value {
+                    option.as_str()
+                } else if value.is_some() && option.get("v") == value {
+                    option.get("label").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+        });
+    display
+        .or(selected)
+        .or_else(|| value.and_then(Value::as_str))
+        .map(|s| s.to_owned().into())
+}
+
+fn compile(
+    surface: &Surface,
+    node: &Node,
+    panel: &Panel,
+    table: &TokenTable,
+    ax: Option<Ax>,
+) -> NodeView {
+    let t = &table.tokens;
+    let component = Component::of(node);
+    let inline_rename = component == Some(Component::TextField)
+        && node.props.get("metadata").and_then(|m| m.get("inlineRename")) == Some(&Value::Bool(true));
+    let mut style = surface.computed_style(node.id).unwrap_or_default();
+    native_panel_root(&mut style, node.id == 0 || node.parent == Some(0));
+    let hidden = style.get("display").and_then(Value::as_str) == Some("none");
+    let mut sheet = StyleRefinement::default().flex().flex_col().min_w(px(0.));
+    // `data-pm-variant="code"`: a command, a path, a tool's output, in the
+    // monospaced face the app's code editors draw. "SF Mono" is no installed
+    // family (text resolution falls back to the proportional face); the
+    // editors fall back to Menlo, so code reads the same everywhere.
+    if variant(node) == Some("code") {
+        sheet = sheet.font_family("Menlo");
+    }
+    if node.id == 0 || node.parent == Some(0) {
+        sheet = sheet.size_full();
+    }
+    if let Some(recipe) = panel.components.get(&node.id) {
+        let radius = recipe.radius.unwrap_or(t.metrics.control_radius);
+        sheet = match component {
+            // Quiet source-list rows: selection and hover inset from the panel
+            // edge by `gap`, text a further `gap` in (language §9 Lists).
+            Some(Component::ListItem | Component::TreeItem) if variant(node) != Some("band") => {
+                // Each row keeps its pitch (`row`), its highlight `list_gap`
+                // shorter and centred in it: a hovered row and a selected one
+                // never touch.
+                sheet
+                    .flex_row()
+                    .items_center()
+                    .min_h(px(t.metrics.row - t.metrics.list_gap))
+                    .my(px(t.metrics.list_gap / 2.))
+                    .mx(px(t.metrics.gap))
+                    .px(px(t.metrics.gap))
+                    .gap(px(t.metrics.gap))
+                    // A selected or hovered row is never a square slab.
+                    .rounded(px(radius))
+            }
+            // Band rows (the timeline outline) share their band with native
+            // track rows: selection spans the whole row, as in After Effects.
+            Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => {
+                sheet.flex_row().items_center().min_h(px(t.metrics.row))
+            }
+            // A section heading starts on the row-label inset; its chevron is
+            // trailing and shows on hover or while collapsed (language §9).
+            Some(Component::DisclosureButton) => sheet
+                .flex_row_reverse()
+                .justify_between()
+                .items_center()
+                .w_full()
+                .gap(px(t.metrics.inner_radius))
+                .px(px(t.metrics.inset))
+                .min_h(px(recipe.hit))
+                .rounded(px(radius)),
+            Some(Component::ToolbarItem) => sheet
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .min_w(px(recipe.hit))
+                .min_h(px(recipe.hit))
+                .rounded(px(radius)),
+            // An inline name occupies the text's rectangle, without a
+            // field well or the inset used by standalone form controls.
+            Some(Component::TextField) if inline_rename => sheet.flex_row().items_center(),
+            Some(
+                Component::PopUpButton
+                | Component::NumberField
+                | Component::TextField
+                | Component::SecureField,
+            ) => sheet
+                .flex_row()
+                .items_center()
+                .px(px(t.metrics.gap))
+                .h(px(recipe.visual_height.unwrap_or(t.metrics.field)))
+                .bg(rgb(recipe.background))
+                .rounded(px(radius)),
+            Some(Component::SegmentedControl) => sheet
+                .flex_row()
+                .p(px(recipe.track_padding.unwrap_or(0.)))
+                .bg(rgb(recipe.background))
+                .rounded(px(radius)),
+            // Segments fill their track's height (stretch), concentric inside it.
+            Some(Component::Segment) => sheet
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .px(px(t.metrics.gap)),
+            Some(Component::FormGroup) => sheet
+                .bg(rgb(recipe.background))
+                .rounded(px(t.metrics.group_radius))
+                .overflow_hidden(),
+            Some(Component::FormRow) => sheet
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(t.metrics.gap))
+                .px(px(t.metrics.inset)),
+            Some(Component::EmptyState) => sheet
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap(px(t.metrics.gap)),
+            Some(Component::List | Component::Tree) => sheet.flex_1(),
+            // Sections stand a gap apart; the heading is a row of its own.
+            Some(Component::DisclosureGroup) => sheet.w_full().mt(px(t.metrics.gap)),
+            // Indeterminate: a small spinner leads the label, as AppKit's
+            // spinning indicator beside "Checking…"; determinate: a bar
+            // under it.
+            Some(Component::ProgressRow) if node.props.get("aria-valuenow").is_none() => {
+                sheet.flex_row().items_center().gap(px(t.metrics.gap))
+            }
+            Some(Component::ProgressRow) => sheet.gap(px(t.metrics.inner_radius)).justify_center(),
+            Some(Component::Banner) => sheet
+                .flex_row()
+                .items_center()
+                .gap(px(t.metrics.gap))
+                .p(px(t.metrics.gap))
+                .bg(rgb(recipe.background))
+                .rounded(px(t.metrics.control_radius)),
+            Some(Component::ViewerOverlay) => sheet
+                .absolute()
+                .bottom(px(t.metrics.inset))
+                .flex_row()
+                .items_center()
+                .gap(px(t.metrics.gap))
+                .px(px(t.metrics.gap))
+                .bg(rgb(t.colors.floating))
+                .rounded(px(t.metrics.control_radius)),
+            Some(Component::SheetAnchor | Component::PopoverAnchor | Component::ColourPopover) => {
+                let mut floating = sheet
+                    .bg(rgb(recipe.background))
+                    .rounded(px(radius))
+                    .p(px(t.metrics.inset))
+                    .gap(px(t.metrics.gap));
+                if let Some(width) = recipe.width {
+                    floating = floating.w(px(width));
+                }
+                floating
+            }
+            _ => sheet,
+        };
+    }
+    let mut compiled = apply(sheet, &style, table);
+    // Wells in an inspector value column share it equally (Position X | Y)
+    // whether or not they are leased native fields (language §9).
+    let in_value_slot = node
+        .parent
+        .and_then(|p| surface.node(p))
+        .is_some_and(|p| p.props.get("data-pm-slot").and_then(Value::as_str) == Some("value"));
+    let slot_control = in_value_slot
+        && matches!(
+            component,
+            Some(
+                Component::NumberField
+                    | Component::TextField
+                    | Component::PopUpButton
+                    | Component::SegmentedControl
+            )
+        );
+    if slot_control {
+        compiled.sheet = compiled.sheet.flex_1().min_w(px(0.)).overflow_hidden();
+    }
+    // A colour is one well: its chip, then its hex, which draws no well of
+    // its own.
+    let siblings = |of: Option<Id>| -> Vec<Option<Component>> {
+        of.and_then(|p| surface.node(p))
+            .map(|p| {
+                p.children
+                    .iter()
+                    .filter_map(|c| surface.node(*c))
+                    .map(Component::of)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let joined = |of: Option<Id>| {
+        let kinds = siblings(of);
+        kinds.contains(&Some(Component::ColourWell)) && kinds.contains(&Some(Component::TextField))
+    };
+    let slot = node.props.get("data-pm-slot").and_then(Value::as_str);
+    let in_colour = in_value_slot && joined(node.parent);
+    // In an inspector value column a segmented control is a compact,
+    // field-high track filling the column (above); its segments share it
+    // equally (Align: three cells, as wide as the wells beside it) and stay
+    // concentric (language §9).
+    let slot_of = |id: Option<Id>| {
+        id.and_then(|p| surface.node(p))
+            .and_then(|p| p.props.get("data-pm-slot"))
+            .and_then(Value::as_str)
+            == Some("value")
+    };
+    let compact = match component {
+        Some(Component::SegmentedControl) => in_value_slot,
+        Some(Component::Segment) => slot_of(node.parent.and_then(|p| surface.node(p)?.parent)),
+        _ => false,
+    };
+    if compact {
+        let inset = t.metrics.control_radius - t.metrics.inner_radius;
+        compiled.sheet = if component == Some(Component::Segment) {
+            compiled
+                .sheet
+                .flex_1()
+                .px(px(t.metrics.gap))
+                .rounded(px((t.metrics.inner_radius - inset).max(t.radius.xs)))
+        } else {
+            compiled
+                .sheet
+                .h(px(t.metrics.field))
+                .p(px(inset))
+                .gap(px(inset))
+                .rounded(px(t.metrics.inner_radius))
+        };
+    }
+    // A host-menu trigger in the value column (Font, Fill) reads as a well.
+    // Icon actions beside wells (Position's Pad) keep their hit square.
+    let titled = !node.children.is_empty() || !node.text.is_empty();
+    if in_value_slot && titled && component == Some(Component::ToolbarItem) {
+        compiled.sheet = compiled
+            .sheet
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .h(px(t.metrics.field))
+            .min_h(px(t.metrics.field))
+            .px(px(t.metrics.gap))
+            .bg(well(t))
+            .rounded(px(t.metrics.inner_radius));
+    }
+    // A colour well is a field-high square holding its chip; alone it is
+    // a well itself, beside its hex it stands in the row's well.
+    if component == Some(Component::ColourWell) {
+        let side = px(t.metrics.field);
+        compiled.sheet = compiled
+            .sheet
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .w(side)
+            .min_w(side)
+            .h(side)
+            .min_h(side)
+            .rounded(px(t.metrics.inner_radius));
+        if !in_colour {
+            compiled.sheet = compiled.sheet.bg(well(t));
+        }
+    }
+    // The hex beside it draws no well of its own, with or without an editor
+    // (a locked layer's hex is the dimmed value with no editor).
+    if in_colour && component == Some(Component::TextField) {
+        compiled.sheet.background = None;
+    }
+    let in_row = node
+        .parent
+        .and_then(|p| surface.node(p))
+        .is_some_and(|p| Component::of(p) == Some(Component::InspectorRow));
+    let has_slot = |row: &Node, name: &str| {
+        row.children.iter().any(|c| {
+            surface
+                .node(*c)
+                .is_some_and(|c| c.props.get("data-pm-slot").and_then(Value::as_str) == Some(name))
+        })
+    };
+    // A row's keyframe mark hangs in the gutter: the mark's own leading
+    // point stands on the panel's text edge, where headings start.
+    let hang = (t.metrics.hit - t.metrics.symbol_inline) / 2.;
+    if component == Some(Component::InspectorRow) && has_slot(node, "leading") {
+        compiled.sheet = compiled.sheet.pl(px((t.metrics.inset - hang).max(0.)));
+    }
+    match slot {
+        // The gutter a row's keyframe mark stands in; a row with no mark
+        // keeps it, so every label starts on one x.
+        Some("leading") if in_row => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .w(px(t.metrics.hit))
+                .mr(px(t.space.hair));
+        }
+        // A row's label keeps its column and gives way first in a narrow
+        // panel; the value takes the rest, never less than `value_column`.
+        Some("label") if in_row => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .flex_shrink(1.)
+                .w(px(t.metrics.label_column))
+                .min_w(px(t.metrics.hit))
+                .pr(px(t.metrics.gap));
+        }
+        Some("label") => compiled.sheet = compiled.sheet.flex_1(),
+        Some("value") => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .min_w(px(t.metrics.value_column))
+                .gap(px(t.metrics.inner_radius));
+            // A row whose panel caps its value column (`valueMostToken`, a
+            // metric) keeps label and control together on a wide panel.
+            let most = node
+                .parent
+                .and_then(|p| surface.node(p))
+                .filter(|row| Component::of(row) == Some(Component::InspectorRow))
+                .and_then(|row| row.props.get("metadata")?.get("valueMostToken")?.as_str())
+                .filter(|name| name.starts_with("metrics."))
+                .and_then(|name| table.number(&serde_json::json!({ "token": name })));
+            if let Some(most) = most {
+                compiled.sheet = compiled.sheet.max_w(px(most));
+            }
+            if joined(Some(node.id)) {
+                compiled.sheet = compiled
+                    .sheet
+                    .h(px(t.metrics.field))
+                    .gap(px(0.))
+                    .pr(px(t.metrics.gap))
+                    .bg(well(t))
+                    .rounded(px(t.metrics.inner_radius));
+            }
+        }
+        Some("trailing") => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .w(px(t.metrics.hit))
+                .items_center()
+                .justify_center();
+        }
+        // What stands under a row (its expression, what is wrong with its
+        // value): from the label's x to the panel's inset.
+        Some("detail") => {
+            compiled.sheet = compiled
+                .sheet
+                .gap(px(t.space.hair))
+                .pl(px(t.metrics.inset - hang + t.metrics.hit + t.space.hair))
+                .pr(px(t.metrics.inset))
+                .pb(px(t.metrics.gap));
+        }
+        // A section's heading row: its title, and its action at the
+        // trailing edge.
+        Some("heading") => {
+            compiled.sheet = compiled.sheet.flex_row().items_center().w_full();
+        }
+        Some("accessory") => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .flex_row()
+                .items_center()
+                .pr(px(t.metrics.gap));
+        }
+        _ => {}
+    }
+    let selected = node.props.get("aria-selected") == Some(&Value::Bool(true))
+        || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true));
+    if selected && node.props.get("metadata").and_then(|m| m.get("selectionRingOnly")) != Some(&Value::Bool(true)) {
+        compiled.sheet = compiled.sheet.bg(rgb(t.colors.selected_fill));
+    }
+    let header_id = node.props.get("id").and_then(Value::as_str);
+    let disabled = node.props.get("disabled") == Some(&Value::Bool(true));
+    let symbol = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("symbol").or_else(|| m.get("requiredSymbol")))
+        .or_else(|| node.props.get("attr").and_then(|m| m.get("symbol")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| SharedString::from(s.to_owned()));
+    let symbol_leads = node.r#type == "text"
+        && symbol.is_some()
+        && (!node.text.is_empty() || !node.children.is_empty());
+    let virtual_window = (node.r#type == "virtual-list")
+        .then(|| {
+            let count = node.props.get("count")?.as_u64()?;
+            let range = node.props.get("range")?.as_array()?;
+            let size = node
+                .props
+                .get("itemSize")
+                .and_then(Value::as_f64)
+                .or_else(|| {
+                    // Any metric names the rows' height (a Settings card's
+                    // rows are `metrics.form_row`).
+                    let name = node
+                        .props
+                        .get("metadata")
+                        .and_then(|m| m.get("rowHeightToken"))
+                        .and_then(Value::as_str)?;
+                    name.starts_with("metrics.")
+                        .then(|| table.number(&serde_json::json!({ "token": name })))
+                        .flatten()
+                        .map(f64::from)
+                })?;
+            pm_builtins::virtualization::Window::new(
+                count as usize,
+                (
+                    range.first()?.as_u64()? as usize,
+                    range.get(1)?.as_u64()? as usize,
+                ),
+                size,
+            )
+            .ok()
+        })
+        .flatten();
+    let meta = node.props.get("metadata");
+    let drag_item = meta
+        .and_then(|m| m.get("item"))
+        .and_then(Value::as_str)
+        .map(|s| SharedString::from(s.to_owned()));
+    let fixed_items = virtual_window.is_some()
+        && meta.and_then(|m| m.get("fixedItems")) == Some(&Value::Bool(true));
+    NodeView {
+        drag_item,
+        fixed_items,
+        well: slot_control
+            && matches!(
+                component,
+                Some(Component::PopUpButton | Component::SegmentedControl)
+            ),
+        bare: inline_rename || (component == Some(Component::TextField) && in_colour),
+        code: meta.and_then(|m| m.get("code")) == Some(&Value::Bool(true)),
+        sheet_body: slot == Some("body"),
+        hover_group: meta.and_then(|m| m.get("hoverGroup")) == Some(&Value::Bool(true)),
+        hover_background: meta
+            .and_then(|m| m.get("hoverStyle"))
+            .and_then(Value::as_object)
+            .and_then(|hover| {
+                apply(StyleRefinement::default(), hover, table)
+                    .sheet
+                    .background
+            }),
+        pill: meta
+            .and_then(|m| m.get("pill"))
+            .and_then(Value::as_str)
+            .and_then(pm_shell::pill::Role::named),
+        turn: meta.and_then(|m| m.get("turn")).and_then(Value::as_bool),
+        hover_shows: if meta.and_then(|m| m.get("hoverOnly")) == Some(&Value::Bool(true)) {
+            Some(true)
+        } else if meta.and_then(|m| m.get("hoverHide")) == Some(&Value::Bool(true)) {
+            Some(false)
+        } else {
+            None
+        },
+        fixed_width: meta
+            .and_then(|m| m.get("fixedWidthSample"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
+        fits_labels: meta
+            .and_then(|m| m.get("fitsLabels"))
+            .and_then(Value::as_array)
+            .map(|labels| {
+                let style = node.props.get("style");
+                let side = |key: &str| {
+                    style
+                        .and_then(|s| s.get(key))
+                        .and_then(|v| table.number(v))
+                        .unwrap_or(0.)
+                };
+                let inset = meta
+                    .and_then(|m| m.get("fitsInsetToken"))
+                    .and_then(Value::as_str)
+                    .and_then(|name| table.number(&serde_json::json!({ "token": name })))
+                    .unwrap_or(0.);
+                let labels = labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|label| SharedString::from(label.to_owned()))
+                    .collect();
+                (
+                    Arc::new(labels),
+                    side("paddingLeft") + side("paddingRight") + inset,
+                )
+            }),
+        local_change: node.listeners.contains_key("change"),
+        commit_on_release: node.listeners.contains_key("input")
+            && node.listeners.contains_key("change")
+            && meta
+                .and_then(|m| m.get("commitOnRelease"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        cancel_change: meta
+            .and_then(|m| m.get("cancelChange"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        opens_field: match meta.and_then(|m| m.get("opensField")).and_then(Value::as_str) {
+            Some("click") => Some(1),
+            Some("doubleClick") => Some(2),
+            _ => None,
+        },
+        timeline_scrub: meta.and_then(|m| m.get("timelineScrub")).and_then(|t| {
+            Some((
+                SharedString::from(t.get("layer")?.as_str()?.to_owned()),
+                SharedString::from(t.get("path")?.as_str()?.to_owned()),
+            ))
+        }),
+        timeline_parent_pick: meta
+            .and_then(|m| m.get("timelineParentPick"))
+            .and_then(|t| t.get("layer"))
+            .and_then(Value::as_str)
+            .map(|layer| SharedString::from(layer.to_owned())),
+        timeline_switch: header_id.and_then(|semantic| {
+            let (switch, rest) = [
+                ("timeline:threeD:", pm_panel_timeline::LayerSwitch::ThreeD),
+                ("timeline:visibility:", pm_panel_timeline::LayerSwitch::Visible),
+                ("timeline:lock:", pm_panel_timeline::LayerSwitch::Locked),
+                ("timeline:solo:", pm_panel_timeline::LayerSwitch::Solo),
+                ("timeline:shy:", pm_panel_timeline::LayerSwitch::Shy),
+            ]
+            .into_iter()
+            .find_map(|(prefix, sw)| semantic.strip_prefix(prefix).map(|rest| (sw, rest)))?;
+            let pm_panel_timeline::RowId::Layer(layer) =
+                pm_panel_timeline::v4::parse_row(rest).ok()?
+            else {
+                return None;
+            };
+            Some((switch, SharedString::from(layer)))
+        }),
+        timeline_layer_drag: meta.and_then(|m| {
+            // nativeRow already carries the collision-free layer identity.
+            // Reuse it instead of adding another drag object to every row's
+            // initial wire commit (which is bounded by the host argument quota).
+            let layer = if let Some(drag) = m.get("timelineLayerDrag") {
+                drag.get("layer")?.as_str()?.to_owned()
+            } else {
+                match pm_panel_timeline::v4::parse_row(m.get("nativeRow")?.as_str()?).ok()? {
+                    pm_panel_timeline::RowId::Layer(id) => id,
+                    _ => return None,
+                }
+            };
+            Some(SharedString::from(layer))
+        }),
+        outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
+        outline_retained: meta.and_then(|m| m.get("nativeRetained")).and_then(Value::as_bool).unwrap_or(false),
+        outline_first: meta
+            .and_then(|m| m.get("nativeFirstRow"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
+        outline_window: meta
+            .and_then(|m| m.get("nativeWindow"))
+            .and_then(Value::as_array)
+            .and_then(|w| Some((w.first()?.as_u64()? as usize, w.get(1)?.as_u64()? as usize))),
+        id: node.id,
+        parent: node.parent,
+        children: node.children.clone(),
+        component,
+        style: compiled.sheet,
+        hidden,
+        // The native timeline scrolls its outline; a nested scroller would double it.
+        // `scrollOwner` "child" (a virtual list inside scrolls) or "parent" (it
+        // sits in a scroller of its own panel: Properties' Effects, PM-732).
+        scroll_y: meta.and_then(|m| m.get("nativeFirstRow")).is_none()
+            && !matches!(
+                meta.and_then(|m| m.get("scrollOwner")).and_then(Value::as_str),
+                Some("child" | "parent")
+            )
+            && (compiled.scroll_y
+                || matches!(component, Some(Component::List | Component::Tree))
+                || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),
+        scroll_edge: meta
+            .and_then(|m| m.get("scrollEdge"))
+            .and_then(|edge| table.color(&serde_json::json!({ "token": edge }))),
+        scroll_x: compiled.scroll_x,
+        semantic: header_id.map(|s| SharedString::from(s.to_owned())),
+        text: if !node.text.is_empty() {
+            Some(node.text.clone().into())
+        } else if component == Some(Component::PopUpButton) {
+            popup_title(node)
+        } else {
+            None
+        },
+        rich: Rich::of(node),
+        symbol,
+        symbol_size: compiled.symbol_size.unwrap_or(t.metrics.symbol_panel),
+        resource: (node.r#type == "img")
+            .then(|| node.props.get("resource").and_then(Value::as_str))
+            .flatten()
+            .map(|r| SharedString::from(r.to_owned())),
+        contain: node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("fit"))
+            .and_then(Value::as_str)
+            == Some("contain"),
+        disabled,
+        events: Events::of(node),
+        ax,
+        tab_index: node
+            .props
+            .get("tabIndex")
+            .and_then(Value::as_i64)
+            .map(|n| n as isize),
+        title: node
+            .props
+            .get("title")
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
+        row_count: node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("totalRows").or_else(|| m.get("totalCount")))
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .or(virtual_window.map(|w| w.count)),
+        native: matches!(node.r#type.as_str(), "canvas" | "frame")
+            .then(|| node.props.get("surface").and_then(Value::as_str))
+            .flatten()
+            .map(|s| s.to_owned().into()),
+        kit: kit(node, component, panel, table),
+        virtual_window,
+        is_plain_text: node.r#type == "text" && node.props.is_empty() && node.children.is_empty(),
+        symbol_leads,
+        binding: node
+            .props
+            .get("binding")
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
+        unit: (component == Some(Component::NumberField))
+            .then(|| node.props.get("unit").and_then(Value::as_str))
+            .flatten()
+            .filter(|u| !u.is_empty())
+            // Split wells (Position X | Y) keep their values whole: the pair's
+            // units give way when any value and unit would not fit (the row names it).
+            .filter(|u| {
+                let Some(slot) = node.parent.and_then(|p| surface.node(p)).filter(|slot| {
+                    slot.props.get("data-pm-slot").and_then(Value::as_str) == Some("value")
+                }) else {
+                    return true;
+                };
+                let wells: Vec<&Node> = slot
+                    .children
+                    .iter()
+                    .filter_map(|c| surface.node(*c))
+                    .filter(|c| Component::of(c) == Some(Component::NumberField))
+                    .collect();
+                let budget = if wells.len() == 3 {
+                    6
+                } else {
+                    SPLIT_WELL_CHARS
+                };
+                wells.len() < 2
+                    || wells.iter().all(|w| {
+                        let shown = w
+                            .props
+                            .get("value")
+                            .and_then(Value::as_f64)
+                            .map_or(0, |v| number_facts(w).text(v).chars().count());
+                        shown + 1 + u.chars().count() <= budget
+                    })
+            })
+            .map(|u| SharedString::from(u.to_owned())),
+        number: (component == Some(Component::NumberField)).then(|| number_facts(node)),
+    }
+}
+/// Characters a split value well shows at `body` size (half the value
+/// column of a panel at its usual width, less a trailing control).
+const SPLIT_WELL_CHARS: usize = 9;
+pub(crate) fn number_facts(node: &Node) -> NumberFacts {
+    let number = |key: &str, default| {
+        node.props
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(default)
+    };
+    NumberFacts {
+        value: number("value", 0.),
+        step: number("step", 1.),
+        speed: number("speed", 0.5),
+        min: number("min", -f64::MAX),
+        max: number("max", f64::MAX),
+        precision: node
+            .props
+            .get("precision")
+            .and_then(Value::as_u64)
+            .map(|n| n.min(9) as u32),
+    }
+}
+/// A list of numbers (a grouped control's values); anything else is none.
+fn numbers(value: Option<&Value>) -> Vec<f64> {
+    value
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default()
+}
+fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTable) -> Kit {
+    let t = &table.tokens;
+    let decoration = panel.decorations.get(&node.id);
+    let value = node.props.get("value");
+    match component {
+        Some(Component::Checkbox | Component::Toggle) => {
+            Kit::Check(value.and_then(Value::as_bool).unwrap_or(false))
+        }
+        Some(Component::ColourWell) => Kit::Swatch {
+            color: value.and_then(Value::as_str).and_then(parse_hex),
+            keyline: t.colors.separator,
+        },
+        Some(Component::ProgressRow) if node.props.get("metadata").and_then(|m|m.get("pmKit")).and_then(|m|m.get("queueProgress")).is_some() => Kit::QueueProgress {
+            value: node.props.get("aria-valuenow").and_then(Value::as_f64).unwrap_or(0.).clamp(0.,1.) as f32,
+            ring: node.props["metadata"]["pmKit"]["queueProgress"] == "ring",
+        },
+        Some(Component::ProgressRow) => Kit::Progress(
+            node.props
+                .get("aria-valuenow")
+                .and_then(Value::as_f64)
+                .map(|n| n.clamp(0., 1.) as f32),
+        ),
+        Some(Component::SheetAnchor | Component::PopoverAnchor | Component::ColourPopover) => {
+            let anchor = node.props.get("anchor");
+            Kit::Anchored {
+                anchor: anchor.and_then(Value::as_u64),
+                point: anchor.and_then(|a| {
+                    Some((a.get("x")?.as_f64()? as f32, a.get("y")?.as_f64()? as f32))
+                }),
+                dismiss: node.props.get("data-pm-dismiss-outside") == Some(&Value::Bool(true)),
+            }
+        }
+        Some(Component::ViewerGizmo) => match decoration {
+            Some(Decoration::ViewerGizmo(g)) => Kit::Gizmo {
+                position: g.position.map_or((0., 0.), |(x, y)| (x as f32, y as f32)),
+                size: g.size.value.unwrap_or(t.metrics.keyframe as f64) as f32,
+                fill: g.fill,
+                stroke: g.stroke,
+                keyline: g.keyline.value.unwrap_or(t.metrics.border as f64) as f32,
+                round: matches!(
+                    g.kind,
+                    pm_surface::kit::GizmoKind::Rotation | pm_surface::kit::GizmoKind::Anchor
+                ),
+            },
+            _ => Kit::None,
+        },
+        Some(Component::Banner) => Kit::Banner {
+            symbol: match decoration {
+                Some(Decoration::Banner {
+                    symbol_size,
+                    symbol_color,
+                    ..
+                }) => node
+                    .props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit").or(Some(m)))
+                    .and_then(|m| m.get("symbol"))
+                    .and_then(Value::as_str)
+                    .map(|s| {
+                        (
+                            SharedString::from(s.to_owned()),
+                            *symbol_size,
+                            *symbol_color,
+                        )
+                    }),
+                _ => None,
+            },
+        },
+        Some(Component::SecureField) => Kit::Secure,
+        Some(Component::ColorWheel) => {
+            let numbers = numbers(value);
+            let option = |key: &str| {
+                node.props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|k| k.get(key))
+                    .and_then(Value::as_f64)
+            };
+            let neutral = option("neutral").unwrap_or(0.);
+            let master = option("master").map(|m| {
+                let span = if m >= neutral {
+                    option("masterMax").unwrap_or(neutral + 1.) - neutral
+                } else {
+                    neutral - option("masterMin").unwrap_or(neutral - 1.)
+                };
+                ((m - neutral) / span.max(1e-9)).clamp(-1., 1.)
+            });
+            let master_strip = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("masterBinding"))
+                .and_then(Value::as_str)
+                .zip(option("master"))
+                .map(|(binding, value)| {
+                    (
+                        value,
+                        [
+                            option("masterMin").unwrap_or(neutral - 1.),
+                            option("masterMax").unwrap_or(neutral + 1.),
+                        ],
+                        SharedString::from(binding.to_owned()),
+                    )
+                });
+            Kit::Wheel {
+                rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
+                neutral,
+                range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
+                master,
+                master_strip,
+            }
+        }
+        Some(component @ (Component::PointPad | Component::GradientBar)) => {
+            let option = |key: &str| {
+                node.props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|k| k.get(key))
+            };
+            let number =
+                |key: &str, default: f64| option(key).and_then(Value::as_f64).unwrap_or(default);
+            if component == Component::PointPad {
+                let n = numbers(value);
+                Kit::Pad {
+                    point: [
+                        n.first().copied().unwrap_or(0.),
+                        n.get(1).copied().unwrap_or(0.),
+                    ],
+                    min: [number("minX", -100.), number("minY", -100.)],
+                    max: [number("maxX", 100.), number("maxY", 100.)],
+                }
+            } else {
+                let colour = |key: &str, default: u32| {
+                    option(key)
+                        .and_then(Value::as_str)
+                        .and_then(parse_hex)
+                        .unwrap_or(default)
+                };
+                Kit::Ramp {
+                    start: colour("start", 0x000000),
+                    end: colour("end", 0xffffff),
+                    midpoint: value.and_then(Value::as_f64),
+                    range: [number("min", 0.), number("max", 100.)],
+                }
+            }
+        }
+        Some(Component::CurveEditor) => Kit::Curve {
+            values: numbers(value),
+            channel: node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("channel"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(3) as usize,
+        },
+        Some(component @ (Component::EaseCurve | Component::EaseThumbnail)) => {
+            let n = numbers(value);
+            let at = |i: usize, default: f64| {
+                n.get(i)
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
+            Kit::Ease {
+                curve: [at(0, 0.), at(1, 0.), at(2, 1.), at(3, 1.)],
+                thumbnail: component == Component::EaseThumbnail,
+                preview: node
+                    .props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|m| m.get("preview"))
+                    .and_then(|v| serde_json::from_value::<[f64; 4]>(v.clone()).ok())
+                    .filter(|c| c.iter().all(|v| v.is_finite())),
+            }
+        }
+        Some(Component::DisclosureButton) => Kit::Disclosure {
+            open: node.props.get("aria-expanded") == Some(&Value::Bool(true)),
+            always_show: node
+                .props
+                .get("metadata")
+                .and_then(|metadata| metadata.get("pmKit"))
+                .and_then(|kit| kit.get("alwaysShowChevron"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        _ => Kit::None,
+    }
+}
+struct Compiled {
+    sheet: StyleRefinement,
+    scroll_y: bool,
+    scroll_x: bool,
+    symbol_size: Option<f32>,
+}
+#[derive(Clone, Copy)]
+enum Len {
+    Px(f32),
+    Fraction(f32),
+}
+impl From<Len> for Length {
+    fn from(value: Len) -> Self {
+        match value {
+            Len::Px(n) => px(n).into(),
+            Len::Fraction(n) => relative(n).into(),
+        }
+    }
+}
+fn length(value: &Value, table: &TokenTable) -> Option<Len> {
+    let value = table.resolve(value);
+    if let Some(n) = value.as_f64() {
+        return Some(Len::Px(n as f32));
+    }
+    let text = value.as_str()?;
+    if let Some(percent) = text.strip_suffix('%') {
+        return percent.parse::<f32>().ok().map(|n| Len::Fraction(n / 100.));
+    }
+    text.strip_suffix("px")
+        .unwrap_or(text)
+        .parse()
+        .ok()
+        .map(Len::Px)
+}
+fn with<T>(
+    e: StyleRefinement,
+    value: Option<T>,
+    apply: impl FnOnce(StyleRefinement, T) -> StyleRefinement,
+) -> StyleRefinement {
+    match value {
+        Some(value) => apply(e, value),
+        None => e,
+    }
+}
+fn tracks(text: &str) -> Option<u16> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("repeat(") {
+        return rest.split(',').next()?.trim().parse().ok();
+    }
+    let count = text.split_whitespace().count();
+    (count > 0).then_some(count as u16)
+}
+fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) -> Compiled {
+    if style.get("display").and_then(Value::as_str) == Some("flex")
+        && !style.contains_key("flexDirection")
+    {
+        e = e.flex_row();
+    }
+    let mut scroll_y = false;
+    let mut scroll_x = false;
+    let mut symbol_size = None;
+    for (key, raw) in style {
+        let value = table.resolve(raw);
+        let n = table.number(raw);
+        let s = value.as_str();
+        let len = length(raw, table);
+        match key.as_str() {
+            "display" => {
+                if s == Some("grid") {
+                    e = e.grid();
+                }
+            }
+            "gridTemplateColumns" => {
+                if let Some(count) = s.and_then(tracks).or(n.map(|n| n as u16)) {
+                    e = e.grid_cols(count);
+                }
+            }
+            "gridTemplateRows" => {
+                if let Some(count) = s.and_then(tracks).or(n.map(|n| n as u16)) {
+                    e = e.grid_rows(count);
+                }
+            }
+            "gridColumn" => {
+                if let Some(span) = s
+                    .and_then(|s| s.strip_prefix("span "))
+                    .and_then(|s| s.trim().parse().ok())
+                    .or(n.map(|n| n as u16))
+                {
+                    e = e.col_span(span);
+                }
+            }
+            "position" => {
+                e = match s {
+                    Some("absolute") => e.absolute(),
+                    Some("relative") => e.relative(),
+                    _ => e,
+                };
+            }
+            "top" => e = with(e, len, |e, v| e.top(Length::from(v))),
+            "left" => e = with(e, len, |e, v| e.left(Length::from(v))),
+            "right" => e = with(e, len, |e, v| e.right(Length::from(v))),
+            "bottom" => e = with(e, len, |e, v| e.bottom(Length::from(v))),
+            "inset" => {
+                let v: Length = match (s, len) {
+                    (Some("fill"), _) => px(0.).into(),
+                    (_, Some(v)) => v.into(),
+                    _ => continue,
+                };
+                e = e.top(v).left(v).right(v).bottom(v);
+            }
+            "flexDirection" => {
+                e = if s == Some("row") {
+                    e.flex_row()
+                } else {
+                    e.flex_col()
+                };
+            }
+            "flexWrap" => {
+                e = if s == Some("wrap") {
+                    e.flex_wrap()
+                } else {
+                    e.flex_nowrap()
+                };
+            }
+            "alignItems" => {
+                e = match s {
+                    Some("center") => e.items_center(),
+                    Some("end" | "flex-end") => e.items_end(),
+                    Some("start" | "flex-start") => e.items_start(),
+                    Some("baseline") => e.items_baseline(),
+                    _ => e,
+                };
+            }
+            "alignSelf" => {
+                e = match s {
+                    Some("center") => e.self_center(),
+                    Some("end" | "flex-end") => e.self_end(),
+                    Some("start" | "flex-start") => e.self_start(),
+                    _ => e,
+                };
+            }
+            "justifyContent" => {
+                e = match s {
+                    Some("center") => e.justify_center(),
+                    Some("end" | "flex-end") => e.justify_end(),
+                    Some("start" | "flex-start") => e.justify_start(),
+                    Some("space-between") => e.justify_between(),
+                    Some("space-around") => e.justify_around(),
+                    _ => e,
+                };
+            }
+            "gap" => {
+                if let Some(n) = n {
+                    e = e.gap(px(n));
+                }
+            }
+            "columnGap" => {
+                if let Some(n) = n {
+                    e = e.gap_x(px(n));
+                }
+            }
+            "rowGap" => {
+                if let Some(n) = n {
+                    e = e.gap_y(px(n));
+                }
+            }
+            "padding" => e = with(e, n, |e, n| e.p(px(n))),
+            "paddingLeft" => e = with(e, n, |e, n| e.pl(px(n))),
+            "paddingRight" => e = with(e, n, |e, n| e.pr(px(n))),
+            "paddingTop" => e = with(e, n, |e, n| e.pt(px(n))),
+            "paddingBottom" => e = with(e, n, |e, n| e.pb(px(n))),
+            "margin" => e = with(e, n, |e, n| e.m(px(n))),
+            "marginLeft" => e = with(e, n, |e, n| e.ml(px(n))),
+            "marginRight" => e = with(e, n, |e, n| e.mr(px(n))),
+            "marginTop" => e = with(e, n, |e, n| e.mt(px(n))),
+            "marginBottom" => e = with(e, n, |e, n| e.mb(px(n))),
+            "height" => e = with(e, len, |e, v| e.h(Length::from(v))),
+            "width" => e = with(e, len, |e, v| e.w(Length::from(v))),
+            "minHeight" => e = with(e, len, |e, v| e.min_h(Length::from(v))),
+            "minWidth" => e = with(e, len, |e, v| e.min_w(Length::from(v))),
+            "maxHeight" => e = with(e, len, |e, v| e.max_h(Length::from(v))),
+            "maxWidth" => e = with(e, len, |e, v| e.max_w(Length::from(v))),
+            "flexGrow" => {
+                if n.is_some_and(|n| n > 0.) {
+                    e = e.flex_1();
+                } else if n == Some(0.) {
+                    // Takes no spare room (over a kit recipe's `flex_1`).
+                    e = e.flex_grow(0.);
+                }
+            }
+            "flexShrink" => {
+                if n == Some(0.) {
+                    e = e.flex_shrink_0();
+                } else if n.is_some_and(|n| n > 0.) {
+                    // Explicit, so a native control knows it may give way.
+                    e = e.flex_shrink(1.);
+                }
+            }
+            "flexBasis" => {
+                if let Some(v) = len {
+                    e = e.flex_basis(Length::from(v));
+                }
+            }
+            "borderRadius" => e = with(e, n, |e, n| e.rounded(px(n))),
+            "borderWidth" | "border" => e = with(e, n, |e, n| e.border(px(n))),
+            "borderTopWidth" | "borderTop" => e = with(e, n, |e, n| e.border_t(px(n))),
+            "borderBottomWidth" | "borderBottom" => e = with(e, n, |e, n| e.border_b(px(n))),
+            "borderLeftWidth" | "borderLeft" => e = with(e, n, |e, n| e.border_l(px(n))),
+            "borderRightWidth" | "borderRight" => e = with(e, n, |e, n| e.border_r(px(n))),
+            "borderColor" => {
+                if let Some(color) = table.color(raw) {
+                    e = e.border_color(rgb(color));
+                }
+            }
+            "opacity" => e = with(e, n, |e, n| e.opacity(n)),
+            "fontSize" => e = with(e, n, |e, n| e.text_size(px(n))),
+            "fontWeight" => e = with(e, n, |e, n| e.font_weight(FontWeight(n))),
+            "lineHeight" => {
+                if let Some(n) = n {
+                    // Unitless leadings multiply the font size; larger values are points.
+                    e = if n <= 4. {
+                        e.line_height(relative(n))
+                    } else {
+                        e.line_height(px(n))
+                    };
+                }
+            }
+            "fontVariantNumeric" => {
+                if s == Some("tabular-nums") {
+                    e = e.font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+                }
+            }
+            "textOverflow" => {
+                if s == Some("ellipsis") {
+                    e = e.text_ellipsis().overflow_hidden();
+                } else if s == Some("middle") {
+                    // A command or a path keeps its start and its end.
+                    e = e.text_ellipsis_middle().overflow_hidden();
+                }
+            }
+            "textAlign" => {
+                e = match s {
+                    Some("center") => e.text_center(),
+                    Some("right" | "end") => e.text_right(),
+                    _ => e,
+                };
+            }
+            "whiteSpace" => {
+                if s == Some("nowrap") {
+                    e = e.whitespace_nowrap();
+                }
+            }
+            "color" => {
+                if let Some(color) = table.color(raw) {
+                    e = e.text_color(rgb(color));
+                }
+            }
+            "background" | "backgroundColor" => {
+                // A well is the ink's wash, whatever panel it stands on.
+                if raw.get("token").and_then(Value::as_str) == Some("colors.field") {
+                    e = e.bg(well(&table.tokens));
+                } else if let Some(color) = table.color(raw) {
+                    e = e.bg(rgb(color));
+                }
+            }
+            "overflow" | "overflowY" | "overflowX" => {
+                let scrolls = s == Some("auto") || s == Some("scroll");
+                if scrolls {
+                    scroll_y |= key != "overflowX";
+                    scroll_x |= key == "overflowX";
+                } else if s == Some("hidden") {
+                    e = e.overflow_hidden();
+                }
+            }
+            "symbolSize" => symbol_size = n,
+            "cursor" => {
+                e = match s {
+                    Some("col-resize" | "ew-resize") => e.cursor_col_resize(),
+                    Some("row-resize" | "ns-resize") => e.cursor_row_resize(),
+                    Some("grab") => e.cursor_grab(),
+                    Some("grabbing") => e.cursor_grabbing(),
+                    Some("text") => e.cursor_text(),
+                    Some("crosshair") => e.cursor_crosshair(),
+                    _ => e,
+                };
+            }
+            _ => {}
+        }
+    }
+    Compiled {
+        sheet: e,
+        scroll_y,
+        scroll_x,
+        symbol_size,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[::core::prelude::v1::test]
+    fn a_small_number_keeps_its_digits_and_never_reads_zero() {
+        let n = |step: f64, precision: Option<u32>| NumberFacts {
+            value: 0.,
+            step,
+            speed: 1.,
+            min: f64::NEG_INFINITY,
+            max: f64::INFINITY,
+            precision,
+        };
+        assert_eq!(n(0.01, None).text(0.002), "0.002");
+        assert_eq!(n(0.01, None).text(0.0025), "0.0025");
+        assert_eq!(n(0.01, None).text(0.06), "0.06");
+        assert_eq!(n(0.01, None).text(0.4), "0.4");
+        assert_eq!(n(1., None).text(45.), "45");
+        assert_eq!(n(0.01, None).text(0.), "0");
+        // A declared precision holds.
+        assert_eq!(n(1., Some(1)).text(0.004), "0");
+    }
+
+    #[::core::prelude::v1::test]
+    fn native_panel_frame_drops_only_root_decoration() {
+        let authored = json!({"background":"#121212", "borderWidth":1, "borderLeft":2, "borderTop":1,
+            "borderRadius":8, "margin":6, "padding":10, "gap":4});
+        let mut root = authored.as_object().unwrap().clone();
+        native_panel_root(&mut root, true);
+        assert_eq!(
+            root,
+            json!({"padding":10,"gap":4}).as_object().unwrap().clone()
+        );
+        let mut control = authored.as_object().unwrap().clone();
+        native_panel_root(&mut control, false);
+        assert_eq!(control, authored.as_object().unwrap().clone());
+    }
+    #[::core::prelude::v1::test]
+    fn agent_popup_titles_show_the_published_display_then_the_selected_option() {
+        let mut node = Node {
+            id: 1, r#type: "button".into(), parent: None, children: vec![],
+            props: json!({"value":"opus","options":[{"v":"opus","label":"Opus 5.5 (1M context)"}],"metadata":{"pmKit":{"display":"Opus 5.5"}}}).as_object().unwrap().clone(),
+            text: String::new(), listeners: Default::default(), input: None,
+        };
+        assert_eq!(popup_title(&node).as_deref(), Some("Opus 5.5"));
+        node.props.remove("metadata");
+        assert_eq!(popup_title(&node).as_deref(), Some("Opus 5.5 (1M context)"));
+        node.props.remove("options");
+        assert_eq!(popup_title(&node).as_deref(), Some("opus"));
+    }
+    use super::*;
+    use serde_json::json;
+
+    #[::core::prelude::v1::test]
+    fn settings_scroll_popup_title_matches_the_native_selection() {
+        let mut node = Node {
+            id: 1,
+            r#type: "button".into(),
+            parent: None,
+            children: vec![],
+            props: json!({
+                "value": "All Types",
+                "options": [{"v": "All Types", "label": "All extension types"}],
+                "metadata": {"pmKit": {"display": "All types"}}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            text: String::new(),
+            listeners: Default::default(),
+            input: None,
+        };
+        assert_eq!(popup_title(&node).as_deref(), Some("All types"));
+        node.props.remove("metadata");
+        assert_eq!(popup_title(&node).as_deref(), Some("All extension types"));
+        node.props.remove("options");
+        assert_eq!(popup_title(&node).as_deref(), Some("All Types"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn number_fields_read_like_the_shipped_field() {
+        let facts = |step: f64, precision: Option<u32>| NumberFacts {
+            value: 0.,
+            step,
+            speed: 1.,
+            min: f64::MIN,
+            max: f64::MAX,
+            precision,
+        };
+        assert_eq!(facts(1., None).text(1370.272623), "1370");
+        assert_eq!(facts(1., None).text(4.26), "4.3");
+        assert_eq!(facts(0.01, None).text(0.5), "0.5");
+        assert_eq!(facts(1., Some(2)).text(960.), "960");
+        assert_eq!(facts(1., Some(2)).text(12.345), "12.35");
+        assert_eq!(facts(1., Some(1)).text(-0.01), "0");
+    }
+    #[::core::prelude::v1::test]
+    fn tokens_resolve_through_one_flat_table() {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let table = TokenTable::new(tokens.clone());
+        assert_eq!(
+            table.number(&json!({"token":"metrics.row"})),
+            Some(tokens.metrics.row)
+        );
+        assert_eq!(
+            table.color(&json!({"token":"colors.text"})),
+            Some(tokens.colors.text)
+        );
+        assert_eq!(table.number(&json!({"token":"metrics.nonsense"})), None);
+    }
+    #[::core::prelude::v1::test]
+    fn grid_lengths_and_track_counts_compile() {
+        let table = TokenTable::new(Tokens::new(pm_design::Scheme::Light, Default::default()));
+        assert_eq!(tracks("repeat(3, 1fr)"), Some(3));
+        assert_eq!(tracks("80px 1fr"), Some(2));
+        let style = json!({"display":"grid","gridTemplateColumns":"repeat(4, 1fr)","position":"absolute","left":3,"opacity":0.5,"lineHeight":1.25,"fontVariantNumeric":"tabular-nums","textOverflow":"ellipsis","borderWidth":1,"overflowY":"auto"});
+        let compiled = apply(
+            StyleRefinement::default(),
+            style.as_object().unwrap(),
+            &table,
+        );
+        assert_eq!(compiled.sheet.display, Some(Display::Grid));
+        assert_eq!(compiled.sheet.position, Some(Position::Absolute));
+        assert_eq!(compiled.sheet.opacity, Some(0.5));
+        assert!(compiled.sheet.text.font_features.is_some());
+        assert!(compiled.scroll_y);
+    }
+}

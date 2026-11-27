@@ -1,0 +1,149 @@
+//! Shared helpers for the integration tests.
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
+
+use pm_kernel::project_io::{OpenOptions, SaveOptions, SaveTarget, open_project};
+use pm_kernel::{DocumentStore, ProjectIoError, SaveReceipt};
+
+/// A fresh directory under the system temp dir, removed on drop.
+pub struct TempDir(pub PathBuf);
+
+impl TempDir {
+    pub fn new(tag: &str) -> TempDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "pm-kernel-{tag}-{}-{nanos}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+
+    /// Every entry name, sorted (to spot leftover temp files).
+    /// What is in the folder, other than what a save keeps beside a
+    /// project on purpose: the version it replaced, under the save's
+    /// private name (`.<file>.<uuid>.aside`), and the record that says so
+    /// (`.save`). A staging file or anything else left behind is listed.
+    pub fn entries(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| !(n.starts_with('.') && (n.ends_with(".aside") || n.ends_with(".save"))))
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A Trash for tests: a file goes into `dir`, intact, under a fresh name;
+/// a file on another volume goes into a `.Trashes` folder beside it, as the
+/// system's Trash has one per volume.
+pub fn trash(dir: &Path) -> pm_kernel::project_io::TrashHook {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = dir.to_owned();
+    pm_kernel::project_io::TrashHook(std::sync::Arc::new(move |path: &Path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let name = format!("{}-{name}", N.fetch_add(1, Ordering::Relaxed));
+        std::fs::create_dir_all(&dir)?;
+        let to = dir.join(&name);
+        match std::fs::rename(path, &to) {
+            Err(e) if e.raw_os_error() == Some(18) => {
+                let volume = path.parent().unwrap_or(Path::new(".")).join(".Trashes");
+                std::fs::create_dir_all(&volume)?;
+                let to = volume.join(&name);
+                std::fs::rename(path, &to).map(|()| to)
+            }
+            other => other.map(|()| to),
+        }
+    }))
+}
+
+/// What the test Trash at `dir` holds.
+pub fn trashed(dir: &Path) -> Vec<Vec<u8>> {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.map(|e| std::fs::read(e.unwrap().path()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn crate_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+pub fn ts_fixture(name: &str) -> PathBuf {
+    crate_dir().join("tests/fixtures/ts-writer").join(name)
+}
+
+pub fn engine_fixture(rel: &str) -> PathBuf {
+    crate_dir()
+        .join("../../../../engine/crates/pm-model/tests/fixtures")
+        .join(rel)
+}
+
+pub fn open_store(path: &Path) -> DocumentStore {
+    DocumentStore::open(open_project(path, OpenOptions::default()).expect("opens"))
+}
+
+/// prepare → run → finish, as the app does across threads.
+pub fn save(
+    store: &mut DocumentStore,
+    target: SaveTarget,
+    options: SaveOptions,
+) -> Result<(), ProjectIoError> {
+    let receipt = run_save(store, target, options)?;
+    store.finish_save(receipt)
+}
+
+pub fn run_save(
+    store: &mut DocumentStore,
+    target: SaveTarget,
+    options: SaveOptions,
+) -> Result<SaveReceipt, ProjectIoError> {
+    let plan = store.prepare_save(target, options)?;
+    std::thread::spawn(move || plan.run()).join().unwrap()
+}
+
+pub fn save_as(store: &mut DocumentStore, path: &Path) -> Result<(), ProjectIoError> {
+    save(
+        store,
+        SaveTarget::SaveAs {
+            path: path.to_owned(),
+            replace: false,
+        },
+        SaveOptions::default(),
+    )
+}
+
+pub fn read(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap()
+}
+
+pub fn opacity_of(store: &DocumentStore, layer: &str) -> Option<f64> {
+    let root = store.root()?;
+    let loc = pm_kernel::model::find_layer(root, layer)?;
+    let node = pm_kernel::model::layer_at(root, &loc)?;
+    match node.get("p")?.get("opacity")?.get("v")?.kind() {
+        pm_model::NodeKind::Number(n) => Some(*n),
+        _ => None,
+    }
+}

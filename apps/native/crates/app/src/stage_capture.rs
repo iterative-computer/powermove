@@ -1,0 +1,625 @@
+//! The first-run stage drawn offscreen (`--stage-capture <folder>`,
+//! development and soak builds): stills of the intro, frames every quarter
+//! second for the side-by-side with Dia, one recording of the whole run at
+//! full size, and the run's pacing at 120 Hz. No window reaches the screen:
+//! a headless GPUI window drawing with Metal.
+use gpui::{prelude::*, *};
+use pm_design::{Accessibility, Scheme, Tokens};
+use pm_shell::{
+    stage::{CueSheet, Stage},
+    welcome::{Button, Frame},
+    welcome_view::WelcomeView,
+};
+use std::{rc::Rc, sync::Arc, time::Instant};
+
+/// The 14-inch MacBook Pro's display, in points.
+pub(crate) const ROOM: (f32, f32) = (1512., 982.);
+
+pub(crate) fn welcome_frame() -> Frame {
+    crate::first_run::welcome_frame()
+}
+pub(crate) fn timeline_frame() -> Frame {
+    Frame {
+        surface: "S108".into(),
+        back: Some("Back to Welcome".into()),
+        title: "Choose your timeline".into(),
+        line: "Work the way you already do. Switch anytime.".into(),
+        buttons: vec![Button::new("continue", "Continue")],
+        default: Some("continue".into()),
+        ..Frame::default()
+    }
+}
+pub(crate) fn headless() -> HeadlessAppContext {
+    let cx = HeadlessAppContext::with_platform(
+        Arc::new(
+            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                .with_automatic_optical_sizing(),
+        ),
+        Arc::new(()),
+        || {
+            Some(Box::new(
+                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+            ))
+        },
+    );
+    cx.allow_parking();
+    cx
+}
+/// The stage with the intro (`intro` false: the window at once). `exact`
+/// waits for the light's renderer (recordings); otherwise a frame before it
+/// is ready paints no room, as the window does.
+pub(crate) fn open(
+    cx: &mut HeadlessAppContext,
+    tokens: Tokens,
+    intro: bool,
+    exact: bool,
+) -> WindowHandle<Stage> {
+    cx.open_window(size(px(ROOM.0), px(ROOM.1)), move |_, cx| {
+        let stage = cx.new(|cx| {
+            let mut stage = Stage::new(tokens.clone(), CueSheet::default(), intro, cx);
+            stage.clock = Some(0.);
+            stage.wait = exact;
+            stage
+        });
+        let card = cx.new(|cx| {
+            let mut card = WelcomeView::new(tokens, welcome_frame(), Rc::new(|_, _| {}), cx);
+            card.stage = true;
+            card
+        });
+        stage.update(cx, |s, cx| s.set_card(card, cx));
+        stage
+    })
+    .unwrap()
+}
+/// Onboarding's agent step on Free with Aero's plan card, drawn offscreen
+/// in light and dark (`--stage-capture <folder> offer`): what the step shows
+/// a signed-in person on Free, with the plan the backend offers.
+pub fn offer_stills(out: std::path::PathBuf) -> anyhow::Result<()> {
+    use crate::first_run::{AeroPlan, Choices, step_frame};
+    use pm_services::surface_backing::onboarding::Step as Onboard;
+    std::fs::create_dir_all(&out)?;
+    let base = Choices {
+        aero: AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":false,
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]})),
+        ..Choices::default()
+    };
+    // Aero chosen (the card), then each other row position chosen, then the
+    // pointer over an unchosen row (window points of the middle row).
+    let chosen = |agent: &str| Choices {
+        agent: agent.into(),
+        agent_picked: agent != "aero",
+        aero: base.aero.clone(),
+        ..Choices::default()
+    };
+    let shots: [(&str, &str, Option<(f32, f32)>); 4] = [
+        ("onboarding-offer", "aero", None),
+        ("onboarding-rows-middle", "claude", None),
+        ("onboarding-rows-last", "chatgpt", None),
+        ("onboarding-rows-hover", "aero", Some((280., 330.))),
+    ];
+    for (name, agent, pointer) in shots {
+        let frame = step_frame(
+            Onboard::Agent,
+            &chosen(agent),
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        );
+        for scheme in [Scheme::Light, Scheme::Dark] {
+            let tokens = Tokens::new(scheme, Accessibility::default());
+            let mut cx = headless();
+            let frame = frame.clone();
+            let window = cx
+                .open_window(size(px(560.), px(900.)), move |_, cx| {
+                    cx.new(|cx| WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx))
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            for pass in 0..3 {
+                cx.update_window(window.into(), |_, w, cx| {
+                    if let (1, Some((x, y))) = (pass, pointer) {
+                        w.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent {
+                                position: point(px(x), px(y)),
+                                pressed_button: None,
+                                modifiers: Modifiers::default(),
+                            }),
+                            cx,
+                        );
+                    }
+                    w.refresh();
+                    w.draw(cx).clear(cx);
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                cx.run_until_parked();
+            }
+            let image = cx
+                .capture_screenshot(window.into())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let look = if scheme == Scheme::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            image.save(out.join(format!("{name}-{look}.png")))?;
+        }
+    }
+    Ok(())
+}
+pub(crate) fn frame_at(
+    cx: &mut HeadlessAppContext,
+    window: WindowHandle<Stage>,
+    t: f64,
+) -> image::RgbaImage {
+    cx.update_window(window.into(), |view, w, cx| {
+        let stage = view.downcast::<Stage>().unwrap();
+        stage.update(cx, |s, _| s.clock = Some(t));
+        w.refresh();
+        w.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.capture_screenshot(window.into()).unwrap()
+}
+/// A step's card on the stage.
+fn step_card(cx: &mut App, tokens: &Tokens) -> Entity<WelcomeView> {
+    cx.new(|cx| {
+        let mut card = WelcomeView::new(tokens.clone(), timeline_frame(), Rc::new(|_, _| {}), cx);
+        card.stage = true;
+        card
+    })
+}
+/// Stills of the intro, frames every quarter second over 0–6 s (the
+/// side-by-side with Dia), and one recording of the whole run at full size
+/// and 60 fps with a step and the hand-off, into `out`; `stills_only`
+/// leaves out the frames and the recording. `reduced` runs with Reduce
+/// Motion.
+pub fn run(out: std::path::PathBuf, stills_only: bool, reduced: bool) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&out)?;
+    let accessibility = Accessibility {
+        reduce_motion: reduced,
+        ..Accessibility::default()
+    };
+    let tokens = Tokens::new(Scheme::Dark, accessibility);
+    let mut cx = headless();
+    let window = open(&mut cx, tokens.clone(), true, true);
+    let sheet = CueSheet::default();
+    let wave = |p: f64| sheet.window + sheet.wave_seconds * p;
+    let stills: Vec<(&str, f64)> = vec![
+        ("1-credit", 2.6),
+        ("2-mid-rise", 3.6),
+        ("3-rest", sheet.hold - 0.05),
+        ("4-mid-wave", wave(0.12)),
+        ("4b-wave", wave(0.2)),
+        ("5-window", sheet.length() + 0.3),
+    ];
+    let step_at = sheet.length() + 1.;
+    let hand_off_at = step_at + 1.4;
+    let end = if stills_only {
+        sheet.length() + 0.4
+    } else {
+        hand_off_at + 1.2
+    };
+    let fps = 60.;
+    let first = frame_at(&mut cx, window, 0.);
+    let (w, h) = (first.width(), first.height());
+    let mut ffmpeg = (!stills_only).then(|| {
+        std::fs::create_dir_all(out.join("quarter")).ok();
+        std::process::Command::new("ffmpeg")
+            .args([
+                "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
+            ])
+            .arg(format!("{w}x{h}"))
+            .args([
+                "-r", "60", "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "14",
+            ])
+            .arg(out.join("intro.mp4"))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("ffmpeg encodes the recording")
+    });
+    let mut stdin = ffmpeg.as_mut().map(|f| f.stdin.take().unwrap());
+    let (mut stepped, mut handed) = (false, false);
+    let mut next_still = 0;
+    let mut n = 0u32;
+    loop {
+        let t = f64::from(n) / fps;
+        if t > end {
+            break;
+        }
+        // Stills only: jump between the stills (the springs and the wave
+        // are functions of the clock).
+        if stills_only
+            && next_still < stills.len()
+            && t + 0.5 / fps < stills[next_still].1 - 1. / fps
+        {
+            n = (stills[next_still].1 * fps).round() as u32;
+            continue;
+        }
+        if !stills_only && t >= step_at && !stepped {
+            stepped = true;
+            cx.update_window(window.into(), |view, _, cx| {
+                let stage = view.downcast::<Stage>().unwrap();
+                let card = step_card(cx, &tokens);
+                stage.update(cx, |s, cx| {
+                    s.clock = Some(t);
+                    s.set_card(card, cx);
+                });
+            })
+            .unwrap();
+        }
+        if !stills_only && t >= hand_off_at && !handed {
+            handed = true;
+            cx.update_window(window.into(), |view, _, cx| {
+                let stage = view.downcast::<Stage>().unwrap();
+                stage.update(cx, |s, cx| {
+                    s.clock = Some(t);
+                    s.hand_off(|_, _| {}, cx);
+                });
+            })
+            .unwrap();
+        }
+        let image = frame_at(&mut cx, window, t);
+        while next_still < stills.len() && stills[next_still].1 <= t + 0.5 / fps {
+            image.save(out.join(format!("{}.png", stills[next_still].0)))?;
+            next_still += 1;
+        }
+        if !stills_only && n.is_multiple_of(15) && t <= 6.0 + 1e-9 {
+            image.save(out.join("quarter").join(format!("{:05.2}.png", t)))?;
+        }
+        if let Some(stdin) = stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(image.as_raw())?;
+        }
+        n += 1;
+    }
+    drop(stdin);
+    if let Some(mut ffmpeg) = ffmpeg {
+        anyhow::ensure!(ffmpeg.wait()?.success(), "ffmpeg failed");
+    }
+    eprintln!("{n} frames at {w}x{h}");
+    Ok(())
+}
+
+/// The run at 120 Hz as the window runs it: the room is not waited for (a
+/// frame paints the newest one), and each frame's main-thread work
+/// (layout, paint, the hold's GPU snapshots, the wave's preparation and
+/// encoding) is timed, then the GPU is waited for so the next frame starts
+/// clean. Offscreen: this is the work per frame against the 8.33 ms
+/// interval, not a measure of presentation.
+pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(out)?;
+    let mut cx = headless();
+    let window = open(
+        &mut cx,
+        Tokens::new(Scheme::Dark, Accessibility::default()),
+        true,
+        false,
+    );
+    let sheet = CueSheet::default();
+    // Warm: the shaders compile on their workers and the window draws once.
+    for t in [0., 0.1] {
+        frame_at(&mut cx, window, t);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    // The intro, the window's wave, a step in the window, and the hand-off.
+    let step_at = sheet.length() + 0.6;
+    let hand_off_at = step_at + 1.2;
+    let end = hand_off_at + 1.2;
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    let mut rows = Vec::new();
+    let mut n = 0u32;
+    let (mut stepped, mut handed) = (false, false);
+    loop {
+        let t = f64::from(n) / 120.;
+        if t > end {
+            break;
+        }
+        let started = Instant::now();
+        let cpu = thread_cpu();
+        if t >= step_at && !stepped {
+            stepped = true;
+            cx.update_window(window.into(), |view, _, cx| {
+                let stage = view.downcast::<Stage>().unwrap();
+                let card = step_card(cx, &tokens);
+                stage.update(cx, |s, cx| {
+                    s.clock = Some(t);
+                    s.set_card(card, cx);
+                });
+            })
+            .unwrap();
+        }
+        if t >= hand_off_at && !handed {
+            handed = true;
+            cx.update_window(window.into(), |view, _, cx| {
+                let stage = view.downcast::<Stage>().unwrap();
+                stage.update(cx, |s, cx| {
+                    s.clock = Some(t);
+                    s.hand_off(|_, _| {}, cx);
+                });
+            })
+            .unwrap();
+        }
+        cx.update_window(window.into(), |view, w, cx| {
+            let stage = view.downcast::<Stage>().unwrap();
+            stage.update(cx, |s, _| s.clock = Some(t));
+            w.refresh();
+            w.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        let cpu = (thread_cpu() - cpu) * 1e3;
+        let phase = if t >= hand_off_at {
+            "HandOff".to_owned()
+        } else if t >= step_at {
+            "Step".to_owned()
+        } else {
+            format!("{:?}", sheet.phase(t))
+        };
+        rows.push((t, phase, ms, cpu));
+        n += 1;
+        let spare = (1. / 120.) - started.elapsed().as_secs_f64();
+        if spare > 0. {
+            std::thread::sleep(std::time::Duration::from_secs_f64(spare));
+        }
+    }
+    let mut report = String::from("t,phase,ms,cpu_ms\n");
+    for (t, phase, ms, cpu) in &rows {
+        report.push_str(&format!("{t:.4},{phase},{ms:.3},{cpu:.3}\n"));
+    }
+    std::fs::write(out.join("pacing.csv"), report)?;
+    // Wall time includes the shared machine's preemption; the main
+    // thread's own CPU time is the work itself.
+    for (label, pick) in [("wall", 2usize), ("cpu", 3)] {
+        let value = |r: &(f64, String, f64, f64)| if pick == 2 { r.2 } else { r.3 };
+        let mut by: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+        for r in &rows {
+            by.entry(r.1.clone()).or_default().push(value(r));
+        }
+        by.insert("all".into(), rows.iter().map(value).collect());
+        let worst = rows.iter().fold(
+            (0., 0.),
+            |w: (f64, f64), r| {
+                if value(r) > w.1 { (r.0, value(r)) } else { w }
+            },
+        );
+        for (phase, mut v) in by {
+            v.sort_by(f64::total_cmp);
+            let over = v.iter().filter(|ms| **ms > 1000. / 120.).count();
+            eprintln!(
+                "pacing {label:<4} {phase:<8} frames {:>5}  p50 {:>6.2} ms  p95 {:>6.2}  p99 {:>6.2}  max {:>7.2}  over 8.33 ms: {over}",
+                v.len(),
+                v[v.len() / 2],
+                v[v.len() * 95 / 100],
+                v[v.len() * 99 / 100],
+                v[v.len() - 1]
+            );
+        }
+        eprintln!(
+            "pacing {label:<4} worst frame at t={:.3} s: {:.2} ms",
+            worst.0, worst.1
+        );
+    }
+    Ok(())
+}
+
+/// The calling thread's CPU time, in seconds.
+fn thread_cpu() -> f64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+}
+
+/// The Welcome in its real window (`--stage-capture <folder> window`): the
+/// window the first run shows once the wave has drawn it, with its AppKit
+/// title bar and controls, at the Welcome and at each step. The window
+/// stands off every display and the app never activates, so nothing reaches
+/// the screen; each still is the window as the window server composites it.
+/// AppKit draws the window of an app that is not active in its inactive
+/// look (grey window buttons).
+pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> anyhow::Result<()> {
+    use crate::first_run::{step_frame, welcome_frame};
+    use pm_services::surface_backing::onboarding::Step;
+    use pm_shell::stage::native_window;
+    std::fs::create_dir_all(&out)?;
+    gpui_macos::allow_offscreen_windows();
+    // SAFETY: set before any thread reads the environment.
+    unsafe {
+        std::env::set_var("PM_NATIVE_DRAW_OCCLUDED", "1");
+        // The display link that runs without a screen (on the main display).
+        std::env::set_var("PM_GPUI_CV_DISPLAY_LINK", "1");
+    }
+    pm_shell::capture_app(device, move |cx| {
+        let tokens = Tokens::new(Scheme::Dark, pm_shell::tokens().accessibility);
+        let stage = cx.new(|cx| {
+            let mut stage = Stage::new(tokens.clone(), CueSheet::default(), false, cx);
+            stage.wait = true;
+            stage
+        });
+        let m = &tokens.metrics;
+        let bounds = Bounds::new(
+            point(px(-9000.), px(-9000.)),
+            size(px(m.welcome_width), px(m.welcome_height)),
+        );
+        fn card(frame: Frame, tokens: Tokens, cx: &mut App) -> Entity<WelcomeView> {
+            cx.new(|cx| {
+                let mut card = WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx);
+                card.stage = true;
+                card
+            })
+        }
+        let first = tokens.clone();
+        let window = native_window::open(
+            stage.clone(),
+            None,
+            bounds,
+            move |_, cx| card(welcome_frame(), first, cx),
+            Rc::new(|_, _| true),
+            cx,
+        )
+        .expect("the Welcome window opens");
+        // Ordered in only where no display shows it.
+        if !native_window::off_every_display(window.into(), cx) {
+            eprintln!("The capture window would show on a display: nothing captured.");
+            cx.quit();
+            return;
+        }
+        native_window::show(window.into(), cx);
+        let _ = window.update(cx, |_, w, _| {
+            if let Some(ns) = native_window::ns_window(w) {
+                use objc2_app_kit::NSWindowButton;
+                let enabled = |b| ns.standardWindowButton(b).is_some_and(|b| b.isEnabled());
+                println!(
+                    "window buttons: close {}, minimize {}, zoom {}; resizable {}",
+                    enabled(NSWindowButton::CloseButton),
+                    enabled(NSWindowButton::MiniaturizeButton),
+                    enabled(NSWindowButton::ZoomButton),
+                    ns.styleMask()
+                        .contains(objc2_app_kit::NSWindowStyleMask::Resizable),
+                );
+            }
+        });
+        // (still, step, the timeline chosen, the Powermove account signed in)
+        let shots = [
+            ("1-welcome", None, "layers", None),
+            ("2-timeline-layers", Some(Step::Timeline), "layers", None),
+            ("2b-timeline-tracks", Some(Step::Timeline), "tracks", None),
+            ("3-agent", Some(Step::Agent), "layers", None),
+            ("3b-agent-signed-in", Some(Step::Agent), "layers", Some("ana@example.com")),
+            ("4-speech-model", Some(Step::Transcription), "layers", None),
+            ("5-workspace", Some(Step::Workspace), "layers", None),
+        ];
+        cx.spawn(async move |cx| {
+            for (name, step, timeline, powermove) in shots {
+                if let Some(step) = step {
+                    let tokens = tokens.clone();
+                    let _ = cx.update(|cx| {
+                        let next = card(
+                            step_frame(
+                                step,
+                                &crate::first_run::Choices {
+                                    timeline: timeline.into(),
+                                    ..Default::default()
+                                },
+                                &Default::default(),
+                                powermove,
+                                None,
+                            ),
+                            tokens,
+                            cx,
+                        );
+                        stage.update(cx, |s, cx| s.set_card(next.clone(), cx));
+                        let _ = window
+                            .update(cx, |_, w, cx| next.update(cx, |c, cx| c.hold_focus(w, cx)));
+                    });
+                }
+                // The step's change and its controls settle.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1500))
+                    .await;
+                let _ = cx.update(|cx| {
+                    let _ = window.update(cx, |_, w, _| {
+                        match native_window::ns_window(w)
+                            .and_then(|ns| capture_window(ns.windowNumber() as u32))
+                        {
+                            Some(image) => {
+                                let path = out.join(format!("{name}.png"));
+                                image.save(&path).expect("writes the still");
+                                println!("{}", path.display());
+                            }
+                            None => eprintln!("{name}: the window could not be captured"),
+                        }
+                    });
+                });
+            }
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
+    Ok(())
+}
+
+/// The window `number` as the window server composites it (this app's own
+/// window: no screen-recording grant), straight RGBA.
+fn capture_window(number: u32) -> Option<image::RgbaImage> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGImageGetWidth(image: *const c_void) -> usize;
+        fn CGImageGetHeight(image: *const c_void) -> usize;
+        fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
+        fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
+        fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+        fn CFDataGetLength(data: *const c_void) -> isize;
+        fn CFRelease(object: *const c_void);
+    }
+    // CGWindowListCreateImage: still in CoreGraphics, no longer in the SDK's
+    // headers, so looked up by name.
+    type Create = unsafe extern "C" fn(Rect, u32, u32, u32) -> *const c_void;
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGWindowListCreateImage".as_ptr()) };
+    if symbol.is_null() {
+        return None;
+    }
+    let create: Create = unsafe { std::mem::transmute(symbol) };
+    // The null rectangle: the window's own bounds. Including this window
+    // only; its bounds without the shadow, at the display's resolution.
+    let null = Rect {
+        x: f64::INFINITY,
+        y: f64::INFINITY,
+        w: 0.,
+        h: 0.,
+    };
+    let image = unsafe { create(null, 1 << 3, number, 1 << 0 | 1 << 3) };
+    if image.is_null() {
+        return None;
+    }
+    let result = unsafe {
+        let (w, h, row) = (
+            CGImageGetWidth(image),
+            CGImageGetHeight(image),
+            CGImageGetBytesPerRow(image),
+        );
+        let data = CGDataProviderCopyData(CGImageGetDataProvider(image));
+        let bytes =
+            std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize);
+        // 32-bit little-endian, alpha first and premultiplied: B, G, R, A.
+        let mut out = image::RgbaImage::new(w as u32, h as u32);
+        for y in 0..h {
+            for x in 0..w {
+                let p = &bytes[y * row + x * 4..y * row + x * 4 + 4];
+                let a = p[3];
+                let un = |v: u8| {
+                    if a == 0 {
+                        0
+                    } else {
+                        ((v as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
+                    }
+                };
+                out.put_pixel(
+                    x as u32,
+                    y as u32,
+                    image::Rgba([un(p[2]), un(p[1]), un(p[0]), a]),
+                );
+            }
+        }
+        CFRelease(data);
+        out
+    };
+    unsafe { CFRelease(image) };
+    Some(result)
+}

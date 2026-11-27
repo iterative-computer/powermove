@@ -1,0 +1,23 @@
+[package]
+name = "pm-panel-timeline"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+accesskit = "=0.24.1"
+pm-design = { path = "../design" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+pm-kernel = { path = "../kernel" }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-surface = { path = "../surface" }
+
+[dev-dependencies]
+pm-kernel = { path = "../kernel", features = ["synthetic"] }
+
+[[bench]]
+name = "timeline_scale"
+harness = false

@@ -1,0 +1,865 @@
+//! Property channels (`{ v, kf, expr }`): values, expressions, the
+//! stopwatch, and reset.
+//!
+//! Ports `setProperty` and `setExpression` of `legacy/core/editing.ts`,
+//! `PM.toggleStopwatch` of `legacy/core/anim.ts`, and the inspector's
+//! channel-row actions (`extensions/inspector/ChannelRow.svelte`).
+
+use pm_model::{Map, Value};
+
+use super::channels::{self, Step};
+use super::keyframes::{self, EaseSpec};
+use super::{Cx, new_id, track, values};
+use crate::error::CommandError;
+use crate::model::LayerLoc;
+
+/// How `set_property` writes (`mode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyMode {
+    /// Key at `time` when the channel already has keys, else the static
+    /// value (the inspector and canvas).
+    #[default]
+    Auto,
+    /// Always key at `time` (starts animation on a static channel).
+    Keyframe,
+    /// Always the static value `v`, even on an animated channel (its keys
+    /// keep winning; the old `mode: 'static'` behaved the same).
+    Static,
+}
+
+/// `set_property`.
+/// Interactive edits can carry the kernel key selection to update selected keys together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetProperty {
+    pub layer_id: String,
+    /// The channel key (see the module docs of [`super`]).
+    pub channel: String,
+    /// The new value. A numeric channel needs a finite number
+    /// (`<channel> must be a finite number`); colors are `#RRGGBB[AA]`
+    /// strings, switches booleans, menus strings.
+    pub value: Value,
+    /// The playhead (composition seconds): where a key is written.
+    pub time: f64,
+    pub mode: KeyMode,
+    /// Ease of a key this command creates (default linear); with an
+    /// explicit ease an existing key's ease is replaced too.
+    pub ease: Option<EaseSpec>,
+    /// Hold flag of the written key.
+    pub hold: Option<bool>,
+    /// `preserveHandEdits` (default true): refuse a channel with a
+    /// hand-edit marker. Generated origins always preserve.
+    pub preserve_hand_edits: bool,
+    /// `markIntent`: record a hand-edit marker (`locked_intent[channel]`)
+    /// so agents leave the value alone.
+    pub mark_intent: bool,
+}
+
+impl SetProperty {
+    /// An interface edit with the defaults (`mode: auto`, linear, preserve).
+    pub fn new(
+        layer_id: impl Into<String>,
+        channel: impl Into<String>,
+        value: impl Into<Value>,
+        time: f64,
+    ) -> SetProperty {
+        SetProperty {
+            layer_id: layer_id.into(),
+            channel: channel.into(),
+            value: value.into(),
+            time,
+            mode: KeyMode::Auto,
+            ease: None,
+            hold: None,
+            preserve_hand_edits: true,
+            mark_intent: false,
+        }
+    }
+}
+
+/// Property commands.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum PropertyCommand {
+    /// `set_property` (`setProperty`): the static value, or a key at `time`
+    /// (layer-local, snapped to a frame; an existing key within half a frame
+    /// is updated). Changing a video's constant `c.speed` rescales its
+    /// duration. Label "Change <Channel label>" (e.g. "Change Opacity").
+    Set(SetProperty),
+    /// `set_expression` (`setExpression`): `None` or empty removes it.
+    /// Refuses an expression the expression engine rejects. Generated
+    /// origins may not overwrite a hand-edited 3D channel. Label "Set
+    /// Expression" / "Remove Expression".
+    SetExpression {
+        layer_id: String,
+        channel: String,
+        expression: Option<String>,
+    },
+    /// The stopwatch (`PM.toggleStopwatch`): animated → static at the value
+    /// shown at `time` (keys removed); static → one key at `time` holding
+    /// the static value. Label "Enable Animation" / "Remove Animation".
+    ToggleStopwatch {
+        layer_id: String,
+        channel: String,
+        time: f64,
+    },
+    /// Reset (channel-row menu): keys and expression removed, then the
+    /// channel's default. Transform channels default from the shipped reset
+    /// table; content and effect channels from `default`, which the caller
+    /// resolves like every definition. With neither the static value stays.
+    Reset {
+        layer_id: String,
+        channel: String,
+        default: Option<Value>,
+        time: f64,
+    },
+}
+
+impl PropertyCommand {
+    pub fn label(&self) -> String {
+        match self {
+            PropertyCommand::Set(c) => format!("Change {}", channel_label(&c.channel)),
+            PropertyCommand::SetExpression {
+                expression: Some(e),
+                ..
+            } if !e.is_empty() => "Set Expression".into(),
+            PropertyCommand::SetExpression { .. } => "Remove Expression".into(),
+            PropertyCommand::ToggleStopwatch { .. } => "Toggle Animation".into(),
+            PropertyCommand::Reset { .. } => "Reset".into(),
+        }
+    }
+
+    pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
+        match self {
+            PropertyCommand::Set(c) => set_property(cx, c),
+            PropertyCommand::SetExpression {
+                layer_id,
+                channel,
+                expression,
+            } => set_expression(cx, layer_id, channel, expression.as_deref()),
+            PropertyCommand::ToggleStopwatch {
+                layer_id,
+                channel,
+                time,
+            } => toggle_stopwatch(cx, layer_id, channel, *time),
+            PropertyCommand::Reset {
+                layer_id,
+                channel,
+                default,
+                time,
+            } => reset(cx, layer_id, channel, default.as_ref(), *time),
+        }
+    }
+}
+
+/// `resetChannel` (`ChannelRow.svelte`).
+fn reset(
+    cx: &mut Cx<'_>,
+    layer_id: &str,
+    channel: &str,
+    default: Option<&Value>,
+    time: f64,
+) -> Result<(), CommandError> {
+    let (loc, layer, key, _) = resolve(cx, layer_id, channel)?;
+    let value = default.cloned().or_else(|| {
+        let comp = cx.comp_node(loc.comp_id.as_deref()).ok()?.to_value();
+        let context = pm_fx_defs::DefaultContext {
+            width: values::num(&comp, "w")?,
+            height: values::num(&comp, "h")?,
+        };
+        let value =
+            pm_fx_defs::builtins().reset_default(values::text(&layer, "type")?, &key, context)?;
+        pm_model::json::parse(&value.to_string()).ok()
+    });
+    keyframes::KeyframeCommand::Replace(Box::new(keyframes::ReplaceKeyframes {
+        layer_id: layer_id.into(),
+        channel: key.clone(),
+        keyframes: Vec::new(),
+        replace: true,
+        expression: Some(None),
+        preserve_hand_edits: false,
+        time,
+    }))
+    .plan(cx)?;
+    if let Some(value) = value {
+        let mut c = SetProperty::new(layer_id, key, value, time);
+        c.mode = KeyMode::Static;
+        c.preserve_hand_edits = false;
+        set_property(cx, &c)?;
+    }
+    Ok(())
+}
+
+/// The layer and its channel path, after the lock check and the
+/// `property()` materialization (`Property “x” was not found on “name”`).
+pub(crate) fn resolve(
+    cx: &Cx<'_>,
+    layer_id: &str,
+    channel: &str,
+) -> Result<(LayerLoc, Value, String, Vec<Step>), CommandError> {
+    let (loc, mut layer) = cx.layer_mut_checked(layer_id)?;
+    let key = values::channel_key(channel).to_owned();
+    // The 3D source preserves hand-authored channels for every generated
+    // origin, including expressions and full keyframe replacements.
+    if cx.origin().is_generated()
+        && (layer.get("d").and_then(|d| d.get("extrusion")).is_some()
+            || layer
+                .get("d")
+                .and_then(|d| d.get("definition"))
+                .and_then(Value::as_str)
+                .is_some_and(|d| {
+                    [
+                        pm_scene3d::schema::OBJECT,
+                        pm_scene3d::schema::LIGHT,
+                        pm_scene3d::schema::CAMERA,
+                    ]
+                    .contains(&d)
+                }))
+        && (locked_intent(&layer, &key) || locked_intent(&layer, "3d"))
+    {
+        return Err(CommandError::PreservedHandEdit {
+            layer_id: layer_id.into(),
+            channel: key,
+        });
+    }
+    let path =
+        channels::materialize(&mut layer, &key).ok_or_else(|| CommandError::PropertyNotFound {
+            layer_id: layer_id.to_owned(),
+            name: values::layer_name(&layer, layer_id),
+            channel: key.clone(),
+        })?;
+    Ok((loc, layer, key, path))
+}
+
+/// `lockedIntent(layer, channel)`: a marker on the channel or its root.
+pub(crate) fn locked_intent(layer: &Value, channel: &str) -> bool {
+    layer
+        .get("locked_intent")
+        .is_some_and(|intent| has_locked_intent(intent, channel))
+}
+
+fn has_locked_intent(intent: &Value, channel: &str) -> bool {
+    let root = channel.split('.').next().unwrap_or(channel);
+    intent.get(channel).is_some_and(Value::is_truthy)
+        || intent.get(root).is_some_and(Value::is_truthy)
+}
+
+/// `policyCommand`: extensions always preserve hand edits; the interface and
+/// agents may ask to overwrite them.
+pub(crate) fn preserves(cx: &Cx<'_>, requested: bool) -> bool {
+    requested || cx.origin() == super::Origin::Extension
+}
+
+fn hand_edit(layer_id: &str, channel: &str) -> CommandError {
+    CommandError::PreservedHandEdit {
+        layer_id: layer_id.to_owned(),
+        channel: channel.to_owned(),
+    }
+}
+
+/// Whether the channel holds numbers (`typeof current === 'number'`).
+fn numeric_channel(prop: &Value) -> bool {
+    let keys = track::keys_of(prop);
+    match keys.first() {
+        Some(k) => k.get("v").and_then(Value::as_f64).is_some(),
+        None => prop.get("v").and_then(Value::as_f64).is_some(),
+    }
+}
+
+/// The static video rate, or None for an authored remap/animated rate.
+pub fn constant_video_speed(layer: &Value) -> Option<f64> {
+    if values::text(layer, "type") != Some("video") {
+        return None;
+    }
+    let d = layer.get("d")?;
+    if let Some(remap) = d.get("timeRemap") {
+        let animated = if values::is_property(remap) {
+            remap.get("v").is_some_and(Value::is_truthy)
+                || !track::keys_of(remap).is_empty()
+                || remap.get("expr").is_some_and(Value::is_truthy)
+        } else {
+            remap.is_truthy()
+        };
+        if animated {
+            return None;
+        }
+    }
+    let speed = d.get("speed");
+    if let Some(s) = speed.filter(|s| values::is_property(s))
+        && (!track::keys_of(s).is_empty() || s.get("expr").is_some_and(Value::is_truthy))
+    {
+        return None;
+    }
+    let value = match speed {
+        Some(s) if values::is_property(s) => s.get("v").map(track::js_number).unwrap_or(f64::NAN),
+        Some(Value::Null) | None => 1.0,
+        Some(s) => track::js_number(s),
+    };
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+/// `resizeVideoForSpeed(layer, previous)`.
+pub(crate) fn resize_video_for_speed(layer: &mut Value, previous: Option<f64>, fps: f64) {
+    let next = constant_video_speed(layer);
+    let (Some(previous), Some(next)) = (previous, next) else {
+        return;
+    };
+    if previous == next {
+        return;
+    }
+    let dur = values::num(layer, "dur").unwrap_or(f64::NAN);
+    let duration = dur * previous / next;
+    if !duration.is_finite() {
+        return;
+    }
+    values::obj(layer).insert("dur", Value::Number((1.0 / fps).max(duration)));
+}
+
+pub(crate) fn previous_speed(layer: &Value) -> Option<f64> {
+    constant_video_speed(layer)
+}
+
+fn ease_name(ease: Option<&EaseSpec>) -> Result<Option<String>, CommandError> {
+    match ease {
+        None => Ok(None),
+        Some(EaseSpec::Preset(name)) => Ok(Some(name.clone())),
+        Some(EaseSpec::Curve(_)) => Err(CommandError::Invalid(
+            "set_property takes a named ease; use set_easing for a curve".into(),
+        )),
+    }
+}
+
+/// Named presets collected for one uninterrupted run of property commands.
+/// The pinned editor finishes these after every key has its final neighbours.
+type PresetEdits = Vec<(String, String, Option<bool>)>;
+type PropertyPresets = (String, String, PresetEdits);
+#[derive(Default)]
+pub(crate) struct Presets(Vec<PropertyPresets>);
+
+impl Presets {
+    fn remember(&mut self, layer: &str, channel: &str, id: String, name: String) {
+        let index = self
+            .0
+            .iter()
+            .position(|(l, c, _)| l == layer && c == channel);
+        let index = index.unwrap_or_else(|| {
+            self.0.push((layer.into(), channel.into(), Vec::new()));
+            self.0.len() - 1
+        });
+        let edits = &mut self.0[index].2;
+        if let Some(edit) = edits.iter_mut().find(|e| e.0 == id) {
+            edit.1 = name;
+        } else {
+            edits.push((id, name, None));
+        }
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        root: &pm_model::Node,
+        origin: super::Origin,
+        layer_index: Option<&crate::model::LayerIndex>,
+    ) -> Result<Vec<pm_model::Op>, CommandError> {
+        if self.0.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut cx = Cx::new(root, origin);
+        cx.layer_index = layer_index;
+        for (layer_id, channel, edits) in self.0.drain(..) {
+            if is_core_track(&channel) {
+                let loc = cx.find(&layer_id)?;
+                cx.check_lock(&loc, &layer_id)?;
+                let mut path = loc.path();
+                path.extend(["p".into(), channel.as_str().into()]);
+                if let Some(mut prop) = cx.value_at(&path).filter(values::is_property) {
+                    track::apply_presets(track::keys_mut(&mut prop), &edits);
+                    cx.replace(path, prop)?;
+                    continue;
+                }
+            }
+            let (loc, mut layer) = cx.layer_mut_checked(&layer_id)?;
+            let path = channels::materialize(&mut layer, &channel).expect("written property");
+            let prop = channels::get_mut(&mut layer, &path).expect("written property");
+            track::apply_presets(track::keys_mut(prop), &edits);
+            cx.put_layer(&loc, layer)?;
+        }
+        Ok(cx.finish())
+    }
+}
+
+pub(crate) fn plan_set(
+    root: &pm_model::Node,
+    origin: super::Origin,
+    c: &SetProperty,
+    presets: &mut Presets,
+    selection: &crate::selection::Selection,
+    state: Option<&crate::state::StateSnapshot>,
+    project: Option<&str>,
+    layer_index: Option<&crate::model::LayerIndex>,
+) -> Result<Vec<pm_model::Op>, CommandError> {
+    let mut cx = Cx::new(root, origin);
+    cx.layer_index = layer_index;
+    cx.state = state;
+    cx.project = project;
+    cx.selection = Some(selection);
+    set_property_inner(&mut cx, c, Some(presets), true)?;
+    Ok(cx.finish())
+}
+
+/// `setProperty(command)` outside a property batch.
+pub(crate) fn set_property(cx: &mut Cx<'_>, c: &SetProperty) -> Result<(), CommandError> {
+    set_property_inner(cx, c, None, true)
+}
+
+pub(super) fn set_scene_property(cx: &mut Cx<'_>, c: &SetProperty) -> Result<(), CommandError> {
+    // Composition plans already account for explicit coupled shape edits.
+    set_property_inner(cx, c, None, false)
+}
+
+fn set_property_inner(
+    cx: &mut Cx<'_>,
+    c: &SetProperty,
+    presets: Option<&mut Presets>,
+    migrate_fog: bool,
+) -> Result<(), CommandError> {
+    let direct = direct_property(cx, c)?;
+    let direct_channel = direct.is_some();
+    let (loc, mut layer, channel, path) = match direct {
+        Some(property) => property,
+        None => resolve(cx, &c.layer_id, &c.channel)?,
+    };
+    if preserves(cx, c.preserve_hand_edits) && locked_intent(&layer, &channel) {
+        return Err(hand_edit(&c.layer_id, &channel));
+    }
+    let time = values::finite(c.time, "time")?;
+    let fps = cx.fps(loc.comp_id.as_deref());
+    let ease = ease_name(c.ease.as_ref())?;
+    let prop = channels::get(&layer, &path).cloned().unwrap_or_default();
+    let mut value = c.value.clone();
+    if numeric_channel(&prop) {
+        value = Value::Number(values::finite(track::js_number(&value), &channel)?);
+    }
+    let animated = !track::keys_of(&prop).is_empty();
+    let keyed = match c.mode {
+        KeyMode::Keyframe => true,
+        KeyMode::Auto => animated,
+        KeyMode::Static => false,
+    };
+    let local = track::local_time(&layer, time);
+    // Migrate only an inactive legacy atmosphere when it is first enabled.
+    // This remains part of this single-writer edit and its Undo record.
+    if migrate_fog
+        && channel == "world.fogDensity"
+        && !keyed
+        && value.as_f64().is_some_and(|v| v > 0.)
+    {
+        migrate_inactive_fog(&mut layer)?;
+    }
+    // Selection belongs to the kernel document, never a panel's cached rows.
+    // Only the addressed scalar channel is changed (linked axes are separate commands).
+    let selected: Vec<String> = if keyed && cx.origin().is_human() {
+        cx.selection
+            .map(|selection| {
+                track::keys_of(&prop)
+                    .iter()
+                    .filter_map(|key| key.get("i").and_then(Value::as_str))
+                    .filter(|id| selection.key_selected(&c.layer_id, id))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let snapped = values::snap(local, fps).max(0.0);
+    let multi = selected.len() > 1
+        && track::keys_of(&prop).iter().any(|key| {
+            key.get("t")
+                .and_then(Value::as_f64)
+                .is_some_and(|t| (t - snapped).abs() < 0.5 / fps)
+                && key
+                    .get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| selected.iter().any(|s| s == id))
+        });
+    if multi {
+        let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+        for key in track::keys_mut(prop) {
+            if key
+                .get("i")
+                .and_then(Value::as_str)
+                .is_some_and(|id| selected.iter().any(|s| s == id))
+            {
+                values::obj(key).insert("v", value.clone());
+            }
+        }
+    } else if keyed {
+        let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+        let before = track::keys_of(prop).len();
+        let (id, _) = track::set_key_on(
+            prop,
+            local,
+            value,
+            ease.as_deref().unwrap_or("linear"),
+            fps,
+            true,
+            || new_id("k"),
+        );
+        let created = track::keys_of(prop).len() != before;
+        let keys = track::keys_mut(prop);
+        if let Some(hold) = c.hold
+            && let Some(i) = track::index_of(keys, &id)
+        {
+            track::set_hold_flag(keys, i, hold);
+        }
+        // Plain updates keep native velocity; new keys and explicit presets
+        // get their preset against the final neighbours.
+        if created || ease.is_some() {
+            let name = ease.clone().unwrap_or_else(|| "linear".into());
+            if let Some(presets) = presets {
+                presets.remember(&c.layer_id, &channel, id, name);
+            } else {
+                track::apply_presets(keys, &[(id, name, None)]);
+            }
+        }
+    } else {
+        let speed_before = (channel == "c.speed")
+            .then(|| previous_speed(&layer))
+            .flatten();
+        let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+        values::obj(prop).insert("v", value);
+        if channel == "c.speed" {
+            let old_duration = values::num(&layer, "dur").unwrap_or(0.);
+            resize_video_for_speed(&mut layer, speed_before, fps);
+            super::timing::speed_ripple(cx, &layer, old_duration)?;
+        }
+    }
+    if channel == "c.size" && cx.origin().is_human() && values::text(&layer, "type") == Some("text")
+    {
+        let size = channels::get(&layer, &path).expect("resolved").clone();
+        resize_text_anchor(&mut layer, Some(&prop), &size, local, fps);
+    }
+    if c.mark_intent {
+        mark_intent(&mut layer, &channel, local);
+    }
+    if direct_channel {
+        let mut at = loc.path();
+        at.extend(["p".into(), channel.as_str().into()]);
+        let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+        cx.replace(at, std::mem::take(prop))?;
+        if c.mark_intent {
+            let mut at = loc.path();
+            at.push("locked_intent".into());
+            let intent = layer
+                .as_object_mut()
+                .and_then(|layer| layer.get_mut("locked_intent"))
+                .expect("marked intent");
+            cx.replace(at, std::mem::take(intent))?;
+        }
+        Ok(())
+    } else {
+        cx.put_layer(&loc, layer)
+    }
+}
+
+/// Resize the text's local anchor along with the glyphs. The layer's
+/// position already places that anchor in the parent coordinate space.
+pub(super) fn resize_text_anchor(
+    layer: &mut Value,
+    previous: Option<&Value>,
+    size: &Value,
+    local: f64,
+    fps: f64,
+) {
+    let has_expression = |prop: &Value| prop.get("expr").is_some_and(Value::is_truthy);
+    if previous.is_some_and(has_expression) || has_expression(size) {
+        return;
+    }
+    let size_keys = track::keys_of(size);
+    let snapped = values::snap(local, fps).max(0.);
+    let at = if size_keys.is_empty() { local } else { snapped };
+    let font_size = |value: &Value| {
+        let value = if values::is_property(value) {
+            keyframes::value_at(value, at, "c.size")
+        } else {
+            value.clone()
+        };
+        // The same default and minimum used by text geometry.
+        let size = track::js_number(&value);
+        if size.is_nan() || size == 0. {
+            16.
+        } else {
+            size.max(1.)
+        }
+    };
+    let factor = font_size(size) / previous.map(font_size).unwrap_or(16.);
+    if !factor.is_finite() || factor <= 0. || factor == 1. {
+        return;
+    }
+    // A static pivot belongs to every size key. With distinct key times,
+    // leave it alone rather than moving the artwork at the other keys.
+    let multiple_size_times = size_keys
+        .windows(2)
+        .any(|keys| values::num(&keys[0], "t") != values::num(&keys[1], "t"));
+    let d = layer.get("d");
+    let paragraph = d
+        .and_then(|d| d.get("paragraph"))
+        .is_some_and(Value::is_truthy);
+    for (axis, start, end) in [("anchor.x", "x0", "x1"), ("anchor.y", "y0", "y1")] {
+        if paragraph && axis == "anchor.x" {
+            continue;
+        }
+        let Some(path) = channels::find(layer, axis) else {
+            continue;
+        };
+        let prop = channels::get(layer, &path).expect("resolved");
+        let animated = !track::keys_of(prop).is_empty();
+        if has_expression(prop) || (multiple_size_times && !animated) {
+            continue;
+        }
+        let anchor_at = if animated { snapped } else { at };
+        let Some(anchor) = keyframes::value_at(prop, anchor_at, axis).as_f64() else {
+            continue;
+        };
+        let next_anchor = anchor * factor;
+        if !next_anchor.is_finite() {
+            continue;
+        }
+
+        // Legacy font bounds already pin the rendered type by the anchor's
+        // fraction of those bounds. For a static pivot, scale the reference
+        // too so the fraction stays identical. An animated pivot shares its
+        // reference across all keys, so let rendering handle that axis.
+        let reference = layer.get("d").and_then(|d| d.get("fontAnchorBounds"));
+        let bounds = reference.and_then(|bounds| {
+            let lo = values::num(bounds, start)?;
+            let hi = values::num(bounds, end)?;
+            (lo.is_finite() && hi.is_finite() && hi > lo).then_some([lo, hi])
+        });
+        if let Some([lo, hi]) = bounds {
+            let (lo, hi) = (lo * factor, hi * factor);
+            if animated || !lo.is_finite() || !hi.is_finite() || hi <= lo {
+                continue;
+            }
+            let bounds_path = [channels::key("d"), channels::key("fontAnchorBounds")];
+            let bounds = channels::get_mut(layer, &bounds_path).expect("resolved");
+            values::obj(bounds).insert(start, Value::Number(lo));
+            values::obj(bounds).insert(end, Value::Number(hi));
+        }
+        if next_anchor == anchor {
+            continue;
+        }
+        let prop = channels::get_mut(layer, &path).expect("resolved");
+        let value = Value::Number(next_anchor);
+        if animated {
+            let (id, created) =
+                track::set_key_on(prop, snapped, value, "linear", fps, true, || new_id("k"));
+            if created {
+                track::apply_presets(track::keys_mut(prop), &[(id, "linear".into(), None)]);
+            }
+        } else {
+            values::obj(prop).insert("v", value);
+        }
+    }
+}
+
+/// Core transform tracks already have a channel object. Only read the track
+/// and the layer-level fields used by Set, leaving vector geometry, masks,
+/// effects and the other tracks shared.
+fn direct_property(
+    cx: &Cx<'_>,
+    c: &SetProperty,
+) -> Result<Option<(LayerLoc, Value, String, Vec<Step>)>, CommandError> {
+    let channel = values::channel_key(&c.channel);
+    if !is_core_track(channel) {
+        return Ok(None);
+    }
+    let loc = cx.find(&c.layer_id)?;
+    let node = cx.layer_node(&loc)?;
+    let Some(track) = node.get("p").and_then(|p| p.get(channel)) else {
+        return Ok(None);
+    };
+    cx.check_lock(&loc, &c.layer_id)?;
+    let track = track.to_value();
+    if !values::is_property(&track) {
+        return Ok(None);
+    }
+    let mut fields = Map::new();
+    for field in ["from", "locked_intent"] {
+        if let Some(value) = node.get(field) {
+            fields.insert(field, value.to_value());
+        }
+    }
+    let mut props = Map::new();
+    props.insert(channel, track);
+    fields.insert("p", Value::Object(props));
+    let layer = Value::Object(fields);
+    if cx.origin().is_generated()
+        && super::scene3d::is_scene3d_layer(node)
+        && (locked_intent(&layer, channel) || locked_intent(&layer, "3d"))
+    {
+        return Err(hand_edit(&c.layer_id, channel));
+    }
+    Ok(Some((
+        loc,
+        layer,
+        channel.to_owned(),
+        vec![channels::key("p"), channels::key(channel)],
+    )))
+}
+
+fn is_core_track(channel: &str) -> bool {
+    matches!(
+        channel,
+        "position.x"
+            | "position.y"
+            | "position.z"
+            | "rotation"
+            | "rotation.x"
+            | "rotation.y"
+            | "rotation.z"
+            | "scale.x"
+            | "scale.y"
+            | "scale.z"
+            | "opacity"
+            | "anchor.x"
+            | "anchor.y"
+            | "anchor.z"
+    )
+}
+
+/// Never reinterpret active, animated, expression-driven or hand-shaped fog.
+fn migrate_inactive_fog(layer: &mut Value) -> Result<(), CommandError> {
+    let source = pm_scene3d::from_model(layer).map_err(|e| CommandError::Invalid(e.to_string()))?;
+    if !pm_scene3d::contract::inactive_legacy_fog(&source) {
+        return Ok(());
+    }
+    for (key, value) in [("fogHeightFalloff", 0.06), ("fogDistance", 400.)] {
+        let path = channels::materialize(layer, &format!("world.{key}")).expect("validated world");
+        values::obj(channels::get_mut(layer, &path).expect("validated fog channel"))
+            .insert("v", Value::Number(value));
+    }
+    Ok(())
+}
+
+/// `layer.locked_intent[channel] = { by: 'human', at, t }`.
+pub(crate) fn mark_intent(layer: &mut Value, channel: &str, local: f64) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or_default();
+    let mut m = Map::new();
+    m.insert("by", values::s("human"));
+    m.insert("at", Value::Number(at));
+    m.insert("t", Value::Number(track::round3(local)));
+    let l = values::obj(layer);
+    if l.get("locked_intent").and_then(Value::as_object).is_none() {
+        l.insert("locked_intent", Value::Object(Map::new()));
+    }
+    if let Some(intent) = l.get_mut("locked_intent").and_then(Value::as_object_mut) {
+        intent.insert(channel, Value::Object(m));
+    }
+}
+
+/// `MAX_EXPRESSION_CHARS` of `validate/commands.ts`.
+pub const MAX_EXPRESSION_CHARS: usize = 2_000;
+
+/// `expressionDiagnostic(source)`: the engine's parser decides.
+pub(crate) fn check_expression(source: &str) -> Result<(), CommandError> {
+    if source.encode_utf16().count() > MAX_EXPRESSION_CHARS {
+        return Err(CommandError::Invalid(format!(
+            "Use an expression of at most {MAX_EXPRESSION_CHARS} characters."
+        )));
+    }
+    pm_expr::Expression::parse(source, pm_expr::Dialect::Native)
+        .map(|_| ())
+        .map_err(|e| CommandError::Invalid(e.to_string()))
+}
+
+/// What an expression editor says about `source` before it is applied:
+/// `None` when [`PropertyCommand::SetExpression`] would accept it.
+pub fn expression_diagnostic(source: &str) -> Option<String> {
+    match check_expression(source) {
+        Err(CommandError::Invalid(message)) => Some(message),
+        Err(other) => Some(other.to_string()),
+        Ok(()) => None,
+    }
+}
+
+/// `setExpression(command)`.
+fn set_expression(
+    cx: &mut Cx<'_>,
+    layer_id: &str,
+    channel: &str,
+    expression: Option<&str>,
+) -> Result<(), CommandError> {
+    let (loc, mut layer, _, path) = resolve(cx, layer_id, channel)?;
+    let expression = expression.filter(|e| !e.is_empty());
+    if let Some(e) = expression {
+        check_expression(e)?;
+    }
+    let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+    values::obj(prop).insert("expr", expression.map(values::s).unwrap_or(Value::Null));
+    cx.put_layer(&loc, layer)
+}
+
+/// `PM.toggleStopwatch(L, key, T)`: animated → static at the value shown at
+/// `time`; static → one key at `time` with the static value.
+fn toggle_stopwatch(
+    cx: &mut Cx<'_>,
+    layer_id: &str,
+    channel: &str,
+    time: f64,
+) -> Result<(), CommandError> {
+    let (loc, mut layer, _, path) = resolve(cx, layer_id, channel)?;
+    let fps = cx.fps(loc.comp_id.as_deref());
+    let local = track::local_time(&layer, values::finite(time, "time")?);
+    let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+    if track::keys_of(prop).is_empty() {
+        let v = prop.get("v").cloned().unwrap_or(Value::Null);
+        track::set_key_on(prop, local, v, "linear", fps, true, || new_id("k"));
+    } else {
+        let v = super::keyframes::value_at(prop, local, channel);
+        let m = values::obj(prop);
+        m.insert("v", v);
+        m.insert("kf", Value::Array(Vec::new()));
+    }
+    cx.put_layer(&loc, layer)
+}
+
+/// `PM.CH[key].label` for transform channels, else the key's last part.
+pub fn channel_label(channel: &str) -> String {
+    let key = super::values::channel_key(channel);
+    let known = match key {
+        "anchor.x" => "Anchor X",
+        "anchor.y" => "Anchor Y",
+        "anchor.z" => "Anchor Z",
+        "position.x" => "Position X",
+        "position.y" => "Position Y",
+        "position.z" => "Position Z",
+        "scale.x" => "Scale X",
+        "scale.y" => "Scale Y",
+        "scale.z" => "Scale Z",
+        "rotation" => "Rotation",
+        "rotation.x" => "Rotation X",
+        "rotation.y" => "Rotation Y",
+        "opacity" => "Opacity",
+        "skew" => "Skew",
+        "perspective" => "Perspective",
+        "dofBlur" => "Depth of Field Blur",
+        "dofFocus" => "Focus Distance",
+        "l.blend" => "Blend mode",
+        "l.mblur" => "Motion blur",
+        "l.on" => "Visibility",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.to_owned();
+    }
+    let last = key.rsplit('.').next().unwrap_or(key);
+    let last = if last == "$enabled" { "Enabled" } else { last };
+    let mut chars = last.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => "Property".into(),
+    }
+}

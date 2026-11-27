@@ -1,0 +1,1208 @@
+const std = @import("std");
+const credentials = @import("../auth/credentials.zig");
+const model_provider = @import("../config/model_provider.zig");
+const model_capabilities = @import("../config/model_capabilities.zig");
+const collections = @import("../shared/collections.zig");
+const debug_trace = @import("../shared/debug_trace.zig");
+const io_mod = @import("../shared/io.zig");
+const text_utils = @import("../shared/text_utils.zig");
+const sort_utils = @import("../shared/sort_utils.zig");
+const types = @import("../shared/types.zig");
+
+const Allocator = std.mem.Allocator;
+
+pub const View = enum {
+    full,
+    picker,
+};
+
+pub const FetchInput = struct {
+    access: credentials.CatalogAccess = .{ .public_only = .no_credential },
+    endpoint: []const u8,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    view: View = .full,
+    /// A provider with `reports_connection` sets this once its request has a
+    /// connection: the DNS lookup, connect, and any TLS handshake are done.
+    connected: ?*std.atomic.Value(bool) = null,
+    /// Asked once when the provider rejects the authenticated request with
+    /// 401, before the public fallback (`fetchWithPublicFallback`).
+    renew_after_rejection: ?RenewAfterRejection = null,
+};
+
+/// Gives another token for a sign-in whose token the catalog rejected, such
+/// as one another fx process has already stored, or null to fall back. The
+/// token stays owned by the context until the fetch returns.
+pub const RenewAfterRejection = struct {
+    context: *anyopaque,
+    renew_fn: *const fn (context: *anyopaque, rejected: []const u8) ?[]const u8,
+
+    pub fn renew(self: RenewAfterRejection, rejected: []const u8) ?[]const u8 {
+        return self.renew_fn(self.context, rejected);
+    }
+};
+
+pub const FailureCategory = enum {
+    authentication,
+    rate_limited,
+    gateway_unavailable,
+    cancellation,
+    transport,
+    malformed_response,
+    http_status,
+    resource_exhausted,
+    runtime,
+};
+
+pub const Failure = struct {
+    category: FailureCategory,
+    http_status: ?std.http.Status = null,
+    retryable: bool = false,
+
+    pub fn asError(self: Failure) error{
+        AuthenticationRejected,
+        Cancelled,
+        GatewayUnavailable,
+        MalformedResponse,
+        OutOfMemory,
+        RateLimited,
+        TransportFailure,
+        Unavailable,
+    } {
+        return switch (self.category) {
+            .authentication => error.AuthenticationRejected,
+            .rate_limited => error.RateLimited,
+            .gateway_unavailable => error.GatewayUnavailable,
+            .cancellation => error.Cancelled,
+            .transport => error.TransportFailure,
+            .malformed_response => error.MalformedResponse,
+            .resource_exhausted => error.OutOfMemory,
+            .http_status, .runtime => error.Unavailable,
+        };
+    }
+
+    pub fn allowsPublicFallback(self: Failure) bool {
+        if (self.category != .authentication) return false;
+        const status = self.http_status orelse return false;
+        return status == .unauthorized or status == .forbidden;
+    }
+};
+
+/// Who serves `provider`'s model catalog, as a message about a connection fx
+/// could not make names it.
+pub fn serviceName(provider: model_provider.ProviderId) []const u8 {
+    return if (provider == .gateway) "AI Gateway" else "the model provider";
+}
+
+/// Milliseconds on the clock that times catalog refreshes. Natively it keeps
+/// counting while the machine sleeps, so a catalog goes stale overnight, and
+/// ignores wall-clock changes. The libfx wasm host backs it with wall time, so
+/// callers treat a reading earlier than a stored one as due.
+pub fn clockMs() i64 {
+    const timestamp = std.Io.Clock.boot.now(io_mod.getIo());
+    return @intCast(@divFloor(timestamp.nanoseconds, std.time.ns_per_ms));
+}
+
+pub fn failureForHttpStatus(status: std.http.Status) Failure {
+    if (status == .unauthorized or status == .forbidden) {
+        return .{ .category = .authentication, .http_status = status };
+    }
+    if (status == .too_many_requests) {
+        return .{ .category = .rate_limited, .http_status = status, .retryable = true };
+    }
+
+    const code = @backingInt(status);
+    if (code >= 500 and code < 600) {
+        return .{
+            .category = .gateway_unavailable,
+            .http_status = status,
+            .retryable = types.isRetryableServerStatus(code),
+        };
+    }
+    return .{ .category = .http_status, .http_status = status };
+}
+
+pub const AccessLevel = enum {
+    authenticated,
+    public_only,
+};
+
+pub const AccessMetadata = struct {
+    level: AccessLevel,
+    source: ?credentials.Source,
+    public_only_reason: ?credentials.CatalogPublicOnlyReason,
+    private_models_may_be_hidden: bool,
+
+    pub fn init(access: credentials.CatalogAccess) AccessMetadata {
+        const public_only_reason = access.publicOnlyReason();
+        return .{
+            .level = if (public_only_reason == null) .authenticated else .public_only,
+            .source = access.credentialSource(),
+            .public_only_reason = public_only_reason,
+            .private_models_may_be_hidden = public_only_reason != null,
+        };
+    }
+};
+
+pub const Provenance = struct {
+    access: AccessMetadata,
+    anonymous_fallback_used: bool = false,
+    fallback_failure: ?Failure = null,
+};
+
+pub const FailedOutcome = struct {
+    access: AccessMetadata,
+    anonymous_fallback_used: bool,
+    failure: Failure,
+};
+
+pub const ProviderResult = union(enum) {
+    catalog: std.ArrayList(ModelCatalogEntry),
+    failure: Failure,
+};
+
+pub const FetchFn = *const fn (
+    ?*anyopaque,
+    Allocator,
+    FetchInput,
+) Allocator.Error!ProviderResult;
+
+pub const Provider = struct {
+    /// When set, context must outlive every in-flight fetch and capability lookup.
+    context: ?*anyopaque = null,
+    fetch_fn: FetchFn,
+    /// Reads already-owned metadata without allocation, I/O, or waiting.
+    lookup_capabilities_fn: ?*const fn (?*anyopaque, []const u8) model_capabilities.Capabilities = null,
+    provider_id: model_provider.ProviderId = .gateway,
+    refresh_interval_ms: ?i64 = null,
+    /// The fetch sets `FetchInput.connected` once its request has a connection.
+    reports_connection: bool = false,
+
+    /// Returns owned catalog entries; the caller frees them with `freeModelCatalog`.
+    pub fn fetch(self: Provider, alloc: Allocator, input: FetchInput) Allocator.Error!ProviderResult {
+        return self.fetch_fn(self.context, alloc, input);
+    }
+
+    /// Null means lookup is unsupported, not that the model is unknown.
+    pub fn lookupCapabilities(self: Provider, model: []const u8) ?model_capabilities.Capabilities {
+        const lookup = self.lookup_capabilities_fn orelse return null;
+        return lookup(self.context, model);
+    }
+};
+
+test "catalog capability lookup distinguishes unsupported and unknown without fetching" {
+    const Fixture = struct {
+        fetches: usize = 0,
+        limit: u32 = 512,
+
+        fn fetch(raw: ?*anyopaque, _: Allocator, _: FetchInput) Allocator.Error!ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.fetches += 1;
+            return .{ .failure = .{ .category = .runtime } };
+        }
+
+        fn lookup(raw: ?*anyopaque, model: []const u8) model_capabilities.Capabilities {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return if (std.mem.eql(u8, model, "known")) .{ .max_output_tokens = self.limit } else .{};
+        }
+    };
+    var fixture: Fixture = .{};
+    var provider = Provider{ .context = &fixture, .fetch_fn = Fixture.fetch };
+    try std.testing.expect(provider.lookupCapabilities("known") == null);
+    provider.lookup_capabilities_fn = Fixture.lookup;
+    try std.testing.expectEqual(@as(?u32, 512), provider.lookupCapabilities("known").?.max_output_tokens);
+    try model_capabilities.expectCapabilitiesEqualForTest(.{}, provider.lookupCapabilities("unknown").?);
+    try std.testing.expectEqual(@as(usize, 0), fixture.fetches);
+}
+
+pub const FetchResult = union(enum) {
+    loaded: struct {
+        /// Owned catalog entries; the caller frees them with `freeModelCatalog`.
+        catalog: std.ArrayList(ModelCatalogEntry),
+        provenance: Provenance,
+    },
+    failed: FailedOutcome,
+};
+
+fn failedOutcome(access: credentials.CatalogAccess, anonymous_fallback_used: bool, failure: Failure) FetchResult {
+    return .{ .failed = .{
+        .access = .init(access),
+        .anonymous_fallback_used = anonymous_fallback_used,
+        .failure = failure,
+    } };
+}
+
+pub fn fetchWithPublicFallback(
+    provider: Provider,
+    alloc: Allocator,
+    input: FetchInput,
+) FetchResult {
+    const requested_access = AccessMetadata.init(input.access);
+    const result = fetchWithPublicFallbackUntraced(provider, alloc, input);
+    traceCatalogLoad(requested_access, &result);
+    return result;
+}
+
+fn fetchWithPublicFallbackUntraced(
+    provider: Provider,
+    alloc: Allocator,
+    input: FetchInput,
+) FetchResult {
+    var attempt = input;
+    const first = provider.fetch(alloc, attempt) catch
+        return failedOutcome(attempt.access, false, .{ .category = .resource_exhausted });
+    switch (first) {
+        .catalog => |catalog| return .{ .loaded = .{
+            .catalog = catalog,
+            .provenance = .{ .access = .init(attempt.access) },
+        } },
+        .failure => |first_failure| {
+            var failure = first_failure;
+            // A 401 can mean only that this token is stale: another fx process
+            // may have refreshed the shared sign-in. Try the renewed token once
+            // before the public list (tests/tla/session_title/SessionTitle.tla
+            // CatalogFallsBackOnlyWhenUnrecoverable).
+            if (renewedAccess(attempt, failure)) |renewed| {
+                attempt.access = renewed;
+                const retried = provider.fetch(alloc, attempt) catch
+                    return failedOutcome(attempt.access, false, .{ .category = .resource_exhausted });
+                switch (retried) {
+                    .catalog => |catalog| return .{ .loaded = .{
+                        .catalog = catalog,
+                        .provenance = .{ .access = .init(attempt.access) },
+                    } },
+                    .failure => |retry_failure| failure = retry_failure,
+                }
+            }
+            if (!failure.allowsPublicFallback()) {
+                return failedOutcome(attempt.access, false, failure);
+            }
+            attempt.access = attempt.access.publicFallbackAfterRejection() orelse
+                return failedOutcome(attempt.access, false, failure);
+
+            const fallback = provider.fetch(alloc, attempt) catch
+                return failedOutcome(attempt.access, true, .{ .category = .resource_exhausted });
+            return switch (fallback) {
+                .catalog => |catalog| .{ .loaded = .{
+                    .catalog = catalog,
+                    .provenance = .{
+                        .access = .init(attempt.access),
+                        .anonymous_fallback_used = true,
+                        .fallback_failure = failure,
+                    },
+                } },
+                .failure => |fallback_failure| failedOutcome(attempt.access, true, fallback_failure),
+            };
+        },
+    }
+}
+
+/// The access to retry with after `failure`, when the provider rejected the
+/// authenticated token with 401 and the caller renewed it.
+fn renewedAccess(attempt: FetchInput, failure: Failure) ?credentials.CatalogAccess {
+    if (failure.http_status != .unauthorized) return null;
+    const renew = attempt.renew_after_rejection orelse return null;
+    const rejected = attempt.access.authorizationCredential() orelse return null;
+    const token = renew.renew(rejected) orelse return null;
+    if (std.mem.eql(u8, token, rejected)) return null;
+    return attempt.access.withCredential(token);
+}
+
+fn traceCatalogLoad(requested: AccessMetadata, result: *const FetchResult) void {
+    switch (result.*) {
+        .loaded => |loaded| traceCatalogLoadOutcome(
+            requested,
+            loaded.provenance.access,
+            loaded.provenance.anonymous_fallback_used,
+            "loaded",
+            loaded.provenance.fallback_failure,
+        ),
+        .failed => |failed| traceCatalogLoadOutcome(
+            requested,
+            failed.access,
+            failed.anonymous_fallback_used,
+            "failed",
+            failed.failure,
+        ),
+    }
+}
+
+fn traceCatalogLoadOutcome(
+    requested: AccessMetadata,
+    effective: AccessMetadata,
+    anonymous_fallback_used: bool,
+    outcome: []const u8,
+    failure: ?Failure,
+) void {
+    const credential_source = if (requested.source) |source| @tagName(source) else "none";
+    const public_only_reason = if (effective.public_only_reason) |reason| @tagName(reason) else "none";
+    const failure_category = if (failure) |detail| @tagName(detail.category) else "none";
+    const retryable = if (failure) |detail|
+        if (detail.retryable) "true" else "false"
+    else
+        "none";
+    const common_format = "requested_access={s} credential_source={s} effective_access={s} public_only_reason={s} anonymous_fallback={s} outcome={s} failure_category={s}";
+    const common_args = .{
+        @tagName(requested.level),
+        credential_source,
+        @tagName(effective.level),
+        public_only_reason,
+        if (anonymous_fallback_used) "true" else "false",
+        outcome,
+        failure_category,
+    };
+
+    const http_status = if (failure) |detail| detail.http_status else null;
+    if (http_status) |status| {
+        debug_trace.eventf(
+            "catalog",
+            "model_catalog_load",
+            .{},
+            common_format ++ " http_status={d} retryable={s}",
+            common_args ++ .{ @backingInt(status), retryable },
+        );
+    } else {
+        debug_trace.eventf(
+            "catalog",
+            "model_catalog_load",
+            .{},
+            common_format ++ " http_status=none retryable={s}",
+            common_args ++ .{retryable},
+        );
+    }
+}
+
+pub const ModelCatalogEntry = struct {
+    id: []u8,
+    /// The catalog's display name, trimmed; null when the catalog has none.
+    name: ?[]u8 = null,
+    model_type: []u8,
+    released: i64 = 0,
+    has_tool_use: bool = false,
+    has_reasoning: bool = false,
+    reasoning_efforts: std.ArrayList(types.ReasoningEffort) = .empty,
+    supports_fast_mode: bool = false,
+    supports_ultrafast_mode: bool = false,
+    has_vision: bool = false,
+    has_file_input: bool = false,
+    has_web_search: bool = false,
+    has_explicit_caching: bool = false,
+    has_implicit_caching: bool = false,
+    context_window: u32 = 0,
+    max_tokens: u32 = 0,
+    web_search_price: ?[]u8 = null,
+    /// The id of the model whose Fast mode runs this one; null when the
+    /// catalog names none.
+    fast_variant_of: ?[]u8 = null,
+    /// Whether AI Gateway marks this model as paid by the team's Token Pass.
+    /// Only an AI Gateway catalog for a team with Token Pass marks any.
+    token_pass: bool = false,
+};
+
+pub fn freeModelCatalog(alloc: std.mem.Allocator, entries: *std.ArrayList(ModelCatalogEntry)) void {
+    for (entries.items) |entry| freeModelCatalogEntry(alloc, entry);
+    entries.deinit(alloc);
+}
+
+pub fn freeModelCatalogEntry(alloc: std.mem.Allocator, entry: ModelCatalogEntry) void {
+    alloc.free(entry.id);
+    if (entry.name) |name| alloc.free(name);
+    alloc.free(entry.model_type);
+    var reasoning_efforts = entry.reasoning_efforts;
+    reasoning_efforts.deinit(alloc);
+    if (entry.web_search_price) |price| alloc.free(price);
+    if (entry.fast_variant_of) |base| alloc.free(base);
+}
+
+/// An owned copy of `entries`, which shares nothing with them. Free it with `freeModelCatalog`.
+pub fn cloneModelCatalog(alloc: std.mem.Allocator, entries: []const ModelCatalogEntry) !std.ArrayList(ModelCatalogEntry) {
+    var copy: std.ArrayList(ModelCatalogEntry) = .empty;
+    errdefer freeModelCatalog(alloc, &copy);
+    try copy.ensureTotalCapacity(alloc, entries.len);
+    for (entries) |entry| try appendClonedModelCatalogEntry(alloc, &copy, entry);
+    return copy;
+}
+
+/// Returns owned model id strings in catalog order; caller frees with `collections.freeStringList`.
+pub fn projectModelIds(alloc: std.mem.Allocator, candidates: []const ModelCatalogEntry) !std.ArrayList([]u8) {
+    var ids: std.ArrayList([]u8) = .empty;
+    errdefer collections.freeStringList(alloc, &ids);
+    try ids.ensureTotalCapacity(alloc, candidates.len);
+    for (candidates) |candidate| {
+        try ids.append(alloc, try alloc.dupe(u8, candidate.id));
+    }
+    return ids;
+}
+
+fn appendClonedModelCatalogEntry(alloc: std.mem.Allocator, entries: *std.ArrayList(ModelCatalogEntry), entry: ModelCatalogEntry) !void {
+    const cloned = try cloneModelCatalogEntry(alloc, entry);
+    entries.append(alloc, cloned) catch |err| {
+        freeModelCatalogEntry(alloc, cloned);
+        return err;
+    };
+}
+
+fn cloneModelCatalogEntry(alloc: std.mem.Allocator, entry: ModelCatalogEntry) !ModelCatalogEntry {
+    const id = try alloc.dupe(u8, entry.id);
+    errdefer alloc.free(id);
+    const name = if (entry.name) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (name) |value| alloc.free(value);
+    const model_type = try alloc.dupe(u8, entry.model_type);
+    errdefer alloc.free(model_type);
+    var reasoning_efforts: std.ArrayList(types.ReasoningEffort) = .empty;
+    errdefer reasoning_efforts.deinit(alloc);
+    try reasoning_efforts.appendSlice(alloc, entry.reasoning_efforts.items);
+
+    var cloned = ModelCatalogEntry{
+        .id = id,
+        .name = name,
+        .model_type = model_type,
+        .released = entry.released,
+        .has_tool_use = entry.has_tool_use,
+        .has_reasoning = entry.has_reasoning,
+        .reasoning_efforts = reasoning_efforts,
+        .supports_fast_mode = entry.supports_fast_mode,
+        .supports_ultrafast_mode = entry.supports_ultrafast_mode,
+        .has_vision = entry.has_vision,
+        .has_file_input = entry.has_file_input,
+        .has_web_search = entry.has_web_search,
+        .has_explicit_caching = entry.has_explicit_caching,
+        .has_implicit_caching = entry.has_implicit_caching,
+        .context_window = entry.context_window,
+        .max_tokens = entry.max_tokens,
+        .web_search_price = null,
+        .token_pass = entry.token_pass,
+    };
+    errdefer if (cloned.web_search_price) |price| alloc.free(price);
+    if (entry.web_search_price) |price| {
+        cloned.web_search_price = try alloc.dupe(u8, price);
+    }
+    if (entry.fast_variant_of) |base| {
+        cloned.fast_variant_of = try alloc.dupe(u8, base);
+    }
+    return cloned;
+}
+
+/// Whether the Models menu leaves `entry` out: the catalog says Fast mode on
+/// another model runs it, and that model is in `catalog` and offers Fast mode.
+/// The entry stays in the catalog, so a session that names it still runs.
+pub fn foldsIntoFastMode(entry: ModelCatalogEntry, catalog: []const ModelCatalogEntry) bool {
+    const base_id = entry.fast_variant_of orelse return false;
+    for (catalog) |candidate| {
+        if (std.mem.eql(u8, candidate.id, base_id)) return candidate.supports_fast_mode;
+    }
+    return false;
+}
+
+pub fn compareModelCatalogEntries(_: void, a: ModelCatalogEntry, b: ModelCatalogEntry) bool {
+    if (a.has_tool_use != b.has_tool_use) return a.has_tool_use;
+
+    const a_tier = modelTierRank(a.id);
+    const b_tier = modelTierRank(b.id);
+    if (a_tier != b_tier) return a_tier < b_tier;
+
+    const a_provider = modelProviderRank(a.id);
+    const b_provider = modelProviderRank(b.id);
+    if (a_provider != b_provider) return a_provider < b_provider;
+
+    if (a.released != b.released) return a.released > b.released;
+    return std.mem.order(u8, a.id, b.id) == .lt;
+}
+
+fn modelProviderRank(id: []const u8) u8 {
+    if (std.mem.startsWith(u8, id, "anthropic/")) return 0;
+    if (std.mem.startsWith(u8, id, "openai/")) return 1;
+    if (std.mem.startsWith(u8, id, "google/")) return 2;
+    if (std.mem.startsWith(u8, id, "xai/")) return 3;
+    if (std.mem.startsWith(u8, id, "deepseek/")) return 4;
+    if (std.mem.startsWith(u8, id, "meta/")) return 5;
+    if (std.mem.startsWith(u8, id, "mistral/")) return 6;
+    if (std.mem.startsWith(u8, id, "alibaba/")) return 7;
+    return 8;
+}
+
+fn modelTierRank(id: []const u8) u8 {
+    if (text_utils.containsIgnoreCase(id, "preview") or text_utils.containsIgnoreCase(id, "beta")) return 4;
+    if (text_utils.containsIgnoreCase(id, "haiku") or text_utils.containsIgnoreCase(id, "mini") or text_utils.containsIgnoreCase(id, "lite")) return 3;
+    if (text_utils.containsIgnoreCase(id, "flash")) return 2;
+    if (text_utils.containsIgnoreCase(id, "opus") or
+        text_utils.containsIgnoreCase(id, "sonnet") or
+        text_utils.hasMajorVersionAtLeast(id, "gpt-", 5) or
+        text_utils.containsIgnoreCase(id, "o1") or
+        text_utils.containsIgnoreCase(id, "o3") or
+        text_utils.containsIgnoreCase(id, "o4") or
+        text_utils.containsIgnoreCase(id, "pro") or
+        text_utils.hasMajorVersionAtLeast(id, "grok-", 4))
+    {
+        return 0;
+    }
+    return 1;
+}
+
+const picker_provider_limit: usize = 2;
+const extended_picker_provider_limit: usize = 3;
+
+const FeaturedPickerFamily = struct {
+    family: []const u8,
+    count: usize,
+};
+
+// These are product preferences, but the model version in each slot always
+// comes from the live Gateway catalog instead of a pinned model ID.
+const featured_picker_families = [_]FeaturedPickerFamily{
+    .{ .family = "anthropic/claude-fable", .count = 1 },
+    .{ .family = "openai/gpt", .count = 1 },
+    .{ .family = "xai/grok-build", .count = 1 },
+    .{ .family = "anthropic/claude-opus", .count = 1 },
+    .{ .family = "zai/glm", .count = 1 },
+    .{ .family = "deepseek/deepseek", .count = 1 },
+    .{ .family = "minimax/minimax", .count = 1 },
+};
+
+pub fn projectPickerModelCatalog(alloc: std.mem.Allocator, candidates: []const ModelCatalogEntry) !std.ArrayList(ModelCatalogEntry) {
+    var selected: std.ArrayList(ModelCatalogEntry) = .empty;
+    errdefer freeModelCatalog(alloc, &selected);
+    try selected.ensureTotalCapacity(alloc, candidates.len);
+
+    for (featured_picker_families) |featured| {
+        var remaining = featured.count;
+        while (remaining > 0) : (remaining -= 1) {
+            const candidate = newestUnselectedPickerCandidate(candidates, featured.family, selected.items) orelse break;
+            try appendClonedModelCatalogEntry(alloc, &selected, candidate.*);
+        }
+    }
+
+    var providers: std.ArrayList([]const u8) = .empty;
+    defer providers.deinit(alloc);
+    for (candidates) |candidate| {
+        if (!isPickerCandidate(candidate)) continue;
+        const provider = modelPickerProvider(candidate.id);
+        if (pickerIdsContain(providers.items, provider)) continue;
+        try providers.append(alloc, provider);
+    }
+    sort_utils.sort([]const u8, providers.items, {}, lessThanStrings);
+
+    // After the product highlights, scan providers alphabetically. Each
+    // provider contributes its current models, rather than inheriting the
+    // Gateway's global quality ranking.
+    for (providers.items) |provider| {
+        while (pickerProviderSelectionCount(selected.items, provider) < pickerProviderLimit(provider)) {
+            const candidate = newestUnselectedPickerProviderCandidate(candidates, provider, selected.items) orelse break;
+            try appendClonedModelCatalogEntry(alloc, &selected, candidate.*);
+        }
+    }
+
+    // Highlights stay on top; the rest of the catalog follows so any model is selectable.
+    for (candidates) |candidate| {
+        if (pickerCatalogContains(selected.items, candidate.id)) continue;
+        try appendClonedModelCatalogEntry(alloc, &selected, candidate);
+    }
+
+    return selected;
+}
+
+fn newestUnselectedPickerCandidate(candidates: []const ModelCatalogEntry, family: []const u8, selected: []const ModelCatalogEntry) ?*const ModelCatalogEntry {
+    var newest: ?*const ModelCatalogEntry = null;
+    for (candidates) |*candidate| {
+        if (!isPickerCandidate(candidate.*)) continue;
+        if (!std.mem.eql(u8, modelPickerFamily(candidate.id), family)) continue;
+        if (pickerCatalogContains(selected, candidate.id)) continue;
+
+        if (newest == null or featuredPickerModelIsNewer(family, candidate.*, newest.?.*)) newest = candidate;
+    }
+    return newest;
+}
+
+fn newestUnselectedPickerProviderCandidate(candidates: []const ModelCatalogEntry, provider: []const u8, selected: []const ModelCatalogEntry) ?*const ModelCatalogEntry {
+    var newest: ?*const ModelCatalogEntry = null;
+    for (candidates) |*candidate| {
+        if (!isPickerCandidate(candidate.*)) continue;
+        if (!std.mem.eql(u8, modelPickerProvider(candidate.id), provider)) continue;
+        if (!isPickerProviderCandidate(provider, candidate.*, candidates)) continue;
+        if (pickerCatalogContains(selected, candidate.id)) continue;
+
+        if (newest == null or pickerModelIsNewer(candidate.*, newest.?.*)) newest = candidate;
+    }
+    return newest;
+}
+
+fn isPickerCandidate(candidate: ModelCatalogEntry) bool {
+    if (text_utils.containsIgnoreCase(candidate.id, "claude-sonnet")) return false;
+    // A model that Fast mode on another model runs never takes a highlight slot.
+    if (candidate.fast_variant_of != null) return false;
+    if (isGlmFastVariant(candidate.id)) return false;
+
+    const excluded_variants = [_][]const u8{ "-mini", "-nano", "-oss", "-safeguard" };
+    inline for (excluded_variants) |variant| {
+        if (text_utils.containsIgnoreCase(candidate.id, variant)) return false;
+    }
+    return true;
+}
+
+fn isGlmFastVariant(id: []const u8) bool {
+    return std.mem.startsWith(u8, id, "zai/glm-") and
+        std.mem.endsWith(u8, id, "-fast");
+}
+
+fn isWithinPickerFamilyLimit(candidate: ModelCatalogEntry, candidates: []const ModelCatalogEntry) bool {
+    if (!isPickerCandidate(candidate)) return false;
+
+    const family = modelPickerFamily(candidate.id);
+    var newer_count: usize = 0;
+    for (candidates) |other| {
+        if (!isPickerCandidate(other)) continue;
+        if (!std.mem.eql(u8, modelPickerFamily(other.id), family)) continue;
+        if (!pickerModelIsNewer(other, candidate)) continue;
+
+        newer_count += 1;
+        if (newer_count >= pickerFamilyLimit(family)) return false;
+    }
+    return true;
+}
+
+fn modelPickerFamily(id: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, id, "openai/gpt-") and text_utils.containsIgnoreCase(id, "-codex")) {
+        return "openai/gpt-codex";
+    }
+    if (std.mem.startsWith(u8, id, "deepseek/deepseek-")) {
+        return "deepseek/deepseek";
+    }
+    if (std.mem.startsWith(u8, id, "minimax/minimax-")) {
+        return "minimax/minimax";
+    }
+
+    const slash = std.mem.findScalar(u8, id, '/') orelse return id;
+    var index = slash + 1;
+    while (index + 1 < id.len) : (index += 1) {
+        if (id[index] == '-' and std.ascii.isDigit(id[index + 1])) return id[0..index];
+    }
+    return id;
+}
+
+fn modelPickerProvider(id: []const u8) []const u8 {
+    const slash = std.mem.findScalar(u8, id, '/') orelse return id;
+    return id[0..slash];
+}
+
+fn pickerProviderLimit(provider: []const u8) usize {
+    if (std.mem.eql(u8, provider, "anthropic") or std.mem.eql(u8, provider, "openai")) {
+        return extended_picker_provider_limit;
+    }
+    return picker_provider_limit;
+}
+
+fn pickerProviderSelectionCount(entries: []const ModelCatalogEntry, provider: []const u8) usize {
+    var count: usize = 0;
+    for (entries) |entry| {
+        if (std.mem.eql(u8, modelPickerProvider(entry.id), provider)) count += 1;
+    }
+    return count;
+}
+
+fn isPickerProviderCandidate(provider: []const u8, candidate: ModelCatalogEntry, candidates: []const ModelCatalogEntry) bool {
+    const family = modelPickerFamily(candidate.id);
+    if (std.mem.eql(u8, provider, "anthropic")) {
+        return std.mem.eql(u8, family, "anthropic/claude-opus") and
+            isWithinPickerFamilyLimit(candidate, candidates);
+    }
+    if (std.mem.eql(u8, provider, "openai")) {
+        const is_gpt = std.mem.eql(u8, family, "openai/gpt");
+        const is_codex = std.mem.eql(u8, family, "openai/gpt-codex");
+        return (is_gpt or is_codex) and isWithinPickerFamilyLimit(candidate, candidates);
+    }
+    return true;
+}
+
+fn pickerFamilyLimit(family: []const u8) usize {
+    // Let the picker show two general models next to one coding-focused model.
+    if (std.mem.eql(u8, family, "openai/gpt")) return 2;
+    if (std.mem.eql(u8, family, "openai/gpt-codex")) return 1;
+    return extended_picker_provider_limit;
+}
+
+fn pickerModelIsNewer(a: ModelCatalogEntry, b: ModelCatalogEntry) bool {
+    if (a.released != b.released) return a.released > b.released;
+    if (a.id.len != b.id.len) return a.id.len < b.id.len;
+    return std.mem.order(u8, a.id, b.id) == .lt;
+}
+
+fn featuredPickerModelIsNewer(family: []const u8, a: ModelCatalogEntry, b: ModelCatalogEntry) bool {
+    if (a.released != b.released) return a.released > b.released;
+    if (std.mem.eql(u8, family, "deepseek/deepseek")) {
+        const a_quality = deepseekFeaturedQualityRank(a.id);
+        const b_quality = deepseekFeaturedQualityRank(b.id);
+        if (a_quality != b_quality) return a_quality < b_quality;
+    }
+    return pickerModelIsNewer(a, b);
+}
+
+fn deepseekFeaturedQualityRank(id: []const u8) u8 {
+    if (std.mem.endsWith(u8, id, "-pro")) return 0;
+    if (text_utils.containsIgnoreCase(id, "-thinking") or
+        text_utils.containsIgnoreCase(id, "-reasoning")) return 1;
+    if (text_utils.containsIgnoreCase(id, "-flash")) return 3;
+    return 2;
+}
+
+fn lessThanStrings(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+fn pickerIdsContain(ids: []const []const u8, needle: []const u8) bool {
+    for (ids) |id| {
+        if (std.mem.eql(u8, id, needle)) return true;
+    }
+    return false;
+}
+
+fn pickerCatalogContains(entries: []const ModelCatalogEntry, needle: []const u8) bool {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.id, needle)) return true;
+    }
+    return false;
+}
+
+const FallbackProbe = struct {
+    failures: [2]?Failure,
+    calls: usize = 0,
+    anonymous_retry: bool = false,
+
+    fn fetch(raw: ?*anyopaque, _: Allocator, input: FetchInput) Allocator.Error!ProviderResult {
+        const self: *FallbackProbe = @ptrCast(@alignCast(raw.?));
+        const index = self.calls;
+        self.calls += 1;
+        if (index == 1) {
+            self.anonymous_retry = input.access.authorizationCredential() == null and
+                input.access.teamContext() == null;
+        }
+        if (self.failures[index]) |failure| return .{ .failure = failure };
+        return .{ .catalog = .empty };
+    }
+
+    fn provider(self: *FallbackProbe) Provider {
+        return .{ .context = self, .fetch_fn = fetch };
+    }
+};
+
+/// Rejects every token but `accepted` with `status`, and records each token.
+const TokenProbe = struct {
+    accepted: []const u8,
+    status: std.http.Status = .unauthorized,
+    tokens: [3][]const u8 = .{ "", "", "" },
+    calls: usize = 0,
+
+    fn fetch(raw: ?*anyopaque, _: Allocator, input: FetchInput) Allocator.Error!ProviderResult {
+        const self: *TokenProbe = @ptrCast(@alignCast(raw.?));
+        const token = input.access.authorizationCredential() orelse "";
+        self.tokens[self.calls] = token;
+        self.calls += 1;
+        if (token.len == 0 or std.mem.eql(u8, token, self.accepted)) return .{ .catalog = .empty };
+        return .{ .failure = failureForHttpStatus(self.status) };
+    }
+
+    fn provider(self: *TokenProbe) Provider {
+        return .{ .context = self, .fetch_fn = fetch };
+    }
+};
+
+const RenewProbe = struct {
+    token: ?[]const u8,
+    calls: usize = 0,
+
+    fn renew(raw: *anyopaque, _: []const u8) ?[]const u8 {
+        const self: *RenewProbe = @ptrCast(@alignCast(raw));
+        self.calls += 1;
+        return self.token;
+    }
+
+    fn hook(self: *RenewProbe) RenewAfterRejection {
+        return .{ .context = self, .renew_fn = renew };
+    }
+};
+
+test "catalog renews a rejected token once before the public list" {
+    const access = credentials.catalogAccessForCredential(.fx_login, "stale-key", "team_123");
+
+    // The renewed token works: no public fallback.
+    var probe = TokenProbe{ .accepted = "fresh-key" };
+    var renewed = RenewProbe{ .token = "fresh-key" };
+    var loaded = fetchWithPublicFallback(probe.provider(), std.testing.allocator, .{
+        .access = access,
+        .endpoint = "/v1/models",
+        .renew_after_rejection = renewed.hook(),
+    });
+    defer freeModelCatalog(std.testing.allocator, &loaded.loaded.catalog);
+    try std.testing.expectEqual(AccessLevel.authenticated, loaded.loaded.provenance.access.level);
+    try std.testing.expect(!loaded.loaded.provenance.anonymous_fallback_used);
+    try std.testing.expectEqual(@as(usize, 1), renewed.calls);
+    try std.testing.expectEqual(@as(usize, 2), probe.calls);
+    try std.testing.expectEqualStrings("stale-key", probe.tokens[0]);
+    try std.testing.expectEqualStrings("fresh-key", probe.tokens[1]);
+
+    // No other token, or one rejected too: the public list, after at most one retry.
+    for ([_]?[]const u8{ null, "stale-key", "also-stale" }) |token| {
+        var rejected = TokenProbe{ .accepted = "fresh-key" };
+        var renew = RenewProbe{ .token = token };
+        var fallback = fetchWithPublicFallback(rejected.provider(), std.testing.allocator, .{
+            .access = access,
+            .endpoint = "/v1/models",
+            .renew_after_rejection = renew.hook(),
+        });
+        defer freeModelCatalog(std.testing.allocator, &fallback.loaded.catalog);
+        try std.testing.expect(fallback.loaded.provenance.anonymous_fallback_used);
+        try std.testing.expectEqual(@as(usize, 1), renew.calls);
+        const retried = token != null and !std.mem.eql(u8, token.?, "stale-key");
+        try std.testing.expectEqual(@as(usize, if (retried) 3 else 2), rejected.calls);
+        try std.testing.expectEqualStrings("", rejected.tokens[rejected.calls - 1]);
+    }
+
+    // A 403 is not a stale token: no renewal.
+    var forbidden = TokenProbe{ .accepted = "fresh-key", .status = .forbidden };
+    var unused = RenewProbe{ .token = "fresh-key" };
+    var public = fetchWithPublicFallback(forbidden.provider(), std.testing.allocator, .{
+        .access = access,
+        .endpoint = "/v1/models",
+        .renew_after_rejection = unused.hook(),
+    });
+    defer freeModelCatalog(std.testing.allocator, &public.loaded.catalog);
+    try std.testing.expectEqual(@as(usize, 0), unused.calls);
+    try std.testing.expectEqual(@as(usize, 2), forbidden.calls);
+}
+
+test "catalog HTTP failure classification preserves policy evidence" {
+    for ([_]struct { status: std.http.Status, category: FailureCategory, retryable: bool }{
+        .{ .status = .unauthorized, .category = .authentication, .retryable = false },
+        .{ .status = .forbidden, .category = .authentication, .retryable = false },
+        .{ .status = .too_many_requests, .category = .rate_limited, .retryable = true },
+        .{ .status = .internal_server_error, .category = .gateway_unavailable, .retryable = true },
+        .{ .status = .not_implemented, .category = .gateway_unavailable, .retryable = false },
+        .{ .status = .bad_request, .category = .http_status, .retryable = false },
+    }) |expected| {
+        const failure = failureForHttpStatus(expected.status);
+        try std.testing.expectEqual(expected.category, failure.category);
+        try std.testing.expectEqual(expected.status, failure.http_status.?);
+        try std.testing.expectEqual(expected.retryable, failure.retryable);
+    }
+}
+
+test "catalog authentication fallback is anonymous and bounded" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "catalog-trace.log" });
+    defer alloc.free(trace_path);
+    debug_trace.resetForTest();
+    defer debug_trace.resetForTest();
+    try debug_trace.configureForTestWithScopes(alloc, trace_path, "catalog");
+
+    const access = credentials.catalogAccessForCredential(.ai_gateway_api_key, "test-key", "team_123");
+    const rejection = Failure{ .category = .authentication, .http_status = .unauthorized };
+    var accepted = FallbackProbe{ .failures = .{ rejection, null } };
+    var loaded = fetchWithPublicFallback(accepted.provider(), std.testing.allocator, .{
+        .access = access,
+        .endpoint = "/v1/models",
+    });
+    defer freeModelCatalog(std.testing.allocator, &loaded.loaded.catalog);
+    try std.testing.expectEqual(AccessLevel.public_only, loaded.loaded.provenance.access.level);
+    try std.testing.expectEqual(credentials.Source.ai_gateway_api_key, loaded.loaded.provenance.access.source.?);
+    try std.testing.expectEqual(credentials.CatalogPublicOnlyReason.authenticated_credential_rejected, loaded.loaded.provenance.access.public_only_reason.?);
+    try std.testing.expect(loaded.loaded.provenance.access.private_models_may_be_hidden);
+    try std.testing.expect(loaded.loaded.provenance.anonymous_fallback_used);
+    try std.testing.expectEqual(FailureCategory.authentication, loaded.loaded.provenance.fallback_failure.?.category);
+    try std.testing.expectEqual(std.http.Status.unauthorized, loaded.loaded.provenance.fallback_failure.?.http_status.?);
+    try std.testing.expect(!loaded.loaded.provenance.fallback_failure.?.retryable);
+    try std.testing.expectEqual(@as(usize, 2), accepted.calls);
+    try std.testing.expect(accepted.anonymous_retry);
+
+    for ([_]Failure{
+        .{ .category = .authentication },
+        .{ .category = .cancellation },
+        .{ .category = .transport, .retryable = true },
+    }) |failure| {
+        var rejected = FallbackProbe{ .failures = .{ failure, null } };
+        const failed = fetchWithPublicFallback(rejected.provider(), std.testing.allocator, .{
+            .access = access,
+            .endpoint = "/v1/models",
+        }).failed;
+        try std.testing.expectEqual(failure.category, failed.failure.category);
+        try std.testing.expectEqual(AccessLevel.authenticated, failed.access.level);
+        try std.testing.expect(!failed.anonymous_fallback_used);
+        try std.testing.expectEqual(@as(usize, 1), rejected.calls);
+    }
+
+    var twice = FallbackProbe{ .failures = .{ rejection, rejection } };
+    const failed = fetchWithPublicFallback(twice.provider(), std.testing.allocator, .{
+        .access = access,
+        .endpoint = "/v1/models",
+    }).failed;
+    try std.testing.expectEqual(AccessLevel.public_only, failed.access.level);
+    try std.testing.expect(failed.anonymous_fallback_used);
+    try std.testing.expectEqual(std.http.Status.unauthorized, failed.failure.http_status.?);
+    try std.testing.expectEqual(@as(usize, 2), twice.calls);
+
+    debug_trace.shutdown();
+    var trace_file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), trace_path, .{});
+    defer trace_file.close(io_mod.getIo());
+    const trace = try io_mod.readFileToEnd(alloc, &trace_file, 8192);
+    defer alloc.free(trace);
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, trace, "event=model_catalog_load "));
+    try std.testing.expect(std.mem.find(
+        u8,
+        trace,
+        "requested_access=authenticated credential_source=ai_gateway_api_key effective_access=public_only public_only_reason=authenticated_credential_rejected anonymous_fallback=true outcome=loaded failure_category=authentication http_status=401 retryable=false",
+    ) != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        trace,
+        "requested_access=authenticated credential_source=ai_gateway_api_key effective_access=authenticated public_only_reason=none anonymous_fallback=false outcome=failed failure_category=transport http_status=none retryable=true",
+    ) != null);
+    try std.testing.expect(std.mem.find(u8, trace, "test-key") == null);
+    try std.testing.expect(std.mem.find(u8, trace, "team_123") == null);
+    try std.testing.expect(std.mem.find(u8, trace, "/v1/models") == null);
+}
+
+test "strict authenticated catalog requests never retry anonymously" {
+    const access = credentials.catalogAccessForCredential(
+        .fx_login,
+        "test-token",
+        "team_123",
+    ).withExplicitAuthority();
+    const rejection = Failure{ .category = .authentication, .http_status = .unauthorized };
+    var probe = FallbackProbe{ .failures = .{ rejection, null } };
+
+    const failed = fetchWithPublicFallback(probe.provider(), std.testing.allocator, .{
+        .access = access,
+        .endpoint = "/v1/models",
+    }).failed;
+    try std.testing.expectEqual(AccessLevel.authenticated, failed.access.level);
+    try std.testing.expect(!failed.anonymous_fallback_used);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "catalog fallback classification stays bounded across repeated cycles" {
+    const access = credentials.catalogAccessForCredential(
+        .ai_gateway_api_key,
+        "repeated-test-key",
+        "repeated-team",
+    );
+    const terminal_failures = [_]Failure{
+        .{ .category = .authentication },
+        .{ .category = .rate_limited, .http_status = .too_many_requests, .retryable = true },
+        .{ .category = .gateway_unavailable, .http_status = .service_unavailable, .retryable = true },
+        .{ .category = .cancellation },
+        .{ .category = .transport, .retryable = true },
+        .{ .category = .malformed_response },
+        .{ .category = .http_status, .http_status = .bad_request },
+    };
+
+    for (0..128) |iteration| {
+        const status: std.http.Status = if (iteration % 2 == 0) .unauthorized else .forbidden;
+        const rejection = Failure{ .category = .authentication, .http_status = status };
+        var fallback = FallbackProbe{ .failures = .{ rejection, null } };
+        var loaded = fetchWithPublicFallback(fallback.provider(), std.testing.allocator, .{
+            .access = access,
+            .endpoint = "/v1/models",
+        });
+        switch (loaded) {
+            .loaded => |*result| {
+                defer freeModelCatalog(std.testing.allocator, &result.catalog);
+                try std.testing.expectEqual(AccessLevel.public_only, result.provenance.access.level);
+                try std.testing.expectEqual(status, result.provenance.fallback_failure.?.http_status.?);
+                try std.testing.expect(result.provenance.anonymous_fallback_used);
+            },
+            .failed => return error.TestExpectedEqual,
+        }
+        try std.testing.expectEqual(@as(usize, 2), fallback.calls);
+        try std.testing.expect(fallback.anonymous_retry);
+
+        const expected = terminal_failures[iteration % terminal_failures.len];
+        var terminal = FallbackProbe{ .failures = .{ expected, null } };
+        const failed = fetchWithPublicFallback(terminal.provider(), std.testing.allocator, .{
+            .access = access,
+            .endpoint = "/v1/models",
+        });
+        switch (failed) {
+            .loaded => |result| {
+                var catalog = result.catalog;
+                freeModelCatalog(std.testing.allocator, &catalog);
+                return error.TestExpectedEqual;
+            },
+            .failed => |result| {
+                try std.testing.expectEqual(expected.category, result.failure.category);
+                try std.testing.expectEqual(expected.http_status, result.failure.http_status);
+                try std.testing.expectEqual(AccessLevel.authenticated, result.access.level);
+                try std.testing.expect(!result.anonymous_fallback_used);
+            },
+        }
+        try std.testing.expectEqual(@as(usize, 1), terminal.calls);
+        try std.testing.expect(!terminal.anonymous_retry);
+    }
+}
+
+test "picker curation skips fast variants in provider scan but keeps them selectable" {
+    const candidates = [_]ModelCatalogEntry{
+        .{ .id = @constCast("zai/glm-5.2"), .model_type = @constCast("language"), .released = 100, .has_tool_use = true },
+        .{ .id = @constCast("zai/glm-5.2-fast"), .model_type = @constCast("language"), .released = 100, .has_tool_use = true },
+        .{ .id = @constCast("zai/glm-5.1"), .model_type = @constCast("language"), .released = 90, .has_tool_use = true },
+    };
+
+    var curated = try projectPickerModelCatalog(std.testing.allocator, &candidates);
+    defer freeModelCatalog(std.testing.allocator, &curated);
+
+    try std.testing.expectEqual(@as(usize, 3), curated.items.len);
+    try std.testing.expectEqualStrings("zai/glm-5.2", curated.items[0].id);
+    try std.testing.expectEqualStrings("zai/glm-5.1", curated.items[1].id);
+    try std.testing.expectEqualStrings("zai/glm-5.2-fast", curated.items[2].id);
+}
+
+test "picker curation keeps a marked fast variant selectable without a highlight slot" {
+    const candidates = [_]ModelCatalogEntry{
+        .{ .id = @constCast("moonshotai/kimi-k3"), .model_type = @constCast("language"), .released = 100, .has_tool_use = true },
+        .{
+            .id = @constCast("moonshotai/kimi-k3-fast"),
+            .model_type = @constCast("language"),
+            .released = 100,
+            .has_tool_use = true,
+            .fast_variant_of = @constCast("moonshotai/kimi-k3"),
+        },
+        .{ .id = @constCast("moonshotai/kimi-k2"), .model_type = @constCast("language"), .released = 90, .has_tool_use = true },
+    };
+
+    var curated = try projectPickerModelCatalog(std.testing.allocator, &candidates);
+    defer freeModelCatalog(std.testing.allocator, &curated);
+
+    try std.testing.expectEqual(@as(usize, 3), curated.items.len);
+    try std.testing.expectEqualStrings("moonshotai/kimi-k3", curated.items[0].id);
+    try std.testing.expectEqualStrings("moonshotai/kimi-k2", curated.items[1].id);
+    try std.testing.expectEqualStrings("moonshotai/kimi-k3-fast", curated.items[2].id);
+    try std.testing.expectEqualStrings("moonshotai/kimi-k3", curated.items[2].fast_variant_of.?);
+}
+
+test "a fast variant folds into its base only when the base is listed and offers Fast mode" {
+    const catalog = [_]ModelCatalogEntry{
+        .{ .id = @constCast("anthropic/claude-opus-5"), .model_type = @constCast("language"), .supports_fast_mode = true },
+        .{ .id = @constCast("anthropic/claude-opus-5-fast"), .model_type = @constCast("language"), .fast_variant_of = @constCast("anthropic/claude-opus-5") },
+        .{ .id = @constCast("provider/plain"), .model_type = @constCast("language") },
+        .{ .id = @constCast("provider/plain-fast"), .model_type = @constCast("language"), .fast_variant_of = @constCast("provider/plain") },
+        .{ .id = @constCast("provider/orphan-fast"), .model_type = @constCast("language"), .fast_variant_of = @constCast("provider/orphan") },
+        .{ .id = @constCast("provider/unmarked-fast"), .model_type = @constCast("language") },
+    };
+
+    const expected = [_]bool{ false, true, false, false, false, false };
+    for (catalog, expected) |entry, folds| {
+        try std.testing.expectEqual(folds, foldsIntoFastMode(entry, &catalog));
+    }
+}
+
+test "projectModelIds preserves order and returns owned copies" {
+    var first = [_]u8{ 'a', 'l', 'p', 'h', 'a' };
+    var second = [_]u8{ 'b', 'e', 't', 'a' };
+    const candidates = [_]ModelCatalogEntry{
+        .{ .id = first[0..], .model_type = @constCast("language") },
+        .{ .id = second[0..], .model_type = @constCast("language") },
+    };
+
+    var ids = try projectModelIds(std.testing.allocator, &candidates);
+    defer collections.freeStringList(std.testing.allocator, &ids);
+
+    first[0] = 'z';
+    second[0] = 'y';
+
+    try std.testing.expectEqual(@as(usize, 2), ids.items.len);
+    try std.testing.expectEqualStrings("alpha", ids.items[0]);
+    try std.testing.expectEqualStrings("beta", ids.items[1]);
+}
+
+test "catalog order prefers tool use, tier, provider, then recency" {
+    var entries = [_]ModelCatalogEntry{
+        .{ .id = @constCast("mistral/large-x"), .model_type = @constCast("language"), .released = 100 },
+        .{ .id = @constCast("anthropic/claude-haiku-4.5"), .model_type = @constCast("language"), .released = 99, .has_tool_use = true },
+        .{ .id = @constCast("xai/grok-flash"), .model_type = @constCast("language"), .released = 90, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-5"), .model_type = @constCast("language"), .released = 10, .has_tool_use = true },
+        .{ .id = @constCast("anthropic/claude-opus-4.5"), .model_type = @constCast("language"), .released = 3, .has_tool_use = true },
+        .{ .id = @constCast("anthropic/claude-opus-4.6"), .model_type = @constCast("language"), .released = 5, .has_tool_use = true },
+    };
+
+    std.mem.sort(ModelCatalogEntry, &entries, {}, compareModelCatalogEntries);
+
+    try std.testing.expectEqualStrings("anthropic/claude-opus-4.6", entries[0].id);
+    try std.testing.expectEqualStrings("anthropic/claude-opus-4.5", entries[1].id);
+    try std.testing.expectEqualStrings("openai/gpt-5", entries[2].id);
+    try std.testing.expectEqualStrings("xai/grok-flash", entries[3].id);
+    try std.testing.expectEqualStrings("anthropic/claude-haiku-4.5", entries[4].id);
+    try std.testing.expectEqualStrings("mistral/large-x", entries[5].id);
+}
+
+test "catalog order lists newer gpt and grok majors before older ones" {
+    // The Gateway lists models oldest first.
+    var entries = [_]ModelCatalogEntry{
+        .{ .id = @constCast("openai/gpt-4.1"), .model_type = @constCast("language"), .released = 5, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-5.6-sol"), .model_type = @constCast("language"), .released = 10, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-5.6-sol-fast"), .model_type = @constCast("language"), .released = 10, .has_tool_use = true },
+        .{ .id = @constCast("xai/grok-4.7"), .model_type = @constCast("language"), .released = 20, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-6-sol"), .model_type = @constCast("language"), .released = 30, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-6.1-sol"), .model_type = @constCast("language"), .released = 40, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-6.1-sol-fast"), .model_type = @constCast("language"), .released = 40, .has_tool_use = true },
+        .{ .id = @constCast("xai/grok-5"), .model_type = @constCast("language"), .released = 50, .has_tool_use = true },
+    };
+
+    sort_utils.sort(ModelCatalogEntry, &entries, {}, compareModelCatalogEntries);
+
+    const expected = [_][]const u8{
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6.1-sol-fast",
+        "openai/gpt-6-sol",
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-sol-fast",
+        "xai/grok-5",
+        "xai/grok-4.7",
+        "openai/gpt-4.1",
+    };
+    for (expected, entries) |id, entry| try std.testing.expectEqualStrings(id, entry.id);
+}
+
+test "featured deepseek slot prefers the pro variant at equal recency" {
+    const candidates = [_]ModelCatalogEntry{
+        .{ .id = @constCast("deepseek/deepseek-v4"), .model_type = @constCast("language"), .released = 110, .has_tool_use = true },
+        .{ .id = @constCast("deepseek/deepseek-v4-flash"), .model_type = @constCast("language"), .released = 110, .has_tool_use = true },
+        .{ .id = @constCast("deepseek/deepseek-v4-pro"), .model_type = @constCast("language"), .released = 110, .has_tool_use = true },
+    };
+
+    var curated = try projectPickerModelCatalog(std.testing.allocator, &candidates);
+    defer freeModelCatalog(std.testing.allocator, &curated);
+
+    try std.testing.expectEqual(@as(usize, 3), curated.items.len);
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-pro", curated.items[0].id);
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4", curated.items[1].id);
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", curated.items[2].id);
+}
+
+test "picker keeps its highlights first and every Token Pass mark" {
+    const candidates = [_]ModelCatalogEntry{
+        .{ .id = @constCast("anthropic/claude-fable-5"), .model_type = @constCast("language"), .released = 300, .has_tool_use = true },
+        .{ .id = @constCast("openai/gpt-6-sol"), .model_type = @constCast("language"), .released = 290, .has_tool_use = true },
+        .{ .id = @constCast("deepseek/deepseek-v4-pro"), .model_type = @constCast("language"), .released = 260, .has_tool_use = true },
+        .{ .id = @constCast("deepseek/deepseek-v4.1-flash"), .model_type = @constCast("language"), .released = 255, .has_tool_use = true, .token_pass = true },
+        .{ .id = @constCast("zai/glm-5.3"), .model_type = @constCast("language"), .released = 250, .has_tool_use = true, .token_pass = true },
+        .{ .id = @constCast("zai/glm-5.3-flash"), .model_type = @constCast("language"), .released = 240, .has_tool_use = true, .token_pass = true },
+        .{ .id = @constCast("moonshotai/kimi-k3.1-pro"), .model_type = @constCast("language"), .released = 235, .has_tool_use = true, .token_pass = true },
+        .{ .id = @constCast("moonshotai/kimi-k3"), .model_type = @constCast("language"), .released = 230, .has_tool_use = true, .token_pass = true },
+        .{ .id = @constCast("zai/glm-5.2"), .model_type = @constCast("language"), .released = 100, .has_tool_use = true },
+    };
+
+    var curated = try projectPickerModelCatalog(std.testing.allocator, &candidates);
+    defer freeModelCatalog(std.testing.allocator, &curated);
+
+    // The catalog does not know the team, so Token Pass models keep their
+    // usual places; the model menu moves them up for a team with Token Pass.
+    const highlights = [_][]const u8{ "anthropic/claude-fable-5", "openai/gpt-6-sol", "zai/glm-5.3", "deepseek/deepseek-v4-pro" };
+    for (highlights, curated.items[0..highlights.len]) |id, entry| try std.testing.expectEqualStrings(id, entry.id);
+    try std.testing.expectEqual(candidates.len, curated.items.len);
+    for (candidates) |candidate| {
+        const kept = for (curated.items) |entry| {
+            if (std.mem.eql(u8, entry.id, candidate.id)) break entry;
+        } else return error.TestExpectedModel;
+        try std.testing.expectEqual(candidate.token_pass, kept.token_pass);
+    }
+}

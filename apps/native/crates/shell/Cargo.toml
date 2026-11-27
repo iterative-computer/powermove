@@ -1,0 +1,81 @@
+[package]
+name = "pm-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+pm-wave = { path = "../wave" }
+pm-design = { path = "../design" }
+pm-telemetry = { path = "../telemetry" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["frame-capture"] }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["frame-capture"] }
+metal = "0.33"
+foreign-types = "0.5"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-quartz-core = "0.3"
+block2 = "0.6"
+resvg = { version = "=0.48.1", default-features = false }
+raw-window-handle = "0.6"
+async-channel = "2"
+core-graphics = "0.24"
+image = { version = "0.25", default-features = false, features = ["png"] }
+unicode-segmentation = "1"
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["test-support"] }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["test-support"] }
+gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
+gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+[[test]]
+name = "child_windows"
+harness = false
+[[test]]
+name = "settings_chrome"
+harness = false
+[[test]]
+name = "child_windows_gpui"
+harness = false
+[[test]]
+name = "hidden_release"
+harness = false
+[[test]]
+name = "quit_sheets"
+harness = false
+[[test]]
+name = "tab_close_gpui"
+harness = false
+[[test]]
+name = "hosted_present"
+harness = false
+[[test]]
+name = "window_tabs"
+harness = false
+[[test]]
+name = "modal_sheets"
+harness = false
+
+[[example]]
+name = "capture-agent-pickers"
+path = "src/capture_agent_pickers.rs"
+
+[[test]]
+name = "external_drops"
+harness = false
+
+[[test]]
+name = "launch_release"
+harness = false
+
+[[test]]
+name = "palette_typing"
+harness = false
+[[test]]
+name = "region_pick"
+harness = false

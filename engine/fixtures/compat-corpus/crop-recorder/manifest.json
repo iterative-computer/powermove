@@ -1,0 +1,10 @@
+{
+  "id": "crop-recorder",
+  "name": "Crop Recorder",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Records the crop windows the raster service is called with, passing every call through.",
+  "entry": "index.ts",
+  "contributes": ["hooks"],
+  "author": "user"
+}

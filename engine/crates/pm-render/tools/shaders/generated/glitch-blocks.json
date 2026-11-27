@@ -1,0 +1,22 @@
+{
+ "name": "glitch-blocks",
+ "kind": "shader",
+ "covers": [
+  "iFrame",
+  "helper-hash",
+  "helper-luma",
+  "param-float"
+ ],
+ "prompt": "Digital glitch blocks that shift horizontally and change every few frames, over a simple gradient. Intensity slider.",
+ "provenance": {
+  "via": "claude --print with the in-app agent instructions (no Powermove MCP tools)",
+  "cli": "2.1.300 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "instructionsSha256": "318f129e1c84dc248228a436ba17d0d2fcb913478262bebf35259a912b645a08",
+  "seconds": 21.031,
+  "generated": "2026-10-17T07:33:03.197Z"
+ },
+ "code": "// Digital glitch blocks over a gradient.\n// Blocks shift horizontally and re-randomize uRate times per second.\nuniform float uIntensity;  // @param 0.6 0 1\nuniform float uRate;       // @param 8.0 1 30\nuniform float uBlockSize;  // @param 0.08 0.02 0.3\nuniform float uRGBSplit;   // @param 0.5 0 1\nuniform vec3  uColorA;     // @param #1A1F6B\nuniform vec3  uColorB;     // @param #FF4D8D\n\nvec3 grad(vec2 q) {\n  q.x = fract(q.x);\n  float t = clamp(q.x * 0.75 + q.y * 0.25, 0.0, 1.0);\n  vec3 c = mix(uColorA, uColorB, smoothstep(0.0, 1.0, t));\n  c += 0.06 * (1.0 - q.y);\n  return c;\n}\n\n// Returns horizontal shift and an \"active\" mask for one block layer.\nvec2 blockLayer(vec2 q, float size, float stepId, float seed) {\n  float rows = 1.0 / size;\n  float ry = floor(q.y * rows);\n  float rowR = hash(vec2(ry + seed, stepId));\n  float cols = rows * 0.35;\n  float cx = floor(q.x * cols + hash(vec2(ry, stepId + seed + 3.0)) * 4.0);\n  float cellR = hash(vec2(cx + seed * 2.0, ry + stepId * 7.13));\n  float active = step(1.0 - uIntensity * 0.65, rowR) * step(0.4, cellR);\n  float shift = (hash(vec2(ry + seed, stepId + 1.7)) - 0.5) * 0.45;\n  return vec2(shift * active, active);\n}\n\nvoid main() {\n  float stepId = floor(iTime * uRate);\n  vec2 q = uv;\n\n  vec2 a = blockLayer(q, uBlockSize, stepId, 0.0);\n  vec2 b = blockLayer(q, uBlockSize * 2.7, stepId + 13.0, 41.0);\n  float active = max(a.y, b.y);\n  float shift = (a.x + b.x * 0.6) * uIntensity;\n  q.x += shift;\n\n  float split = uRGBSplit * 0.02 * uIntensity * active\n              * (0.5 + hash(vec2(stepId, floor(uv.y / uBlockSize))));\n  vec3 col;\n  col.r = grad(q + vec2(split, 0.0)).r;\n  col.g = grad(q).g;\n  col.b = grad(q - vec2(split, 0.0)).b;\n\n  // Occasional block treatments: invert or posterize.\n  float fx = hash(vec2(floor(uv.y / uBlockSize), stepId + 5.0));\n  if (active > 0.5 && fx > 0.88) col = 1.0 - col;\n  else if (active > 0.5 && fx > 0.72) col = floor(col * 4.0) / 4.0;\n\n  // Thin bright tear lines.\n  float lineR = hash(vec2(floor(uv.y * iResolution.y / 2.0), stepId));\n  col += step(1.0 - 0.015 * uIntensity, lineR) * 0.5;\n\n  // Faint scanlines.\n  col *= 1.0 - 0.06 * uIntensity * step(0.5, fract(uv.y * iResolution.y * 0.5));\n\n  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n}\n",
+ "definition": null,
+ "summary": "I wrote a shader with glitch blocks that shift sideways and colour-split over a navy-to-pink gradient. They change `uRate` times per second (8 by default), and `uIntensity` (0–1) sets how strong the glitching is; at 0 you get the clean gradient. I didn't compile or render it because no Powermove tools were connected in this run. Other sliders are `uBlockSize` and `uRGBSplit`, plus colour pickers `uColorA` and `uColorB`."
+}

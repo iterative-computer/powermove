@@ -1,0 +1,390 @@
+import { expect, test } from "bun:test";
+import { HostClient, type HostRequest, type Json } from "../../../src";
+import { decodeReply, ProjectService } from "../service";
+import { asset, owner, projection } from "./fixtures";
+import type { Input, Stamp } from "../contract";
+function fixture(readOnlyPages = false) {
+  const requests: HostRequest[] = [];
+  const announcements: { message: string; sequence: number }[] = [];
+  let stamp = { ...owner };
+  let delay: Promise<void> | undefined;
+  let reply: Json | undefined;
+  let reject = false;
+  const host = new HostClient(
+    { realm: "fixture", project: "P", generation: 1 },
+    async (request) => {
+      requests.push(request);
+      if (request.operation.type === "subscribe")
+        return {
+          ...request,
+          revision: stamp.revision,
+          accepted: true,
+          value: { stamp } as unknown as Json,
+        };
+      if (request.operation.type === "command") {
+        const sent = request.operation.args as unknown as { owner: Stamp };
+        if (sent.owner.revision !== stamp.revision)
+          throw new Error("stale captured revision");
+        const capturedStamp = { ...stamp };
+        await delay;
+        if (reject)
+          return {
+            ...request,
+            revision: stamp.revision,
+            accepted: false,
+            error: "Synthetic failure",
+          };
+        const page = "Page" in (request.operation.args as any).action;
+        const next =
+          readOnlyPages && page
+            ? capturedStamp
+            : { ...capturedStamp, revision: capturedStamp.revision + 1 };
+        // An in-flight reply cannot move the simulated server backwards.
+        if (
+          stamp.document === capturedStamp.document &&
+          stamp.revision === capturedStamp.revision
+        )
+          stamp = next;
+        const view = projection([asset()]);
+        view.page.stamp = next;
+        return {
+          ...request,
+          accepted: true,
+          revision: next.revision,
+          value: reply ?? ({ view } as unknown as Json),
+        };
+      }
+      return { ...request, accepted: true, revision: stamp.revision };
+    },
+  );
+  const service = new ProjectService(host, {
+    command: "fixture.media",
+    subscription: "fixture.project",
+    projectStamp: (value) => (value as unknown as { stamp: Stamp }).stamp,
+    announce: (message, sequence) => announcements.push({ message, sequence }),
+  });
+  return {
+    host,
+    service,
+    requests,
+    announcements,
+    replace(s: Stamp) {
+      stamp = s;
+    },
+    setDelay(p: Promise<void>) {
+      delay = p;
+    },
+    setReply(v: Json) {
+      reply = v;
+    },
+    reject() {
+      reject = true;
+    },
+    recover() {
+      reject = false;
+    },
+  };
+}
+test("subscribes through host data; uses actual acks before publishing", async () => {
+  const f = fixture();
+  await f.service.start();
+  expect(f.service.view!.page.stamp.revision).toBe(2);
+  let release!: () => void;
+  f.setDelay(new Promise((resolve) => (release = resolve)));
+  const pending = f.service.input("Clear");
+  await Promise.resolve();
+  expect(f.service.view!.page.stamp.revision).toBe(2);
+  release();
+  await pending;
+  expect(f.service.view!.page.stamp.revision).toBe(3);
+  await f.service.dispose();
+  expect(f.requests.at(-1)!.operation.type).toBe("unsubscribe");
+});
+test("concurrent edits capture the latest actual owner when dequeued", async () => {
+  const f = fixture();
+  await f.service.start();
+  await Promise.all([f.service.input("Clear"), f.service.input("FilesEnter")]);
+  expect(f.service.view!.page.stamp.revision).toBe(4);
+  expect(
+    f.requests
+      .filter((r) => r.operation.type === "command")
+      .map((r) => (r.operation as any).args.owner.revision),
+  ).toEqual([1, 2, 3]);
+  await f.service.dispose();
+});
+test("failed commands retain the last accepted view and inspectable error", async () => {
+  const f = fixture();
+  await f.service.start();
+  const before = structuredClone(f.service.view);
+  f.reject();
+  f.service.run(f.service.input("FilesEnter"));
+  await f.service.idle();
+  expect(f.service.view).toEqual(before);
+  expect(String(f.service.error)).toContain("Synthetic failure");
+  await f.service.dispose();
+});
+test("document replacement fences an in-flight result", async () => {
+  const f = fixture();
+  await f.service.start();
+  let release!: () => void;
+  f.setDelay(new Promise((resolve) => (release = resolve)));
+  const pending = f.service.input("Clear");
+  for (let i = 0; i < 20 && f.requests.length < 3; i++) await Promise.resolve();
+  const stamp = { ...owner, document: 2, revision: 2 };
+  f.replace(stamp);
+  f.host.publish({
+    ...f.host.identity,
+    version: 1,
+    subscription: "fixture.project",
+    revision: 2,
+    sequence: 1,
+    value: { stamp } as unknown as Json,
+  });
+  expect(f.service.view).toBeNull();
+  release();
+  expect(await pending).toBeNull();
+  await f.service.idle();
+  await f.service.dispose();
+});
+test("a new document in the window shows only its own media, from the top", async () => {
+  const f = fixture();
+  await f.service.start();
+  await f.service.page(96, 96);
+  await f.service.idle();
+  expect(f.service.view?.page.stamp.document).toBe(owner.document);
+  // New Project replaces the open project in the same window.
+  const stamp = { ...owner, document: owner.document + 1, revision: 10 };
+  f.replace(stamp);
+  const fresh = projection([asset("new")]);
+  fresh.page.stamp = { ...stamp, revision: 11 };
+  f.setReply({ view: fresh } as unknown as Json);
+  f.host.publish({
+    ...f.host.identity,
+    version: 1,
+    subscription: "fixture.project",
+    revision: 10,
+    sequence: 1,
+    value: { stamp } as unknown as Json,
+  });
+  // Nothing of the old project is shown while the new one's page is asked.
+  expect(f.service.view).toBeNull();
+  await f.service.idle();
+  const pages = f.requests
+    .flatMap((r) =>
+      r.operation.type === "command"
+        ? [
+            r.operation.args as unknown as {
+              owner: Stamp;
+              action: { Page?: { offset: number } };
+            },
+          ]
+        : [],
+    )
+    .filter((a) => a.action.Page && a.owner.document === stamp.document);
+  expect(pages.length).toBeGreaterThan(0);
+  expect(pages.every((a) => a.action.Page!.offset === 0)).toBe(true);
+  expect(f.service.view?.page.stamp.document).toBe(stamp.document);
+  expect(
+    f.service.view?.page.rows.map((r) => ("Asset" in r.id ? r.id.Asset : null)),
+  ).toEqual(["new"]);
+  await f.service.dispose();
+});
+test("dispose fences late replies and releases host subscription", async () => {
+  const f = fixture();
+  await f.service.start();
+  let release!: () => void;
+  f.setDelay(new Promise((resolve) => (release = resolve)));
+  const pending = f.service.input("Clear");
+  await Promise.resolve();
+  const disposed = f.service.dispose();
+  release();
+  expect(await pending).toBeNull();
+  await disposed;
+  expect(f.service.view).toBeNull();
+  expect(await f.service.input("Clear")).toBeNull();
+});
+test("command arguments are copied at submission", async () => {
+  const f = fixture();
+  await f.service.start();
+  const input: Input = { BeginRename: { Asset: "authored" } };
+  const pending = f.service.input(input);
+  input.BeginRename = { Asset: "mutated" };
+  await pending;
+  expect(
+    (f.requests.at(-1)!.operation as any).args.action.Input.BeginRename,
+  ).toEqual({ Asset: "authored" });
+  await f.service.dispose();
+});
+test("invalid, foreign, unsafe-integer and inconsistent projections refuse", () => {
+  const view = projection([asset()]);
+  for (const broken of [
+    null,
+    {
+      view: {
+        ...view,
+        page: { ...view.page, stamp: { ...owner, project: "other" } },
+      },
+    },
+    {
+      view: {
+        ...view,
+        page: {
+          ...view.page,
+          stamp: { ...owner, document: Number.MAX_SAFE_INTEGER + 1 },
+        },
+      },
+    },
+    { view: { ...view, page: { ...view.page, total: 0 } } },
+    { view: { ...view, page: { ...view.page, rows: [asset(), asset()] } } },
+  ])
+    expect(() => decodeReply(broken, owner)).toThrow();
+});
+test("bounded page windows reject before a host request", async () => {
+  const f = fixture();
+  await f.service.start();
+  const n = f.requests.length;
+  for (const [offset, limit] of [
+    [-1, 1],
+    [0, 4097],
+    [0, 0.5],
+  ])
+    await expect(f.service.page(offset, limit)).rejects.toThrow();
+  expect(f.requests.length).toBe(n);
+  await f.service.dispose();
+});
+
+test("unknown future statuses and missing native fields cannot invent ready media", () => {
+  for (const state of [
+    "Changed",
+    { Cloud: { provider: "Fixture" } },
+    { Ready: true },
+  ]) {
+    const row = asset();
+    if ("Asset" in row.data) row.data.Asset[1].availability = state as never;
+    expect(() => decodeReply({ view: projection([row]) }, owner)).toThrow();
+  }
+  const row = asset();
+  if ("Asset" in row.data) delete (row.data.Asset[0] as any).duration;
+  expect(() => decodeReply({ view: projection([row]) }, owner)).toThrow();
+});
+
+test("queued inputs retain their original document and never retarget on switch", async () => {
+  const f = fixture();
+  await f.service.start();
+  let release!: () => void;
+  f.setDelay(new Promise((resolve) => (release = resolve)));
+  const first = f.service.input("Clear");
+  for (let i = 0; i < 20 && f.requests.length < 3; i++) await Promise.resolve();
+  const queued = f.service.input("FilesEnter");
+  const stamp = { ...owner, document: 2, revision: 2 };
+  f.replace(stamp);
+  f.host.publish({
+    ...f.host.identity,
+    version: 1,
+    subscription: "fixture.project",
+    revision: 2,
+    sequence: 1,
+    value: { stamp } as unknown as Json,
+  });
+  release();
+  expect(await first).toBeNull();
+  expect(await queued).toBeNull();
+  await f.service.idle();
+  expect(
+    f.requests
+      .filter((r) => r.operation.type === "command")
+      .some((r) => (r.operation as any).args.action.Input === "FilesEnter"),
+  ).toBe(false);
+  await f.service.dispose();
+});
+test("old rendered controls and native menus refuse stale revision intent", async () => {
+  const f = fixture();
+  await f.service.start();
+  const captured = f.service.view!.page.stamp;
+  await f.service.input("Clear");
+  const count = f.requests.length;
+  expect(await f.service.input("FilesEnter", captured)).toBeNull();
+  expect(await f.service.menu(null, captured)).toBeNull();
+  expect(f.requests.length).toBe(count);
+  await f.service.dispose();
+});
+
+test("late same-document publications cannot regress an acknowledged projection", async () => {
+  const f = fixture();
+  await f.service.start();
+  const count = f.requests.length;
+  f.host.publish({
+    ...f.host.identity,
+    version: 1,
+    subscription: "fixture.project",
+    revision: 1,
+    sequence: 1,
+    value: { stamp: owner } as unknown as Json,
+  });
+  await f.service.idle();
+  expect(f.service.view!.page.stamp.revision).toBe(2);
+  expect(f.requests.length).toBe(count);
+  await f.service.dispose();
+});
+
+test("transport failure fences card input and announces once until accepted publications resume", async () => {
+  const f = fixture();
+  await f.service.start();
+  f.reject();
+  f.service.run(f.service.input("Clear"));
+  await f.service.idle();
+  expect(f.service.errorSequence).toBe(1);
+  const count = f.requests.length;
+  expect(await f.service.input("FilesEnter")).toBeNull();
+  expect(await f.service.menu(null)).toBeNull();
+  expect(f.requests.length).toBe(count);
+  f.service.run(f.service.page(0, 12));
+  await f.service.idle();
+  expect(f.service.errorSequence).toBe(1);
+  f.recover();
+  await f.service.page(0, 12);
+  expect(f.service.error).toBeNull();
+  expect((await f.service.input("Clear"))?.view).toBeTruthy();
+  f.reject();
+  f.service.run(f.service.input("Clear"));
+  await f.service.idle();
+  expect(f.service.errorSequence).toBe(2);
+  expect(f.announcements).toEqual([
+    { message: "Project media isn’t updating right now.", sequence: 1 },
+    { message: "Project media isn’t updating right now.", sequence: 2 },
+  ]);
+  await f.service.dispose();
+});
+
+test("edit bursts coalesce Project refreshes to the latest document state", async () => {
+  const f = fixture(true);
+  await f.service.start();
+  let release!: () => void;
+  f.setDelay(new Promise<void>((resolve) => (release = resolve)));
+  const count = () =>
+    f.requests.filter((r) => r.operation.type === "command").length;
+  const before = count();
+  const publish = (revision: number) => {
+    const stamp = { ...owner, revision };
+    f.replace(stamp);
+    f.host.publish({
+      ...f.host.identity,
+      version: 1,
+      subscription: "fixture.project",
+      revision,
+      sequence: revision,
+      value: { stamp } as unknown as Json,
+    });
+  };
+  publish(2);
+  for (let i = 0; i < 30 && count() === before; i++) await Promise.resolve();
+  expect(count()).toBe(before + 1);
+  for (let revision = 3; revision <= 40; revision++) publish(revision);
+  release();
+  await f.service.idle();
+  expect(f.service.error).toBeNull();
+  expect(f.service.view?.page.stamp.revision).toBe(40);
+  expect(count() - before).toBeLessThanOrEqual(2);
+  expect(f.announcements).toEqual([]);
+  await f.service.dispose();
+});

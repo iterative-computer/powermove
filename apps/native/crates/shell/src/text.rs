@@ -1,0 +1,801 @@
+//! Native primary/multiline editors and a dense GPUI field with an AppKit edit slot.
+use gpui::{prelude::*, *};
+use gpui_macos::native_text::NativeTextSlot;
+pub use gpui_macos::native_text::{TextEvent, TextKind};
+use objc2::rc::Retained;
+use objc2_app_kit::NSView;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::rc::Rc;
+
+pub struct TextField {
+    build: Option<crate::native_control::BuildSnapshot>,
+    build_pixels: Rc<std::cell::RefCell<crate::native_control::BuildPixels>>,
+    slot: Rc<NativeTextSlot>,
+    /// Where the slot was painted inside a scroll layer, to follow it.
+    kind: TextKind,
+    value: String,
+    placeholder: SharedString,
+    /// Drawn after the value in `muted` while not editing (`34 px`).
+    unit: Option<SharedString>,
+    tokens: pm_design::Tokens,
+    /// A composer's last submitted text, cleared once the model empties it.
+    submitted: Option<String>,
+    composer_epoch: Option<u64>,
+    composer_optimistic: bool,
+    /// The newest host replacement this field took (see
+    /// [`Self::set_value_from_host`]).
+    host_value: u64,
+    /// A multiline editor that takes its container's whole height (Shader Lab,
+    /// Notes) instead of four rows.
+    fill: bool,
+    /// No well of its own: the field sits inside a control that draws one
+    /// (the search field).
+    bare: bool,
+    inline_name: bool,
+    /// Source text, in this family: one line least, and the face is kept
+    /// when the tokens change.
+    code: Option<String>,
+    /// The value's ink at rest, when it is not the text ink (a value an
+    /// expression drives).
+    ink: Option<u32>,
+    /// The width the editor was last given, to count its wrapped lines.
+    width: Rc<std::cell::Cell<f32>>,
+    /// A press opened it and the keyboard is on its way (it moves at the next
+    /// present): keys typed meanwhile wait for it (`typing`, PM-487).
+    awaiting_keyboard: bool,
+}
+impl EventEmitter<TextEvent> for TextField {}
+/// Whether `window` can host a native field (an AppKit window, not a
+/// headless test window).
+pub fn available(window: &Window) -> bool {
+    matches!(
+        HasWindowHandle::window_handle(window).map(|h| h.as_raw()),
+        Ok(RawWindowHandle::AppKit(_))
+    )
+}
+impl TextField {
+    pub fn new(
+        kind: TextKind,
+        label: &str,
+        value: &str,
+        tokens: pm_design::Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let RawWindowHandle::AppKit(handle) =
+            HasWindowHandle::window_handle(window).unwrap().as_raw()
+        else {
+            panic!("Mac-only text slot")
+        };
+        let view: Retained<NSView> =
+            unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+        let slot = Rc::new(NativeTextSlot::new(&view, kind, label, value));
+        slot.set_font_size(tokens.typography.body as f64);
+        let (tx, rx) = async_channel::unbounded();
+        slot.on_event(Rc::new(move || {
+            let _ = tx.try_send(());
+        }));
+        cx.spawn(async move |this, cx| {
+            while rx.recv().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| {
+                        for event in this.slot.take_events() {
+                            match &event {
+                                TextEvent::Committed(value) => this.value = value.clone(),
+                                TextEvent::Submitted(value) => {
+                                    this.submitted = Some(value.clone());
+                                }
+                                TextEvent::Changed(value) if this.kind == TextKind::Composer => {
+                                    this.value = value.clone();
+                                }
+                                _ => {}
+                            }
+                            cx.emit(event);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Self {
+            build: None,
+            build_pixels: Default::default(),
+            slot,
+            kind,
+            value: value.into(),
+            placeholder: SharedString::default(),
+            unit: None,
+            tokens,
+            submitted: None,
+            composer_epoch: None,
+            composer_optimistic: false,
+            host_value: 0,
+            fill: false,
+            bare: false,
+            inline_name: false,
+            code: None,
+            ink: None,
+            width: Rc::default(),
+            awaiting_keyboard: false,
+        }
+    }
+    /// The lines a multi-line field shows: its text as it wraps in the
+    /// field's width, between one and [`MULTILINE_MOST`] lines.
+    /// Past the most, the editor scrolls.
+    fn lines(&self, window: &mut Window) -> f32 {
+        let text = self.slot.value();
+        let size = px(self.tokens.typography.body);
+        let room = self.width.get() - 2. * self.text_origin().0;
+        let mut lines = 0usize;
+        for line in text.split('\n') {
+            lines += 1;
+            if self.code.is_some() {
+                // The fixed-width face: every character is this wide.
+                let across = (room / (f32::from(size) * MONO_ADVANCE)).floor().max(1.);
+                lines += ((line.chars().count() as f32 / across).ceil() as usize).saturating_sub(1);
+            } else if room > 0. && !line.is_empty() {
+                let style = window.text_style();
+                let font = Font {
+                    family: pm_design::TEXT_FONT.into(),
+                    ..style.font()
+                };
+                let run = TextRun {
+                    len: line.len(),
+                    font,
+                    color: style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: None,
+                };
+                let width = window
+                    .text_system()
+                    .shape_line(line.to_owned().into(), size, &[run])
+                    .width;
+                lines += (f32::from(width) / room).floor() as usize;
+            }
+        }
+        lines.clamp(1, MULTILINE_MOST) as f32
+    }
+    /// A multiline editor in `family` (code editors use the mono face) that
+    /// fills its parent's height.
+    pub fn code_editor(&mut self, family: &str) {
+        self.set_code(family);
+        self.fill = true;
+    }
+    /// Source text in `family` (the mono face): no spelling marks,
+    /// corrections or smart substitutions. The field keeps its own height.
+    pub fn set_code(&mut self, family: &str) {
+        let size = self.tokens.typography.body as f64;
+        // The family's PostScript face when installed, else Menlo (always is).
+        let face = [
+            format!("{}-Regular", family.replace(' ', "")),
+            "Menlo-Regular".into(),
+        ]
+        .into_iter()
+        .find(|name| {
+            objc2_app_kit::NSFont::fontWithName_size(
+                &objc2_foundation::NSString::from_str(name),
+                size,
+            )
+            .is_some()
+        })
+        .unwrap_or_default();
+        self.slot.set_font(&face, size);
+        // Code keeps Tab for indenting.
+        self.slot.set_tab_inserts(true);
+        // Code: no spelling marks, corrections or smart substitutions.
+        if let Some(view) = self
+            .slot
+            .native_view()
+            .downcast_ref::<objc2_app_kit::NSTextView>()
+        {
+            view.setContinuousSpellCheckingEnabled(false);
+            view.setAutomaticSpellingCorrectionEnabled(false);
+            view.setAutomaticQuoteSubstitutionEnabled(false);
+            view.setAutomaticDashSubstitutionEnabled(false);
+            view.setAutomaticTextReplacementEnabled(false);
+            view.setGrammarCheckingEnabled(false);
+        }
+        self.code = Some(family.into());
+    }
+    /// The value's ink while it is not being edited; `None` is the text ink.
+    pub fn set_ink(&mut self, ink: Option<u32>) {
+        self.ink = ink;
+    }
+    /// The editor fills its container's height (a notes pane) instead of
+    /// four rows.
+    pub fn set_fill(&mut self, fill: bool) {
+        self.fill = fill;
+    }
+    /// Muted hint shown while the field is empty (`metadata.placeholder`).
+    /// Draw no well: the enclosing control owns the fill, edge and padding.
+    /// Escape cancels the edit (the owner hears `Cancelled`) instead of
+    /// committing it: a search field, which clears itself.
+    pub fn set_escape_cancels(&mut self, cancels: bool) {
+        self.slot.set_escape_cancels(cancels);
+    }
+    pub fn set_bare(&mut self, bare: bool) {
+        self.bare = bare;
+    }
+    /// An inline name keeps the surrounding text's line box while editing.
+    pub fn set_inline_name(&mut self, inline: bool) {
+        self.inline_name = inline;
+    }
+    pub fn set_unit(&mut self, unit: Option<SharedString>) {
+        self.unit = unit;
+    }
+    /// A form number field's stepper (Frame Rate).
+    pub fn set_stepper(&mut self, on: bool) {
+        self.slot.set_stepper(on);
+    }
+    /// A form's field (Settings): AppKit's bordered field is the whole
+    /// control, shown at all times; the unit stands beside it.
+    pub fn snapshot_pending(&self) -> bool {
+        !matches!(
+            self.kind,
+            TextKind::DenseText | TextKind::DenseNumber | TextKind::Canvas
+        ) && self.slot.snapshot_visible()
+            && self
+                .build
+                .and_then(|b| b.revision)
+                .is_some_and(|r| !self.build_pixels.borrow().attempted(r))
+    }
+    pub fn set_build_snapshot(
+        &mut self,
+        build: Option<crate::native_control::BuildSnapshot>,
+    ) -> bool {
+        let build = build.filter(|b| b.ready.unwrap_or(0.) < 1. && self.kind != TextKind::Canvas);
+        if self.build == build {
+            return false;
+        }
+        self.build = build;
+        if build.is_none() {
+            *self.build_pixels.borrow_mut() = Default::default();
+        }
+        true
+    }
+    fn render_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let build = self.build;
+        let pixels = self.build_pixels.clone();
+        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
+        let owner = cx.entity().downgrade();
+        let slot = self.slot.clone();
+        let t = &self.tokens;
+        let _ = window;
+        div()
+            .id("native-text")
+            .filter(crate::native_control::reveal_paint(build).0)
+            .opacity(crate::native_control::reveal_paint(build).1)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xs))
+            .text_size(px(t.typography.body))
+            .font_family(pm_design::TEXT_FONT)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h(px(t.metrics.field))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                crate::slot_stage::stage_text(
+                                    &slot,
+                                    bounds,
+                                    window.content_mask(),
+                                    window,
+                                );
+                                if let Some(build) = build {
+                                    if let Some(revision) = build.revision {
+                                        if pixels.borrow_mut().capture(
+                                            slot.native_view(),
+                                            bounds,
+                                            revision,
+                                        ) {
+                                            let _ = owner.update(cx, |_, cx| cx.notify());
+                                        }
+                                    }
+                                    let (_, live) = pm_design::dots::snapshot_visibility(
+                                        pixels.borrow().captured(),
+                                        build.ready,
+                                    );
+                                    slot.stage_build_alpha(live as f64);
+                                } else {
+                                    slot.stage_build_alpha(1.);
+                                }
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .children(
+                        snapshot
+                            .map(|image| div().absolute().inset_0().child(img(image).size_full())),
+                    ),
+            )
+            .children(self.unit.clone().map(|unit| {
+                div()
+                    .flex_none()
+                    .text_color(rgb(t.colors.secondary))
+                    .child(unit)
+            }))
+            .into_any_element()
+    }
+    pub fn set_paste_handler(&mut self, handler: Rc<dyn Fn() -> bool>) {
+        self.slot.set_paste_handler(handler);
+    }
+    pub fn set_placeholder(&mut self, text: &str) {
+        if self.placeholder != text {
+            self.slot.set_placeholder(text);
+            self.placeholder = text.to_owned().into();
+        }
+    }
+    /// Stages the slot again on a frame whose cached paint did not run, as
+    /// last painted (in a scrolling region its container follows the scroll).
+    pub fn keep(&self, _window: &Window) {
+        self.slot.keep();
+    }
+    pub fn accessibility_item(&self) -> Option<gpui_macos::composition::AccessibilityItem> {
+        self.slot.accessibility_item()
+    }
+    /// Dialog-owned navigation; normal text slots retain their existing policy.
+    pub fn set_label(&self, label: &str) {self.slot.set_label(label);}
+    pub fn set_host_navigation(&self, enabled: bool) {self.slot.set_host_navigation(enabled);}
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+    /// Whether this value is currently accepting typed text.
+    pub fn is_editing(&self) -> bool {
+        self.slot.is_editing()
+    }
+    /// The text as it stands in the editor, typed but not yet committed.
+    pub fn editing_text(&self) -> String {
+        self.slot.value()
+    }
+    /// Replaces the text and keeps the editor open (a number field's arrow
+    /// step: the person goes on stepping or typing).
+    pub fn replace_text(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.slot.replace_value(value);
+        self.value = value.into();
+        cx.notify();
+    }
+    /// Whether the field has the keyboard now, not only asked to take it.
+    pub fn has_keyboard(&self) -> bool {
+        self.slot.has_keyboard()
+    }
+    pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
+        // Already typing in it: asked again (a double-click's second press,
+        // a focus that follows the first), it keeps the keyboard. Taking it
+        // again ends the edit, committing it and closing a field opened on
+        // demand, so the next ⌘A selected every layer.
+        if self.slot.has_keyboard() {
+            return;
+        }
+        self.slot.begin_editing();
+        self.await_keyboard();
+        cx.notify();
+    }
+    /// Typing was held for a field on its way (a press that opens it): when
+    /// this one takes the keyboard, what waited goes to it.
+    fn await_keyboard(&mut self) {
+        if crate::typing::expecting() && !self.slot.has_keyboard() {
+            self.awaiting_keyboard = true;
+        }
+    }
+    /// Ends editing and gives the keyboard back to the editor (Escape in a
+    /// docked composer).
+    pub fn blur(&mut self, cx: &mut Context<Self>) {
+        self.slot.blur();
+        cx.notify();
+    }
+    /// Focused with all its text selected, so typing replaces it.
+    pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
+        if !self.slot.has_keyboard() {
+            self.slot.begin_editing();
+        }
+        self.slot.set_selection(0, usize::MAX);
+        self.await_keyboard();
+        cx.notify();
+    }
+    /// Where the first line's text starts in the field.
+    fn text_origin(&self) -> (f32, f32) {
+        if self.kind == TextKind::Composer {
+            COMPOSER_TEXT_ORIGIN
+        } else {
+            MULTILINE_TEXT_ORIGIN
+        }
+    }
+    /// Select a UTF-16 prefix, leaving a filename extension intact.
+    pub fn begin_editing_selecting_to(&mut self, end: usize, cx: &mut Context<Self>) {
+        self.slot.begin_editing();
+        self.slot.set_selection(0, end);
+        cx.notify();
+    }
+    pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
+        let resized = self.tokens.typography.body != tokens.typography.body;
+        self.tokens = tokens;
+        match self.code.clone() {
+            // A source field keeps its face at the new size.
+            Some(family) if resized => self.set_code(&family),
+            Some(_) => {}
+            None => self
+                .slot
+                .set_font_size(self.tokens.typography.body as f64),
+        }
+    }
+    /// The panel marks a value its host set (`metadata.hostValue`, rising
+    /// with each one): that value replaces the text even while the person is
+    /// editing, once. Anything else, such as a late answer to their own
+    /// typing, never replaces what they typed.
+    pub fn set_value_from_host(&mut self, value: &str, revision: u64, cx: &mut Context<Self>) {
+        if revision > self.host_value {
+            self.host_value = revision;
+            if self.slot.is_editing() && self.slot.value() != value {
+                self.slot.replace_value(value);
+                self.value = value.into();
+                cx.notify();
+                return;
+            }
+        }
+        self.set_value(value, cx);
+    }
+    /// Send and Return sample the same native editor. Marked input belongs to
+    /// the input method until the person commits it.
+    pub fn composer_submission(&mut self) -> Option<String> {
+        if self.slot.has_marked_text() {
+            return None;
+        }
+        let text = self.slot.value();
+        self.submitted = Some(text.clone());
+        Some(text)
+    }
+
+    pub fn composer_epoch(&self) -> Option<u64> {
+        self.composer_epoch
+    }
+
+    pub fn set_composer_value(
+        &mut self,
+        value: &str,
+        epoch: u64,
+        sending: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self.composer_epoch.replace(epoch);
+        if let Some(sending) = sending {
+            if !self.composer_optimistic
+                && !self.slot.has_marked_text()
+                && self.slot.value() == sending
+            {
+                self.composer_optimistic = true;
+                self.replace_text(value, cx);
+            }
+            return;
+        }
+        if std::mem::take(&mut self.composer_optimistic) {
+            self.submitted = None;
+            if !self.slot.has_marked_text() {
+                let editing = self.slot.value();
+                if editing.is_empty() {
+                    self.replace_text(value, cx);
+                } else {
+                    // New input during submission belongs to the next draft.
+                    // Report it against the current epoch.
+                    cx.emit(TextEvent::Changed(editing));
+                }
+            }
+            return;
+        }
+        if !self.slot.is_editing() {
+            if self.value != value {
+                self.slot.set_value(value);
+                self.value = value.into();
+                cx.notify();
+            }
+            self.submitted = None;
+            return;
+        }
+        if !previous.is_some_and(|previous| previous < epoch) {
+            return;
+        }
+        let editing = self.slot.value();
+        let Some(sent) = self.submitted.take() else {
+            if editing.is_empty() && !value.is_empty() && !self.slot.has_marked_text() {
+                self.replace_text(value, cx);
+            }
+            return;
+        };
+        if editing == sent && !self.slot.has_marked_text() {
+            self.replace_text(value, cx);
+        } else if !self.slot.has_marked_text() {
+            // The person typed while the send was being admitted. Preserve
+            // that input and publish it against the newly opened draft.
+            let draft = if value.is_empty() {
+                editing.strip_prefix(&sent).unwrap_or(&editing)
+            } else {
+                &editing
+            };
+            self.replace_text(draft, cx);
+            cx.emit(TextEvent::Changed(draft.to_owned()));
+        }
+    }
+
+    pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        // A sent message leaves the composer once the model has taken it,
+        // unless the person already typed on.
+        if value.is_empty()
+            && let Some(sent) = self.submitted.take()
+            && self.slot.value() == sent
+        {
+            self.slot.replace_value("");
+            self.value.clear();
+            cx.notify();
+            return;
+        }
+        self.slot.set_value(value);
+        if !self.slot.is_editing() {
+            self.value = value.into();
+            cx.notify();
+        }
+    }
+}
+/// Where a multi-line native editor draws its first glyph, from its own
+/// corner: the text container inset plus the line fragment padding.
+const MULTILINE_TEXT_ORIGIN: (f32, f32) = (9., 3.);
+/// Where a composer's first line box starts: its draft is written straight
+/// on the composer, level with the controls under it
+/// (`gpui_macos::native_text::COMPOSER_INSET` and the line fragment padding).
+const COMPOSER_TEXT_ORIGIN: (f32, f32) = (7., 7.);
+/// How far under a dense well's top its one-line editor starts, so the
+/// text being edited stands on the baseline of the value drawn at rest.
+const DENSE_EDIT_DROP: f32 = 3.;
+/// A character's advance in the fixed-width face, in ems.
+const MONO_ADVANCE: f32 = 0.602;
+/// The most lines a multi-line field grows to before it scrolls.
+const MULTILINE_MOST: usize = 6;
+impl Render for TextField {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The keyboard a press asked for has come: what waited for it goes in.
+        if self.awaiting_keyboard {
+            if self.slot.has_keyboard() {
+                self.awaiting_keyboard = false;
+                crate::typing::field_ready();
+            } else if crate::typing::expecting() {
+                window.request_animation_frame();
+            } else {
+                self.awaiting_keyboard = false;
+            }
+        }
+        if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
+            return self.render_form(window, cx);
+        }
+        let build = self.build;
+        let pixels = self.build_pixels.clone();
+        let slot = self.slot.clone();
+        let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
+            .then(|| self.lines(window));
+        // A composer grows with its wrapped lines too, not only its returns:
+        // a long request stays in view while it is typed.
+        let composer = (self.kind == TextKind::Composer && !self.fill).then(|| self.lines(window));
+        let seen = self.width.clone();
+        let entity = cx.entity().downgrade();
+        let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
+        let editing = self.slot.is_editing() && build.is_none();
+        let (t, bare) = (&self.tokens, self.bare);
+        let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
+        // A well is a soft ink fill with no outline; while it is edited a
+        // neutral ring marks it (never the accent).
+        // The ring is inside the well's edge: panels are translucent, and
+        // an outer shadow would show through under the whole well.
+        let ring = BoxShadow {
+            color: crate::kit::ink(t.colors.focus, 1.).into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(t.metrics.border),
+            inset: true,
+        };
+        div()
+            .id("native-text")
+            .filter(crate::native_control::reveal_paint(build).0)
+            .opacity(crate::native_control::reveal_paint(build).1)
+            .relative()
+            .w_full()
+            .when(self.fill, |d| d.h_full())
+            .when(!self.fill, |d| {
+                d.h(px(if self.kind == TextKind::Composer {
+                    // Grows with its lines, up to the composer's limit.
+                    let lines = composer
+                        .unwrap_or(1.)
+                        .max(self.value.lines().count() as f32)
+                        .max(1.)
+                        .min(self.tokens.metrics.composer_max_lines);
+                    // Each line as the editor spaces it (v1's 1.5), and
+                    // its inset above and below.
+                    let line = self.tokens.typography.body
+                        * gpui_macos::native_text::COMPOSER_LEADING as f32;
+                    (lines * line + 2. * COMPOSER_TEXT_ORIGIN.1).max(self.tokens.metrics.hit)
+                } else if self.inline_name {
+                    f32::from(window.line_height())
+                } else if bare {
+                    // One line, so the control around it can centre the text.
+                    (self.tokens.typography.body * 1.35).ceil()
+                } else if let Some(lines) = multiline {
+                    // As tall as its lines: the text view's line height and
+                    // its inset above and below.
+                    (lines * (self.tokens.typography.body * 1.3).ceil()
+                        + 2. * MULTILINE_TEXT_ORIGIN.1)
+                        .max(self.tokens.metrics.field)
+                } else {
+                    self.tokens.metrics.field
+                }))
+            })
+            // Every value starts on one inset down a column; a well with a
+            // unit trades its trailing padding for the value's room.
+            .pl(px(if bare { 0. } else { self.tokens.metrics.gap }))
+            .pr(px(if bare {
+                0.
+            } else if self.unit.is_some() {
+                self.tokens.space.xs
+            } else {
+                self.tokens.metrics.gap
+            }))
+            .when(!bare, |d| {
+                d.rounded(px(if single {
+                    t.metrics.inner_radius
+                } else {
+                    t.metrics.control_radius
+                }))
+                .bg(crate::kit::ink(t.colors.text, t.translucency.hover))
+                // A step deeper under the pointer: the well takes input.
+                .when(!editing, |d| {
+                    let over = crate::kit::ink(t.colors.text, t.translucency.selected);
+                    d.hover_style(move |s| s.bg(over))
+                })
+                .when(editing, |d| d.shadow(vec![ring]))
+            })
+            .text_color(rgb(self.ink.unwrap_or(self.tokens.colors.text)))
+            .text_size(px(self.tokens.typography.body))
+            .font_family(pm_design::TEXT_FONT)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.build.is_some() {
+                        return;
+                    }
+                    // A press while it already has the keyboard (a double-click's
+                    // second press) leaves it: taking it again ended the edit,
+                    // which commits and closes a field opened on demand.
+                    if this.build.is_none() && !this.slot.has_keyboard() {
+                        this.slot.begin_editing();
+                        // Under load the keyboard moves a slow frame later:
+                        // what is typed until then is for this field, never
+                        // ⌘A on the layers or digits on the playhead.
+                        if !this.slot.has_keyboard() {
+                            crate::typing::expect();
+                            this.awaiting_keyboard = true;
+                        }
+                    }
+                    cx.notify();
+                }),
+            )
+            .flex()
+            .items_center()
+            .when(dense && !editing && self.value.is_empty(), |d| {
+                d.text_color(rgb(self.tokens.colors.muted))
+                    .child(self.placeholder.clone())
+            })
+            // A text view has no placeholder of its own: draw it where its
+            // first line starts (the view's container inset and line padding).
+            .when(
+                matches!(self.kind, TextKind::Composer | TextKind::Multiline)
+                    && !self.placeholder.is_empty()
+                    && self.slot.value().is_empty(),
+                |d| {
+                    let (left, top) = self.text_origin();
+                    let composer = self.kind == TextKind::Composer;
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(left))
+                            .top(px(top))
+                            // A composer's placeholder is the third text step,
+                            // in the line box its draft is set in.
+                            .when(composer, |d| {
+                                d.line_height(px(self.tokens.typography.body
+                                    * gpui_macos::native_text::COMPOSER_LEADING as f32))
+                            })
+                            .text_color(rgb(if composer {
+                                self.tokens.colors.faint
+                            } else {
+                                self.tokens.colors.muted
+                            }))
+                            .child(self.placeholder.clone()),
+                    )
+                },
+            )
+            .when(dense && !editing && !self.value.is_empty(), |d| {
+                d.overflow_hidden()
+                    .child(div().min_w(px(0.)).truncate().child(self.value.clone()))
+                    .children(self.unit.clone().map(|unit| {
+                        div()
+                            .flex_none()
+                            .ml(px(self.tokens.space.hair))
+                            .text_color(rgb(self.tokens.colors.muted))
+                            .child(unit)
+                    }))
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        // A new width wraps the text anew: count again.
+                        let width = f32::from(bounds.size.width);
+                        if (multiline.is_some() || composer.is_some())
+                            && (seen.replace(width) - width).abs() > 0.5
+                        {
+                            let _ = entity.update(cx, |_, cx| cx.notify());
+                        }
+                        let mask = window.content_mask();
+                        // Same content rectangle and token-sized native font in either mode.
+                        // A one-line field sets its text at its top; the
+                        // value drawn at rest is centred in the well. The
+                        // editor stands lower by the difference, so a value
+                        // does not jump when it is clicked.
+                        let mut bounds = bounds;
+                        if dense {
+                            bounds.origin.y += px(DENSE_EDIT_DROP);
+                            bounds.size.height -= px(DENSE_EDIT_DROP);
+                        }
+                        if build.is_none() {
+                            slot.stage_build_alpha(1.);
+                        }
+                        crate::slot_stage::stage_text(&slot, bounds, mask, window);
+                        if let Some(build) = build {
+                            if !dense {
+                                if let Some(revision) = build.revision {
+                                    if pixels.borrow_mut().capture(
+                                        slot.native_view(),
+                                        bounds,
+                                        revision,
+                                    ) {
+                                        let _ = entity.update(cx, |_, cx| cx.notify());
+                                    }
+                                }
+                            }
+                            let (_, live) = pm_design::dots::snapshot_visibility(
+                                dense || pixels.borrow().captured(),
+                                build.ready,
+                            );
+                            slot.stage_build_alpha(live as f64);
+                        } else {
+                            slot.stage_build_alpha(1.);
+                        }
+                        // Use a capture completed in this paint at scroll rest.
+                        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
+                        if let Some(image) = snapshot {
+                            let _ = window.paint_image(
+                                bounds,
+                                bounds,
+                                Corners::default(),
+                                0.,
+                                image,
+                                0,
+                                false,
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
+    }
+}

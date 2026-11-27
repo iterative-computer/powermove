@@ -1,0 +1,110 @@
+{
+ "format": "powermove-history-dictionary",
+ "version": 1,
+ "records": [
+  {
+   "id": "L1",
+   "type": "shape",
+   "name": "One",
+   "from": 0,
+   "dur": 2,
+   "on": true,
+   "p": {
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    }
+   }
+  },
+  {
+   "id": "L2",
+   "type": "shape",
+   "name": "Two",
+   "from": 0,
+   "dur": 2,
+   "on": true,
+   "p": {
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    }
+   }
+  }
+ ],
+ "history": {
+  "version": 1,
+  "paths": "composition",
+  "index": 1,
+  "entries": [
+   {
+    "label": "Add Layer",
+    "forward": [
+     {
+      "patch": {
+       "path": [
+        "comps",
+        "C1",
+        "layers"
+       ],
+       "exists": true
+      },
+      "refs": [
+       0,
+       1
+      ]
+     }
+    ],
+    "backward": [
+     {
+      "patch": {
+       "path": [
+        "comps",
+        "C1",
+        "layers"
+       ],
+       "exists": true
+      },
+      "refs": [
+       0
+      ]
+     }
+    ]
+   },
+   {
+    "label": "Rename Layer",
+    "forward": [
+     {
+      "patch": {
+       "path": [
+        "comps",
+        "C1",
+        "layers",
+        0,
+        "name"
+       ],
+       "exists": true,
+       "value": "Renamed"
+      }
+     }
+    ],
+    "backward": [
+     {
+      "patch": {
+       "path": [
+        "comps",
+        "C1",
+        "layers",
+        0,
+        "name"
+       ],
+       "exists": true,
+       "value": "One"
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,1097 @@
+{
+ "three": "0.180.0",
+ "cases": [
+  {
+   "id": "sphere-studio",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     3,
+     2,
+     6
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.5,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -3,
+      5,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 3,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "sphere",
+    "parameters": {},
+    "matrix": [
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#C7C4FF",
+     "roughness": 0.4,
+     "metalness": 0.1,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "sphere-corpus",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0,
+     1.2,
+     4
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.5,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -4,
+      6,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFF4E0",
+     "intensity": 2.5,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "sphere",
+    "parameters": {
+     "radius": 1,
+     "segments": 48
+    },
+    "matrix": [
+     0.42261826174069944,
+     0.23456971600980447,
+     -0.875426098065593,
+     0.0,
+     0.0,
+     0.9659258262890683,
+     0.25881904510252074,
+     0.0,
+     0.9063077870366499,
+     -0.109381654946615,
+     0.40821789367673483,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#4C8DFF",
+     "roughness": 0.35,
+     "metalness": 0.2,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "box-exposure",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0,
+     1.2,
+     4
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.8,
+    "ambientColor": "#8899FF",
+    "exposure": 1.4,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -4,
+      6,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFF4E0",
+     "intensity": 2.5,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "box",
+    "parameters": {
+     "width": 1.4,
+     "height": 1.4,
+     "depth": 1.4
+    },
+    "matrix": [
+     -0.3420201433256687,
+     0.24321034680169396,
+     -0.9076733711903687,
+     0.0,
+     0.0,
+     0.9659258262890683,
+     0.25881904510252074,
+     0.0,
+     0.9396926207859084,
+     0.08852132690137686,
+     -0.33036608954935215,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#FF6B1A",
+     "roughness": 0.6,
+     "metalness": 0.05,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "plane-background",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0,
+     1.2,
+     4
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.5,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": "#1B2A4A"
+   },
+   "lights": [
+    {
+     "position": [
+      -4,
+      6,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFF4E0",
+     "intensity": 2.5,
+     "visible": true
+    }
+   ],
+   "bottom": true,
+   "object": {
+    "primitive": "plane",
+    "parameters": {
+     "width": 2.4,
+     "height": 1.6
+    },
+    "matrix": [
+     0.9396926207859084,
+     0.08852132690137686,
+     -0.33036608954935215,
+     0.0,
+     0.0,
+     0.9659258262890683,
+     0.25881904510252074,
+     0.0,
+     0.3420201433256687,
+     -0.24321034680169396,
+     0.9076733711903687,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#3FCF8E",
+     "roughness": 0.8,
+     "metalness": 0.1,
+     "emissive": "#102030",
+     "emissiveIntensity": 1.5,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "layerOpacity": 1
+  },
+  {
+   "id": "cylinder-single-sided-two-suns",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     2.5,
+     1.5,
+     3.5
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.3,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -4,
+      6,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 2,
+     "visible": true
+    },
+    {
+     "position": [
+      5,
+      -1,
+      2
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FF8844",
+     "intensity": 1.5,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "cylinder",
+    "parameters": {
+     "radiusTop": 0.3,
+     "radiusBottom": 0.8,
+     "height": 1.6,
+     "segments": 24
+    },
+    "matrix": [
+     0.8528685319524433,
+     -0.005236133250197728,
+     -0.5220994638130463,
+     0.0,
+     -0.1503837331804353,
+     0.9551121657052657,
+     -0.2552361332501978,
+     0.0,
+     0.49999999999999994,
+     0.29619813272602386,
+     0.8137976813493738,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#E8E2CF",
+     "roughness": 0.5,
+     "metalness": 0,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": false
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "cone-metal-three-suns",
+   "width": 480,
+   "height": 480,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0,
+     0.5,
+     3.2
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.2,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1.2,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -3,
+      5,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 3,
+     "visible": true
+    },
+    {
+     "position": [
+      4,
+      2,
+      1
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#88AAFF",
+     "intensity": 2,
+     "visible": true
+    },
+    {
+     "position": [
+      0,
+      -4,
+      3
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFDD99",
+     "intensity": 1,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "cone",
+    "parameters": {
+     "radius": 0.8,
+     "height": 1.5,
+     "segments": 40
+    },
+    "matrix": [
+     0.9902680687415704,
+     0.1370587488362232,
+     0.024167155361971074,
+     0.0,
+     -0.13917310096006544,
+     0.9752236716571246,
+     0.17195824553872419,
+     0.0,
+     0.0,
+     -0.17364817766693033,
+     0.984807753012208,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#D4AF37",
+     "roughness": 0.15,
+     "metalness": 1,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "torus-orthographic",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "orthographic",
+    "position": [
+     3,
+     2,
+     6
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1.3,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.5,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -3,
+      5,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 3,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "torus",
+    "parameters": {
+     "radius": 1,
+     "tube": 0.35,
+     "segments": 48
+    },
+    "matrix": [
+     0.9396926207859084,
+     0.2961981327260238,
+     -0.17101007166283438,
+     0.0,
+     0.0,
+     0.5000000000000001,
+     0.8660254037844386,
+     0.0,
+     0.3420201433256687,
+     -0.8137976813493737,
+     0.4698463103929543,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#A73366",
+     "roughness": 0.3,
+     "metalness": 0.4,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "sphere-half-opacity-layer",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     3,
+     2,
+     6
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.5,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -3,
+      5,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 3,
+     "visible": true
+    }
+   ],
+   "layerOpacity": 0.5,
+   "object": {
+    "primitive": "sphere",
+    "parameters": {
+     "radius": 1.2,
+     "segments": 24
+    },
+    "matrix": [
+     0.8660254037844387,
+     0.0,
+     -0.49999999999999994,
+     0.0,
+     0.0,
+     1.0,
+     0.0,
+     0.0,
+     0.49999999999999994,
+     0.0,
+     0.8660254037844387,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#7DD3FC",
+     "roughness": 0.4,
+     "metalness": 0.1,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false
+  },
+  {
+   "id": "box-odd-size-near-clip",
+   "width": 333,
+   "height": 517,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0.4,
+     0.3,
+     1.1
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 75,
+    "zoom": 1,
+    "near": 0.5,
+    "far": 20
+   },
+   "environment": {
+    "ambient": 0.5,
+    "ambientColor": "#FFFFFF",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -3,
+      5,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 3,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "box",
+    "parameters": {
+     "width": 1.2,
+     "height": 1.2,
+     "depth": 1.2
+    },
+    "matrix": [
+     0.8160349234517084,
+     0.32047138490943267,
+     -0.48102504629322024,
+     0.0,
+     -0.07139380484326965,
+     0.8817321223833724,
+     0.46631683326609036,
+     0.0,
+     0.573576436351046,
+     -0.34618861305875415,
+     0.7424038765061041,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#4C8DFF",
+     "roughness": 0.45,
+     "metalness": 0.1,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "sphere-nonuniform-scale-rolled-camera",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     1,
+     2,
+     5
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0.3,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0.6,
+    "ambientColor": "#FFE0C0",
+    "exposure": 1,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      -3,
+      5,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 3,
+     "visible": true
+    },
+    {
+     "position": [
+      3,
+      1,
+      -4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#4060FF",
+     "intensity": 4,
+     "visible": false
+    }
+   ],
+   "object": {
+    "primitive": "sphere",
+    "parameters": {
+     "radius": 1,
+     "segments": 64
+    },
+    "matrix": [
+     1.532088886237956,
+     0.4396926207859083,
+     -1.2080455471101073,
+     0.0,
+     0.0,
+     0.4698463103929542,
+     0.17101007166283436,
+     0.0,
+     0.6427876096865393,
+     -0.2620026302293849,
+     0.7198463103929542,
+     0.0,
+     0.3,
+     -0.2,
+     0.1,
+     1.0
+    ],
+    "material": {
+     "color": "#F2C14E",
+     "roughness": 0.25,
+     "metalness": 0.6,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "sphere-mirror-exposure",
+   "width": 640,
+   "height": 360,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0,
+     0,
+     3.5
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 1,
+    "ambientColor": "#FFFFFF",
+    "exposure": 3,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      2,
+      3,
+      4
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FFFFFF",
+     "intensity": 6,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "sphere",
+    "parameters": {
+     "radius": 1,
+     "segments": 96
+    },
+    "matrix": [
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#FFFFFF",
+     "roughness": 0,
+     "metalness": 1,
+     "emissive": "#000000",
+     "emissiveIntensity": 1,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  },
+  {
+   "id": "torus-emissive-dark",
+   "width": 400,
+   "height": 300,
+   "camera": {
+    "projection": "perspective",
+    "position": [
+     0,
+     3,
+     3
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "up": [
+     0,
+     1,
+     0
+    ],
+    "fov": 45,
+    "zoom": 1,
+    "near": 0.01,
+    "far": 1000
+   },
+   "environment": {
+    "ambient": 0,
+    "ambientColor": "#000000",
+    "exposure": 0.7,
+    "background": null
+   },
+   "lights": [
+    {
+     "position": [
+      0,
+      10,
+      0
+     ],
+     "target": [
+      0,
+      0,
+      0
+     ],
+     "color": "#FF0000",
+     "intensity": 0.5,
+     "visible": true
+    }
+   ],
+   "object": {
+    "primitive": "torus",
+    "parameters": {},
+    "matrix": [
+     1.5,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     9.184850993605148e-17,
+     1.5,
+     0.0,
+     0.0,
+     -1.5,
+     9.184850993605148e-17,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "material": {
+     "color": "#202020",
+     "roughness": 0.9,
+     "metalness": 0,
+     "emissive": "#3FCF8E",
+     "emissiveIntensity": 2.5,
+     "opacity": 1,
+     "doubleSided": true
+    }
+   },
+   "bottom": false,
+   "layerOpacity": 1
+  }
+ ]
+}

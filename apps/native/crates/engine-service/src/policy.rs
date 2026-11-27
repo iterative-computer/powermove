@@ -1,0 +1,611 @@
+//! Frame identities are local to a viewer; document ids never recycle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Output {
+    pub width: u32,
+    pub height: u32,
+    pub display: u32,
+    pub headroom: f64,
+    /// `width`×`height` is a visible window of a larger canvas (a viewer
+    /// zoomed past its pane). `None`: the whole composition.
+    pub crop: Option<Crop>,
+}
+/// The drawable's place on the whole composition canvas, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Crop {
+    pub x: u32,
+    pub y: u32,
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+}
+impl Output {
+    /// At Fit, the shell's rounded drawable can be one pixel smaller than
+    /// the whole canvas. Only a crop beyond that rounding is zoomed.
+    pub(crate) fn is_zoomed(self) -> bool {
+        self.crop.is_some_and(|crop| {
+            crop.x != 0
+                || crop.y != 0
+                || crop.canvas_width.abs_diff(self.width) > 1
+                || crop.canvas_height.abs_diff(self.height) > 1
+        })
+    }
+    /// This output drawn into a `width`×`height` drawable. A crop keeps its
+    /// place on the canvas, scaled with the drawable, and stays inside it.
+    pub fn resized(self, width: u32, height: u32) -> Output {
+        if (width, height) == (self.width, self.height) || width == 0 || height == 0 {
+            return self;
+        }
+        let sx = f64::from(width) / f64::from(self.width);
+        let sy = f64::from(height) / f64::from(self.height);
+        let scaled = |v: u32, s: f64| (f64::from(v) * s).round() as u32;
+        Output {
+            width,
+            height,
+            crop: self.crop.map(|c| {
+                let (x, y) = (scaled(c.x, sx), scaled(c.y, sy));
+                Crop {
+                    x,
+                    y,
+                    canvas_width: scaled(c.canvas_width, sx).max(x + width),
+                    canvas_height: scaled(c.canvas_height, sy).max(y + height),
+                }
+            }),
+            ..self
+        }
+    }
+    pub fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.width > 0 && self.height > 0 && self.width <= 16384 && self.height <= 16384,
+            "invalid output size"
+        );
+        if let Some(c) = self.crop {
+            anyhow::ensure!(
+                c.x.checked_add(self.width)
+                    .is_some_and(|r| r <= c.canvas_width)
+                    && c.y
+                        .checked_add(self.height)
+                        .is_some_and(|b| b <= c.canvas_height),
+                "crop outside its canvas"
+            );
+        }
+        anyhow::ensure!(
+            self.headroom.is_finite() && self.headroom >= 1.,
+            "invalid EDR headroom"
+        );
+        Ok(())
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub generation: u64,
+    pub doc_id: u64,
+    pub revision: u64,
+    pub sequence: u64,
+}
+/// What a viewer frame is for. Paused frames are exact; the others may trade
+/// accuracy for their deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Moment {
+    #[default]
+    Paused,
+    /// Paused while dragging: video may stand in until its exact frame lands.
+    Scrub,
+    Playing,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheKey {
+    pub content: u64,
+    pub revision: u64,
+    pub time: i64,
+    pub width: u32,
+    pub height: u32,
+    pub crop: Option<Crop>,
+    pub moment: Moment,
+    /// The render scale (`FrameSpec::scale`, bits): with the crop, the
+    /// request's composition density and origin.
+    pub scale: u64,
+    /// The resampler the frame was drawn with.
+    pub sampling: pm_render::sampling::Sampling,
+    /// The final picture (`FrameSpec::final_picture`), not its preview at
+    /// the same size.
+    pub finished: bool,
+    pub studio_preview: crate::studio::Preview,
+    /// `ViewCamera::key` of the pane's camera.
+    pub studio_view: u64,
+    /// Interactive focused group hash (0 when none).
+    pub focus_group: u64,
+    /// What the frame read besides its document, as observed when it was
+    /// drawn: its media files' stamps and the override wrappers answering.
+    pub inputs: u64,
+    /// The view's output tone it was drawn for (a digest of it).
+    pub tone: u64,
+    /// The font registry generation it was drawn with.
+    pub fonts: Option<u64>,
+    /// The resources (contributed definitions) generation it was drawn with.
+    pub resources: u64,
+}
+impl CacheKey {
+    /// Same rendered scene content regardless of viewer zoom/pan output
+    /// geometry (`width`, `height`, `crop`, `scale`). Whole-composition
+    /// surfaces stay valid under this key and serve any zoomed/panned crop
+    /// directly in the display pass without re-rendering.
+    pub fn same_scene_content(self, other: Self) -> bool {
+        self.content == other.content
+            && self.revision == other.revision
+            && self.inputs == other.inputs
+            && self.tone == other.tone
+            && self.fonts == other.fonts
+            && self.resources == other.resources
+            && self.studio_preview == other.studio_preview
+            && self.studio_view == other.studio_view
+            && self.focus_group == other.focus_group
+    }
+    pub fn same_content(self, other: Self) -> bool {
+        self.same_scene_content(other)
+            && self.width == other.width
+            && self.height == other.height
+            && self.crop == other.crop
+    }
+}
+
+/// The viewer's render resolution (Auto, Full, ½, ¼ in the viewer chrome).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Quality {
+    #[default]
+    Auto,
+    Full,
+    Half,
+    Quarter,
+}
+/// The resolution Auto drags at when an exact frame is slower than a refresh.
+pub const AUTO_FLOOR: f64 = 0.5;
+/// Half resolution costs about a quarter of the fill, so a reduced frame this
+/// far under a refresh predicts a full-resolution frame inside it.
+const UNDER: f64 = 0.2;
+/// Where a slow drag goes when half resolution is still slow.
+pub const AUTO_DRAG_FLOOR: f64 = 0.25;
+/// A dragged frame at [`AUTO_FLOOR`] slower than this many refreshes drags at
+/// [`AUTO_DRAG_FLOOR`] (a heavy project: extension layers, glows at 6K); one
+/// at the lower floor under half a refresh goes back to [`AUTO_FLOOR`].
+const SLOW_REDUCED: f64 = 2.;
+
+/// A dragged playhead waits this long without moving before its frame is
+/// drawn again exact (After Effects' adaptive resolution).
+pub const SCRUB_SETTLE_SECONDS: f64 = 0.1;
+/// How long a paused picture has been on screen, its viewer asking for
+/// nothing newer, before its settled picture is asked for
+/// (`FrameSpec::final_picture`, drawn by `crate::settle`): a click through
+/// the timeline or a held arrow key never starts one.
+pub const SETTLE_IDLE_SECONDS: f64 = 0.3;
+/// The GPU time a slice of a settled picture is sized to: how many units
+/// (layers, effect passes) share a slice. Not a bound: a single unit takes
+/// what it takes (see `pm_render::slices`).
+pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
+/// The longest a slice waits for the worker's pictures (a viewer being
+/// drawn, a playing viewer's next frame) at one slice point: past it the
+/// slice goes, so another viewer playing or being dragged never keeps a
+/// paused one from settling (it may then delay one of the playing frames).
+pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
+
+/// A drag that went back to full and was slow again at once (a full frame
+/// that just misses its refresh, a reduced one far under it) needs this many
+/// quick reduced frames in a row before full again, doubling with each such
+/// return up to [`MOST_QUICK_STILLS`]: Auto otherwise flips between full and
+/// half every few frames, and every flip converts the clips' frames again.
+const QUICK_STILLS: u32 = 8;
+const MOST_QUICK_STILLS: u32 = 32;
+/// Playing frames at full resolution slower than their content frame this
+/// many times in a row put Auto's playback at [`AUTO_FLOOR`].
+const LATE_PLAYS: u32 = 3;
+/// The first frames of a run of playback (after a play, a pause or a seek)
+/// open media and fill caches: they say nothing about the pace, and are not
+/// judged. A run starts when a playing frame comes this long after the last.
+const WARMING_PLAYS: u32 = 12;
+const NEW_RUN_S: f64 = 0.5;
+/// At the floor, a playing frame predicts what it would cost at full
+/// resolution: its GPU work grows with the pixels, the rest (CPU, waits for
+/// media) does not. Playback goes back to full when, of the last
+/// [`QUICK_PLAYS`] reduced frames (about a second), [`FITTING_PLAYS`] would
+/// fit in this share of their content frame: one cheap frame does not flip
+/// it back, one dear frame does not hold it at half.
+const FULL_FITS: f64 = 0.8;
+const QUICK_PLAYS: u32 = 24;
+const FITTING_PLAYS: u32 = 18;
+
+/// Auto's adaptive resolution (After Effects' Adaptive Resolution). While the
+/// playhead is dragged, a full-resolution still that took longer than a
+/// refresh puts the dragged frames at [`AUTO_FLOOR`] until an exact frame fits
+/// a refresh again. While playing, frames that keep missing their content
+/// frame at full resolution play at [`AUTO_FLOOR`] until reduced frames are
+/// cheap enough for a full one to fit again. Stopped frames are always full
+/// resolution in Auto, and a fixed quality is always what it says.
+#[derive(Debug, Clone, Default)]
+pub struct AutoQuality {
+    slow_stills: bool,
+    /// Dragged frames are slow at half resolution too: they drag at
+    /// [`AUTO_DRAG_FLOOR`].
+    slower_stills: bool,
+    /// Quick reduced drag frames in a row, and how many bring a drag back to
+    /// full (one, until a drag is slow again just after coming back).
+    quick_stills: u32,
+    stills_needed: u32,
+    /// The last reduced drag frame brought it back to full.
+    came_back: bool,
+    slow_play: bool,
+    /// Consecutive full playing frames over their content frame.
+    late_plays: u32,
+    /// Of the last reduced playing frames (one bit each, newest lowest),
+    /// which would fit at full resolution ([`FULL_FITS`]), and how many there are.
+    fitting: u32,
+    reduced_plays: u32,
+    /// Frames of this run of playback not judged yet ([`WARMING_PLAYS`]),
+    /// and when the last playing frame was drawn (seconds).
+    warming: u32,
+    last_play: Option<f64>,
+}
+impl AutoQuality {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+    /// A paused or dragged frame drawn at `scale` took `cost_ms` against a
+    /// refresh of `interval_ms`. A full one over the refresh is slow; a
+    /// reduced one far enough under it predicts a full one inside it.
+    pub fn record_still(&mut self, cost_ms: f64, interval_ms: f64, scale: f64) {
+        if !cost_ms.is_finite() || !interval_ms.is_finite() || interval_ms <= 0. {
+            return;
+        }
+        let needed = self.stills_needed.max(1);
+        if scale >= 1. {
+            self.slow_stills = cost_ms > interval_ms;
+            // A slow full frame (a paused one between two drags) says nothing
+            // about half: the next drag starts where the last one had to go,
+            // instead of drawing at half first and converting every clip's
+            // frames again on the way down (a 200 ms gap at each drag's start).
+            // Only a full frame inside the refresh forgets it.
+            if !self.slow_stills {
+                self.slower_stills = false;
+            }
+            self.quick_stills = 0;
+            if self.slow_stills && self.came_back {
+                // Slow again at once: the next way back takes a run.
+                self.stills_needed = (needed * QUICK_STILLS).min(MOST_QUICK_STILLS);
+            } else if !self.slow_stills {
+                self.stills_needed = 1;
+            }
+            self.came_back = false;
+        } else if scale >= AUTO_FLOOR {
+            if cost_ms < UNDER * interval_ms {
+                self.quick_stills += 1;
+                if self.quick_stills >= needed {
+                    self.slow_stills = false;
+                    self.came_back = true;
+                    self.quick_stills = 0;
+                }
+            } else {
+                self.quick_stills = 0;
+            }
+            self.slower_stills = cost_ms > SLOW_REDUCED * interval_ms;
+        } else if cost_ms < 0.5 * interval_ms {
+            self.slower_stills = false;
+        }
+    }
+    /// Elapsed work on a cancelled frame is a lower bound. It can lower
+    /// interactive quality, but it cannot tell us a higher scale will fit.
+    pub(crate) fn record_interrupted(&mut self, cost_ms: f64, interval_ms: f64, scale: f64) {
+        if scale >= 1. && cost_ms > interval_ms {
+            self.record_still(cost_ms, interval_ms, scale);
+        } else if scale == AUTO_FLOOR && cost_ms > SLOW_REDUCED * interval_ms {
+            self.slow_stills = true;
+            self.slower_stills = true;
+            self.quick_stills = 0;
+        }
+    }
+    /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done),
+    /// `gpu_ms` of it the GPU's own work, against its content frame of
+    /// `frame_ms`; drawn at `at_s` (seconds).
+    pub fn record_play(&mut self, cost_ms: f64, gpu_ms: f64, frame_ms: f64, scale: f64, at_s: f64) {
+        if !cost_ms.is_finite() || !frame_ms.is_finite() || frame_ms <= 0. {
+            return;
+        }
+        if self
+            .last_play
+            .is_none_or(|last| !(at_s - last).is_finite() || at_s - last > NEW_RUN_S)
+        {
+            self.warming = WARMING_PLAYS;
+        }
+        self.last_play = Some(at_s);
+        if self.warming > 0 {
+            self.warming -= 1;
+            return;
+        }
+        if scale >= 1. {
+            self.fitting = 0;
+            self.reduced_plays = 0;
+            self.late_plays = if cost_ms > frame_ms {
+                self.late_plays + 1
+            } else {
+                0
+            };
+            if self.late_plays >= LATE_PLAYS {
+                self.slow_play = true;
+                self.late_plays = 0;
+            }
+        } else if self.slow_play {
+            self.late_plays = 0;
+            let gpu = if gpu_ms.is_finite() {
+                gpu_ms.clamp(0., cost_ms.max(0.))
+            } else {
+                0.
+            };
+            let full = cost_ms + gpu * (1. / (scale * scale) - 1.);
+            let mask = (1u32 << QUICK_PLAYS) - 1;
+            self.fitting = ((self.fitting << 1) | u32::from(full < FULL_FITS * frame_ms)) & mask;
+            self.reduced_plays = (self.reduced_plays + 1).min(QUICK_PLAYS);
+            if self.reduced_plays >= QUICK_PLAYS && self.fitting.count_ones() >= FITTING_PLAYS {
+                self.slow_play = false;
+                self.fitting = 0;
+                self.reduced_plays = 0;
+            }
+        }
+    }
+}
+impl Quality {
+    /// Render scale for this frame. Auto is exact except for a slow drag or
+    /// slow playback.
+    pub fn scale(self, auto: &AutoQuality, moment: Moment) -> f64 {
+        match self {
+            Self::Auto if moment == Moment::Scrub && auto.slow_stills && auto.slower_stills => {
+                AUTO_DRAG_FLOOR
+            }
+            Self::Auto if moment == Moment::Scrub && auto.slow_stills => AUTO_FLOOR,
+            Self::Auto if moment == Moment::Playing && auto.slow_play => AUTO_FLOOR,
+            Self::Auto | Self::Full => 1.,
+            Self::Half => 0.5,
+            Self::Quarter => 0.25,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Playback in Auto goes to half resolution only after frames keep
+    /// missing their content frame, comes back only after a run of cheap
+    /// reduced frames, and never touches a stop or a fixed quality.
+    /// A drag on a heavy project: full is slow, so half; half is still over
+    /// two refreshes, so a quarter; a quarter well under a refresh goes back
+    /// to half, and a full frame inside a refresh back to full.
+    #[test]
+    fn a_slow_drag_goes_to_a_quarter_and_back() {
+        let refresh = 1000. / 60.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(80., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(109., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR);
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Playing),
+            1.,
+            "playback untouched"
+        );
+        auto.record_still(12., refresh, AUTO_DRAG_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR, "not yet under half a refresh");
+        auto.record_still(6., refresh, AUTO_DRAG_FLOOR);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(10., refresh, 1.);
+        assert_eq!(drag(&auto), 1.);
+        assert_eq!(
+            Quality::Half.scale(&auto, Moment::Scrub),
+            0.5,
+            "a fixed quality stays"
+        );
+    }
+    /// A drag that had to go to a quarter, then a pause whose full frames
+    /// are slow: the next drag starts at a quarter, not at half and down
+    /// again (each change of scale converts the clips' frames again). A full
+    /// frame inside the refresh starts the next drag at full.
+    #[test]
+    fn the_next_drag_starts_where_the_last_one_had_to_go() {
+        let refresh = 1000. / 60.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(80., refresh, 1.);
+        auto.record_still(40., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR);
+        // Paused between drags: full frames, still slow.
+        auto.record_still(70., refresh, 1.);
+        auto.record_still(65., refresh, 1.);
+        assert_eq!(
+            drag(&auto),
+            AUTO_DRAG_FLOOR,
+            "the next drag starts at a quarter"
+        );
+        auto.record_still(10., refresh, 1.);
+        assert_eq!(drag(&auto), 1., "a full frame inside the refresh");
+    }
+    /// Playback in Auto: a run's first frames (media opening, caches filling)
+    /// are not judged; three late full frames in a row go to half; half goes
+    /// back to full once most of a second of reduced frames would fit at full
+    /// (their GPU work grown by the pixels, the rest as it is), not on one
+    /// cheap frame, and one dear frame does not hold it at half.
+    #[test]
+    fn slow_playback_plays_at_half_with_hysteresis() {
+        let frame = 1000. / 24.;
+        let mut auto = AutoQuality::default();
+        let mut at = 0.;
+        let play_frame = |auto: &mut AutoQuality, at: &mut f64, cost: f64, gpu: f64, scale: f64| {
+            *at += frame / 1000.;
+            auto.record_play(cost, gpu, frame, scale, *at);
+        };
+        let play = |auto: &AutoQuality| Quality::Auto.scale(auto, Moment::Playing);
+        // A run's first frames are slow and not judged.
+        for _ in 0..WARMING_PLAYS {
+            play_frame(&mut auto, &mut at, 120., 10., 1.);
+        }
+        assert_eq!(play(&auto), 1., "the start of a run is not its pace");
+        // Two late frames are not slow playback.
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        play_frame(&mut auto, &mut at, 20., 10., 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        assert_eq!(play(&auto), 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        assert_eq!(play(&auto), AUTO_FLOOR, "three late frames in a row");
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Paused),
+            1.,
+            "a stop is exact"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            1.,
+            "drags keep their own rule"
+        );
+        for fixed in [Quality::Full, Quality::Half, Quality::Quarter] {
+            assert_eq!(
+                fixed.scale(&auto, Moment::Playing),
+                fixed.scale(&AutoQuality::default(), Moment::Playing),
+                "{fixed:?} is always respected"
+            );
+        }
+        // Reduced frames whose GPU work, four times over, would not fit stay
+        // reduced (10 + 8 x 3 = 34 ms > 0.8 of 41.7).
+        for _ in 0..40 {
+            play_frame(&mut auto, &mut at, 10., 8., AUTO_FLOOR);
+        }
+        assert_eq!(play(&auto), AUTO_FLOOR);
+        // Frames with room at full go back, a few dear ones among them or not
+        // (8 + 4 x 3 = 20 ms fits).
+        for i in 0..QUICK_PLAYS {
+            let dear = i % 6 == 0;
+            play_frame(
+                &mut auto,
+                &mut at,
+                if dear { 60. } else { 8. },
+                4.,
+                AUTO_FLOOR,
+            );
+        }
+        assert_eq!(play(&auto), 1., "most of a second would fit at full");
+        // A pause starts a new run: its first frames are not judged again.
+        at += 2.;
+        for _ in 0..WARMING_PLAYS {
+            play_frame(&mut auto, &mut at, 200., 10., 1.);
+        }
+        assert_eq!(play(&auto), 1.);
+    }
+    #[test]
+    fn a_slow_still_drags_at_half_and_stops_exact() {
+        let mut auto = AutoQuality::default();
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1.);
+        auto.record_still(41., 16.67, 1.);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), AUTO_FLOOR);
+        auto.record_still(12., 16.67, AUTO_FLOOR);
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            AUTO_FLOOR,
+            "still slow at half"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Paused),
+            1.,
+            "a stop is exact"
+        );
+        assert_eq!(
+            Quality::Full.scale(&auto, Moment::Scrub),
+            1.,
+            "Full means full"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Playing),
+            1.,
+            "a slow drag does not reduce playback"
+        );
+        auto.record_still(9., 16.67, 1.);
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            1.,
+            "a cheap place drags exact"
+        );
+        // One slow still (a first frame compiling its programs) costs one
+        // reduced drag frame: that one is cheap enough to go back to full.
+        auto.record_still(300., 16.67, 1.);
+        auto.record_still(0.8, 16.67, AUTO_FLOOR);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1.);
+    }
+
+    /// A drag whose full frames just miss the refresh and whose reduced ones
+    /// are far under it does not flip between full and half every few
+    /// frames: slow again right after coming back, it stays reduced for a run
+    /// of quick frames (longer each time), and a full frame that fits the
+    /// refresh makes one quick frame enough again.
+    #[test]
+    fn a_drag_does_not_flip_between_full_and_half() {
+        let refresh = 1000. / 120.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(12., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(
+            drag(&auto),
+            1.,
+            "an isolated slow frame costs one reduced frame"
+        );
+        auto.record_still(12., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR, "slow again at once");
+        for _ in 0..QUICK_STILLS - 1 {
+            auto.record_still(1., refresh, AUTO_FLOOR);
+            assert_eq!(drag(&auto), AUTO_FLOOR, "a run of quick frames first");
+        }
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1.);
+        auto.record_still(12., refresh, 1.);
+        for _ in 0..MOST_QUICK_STILLS - 1 {
+            auto.record_still(1., refresh, AUTO_FLOOR);
+        }
+        assert_eq!(drag(&auto), AUTO_FLOOR, "longer the second time");
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1.);
+        auto.record_still(5., refresh, 1.);
+        assert_eq!(drag(&auto), 1., "a full frame inside the refresh");
+        auto.record_still(12., refresh, 1.);
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1., "and one quick frame is enough again");
+    }
+
+    #[test]
+    fn auto_plays_at_full_resolution_however_slow_and_fixed_qualities_stay_fixed() {
+        let mut auto = AutoQuality::default();
+        // A slow place: drags are reduced, playback and stops are exact.
+        auto.record_still(90., 16.67, 1.);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), AUTO_FLOOR);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Playing), 1.);
+        assert_eq!(Quality::Auto.scale(&auto, Moment::Paused), 1.);
+        assert_eq!(Quality::Half.scale(&auto, Moment::Paused), 0.5);
+        assert_eq!(Quality::Half.scale(&auto, Moment::Playing), 0.5);
+        assert_eq!(Quality::Quarter.scale(&auto, Moment::Playing), 0.25);
+        assert_eq!(Quality::Full.scale(&auto, Moment::Scrub), 1.);
+    }
+
+    #[test]
+    fn a_crop_must_lie_on_its_canvas() {
+        let output = |x, width| Output {
+            width,
+            height: 100,
+            display: 0,
+            headroom: 1.,
+            crop: Some(Crop {
+                x,
+                y: 0,
+                canvas_width: 400,
+                canvas_height: 100,
+            }),
+        };
+        assert!(output(300, 100).validate().is_ok());
+        assert!(output(301, 100).validate().is_err());
+        assert!(output(u32::MAX, 100).validate().is_err());
+    }
+}

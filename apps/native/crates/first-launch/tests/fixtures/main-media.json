@@ -1,0 +1,50 @@
+[
+  {
+    "index": "7066c0e57225b6996ba87ae5a836c2292d9289fa8292c403fa3de8be63ea088c.json",
+    "payload": "synthetic original",
+    "record": {
+      "key": "media:original",
+      "revision": "synthetic-revision",
+      "size": 18,
+      "type": "video/quicktime",
+      "file": "ca024752f77de72f97a2bf8df753003b0de0099a92c95dab15ed823bb3fd9b96.mov",
+      "sha256": "ca024752f77de72f97a2bf8df753003b0de0099a92c95dab15ed823bb3fd9b96",
+      "mtime": 1,
+      "future": {
+        "keep": true
+      }
+    }
+  },
+  {
+    "index": "9402b61725663a4e43fec4d7dc270182322a4568934c1090b22961d8853c871a.json",
+    "payload": "synthetic playback proxy",
+    "record": {
+      "key": "media:proxy",
+      "revision": "synthetic-revision",
+      "size": 24,
+      "type": "video/quicktime",
+      "file": "aeb4680807da0fd64597463683dbf3ca68bdf8792322aa432c7df3a5540f9c03.mov",
+      "sha256": "aeb4680807da0fd64597463683dbf3ca68bdf8792322aa432c7df3a5540f9c03",
+      "mtime": 1,
+      "future": {
+        "keep": true
+      }
+    }
+  },
+  {
+    "index": "36cb785eaeec680cade0d4d720589c57d087986ec8f687bb5427cfa27042f9f7.json",
+    "payload": "synthetic undo only",
+    "record": {
+      "key": "undo-only",
+      "revision": "synthetic-revision",
+      "size": 19,
+      "type": "video/quicktime",
+      "file": "8a8ac1d8cfee52cf862ac3b7d179661bb2f8d67bb8b52689697baee8c5417d3b.mov",
+      "sha256": "8a8ac1d8cfee52cf862ac3b7d179661bb2f8d67bb8b52689697baee8c5417d3b",
+      "mtime": 1,
+      "future": {
+        "keep": true
+      }
+    }
+  }
+]

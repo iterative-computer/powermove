@@ -1,13 +1,14 @@
+# PM_CLOUD_STACK and PM_CLOUD_PG_PORT come from scripts/lib/local-env.ts (defaults: powermove-cloud, 54329).
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: powermove-cloud-postgres
+    container_name: ${PM_CLOUD_STACK:-powermove-cloud}-postgres
     environment:
       POSTGRES_DB: powermove
       POSTGRES_USER: powermove
       POSTGRES_PASSWORD: powermove
     ports:
-      - "54329:5432"
+      - "${PM_CLOUD_PG_PORT:-54329}:5432"
     volumes:
       - powermove-cloud-pg:/var/lib/postgresql/data
     healthcheck:

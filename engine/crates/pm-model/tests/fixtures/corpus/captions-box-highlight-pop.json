@@ -1,0 +1,354 @@
+{
+ "id": "Pcaptions-box-highlight-pop",
+ "name": "captions/box-highlight-pop",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "linear",
+  "angle": 35,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   },
+   {
+    "id": "stop-2",
+    "color": "#1B2A4A",
+    "position": 55
+   },
+   {
+    "id": "stop-3",
+    "color": "#3A2A5A",
+    "position": 100
+   }
+  ]
+ },
+ "compId": "Pcaptions-box-highlight-pop-root",
+ "compName": "captions/box-highlight-pop",
+ "layers": [
+  {
+   "id": "L004",
+   "type": "captions",
+   "name": "Captions",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#F2C14E",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 320,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 180,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "cues": [
+     {
+      "id": "c001",
+      "start": 0,
+      "end": 0.9,
+      "text": "Captions follow the spoken words",
+      "words": [
+       {
+        "text": "Captions",
+        "start": 0,
+        "end": 0.18
+       },
+       {
+        "text": "follow",
+        "start": 0.18,
+        "end": 0.36
+       },
+       {
+        "text": "the",
+        "start": 0.36,
+        "end": 0.54
+       },
+       {
+        "text": "spoken",
+        "start": 0.54,
+        "end": 0.72
+       },
+       {
+        "text": "words",
+        "start": 0.72,
+        "end": 0.9
+       }
+      ]
+     },
+     {
+      "id": "c002",
+      "start": 0.9,
+      "end": 1.8,
+      "text": "with highlight and pop animation",
+      "words": [
+       {
+        "text": "with",
+        "start": 0.9,
+        "end": 1.08
+       },
+       {
+        "text": "highlight",
+        "start": 1.08,
+        "end": 1.26
+       },
+       {
+        "text": "and",
+        "start": 1.26,
+        "end": 1.44
+       },
+       {
+        "text": "pop",
+        "start": 1.44,
+        "end": 1.62
+       },
+       {
+        "text": "animation",
+        "start": 1.62,
+        "end": 1.8
+       }
+      ]
+     },
+     {
+      "id": "c003",
+      "start": 1.8,
+      "end": 2.9,
+      "text": "and a long cue that wraps across more than two lines when the maximum width is narrow",
+      "words": [
+       {
+        "text": "and",
+        "start": 1.8,
+        "end": 1.864706
+       },
+       {
+        "text": "a",
+        "start": 1.864706,
+        "end": 1.929412
+       },
+       {
+        "text": "long",
+        "start": 1.929412,
+        "end": 1.994118
+       },
+       {
+        "text": "cue",
+        "start": 1.994118,
+        "end": 2.058824
+       },
+       {
+        "text": "that",
+        "start": 2.058824,
+        "end": 2.123529
+       },
+       {
+        "text": "wraps",
+        "start": 2.123529,
+        "end": 2.188235
+       },
+       {
+        "text": "across",
+        "start": 2.188235,
+        "end": 2.252941
+       },
+       {
+        "text": "more",
+        "start": 2.252941,
+        "end": 2.317647
+       },
+       {
+        "text": "than",
+        "start": 2.317647,
+        "end": 2.382353
+       },
+       {
+        "text": "two",
+        "start": 2.382353,
+        "end": 2.447059
+       },
+       {
+        "text": "lines",
+        "start": 2.447059,
+        "end": 2.511765
+       },
+       {
+        "text": "when",
+        "start": 2.511765,
+        "end": 2.576471
+       },
+       {
+        "text": "the",
+        "start": 2.576471,
+        "end": 2.641176
+       },
+       {
+        "text": "maximum",
+        "start": 2.641176,
+        "end": 2.705882
+       },
+       {
+        "text": "width",
+        "start": 2.705882,
+        "end": 2.770588
+       },
+       {
+        "text": "is",
+        "start": 2.770588,
+        "end": 2.835294
+       },
+       {
+        "text": "narrow",
+        "start": 2.835294,
+        "end": 2.9
+       }
+      ]
+     }
+    ],
+    "style": {
+     "preset": "classic",
+     "font": "SF Pro Display",
+     "weight": 600,
+     "italic": false,
+     "size": 18,
+     "tracking": 0,
+     "leading": 1.2,
+     "fill": "#FFFFFF",
+     "stroke": 1,
+     "strokeColor": "#000000",
+     "box": true,
+     "boxColor": "#101014",
+     "boxOpacity": 80,
+     "boxPadding": 14,
+     "boxRadius": 12,
+     "placement": "bottom",
+     "align": "center",
+     "offsetX": 0,
+     "offsetY": 0,
+     "safeMargin": 8,
+     "maxWidth": 80,
+     "maxLines": 2,
+     "textCase": "original",
+     "highlight": true,
+     "highlightColor": "#FFD66B",
+     "highlightScale": 120,
+     "wordAnimation": "pop"
+    }
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

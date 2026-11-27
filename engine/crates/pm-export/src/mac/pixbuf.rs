@@ -1,0 +1,461 @@
+//! IOSurface-backed CVPixelBuffers: a pool for encoder input, plane copies, color
+//! attachments.
+
+#![allow(deprecated)]
+
+use std::ptr::NonNull;
+
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2_core_foundation::{CFData, CFRetained, CFString, CFType};
+use objc2_core_video::*;
+use objc2_foundation::{NSDictionary, NSNumber, NSString};
+
+use super::cf::{self, Dict};
+use crate::Error;
+use crate::convert::{EncoderInput, Plane, PlaneData, plane_layout};
+use crate::settings::{AlphaOutput, ChromaLocation, ColorTags, InputFormat};
+
+/// A retained CVPixelBuffer.
+pub struct PixelBuffer(pub CFRetained<CVPixelBuffer>);
+
+// CVPixelBuffers are reference-counted CF objects that may cross threads.
+unsafe impl Send for PixelBuffer {}
+
+fn surface_attrs(
+    format: Option<u32>,
+    size: Option<(u32, u32)>,
+) -> Retained<NSDictionary<NSString, AnyObject>> {
+    let empty = Dict::new().build();
+    let mut d = Dict::new()
+        .cfkey(unsafe { kCVPixelBufferIOSurfacePropertiesKey }, &empty)
+        .cfkey(
+            unsafe { kCVPixelBufferMetalCompatibilityKey },
+            &NSNumber::new_bool(true),
+        );
+    if let Some(f) = format {
+        d = d.cfkey(
+            unsafe { kCVPixelBufferPixelFormatTypeKey },
+            &NSNumber::new_u32(f),
+        );
+    }
+    if let Some((w, h)) = size {
+        d = d
+            .cfkey(unsafe { kCVPixelBufferWidthKey }, &NSNumber::new_u32(w))
+            .cfkey(unsafe { kCVPixelBufferHeightKey }, &NSNumber::new_u32(h));
+    }
+    d.build()
+}
+
+/// Pixel buffer attributes requesting `format` with IOSurface backing (decoder output).
+pub fn output_attributes(format: u32) -> Retained<NSDictionary<NSString, AnyObject>> {
+    surface_attrs(Some(format), None)
+}
+
+/// A pool of encoder-input buffers of one format and size.
+pub struct Pool {
+    pool: CFRetained<CVPixelBufferPool>,
+}
+
+unsafe impl Send for Pool {}
+
+impl Pool {
+    pub fn new(format: InputFormat, width: u32, height: u32) -> Result<Self, Error> {
+        let attrs = surface_attrs(Some(format.code()), Some((width, height)));
+        let mut out: *mut CVPixelBufferPool = std::ptr::null_mut();
+        let r = unsafe {
+            CVPixelBufferPoolCreate(
+                None,
+                None,
+                Some(cf::cf_dict(&attrs)),
+                NonNull::from(&mut out),
+            )
+        };
+        if r != 0 || out.is_null() {
+            return Err(Error::Encode(format!(
+                "CVPixelBufferPoolCreate '{}' {width}×{height}: {r}",
+                cf::fourcc_str(format.code())
+            )));
+        }
+        Ok(Self {
+            pool: unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) },
+        })
+    }
+
+    pub fn buffer(&self) -> Result<PixelBuffer, Error> {
+        let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
+        let r = unsafe {
+            CVPixelBufferPoolCreatePixelBuffer(None, &self.pool, NonNull::from(&mut out))
+        };
+        if r != 0 || out.is_null() {
+            return Err(Error::Encode(format!(
+                "CVPixelBufferPoolCreatePixelBuffer: {r}"
+            )));
+        }
+        Ok(PixelBuffer(unsafe {
+            CFRetained::from_raw(NonNull::new_unchecked(out))
+        }))
+    }
+}
+
+impl PixelBuffer {
+    /// Wraps (retains) a buffer handed out by VideoToolbox or AVFoundation.
+    ///
+    /// # Safety
+    /// `p` must point to a valid CVPixelBuffer.
+    pub unsafe fn retain(p: NonNull<CVPixelBuffer>) -> Self {
+        Self(unsafe { CFRetained::retain(p) })
+    }
+
+    pub fn width(&self) -> usize {
+        CVPixelBufferGetWidth(&self.0)
+    }
+
+    pub fn height(&self) -> usize {
+        CVPixelBufferGetHeight(&self.0)
+    }
+
+    pub fn format(&self) -> u32 {
+        CVPixelBufferGetPixelFormatType(&self.0)
+    }
+
+    pub fn as_cf(&self) -> &CVPixelBuffer {
+        &self.0
+    }
+
+    fn with_lock<T>(
+        &self,
+        read_only: bool,
+        f: impl FnOnce(&CVPixelBuffer) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let flags = if read_only {
+            CVPixelBufferLockFlags::ReadOnly
+        } else {
+            CVPixelBufferLockFlags(0)
+        };
+        let r = unsafe { CVPixelBufferLockBaseAddress(&self.0, flags) };
+        if r != 0 {
+            return Err(Error::Encode(format!("CVPixelBufferLockBaseAddress: {r}")));
+        }
+        let out = f(&self.0);
+        unsafe { CVPixelBufferUnlockBaseAddress(&self.0, flags) };
+        out
+    }
+
+    /// (base, bytes per row, rows) of a plane; `planar` false means the whole buffer.
+    fn geometry(pb: &CVPixelBuffer, planar: bool, plane: usize) -> (*mut u8, usize, usize) {
+        if planar {
+            (
+                CVPixelBufferGetBaseAddressOfPlane(pb, plane) as *mut u8,
+                CVPixelBufferGetBytesPerRowOfPlane(pb, plane),
+                CVPixelBufferGetHeightOfPlane(pb, plane),
+            )
+        } else {
+            (
+                CVPixelBufferGetBaseAddress(pb) as *mut u8,
+                CVPixelBufferGetBytesPerRow(pb),
+                CVPixelBufferGetHeight(pb),
+            )
+        }
+    }
+
+    /// Copies an encoder-input frame into this buffer (same format and size).
+    pub fn write(&self, input: &EncoderInput) -> Result<(), Error> {
+        if self.format() != input.format.code()
+            || self.width() != input.width as usize
+            || self.height() != input.height as usize
+        {
+            return Err(Error::InvalidFrame(
+                "encoder input does not match the pool".into(),
+            ));
+        }
+        let planar = input.planes.len() > 1;
+        self.with_lock(false, |pb| {
+            for (i, plane) in input.planes.iter().enumerate() {
+                let (base, bpr, rows) = Self::geometry(pb, planar, i);
+                let row_bytes = plane.row_bytes();
+                if base.is_null() || bpr < row_bytes || rows != plane.rows {
+                    return Err(Error::Encode(format!(
+                        "plane {i}: {bpr} bytes per row, {rows} rows for {row_bytes} × {}",
+                        plane.rows
+                    )));
+                }
+                for y in 0..rows {
+                    let dst =
+                        unsafe { std::slice::from_raw_parts_mut(base.add(y * bpr), row_bytes) };
+                    match &plane.data {
+                        PlaneData::U16(v) => {
+                            let src = &v[y * plane.row_samples..(y + 1) * plane.row_samples];
+                            #[cfg(target_endian = "little")]
+                            // SAFETY: initialized u16 samples viewed as their in-memory
+                            // little-endian bytes. This borrows exactly the row's length.
+                            dst.copy_from_slice(unsafe {
+                                std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), row_bytes)
+                            });
+                            #[cfg(not(target_endian = "little"))]
+                            for (d, s) in dst.chunks_exact_mut(2).zip(src) {
+                                d.copy_from_slice(&s.to_le_bytes());
+                            }
+                        }
+                        PlaneData::U8(v) => dst.copy_from_slice(
+                            &v[y * plane.row_samples..(y + 1) * plane.row_samples],
+                        ),
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Reads this buffer as encoder-input planes (`y416`, `v216`, or `420v`).
+    pub fn read(&self, format: InputFormat) -> Result<EncoderInput, Error> {
+        if self.format() != format.code() {
+            return Err(Error::Verify(format!(
+                "decoder delivered '{}', asked for '{}'",
+                cf::fourcc_str(self.format()),
+                cf::fourcc_str(format.code())
+            )));
+        }
+        let (w, h) = (self.width() as u32, self.height() as u32);
+        let layout = plane_layout(format, w, h);
+        let planar = layout.len() > 1;
+        self.with_lock(true, |pb| {
+            let mut planes = vec![];
+            for (i, &(samples, rows, wide)) in layout.iter().enumerate() {
+                let (base, bpr, got_rows) = Self::geometry(pb, planar, i);
+                let row_bytes = if wide { samples * 2 } else { samples };
+                if base.is_null() || bpr < row_bytes || got_rows != rows {
+                    return Err(Error::Verify(format!(
+                        "decoded plane {i} has an unexpected layout"
+                    )));
+                }
+                let data = if wide {
+                    let mut v = Vec::with_capacity(samples * rows);
+                    for y in 0..rows {
+                        let row =
+                            unsafe { std::slice::from_raw_parts(base.add(y * bpr), row_bytes) };
+                        v.extend(
+                            row.chunks_exact(2)
+                                .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                        );
+                    }
+                    PlaneData::U16(v)
+                } else {
+                    let mut v = Vec::with_capacity(samples * rows);
+                    for y in 0..rows {
+                        v.extend_from_slice(unsafe {
+                            std::slice::from_raw_parts(base.add(y * bpr), row_bytes)
+                        });
+                    }
+                    PlaneData::U8(v)
+                };
+                planes.push(Plane {
+                    data,
+                    row_samples: samples,
+                    rows,
+                });
+            }
+            Ok(EncoderInput {
+                format,
+                width: w,
+                height: h,
+                planes,
+                light: None,
+            })
+        })
+    }
+
+    /// The frame's signature, read in place: what
+    /// [`crate::evidence::frame_signature`] gives for [`PixelBuffer::read`].
+    pub fn signature(&self, format: InputFormat) -> Result<crate::evidence::FrameSignature, Error> {
+        use InputFormat as F;
+        if !matches!(format, F::Y416 | F::V216 | F::V420 | F::X420) {
+            return Ok(crate::evidence::frame_signature(&self.read(format)?));
+        }
+        if self.format() != format.code() {
+            return Err(Error::Verify(format!(
+                "decoder delivered '{}', asked for '{}'",
+                cf::fourcc_str(self.format()),
+                cf::fourcc_str(format.code())
+            )));
+        }
+        let (w, h) = (self.width(), self.height());
+        let layout = plane_layout(format, w as u32, h as u32);
+        let planar = layout.len() > 1;
+        self.with_lock(true, |pb| {
+            let mut planes = vec![];
+            for (i, &(samples, rows, wide)) in layout.iter().enumerate() {
+                let (base, bpr, got_rows) = Self::geometry(pb, planar, i);
+                let row_bytes = if wide { samples * 2 } else { samples };
+                if base.is_null() || bpr < row_bytes || got_rows != rows {
+                    return Err(Error::Verify(format!(
+                        "decoded plane {i} has an unexpected layout"
+                    )));
+                }
+                planes.push((base as *const u8, bpr));
+            }
+            // Sample `i` of row `row` of plane `p` (indices stay inside the
+            // rows checked above: x < w, y < h).
+            let u8_at = |p: usize, row: usize, i: usize| {
+                let (base, bpr): (*const u8, usize) = planes[p];
+                unsafe { *base.add(row * bpr + i) }
+            };
+            let u16_at = |p: usize, row: usize, i: usize| {
+                u16::from_le_bytes([u8_at(p, row, 2 * i), u8_at(p, row, 2 * i + 1)])
+            };
+            Ok(crate::evidence::signature(w, h, |x, y| match format {
+                F::Y416 => {
+                    let i = x * 4;
+                    [
+                        (f64::from(u16_at(0, y, i + 1)) - 4096.0) / 56064.0,
+                        (f64::from(u16_at(0, y, i + 2)) - 32768.0) / 57344.0,
+                        (f64::from(u16_at(0, y, i + 3)) - 32768.0) / 57344.0,
+                        f64::from(u16_at(0, y, i)) / 65535.0,
+                    ]
+                }
+                F::V216 => {
+                    let i = (x & !1) * 2;
+                    let luma = u16_at(0, y, if x.is_multiple_of(2) { i + 1 } else { i + 3 });
+                    [
+                        (f64::from(luma) - 4096.0) / 56064.0,
+                        (f64::from(u16_at(0, y, i)) - 32768.0) / 57344.0,
+                        (f64::from(u16_at(0, y, i + 2)) - 32768.0) / 57344.0,
+                        1.0,
+                    ]
+                }
+                F::V420 => {
+                    let ci = (x / 2) * 2;
+                    [
+                        (f64::from(u8_at(0, y, x)) - 16.0) / 219.0,
+                        (f64::from(u8_at(1, y / 2, ci)) - 128.0) / 224.0,
+                        (f64::from(u8_at(1, y / 2, ci + 1)) - 128.0) / 224.0,
+                        1.0,
+                    ]
+                }
+                _ => {
+                    let ci = (x / 2) * 2;
+                    [
+                        (f64::from(u16_at(0, y, x) >> 6) - 64.0) / 876.0,
+                        (f64::from(u16_at(1, y / 2, ci) >> 6) - 512.0) / 896.0,
+                        (f64::from(u16_at(1, y / 2, ci + 1) >> 6) - 512.0) / 896.0,
+                        1.0,
+                    ]
+                }
+            }))
+        })
+    }
+
+    /// The bytes of a packed (single-plane) buffer, rows tightly packed (for
+    /// example `BGRA` from a decoder, in tests and measurements).
+    pub fn bytes(&self) -> Result<Vec<u8>, Error> {
+        let (w, h) = (self.width(), self.height());
+        let format = self.format();
+        let bytes_per_pixel = if [
+            kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_32RGBA,
+            kCVPixelFormatType_32ARGB,
+        ]
+        .contains(&format)
+        {
+            4
+        } else if [kCVPixelFormatType_64RGBALE, kCVPixelFormatType_64RGBAHalf].contains(&format) {
+            8
+        } else {
+            return Err(Error::Verify(format!(
+                "'{}' is not a packed RGB format",
+                String::from_utf8_lossy(&format.to_be_bytes())
+            )));
+        };
+        self.with_lock(true, |pb| {
+            let (base, bpr, rows) = Self::geometry(pb, false, 0);
+            let row_bytes = bytes_per_pixel * w;
+            if base.is_null() || rows != h || bpr < row_bytes {
+                return Err(Error::Verify("the buffer has no packed plane".into()));
+            }
+            let mut out = Vec::with_capacity(row_bytes * h);
+            for y in 0..h {
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(base.add(y * bpr), row_bytes)
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn attach(&self, key: &CFString, value: &CFType) {
+        unsafe { CVBufferSetAttachment(&self.0, key, value, CVAttachmentMode::ShouldPropagate) };
+    }
+
+    /// Sets the color and alpha attachments the encoder sees. `rows_subsampled`:
+    /// the buffer is 4:2:0, so where its chroma sits between rows is stated
+    /// when it is not the codecs' default.
+    pub fn tag(&self, tags: ColorTags, alpha: AlphaOutput, rows_subsampled: bool) {
+        let (primaries, transfer, matrix) = color_constants(tags);
+        unsafe {
+            self.attach(kCVImageBufferColorPrimariesKey, primaries.as_ref());
+            self.attach(kCVImageBufferTransferFunctionKey, transfer.as_ref());
+            self.attach(kCVImageBufferYCbCrMatrixKey, matrix.as_ref());
+            if rows_subsampled && tags.chroma_location() == ChromaLocation::TopLeft {
+                for field in [
+                    kCVImageBufferChromaLocationTopFieldKey,
+                    kCVImageBufferChromaLocationBottomFieldKey,
+                ] {
+                    self.attach(field, kCVImageBufferChromaLocation_TopLeft.as_ref());
+                }
+            }
+            if let Some(hdr) = tags.hdr_metadata() {
+                self.attach(
+                    kCVImageBufferMasteringDisplayColorVolumeKey,
+                    CFData::from_bytes(&hdr.mdcv()).as_ref(),
+                );
+                if hdr.max_cll != 0 {
+                    self.attach(
+                        kCVImageBufferContentLightLevelInfoKey,
+                        CFData::from_bytes(&hdr.clli()).as_ref(),
+                    );
+                }
+            }
+            match alpha {
+                AlphaOutput::None => {}
+                AlphaOutput::Straight => self.attach(
+                    kCVImageBufferAlphaChannelModeKey,
+                    kCVImageBufferAlphaChannelMode_StraightAlpha.as_ref(),
+                ),
+                AlphaOutput::Premultiplied => self.attach(
+                    kCVImageBufferAlphaChannelModeKey,
+                    kCVImageBufferAlphaChannelMode_PremultipliedAlpha.as_ref(),
+                ),
+            }
+        }
+    }
+}
+
+/// CoreVideo constants for a tag set: (primaries, transfer, matrix).
+pub fn color_constants(
+    tags: ColorTags,
+) -> (&'static CFString, &'static CFString, &'static CFString) {
+    unsafe {
+        match tags {
+            ColorTags::Rec2100Pq { .. } => (
+                kCVImageBufferColorPrimaries_ITU_R_2020,
+                kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+                kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            ),
+            ColorTags::Rec2100Hlg { .. } => (
+                kCVImageBufferColorPrimaries_ITU_R_2020,
+                kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+                kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            ),
+            ColorTags::Rec709Broadcast | ColorTags::Rec709Image => (
+                kCVImageBufferColorPrimaries_ITU_R_709_2,
+                kCVImageBufferTransferFunction_ITU_R_709_2,
+                kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            ),
+            ColorTags::Rec709QuickTime | ColorTags::SrgbImage => (
+                kCVImageBufferColorPrimaries_ITU_R_709_2,
+                kCVImageBufferTransferFunction_sRGB,
+                kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            ),
+        }
+    }
+}

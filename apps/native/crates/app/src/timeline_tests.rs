@@ -1,0 +1,6037 @@
+//! Timeline gestures: real GPUI input, through the mounted v4 surface and the
+//! native timeline element, into the real kernel. Undo reverts each edit.
+use crate::timeline_surface::{Delegate, TimelineSurface};
+use crate::v4_view::{Natives, SurfaceView};
+use crate::v4_view_tests::{PROJECT, Rig, bounds, publication, settle, tokens, window};
+use gpui::{
+    App, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, Window, point, px,
+};
+use pm_kernel::{Call, Caller, HistoryCall, Request};
+use pm_panel_timeline::HostEffect;
+use std::{cell::RefCell, rc::Rc, time::Duration};
+
+#[derive(Default)]
+pub(crate) struct Recorder {
+    pub audio: RefCell<Option<([f64; 2], i64, bool)>>,
+    pub runtime: RefCell<Option<std::sync::Arc<pm_builtins::Builtins>>>,
+    pub time: RefCell<f64>,
+    pub audio_gain_previews: RefCell<Vec<pm_engine_service::audio::GainPreview>>,
+    pub timing_previews: RefCell<Vec<Option<pm_kernel::Snapshot>>>,
+    pub seeks: RefCell<Vec<f64>>,
+    pub effects: RefCell<Vec<HostEffect>>,
+    pub reports: RefCell<Vec<String>>,
+    pub commands: RefCell<Vec<String>>,
+    pub runs: RefCell<Vec<(String, Vec<serde_json::Value>)>>,
+    pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
+    pub choice: RefCell<Option<String>>,
+    pub skims: RefCell<Vec<Option<f64>>>,
+    /// Ruler scrubs starting (`true`) and ending, as the app hears them.
+    pub scrubs: RefCell<Vec<bool>>,
+    /// For each seek, whether a ruler scrub was under way.
+    pub seeks_in_scrub: RefCell<Vec<bool>>,
+    /// The kernel the layer menu reads its rows from.
+    pub published: RefCell<Option<pm_kernel::KernelHandle>>,
+    pub skimming: std::cell::Cell<bool>,
+    /// How often the panel said the time under it moved (scroll, zoom, size).
+    pub moved: std::cell::Cell<usize>,
+    pub view_facts: std::cell::Cell<usize>,
+    /// Effects dropped from the Effects panel.
+    pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
+    /// Finder files and Project items dropped on the timeline.
+    pub media_drops: RefCell<Vec<crate::timeline_surface::MediaDrop>>,
+}
+pub(crate) struct Recording(pub Rc<Recorder>);
+impl Delegate for Recording {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, _: &mut App) {
+        self.0.timing_previews.borrow_mut().push(snapshot);
+    }
+    fn audio_gain_preview(&self, message: pm_engine_service::audio::GainPreview, _: &mut App) {
+        self.0.audio_gain_previews.borrow_mut().push(message);
+    }
+    fn audio_peaks(&self, _: &App) -> Option<([f64; 2], i64, bool)> { *self.0.audio.borrow() }
+    // G3_VIEW_SNAPSHOT_BEGIN
+    fn tracks_view(&self, view: std::sync::Arc<pm_panel_timeline::TimelineModel>, _: &mut App) {
+        if let Some(runtime) = self.0.runtime.borrow().as_ref() {
+            runtime.update_timeline_view(view);
+        }
+    }
+    fn timeline_outline(
+        &self,
+        view: std::sync::Arc<pm_panel_timeline::TimelineModel>,
+        refresh: bool,
+        _: &mut App,
+    ) {
+        if let Some(runtime) = self.0.runtime.borrow().as_ref() {
+            runtime.update_timeline_outline(view, refresh);
+        }
+    }
+    // G3_VIEW_SNAPSHOT_END
+    fn time(&self, _: &App) -> f64 {
+        *self.0.time.borrow()
+    }
+    fn seek(&self, seconds: f64, _: &mut App) {
+        *self.0.time.borrow_mut() = seconds;
+        self.0.seeks.borrow_mut().push(seconds);
+        let scrubbing = self.0.scrubs.borrow().last() == Some(&true);
+        self.0.seeks_in_scrub.borrow_mut().push(scrubbing);
+    }
+    fn effect(&self, effect: HostEffect, _: &mut App) {
+        self.0.effects.borrow_mut().push(effect);
+    }
+    fn report(&self, message: String, _: &mut App) {
+        self.0.reports.borrow_mut().push(message);
+    }
+    fn skim(&self, seconds: Option<f64>, _: &mut App) {
+        self.0.skims.borrow_mut().push(seconds);
+    }
+    fn scrubbing(&self, on: bool, _: &mut App) {
+        self.0.scrubs.borrow_mut().push(on);
+    }
+    fn view_facts(&self, _: serde_json::Value, _: &mut App) {
+        self.0.view_facts.set(self.0.view_facts.get() + 1);
+    }
+    fn view_moved(&self, _: &mut App) {
+        self.0.moved.set(self.0.moved.get() + 1);
+    }
+    fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, _: &mut App) {
+        self.0.media_drops.borrow_mut().push(drop);
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, _: &mut App) {
+        self.0.effect_drops.borrow_mut().push(drop);
+    }
+    fn skimming(&self, _: &App) -> bool {
+        self.0.skimming.get()
+    }
+    fn command(&self, name: &str, _: &mut App) {
+        self.0.commands.borrow_mut().push(name.to_owned());
+    }
+    fn run(&self, name: &str, args: Vec<serde_json::Value>, cx: &mut App) {
+        self.0.runs.borrow_mut().push((name.into(), args));
+        self.command(name, cx);
+    }
+    fn layer_menu_rows(&self, layer: &str, _: &App) -> Vec<serde_json::Value> {
+        match &*self.0.published.borrow() {
+            Some(kernel) => kernel
+                .published(crate::v4_view_tests::PROJECT)
+                .map(|p| crate::layer_commands::layer_menu(&p, layer, *self.0.time.borrow(), false))
+                .unwrap_or_default(),
+            None => vec![],
+        }
+    }
+    fn menu(
+        &self,
+        items: Vec<serde_json::Value>,
+        _: &mut Window,
+        cx: &mut App,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    ) {
+        // A row by its id or its label, numbered in preorder like the menu.
+        fn find(items: &[serde_json::Value], wanted: &str, next: &mut usize) -> Option<usize> {
+            for item in items {
+                let index = *next;
+                *next += 1;
+                if item["id"] == wanted || item["label"] == wanted {
+                    return Some(index);
+                }
+                if let Some(children) = item["children"].as_array()
+                    && let Some(found) = find(children, wanted, next)
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let index = self
+            .0
+            .choice
+            .borrow()
+            .as_ref()
+            .and_then(|wanted| find(&items, wanted, &mut 0));
+        self.0.menus.borrow_mut().push(items);
+        cx.defer(move |cx| choose(index, cx));
+    }
+}
+pub(crate) struct Stage {
+    pub rig: Rig,
+    pub view: Entity<SurfaceView>,
+    pub surface: Entity<TimelineSurface>,
+    pub recorder: Rc<Recorder>,
+    pub vcx: VisualTestContext,
+}
+pub(crate) fn stage(cx: &mut TestAppContext, layers: usize) -> Stage {
+    stage_project(cx, crate::v4_view_tests::project_json(layers))
+}
+pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
+    stage_with(cx, project, false)
+}
+/// The panel in a cached slot, as a dock holds it: a frame that renders no
+/// view replays the panel's last one.
+struct Docked {
+    child: Entity<SurfaceView>,
+    focus: gpui::FocusHandle,
+    timeline: Entity<TimelineSurface>,
+}
+impl gpui::Render for Docked {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{InteractiveElement, ParentElement, Styled};
+        let timeline = self.timeline.clone();
+        gpui::div()
+            .size_full()
+            .track_focus(&self.focus)
+            // AppKit normally resolves editor shortcuts before delivering
+            // keys to GPUI. TestPlatform uses the same resolver here.
+            .capture_key_down(move |event, _, cx| {
+                let key = event.keystroke.key.as_str();
+                let chord = if key == "a" && event.keystroke.modifiers.platform {
+                    "cmd+a"
+                } else if matches!(key, "u" | "m") {
+                    key
+                } else {
+                    return;
+                };
+                let (command, args) = crate::layer_commands::commands_tests::dispatch(chord);
+                if command == "selectAll" {
+                    assert!(timeline.update(cx, |timeline, cx| timeline.select_all(cx)));
+                    cx.stop_propagation();
+                    return;
+                }
+                let Some(crate::layer_commands::Route::Timeline { frames, shift }) =
+                    crate::layer_commands::route(&command, &args)
+                else {
+                    panic!("{key} did not reach the timeline");
+                };
+                timeline.update(cx, |timeline, cx| {
+                    timeline.command(&command, 0., frames, shift, cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(
+                self.child
+                    .clone()
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
+    }
+}
+fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
+    let rig = crate::v4_view_tests::rig_project("timeline", &project);
+    stage_opened(cx, rig, docked)
+}
+fn stage_opened(cx: &mut TestAppContext, rig: Rig, docked: bool) -> Stage {
+    let first = publication(&rig);
+    let natives = Natives::default();
+    let recorder = Rc::new(Recorder::default());
+    *recorder.runtime.borrow_mut() = Some(rig.runtime.clone());
+    *recorder.published.borrow_mut() = Some(rig.kernel.clone());
+    let delegate = Rc::new(Recording(recorder.clone()));
+    let (kernel, outline) = (rig.kernel.clone(), natives.outline.clone());
+    let surface = cx.new(|cx| {
+        let mut surface = TimelineSurface::new(
+            kernel,
+            PROJECT.into(),
+            tokens(),
+            delegate,
+            outline,
+            Default::default(),
+            cx,
+        );
+        surface.set_outline_runtime(&rig.runtime);
+        surface
+    });
+    natives
+        .views
+        .borrow_mut()
+        .insert("timeline".into(), surface.clone().into());
+    let outline = natives.outline.clone();
+    let (view, vcx) = if docked {
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let child =
+                cx.new(|cx| SurfaceView::new(runtime, first, tokens(), natives, window, cx));
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            Docked {
+                child,
+                focus,
+                timeline: surface.clone(),
+            }
+        });
+        let mut vcx = vcx.clone();
+        vcx.update(|window, _| window.activate());
+        vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
+        (root.read_with(&vcx, |r, _| r.child.clone()), vcx)
+    } else {
+        window(cx, &rig, first, natives)
+    };
+    outline.bind(view.downgrade());
+    let mut stage = Stage {
+        rig,
+        view,
+        surface,
+        recorder,
+        vcx,
+    };
+    stage.idle(cx);
+    stage
+}
+
+#[path = "timeline_mcp_tests.rs"]
+mod timeline_mcp_tests;
+impl Stage {
+    /// Worker jobs and repaints quiesce, and JS publications reach the host.
+    pub fn idle(&mut self, cx: &mut TestAppContext) {
+        // The mock platform has no display link; deliver its pending frame.
+        self.vcx.update(|window, cx| window.simulate_next_frame(cx));
+        let surface = self.surface.clone();
+        settle(cx, |cx| surface.read_with(cx, |s, _| s.idle()));
+        self.vcx.run_until_parked();
+        // This is the fixture's observation request, after all raw input was
+        // delivered. A fast burst can fill the bounded realm queue; let its
+        // existing work finish before requesting a publication. No input is
+        // retried or dropped, and a stuck realm still fails the same deadline.
+        let publish_started = std::time::Instant::now();
+        let deadline = publish_started + Duration::from_secs(20);
+        let mut retries = 0;
+        let mut retry_wait = Duration::ZERO;
+        loop {
+            let mut busy = false;
+            for (_, ticket) in self.rig.runtime.publish() {
+                let ticket = match ticket {
+                    Err(pm_runtime_v8::Error::Busy) => {
+                        busy = true;
+                        continue;
+                    }
+                    ticket => ticket.unwrap(),
+                };
+                while ticket.try_take().is_none() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "fixture publication: retries={retries}, retry_wait={retry_wait:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            if !busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture publication: retries={retries}, retry_wait={retry_wait:?}"
+            );
+            retries += 1;
+            let waiting = std::time::Instant::now();
+            std::thread::sleep(Duration::from_millis(1));
+            retry_wait += waiting.elapsed();
+        }
+        eprintln!(
+            "TIMELINE_FIXTURE_PUBLISH {}",
+            serde_json::json!({"retries":retries,"retry_wait_ms":retry_wait.as_secs_f64()*1000.,
+                "total_ms":publish_started.elapsed().as_secs_f64()*1000.,"ceiling_ms":20000})
+        );
+        for p in self.rig.runtime.take_publications() {
+            self.view.update(&mut self.vcx, |v, cx| v.publish(p, cx));
+        }
+        self.vcx.run_until_parked();
+        let errors = self.rig.runtime.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        self.surface.update(&mut self.vcx, |_, cx| cx.notify());
+        self.vcx.run_until_parked();
+    }
+    fn settle_outline(&mut self, cx: &mut TestAppContext) {
+        settle(cx, |cx| {
+            for p in self.rig.runtime.take_publications() {
+                self.view.update(cx, |v, cx| v.publish(p, cx));
+            }
+            self.surface.read_with(cx, |s, _| s.outline_settled())
+        });
+        self.vcx.update(|window, cx| window.simulate_next_frame(cx));
+        self.vcx.run_until_parked();
+    }
+    pub fn origin(&mut self) -> Point<Pixels> {
+        bounds(&mut self.vcx, "timeline:surface").origin
+    }
+    /// Press, travel in samples, release: as a real pointer would.
+    pub fn drag(
+        &mut self,
+        cx: &mut TestAppContext,
+        from: Point<Pixels>,
+        to: Point<Pixels>,
+        modifiers: Modifiers,
+    ) {
+        self.vcx
+            .simulate_mouse_down(from, MouseButton::Left, modifiers);
+        self.idle(cx);
+        for step in 1..=4 {
+            let t = step as f32 / 4.;
+            let at = from + point((to.x - from.x) * t, (to.y - from.y) * t);
+            self.vcx
+                .simulate_mouse_move(at, MouseButton::Left, modifiers);
+            self.idle(cx);
+        }
+        self.vcx.simulate_mouse_up(to, MouseButton::Left, modifiers);
+        self.idle(cx);
+    }
+    pub fn start_of(&self, id: &str) -> f64 {
+        let p = self.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .into_iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .in_time
+    }
+    pub fn out_of(&self, id: &str) -> f64 {
+        let p = self.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .into_iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .out_time
+    }
+    pub fn undo(&mut self, cx: &mut TestAppContext) {
+        self.rig
+            .kernel
+            .call(
+                PROJECT,
+                Request::new(Caller::native(), Call::History(HistoryCall::Undo)),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        self.surface.update(&mut self.vcx, |s, cx| s.published(cx));
+        self.idle(cx);
+    }
+    /// Window position of a time on a row, from the frame the host painted.
+    pub fn at(&mut self, row: usize, seconds: f64) -> Point<Pixels> {
+        let origin = self.origin();
+        let surface = self.surface.clone();
+        let (frame, scene) =
+            surface.read_with(&self.vcx, |s, _| (s.frame().unwrap(), s.scene().unwrap()));
+        let v = frame.viewport;
+        let t = tokens();
+        let id = scene.navigate_first(row).unwrap();
+        let y = t.metrics.ruler as f64 + scene.scroll_for(&id).unwrap() - v.scroll_y
+            + t.metrics.track_row as f64 / 2.;
+        let x = v.layer_column + (seconds - v.scroll_time) * v.pps;
+        origin + point(px(x as f32), px(y as f32))
+    }
+}
+fn op_center(s: &mut Stage, prefix: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    let op = frame.ops.iter().find(|o| o.id.starts_with(prefix)).unwrap();
+    origin
+        + point(
+            px((op.bounds.x + op.bounds.width / 2.) as f32),
+            px((op.bounds.y + op.bounds.height / 2.) as f32),
+        )
+}
+fn property_key_center(s: &mut Stage, layer: &str, channel: &str) -> Point<Pixels> {
+    let row = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Property {
+        layer_id: layer.into(),
+        channel: channel.into(),
+    });
+    let prefix = format!("key:[{},", serde_json::to_string(&row).unwrap());
+    op_center(s, &prefix)
+}
+fn keyed(s: &mut Stage, cx: &mut TestAppContext, times: &[f64]) -> Vec<String> {
+    let mut ids = vec![];
+    for (i, time) in times.iter().enumerate() {
+        let id = format!("k{i}");
+        s.rig
+            .kernel
+            .call(
+                PROJECT,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: None,
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::KeyframeCommand::Add {
+                                layer_id: "l0".into(),
+                                channel: "opacity".into(),
+                                time: *time,
+                                key_id: id.clone(),
+                                value: Some(pm_model::Value::from(50. + i as f64)),
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: None,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        ids.push(id);
+    }
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    ids
+}
+fn key_time(s: &Stage, id: &str) -> f64 {
+    s.surface
+        .read_with(&s.vcx, |t, _| {
+            t.model().index.key(id).map(|(_, _, k)| k.time)
+        })
+        .unwrap()
+}
+#[gpui::test]
+fn dragging_a_keyframe_moves_it_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    let from = op_center(&mut s, "key:");
+    s.drag(cx, from, from + point(px(40.), px(0.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(key_time(&s, &ids[0]) > 0.5, "{}", key_time(&s, &ids[0]));
+    s.undo(cx);
+    assert_eq!(key_time(&s, &ids[0]), 0.5);
+}
+#[gpui::test]
+fn a_key_drag_previews_on_the_existing_scene_and_commits_the_last_sample(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1., 1.5]);
+    let from = property_key_center(&mut s, "l0", "opacity");
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let scene = s.surface.read_with(&s.vcx, |t, _| t.scene().unwrap());
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    let painted_keys = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.frame()
+                .unwrap()
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    op.id
+                        .starts_with("key:")
+                        .then(|| (op.id.clone(), op.detail["seconds"].as_f64().unwrap()))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    for destination in [1.5, 1.] {
+        let at = from + point(px(((destination - 0.5) * pps) as f32), px(0.));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().revision(),
+            before.revision()
+        );
+        assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+        assert!(s.recorder.timing_previews.borrow().is_empty());
+        assert!(s.surface.read_with(&s.vcx, |t, _| std::sync::Arc::ptr_eq(
+            &scene,
+            &t.scene().unwrap()
+        )));
+        let keys = painted_keys(&s);
+        let moved = keys.iter().find(|(id, _)| id.ends_with("\"k0\"]")).unwrap();
+        assert_eq!(moved.1, destination);
+        assert_eq!(
+            keys.iter().filter(|(_, time)| *time == destination).count(),
+            1
+        );
+    }
+    let release = from + point(px((0.5 * pps) as f32), px(0.));
+    s.vcx
+        .simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(key_time(&s, &ids[0]), 1.);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().index.key(&ids[1]).is_none())
+    );
+    s.undo(cx);
+    assert_eq!(key_time(&s, &ids[0]), 0.5);
+    assert_eq!(key_time(&s, &ids[1]), 1.);
+}
+
+#[gpui::test]
+fn marquee_selects_keys_without_seeking(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    keyed(&mut s, cx, &[0.5, 1.]);
+    let key = property_key_center(&mut s, "l0", "opacity");
+    let start = point(s.at(0, 3.).x, key.y);
+    s.drag(cx, start, key + point(px(-12.), px(6.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let selected = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .keys()
+        .len();
+    assert_eq!(selected, 2);
+    assert!(s.recorder.seeks.borrow().is_empty());
+}
+#[gpui::test]
+fn marquee_on_600_layers_previews_locally_and_shares_rows_on_commit(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 600);
+    keyed(&mut s, cx, &[0.5, 0.8, 1., 1.2]);
+    let first_key = property_key_center(&mut s, "l0", "opacity");
+    let origin = s.origin();
+    let start = point(s.at(0, 4.).x, first_key.y);
+    let through = first_key - point(px(10.), px(0.));
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    let model = s.surface.read_with(&s.vcx, |t, _| t.model());
+    let scene = s.surface.read_with(&s.vcx, |t, _| t.scene().unwrap());
+    assert_eq!(model.index.layers.len(), 600);
+    let selected_on_screen = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.frame().unwrap().ops.iter().filter(|op| {
+                op.id.starts_with("key:") && !op.detail["keyline"].is_null()
+            }).count()
+        })
+    };
+    s.vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(through, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(selected_on_screen(&s), 4);
+    let painted = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    for i in 1..5 {
+        let at = through - point(px(i as f32), px(0.));
+        assert!(at.x > origin.x + px(painted.viewport.layer_column as f32));
+        s.vcx.simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.vcx.run_until_parked();
+        assert!(s.surface.read_with(&s.vcx, |t, _| {
+            std::sync::Arc::ptr_eq(&painted, &t.frame().unwrap())
+        }));
+    }
+    let during = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(during.selection, before.selection);
+    assert_eq!(during.history.entries, before.history.entries);
+    s.vcx.simulate_mouse_up(through, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let after = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert_eq!(after.selection.keys().len(), 4);
+    assert_eq!(after.history.entries, before.history.entries + 1);
+    assert_eq!(selected_on_screen(&s), 4);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert!(std::ptr::eq(model.rows(), t.model().rows()));
+        let updated = t.scene().unwrap();
+        assert!(std::ptr::eq(scene.span(599).unwrap().0, updated.span(599).unwrap().0));
+    });
+}
+
+#[gpui::test]
+fn timeline_right_click_cancels_a_key_or_clip_drag(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    let key = property_key_center(&mut s, "l0", "opacity");
+    let clip = s.at(0, 1.5);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    for from in [key, clip] {
+        let to = from + point(px(44.), px(0.));
+        s.vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        s.vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert!(s.surface.read_with(&s.vcx, |t, _| t.gesture_state() == "dragging"));
+        // The right-up occurs while the original button is still held.
+        s.vcx.simulate_mouse_down(to, MouseButton::Right, Modifiers::none());
+        s.vcx.simulate_mouse_up(to, MouseButton::Right, Modifiers::none());
+        s.vcx.simulate_mouse_move(to + point(px(20.), px(0.)), MouseButton::Left, Modifiers::none());
+        s.vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(key_time(&s, &ids[0]), 0.5);
+        assert_eq!(s.start_of("l0"), 0.);
+        let after = s.rig.kernel.published(PROJECT).unwrap();
+        assert_eq!(after.revision(), before.revision());
+        assert!(after.entry.is_none());
+        assert!(s.recorder.menus.borrow().is_empty());
+        assert!(s.recorder.reports.borrow().is_empty());
+    }
+    s.vcx.simulate_mouse_down(clip, MouseButton::Right, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.menus.borrow().len(), 1);
+}
+
+#[gpui::test]
+fn timeline_right_click_cancels_marquee_and_ignores_the_left_release(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    keyed(&mut s, cx, &[0.5, 1.]);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l1".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    let key = property_key_center(&mut s, "l0", "opacity");
+    let start = point(s.at(0, 4.).x, key.y);
+    let to = key - point(px(12.), px(0.));
+    let highlights = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.frame().unwrap().ops.iter().filter(|op| {
+                op.id.starts_with("key:") && !op.detail["keyline"].is_null()
+            }).count()
+        })
+    };
+    s.vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(highlights(&s), 2);
+    s.vcx.simulate_mouse_down(key, MouseButton::Right, Modifiers::none());
+    s.vcx.simulate_mouse_up(key, MouseButton::Right, Modifiers::none());
+    s.vcx.simulate_mouse_move(start, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_up(key, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let after = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.selection, before.selection);
+    assert_eq!(after.history.entries, before.history.entries);
+    assert_eq!(highlights(&s), 0);
+    assert!(s.recorder.menus.borrow().is_empty());
+    s.vcx.simulate_click(start, Modifiers::none());
+    s.idle(cx);
+    assert!(s.rig.kernel.published(PROJECT).unwrap().selection.is_empty());
+}
+
+/// v1: a marquee from empty track space over layer bars (no keys inside)
+/// selects the layers it touches, in Layers mode as in Tracks; a click on
+/// empty space clears them again.
+#[gpui::test]
+fn a_marquee_over_layer_bars_selects_their_layers(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    // Layer 0 spans 0-2 s, layer 1 0.5-2.5 s: from past layer 0's end on
+    // its row, across both bars.
+    let start = s.at(0, 3.);
+    let end = s.at(1, 1.5);
+    s.drag(cx, start, end, Modifiers::none());
+    let selected = |s: &Stage| {
+        let mut ids = s
+            .rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .to_vec();
+        ids.sort();
+        ids
+    };
+    assert_eq!(selected(&s), ["l0", "l1"]);
+    assert!(s.recorder.seeks.borrow().is_empty());
+    let empty = s.at(0, 4.);
+    s.vcx.simulate_click(empty, Modifiers::none());
+    s.idle(cx);
+    assert!(selected(&s).is_empty());
+}
+/// v1's work-area handles: a 12 pt zone over the ruler's height takes the
+/// press before the scrub (no seek), and dragging moves that edge.
+#[gpui::test]
+fn a_work_area_handle_takes_the_press_and_moves_its_edge_without_seeking(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let v = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport);
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    // 5 pt inside the in edge (at 0 s), well within its reach.
+    let from = point(x_of(0.) + px(5.), y);
+    let to = point(x_of(2.), y);
+    s.drag(cx, from, to, Modifiers::none());
+    let work = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    assert!((work.0 - 2.).abs() < 0.05, "{work:?}");
+    assert!(
+        s.recorder.seeks.borrow().is_empty(),
+        "{:?}",
+        s.recorder.seeks.borrow()
+    );
+}
+/// v1: a plain drag on the work area's bar (the ruler's top strip) moves
+/// the whole work area, keeping its length.
+#[gpui::test]
+fn a_plain_drag_on_the_work_area_bar_moves_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let v = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport);
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    // Narrow it first: its in point to 2 s.
+    let mid = origin.y + px(tokens().metrics.ruler / 2.);
+    s.drag(
+        cx,
+        point(x_of(0.) + px(5.), mid),
+        point(x_of(2.), mid),
+        Modifiers::none(),
+    );
+    let before = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    // It ends at the composition's end: move it back a second.
+    let strip = origin.y + px(3.);
+    s.drag(
+        cx,
+        point(x_of(4.), strip),
+        point(x_of(3.), strip),
+        Modifiers::none(),
+    );
+    let after = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    assert!(
+        (before.0 - after.0 - 1.).abs() < 0.05,
+        "{before:?} {after:?}"
+    );
+    assert!((after.1 - after.0 - (before.1 - before.0)).abs() < 0.05);
+}
+/// v1: Control with the wheel zooms the time, as ⌘ and ⌥ do.
+#[gpui::test]
+fn control_and_the_wheel_zoom_the_time(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let at = s.at(0, 1.);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+        modifiers: Modifiers::control(),
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert_ne!(s.surface.read_with(&s.vcx, |t, _| t.pps()), pps);
+}
+/// v1: a double-click on a key opens the Keyframe Value editor.
+#[gpui::test]
+fn a_double_click_on_a_key_opens_its_value_editor(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    keyed(&mut s, cx, &[0.5, 1.]);
+    let key = op_center(&mut s, "key:");
+    s.vcx.simulate_click(key, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: key,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx
+        .simulate_mouse_up(key, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .commands
+            .borrow()
+            .iter()
+            .any(|c| c == "keyframeValue"),
+        "{:?}",
+        s.recorder.commands.borrow()
+    );
+}
+/// v1: ⌥-dragging the last of the selected keys stretches their timing from
+/// the first; the first stays where it is.
+#[gpui::test]
+fn option_dragging_the_last_selected_key_stretches_the_keys(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    let key = property_key_center(&mut s, "l0", "opacity");
+    // Both keys, by a marquee from empty space.
+    let start = point(s.at(0, 3.).x, key.y);
+    s.drag(cx, start, key + point(px(-12.), px(6.)), Modifiers::none());
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps()) as f32;
+    let last = point(s.at(0, 1.).x, key.y);
+    s.drag(
+        cx,
+        last,
+        last + point(px(pps / 2.), px(0.)),
+        Modifiers::alt(),
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(
+        (key_time(&s, &ids[0]) - 0.5).abs() < 1e-6,
+        "{}",
+        key_time(&s, &ids[0])
+    );
+    assert!(key_time(&s, &ids[1]) > 1.3, "{}", key_time(&s, &ids[1]));
+}
+/// v1: a property row's name offers its lane's menu, Separate Dimensions on
+/// Position.
+#[gpui::test]
+fn a_property_rows_name_offers_its_lane_menu(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":10,"kf":[]},"position.y":{"v":20,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:p", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let row = bounds(&mut s.vcx, r#"timeline:row:["property","l0","position.x"]"#);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: row.center(),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<String> = menus
+        .last()
+        .map(|m| {
+            m.iter()
+                .filter_map(|r| r["label"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    for label in ["Add Keyframe Here", "Paste Keyframes Here", "Separate Dimensions"] {
+        assert!(labels.iter().any(|l| l == label), "{labels:?}");
+    }
+}
+/// v1's pointers: ↔ over the ruler, a hand over a key, an open hand over a
+/// clip's body.
+#[gpui::test]
+fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    keyed(&mut s, cx, &[0.5]);
+    let cursor = |s: &mut Stage, at: Point<Pixels>, cx: &mut TestAppContext| {
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| t.cursor_style())
+    };
+    let ruler = point(
+        s.at(0, 1.).x,
+        s.origin().y + px(tokens().metrics.ruler / 2.),
+    );
+    assert_eq!(
+        cursor(&mut s, ruler, cx),
+        gpui::CursorStyle::ResizeLeftRight
+    );
+    let key = op_center(&mut s, "key:");
+    // The owner's rule: no pointing hand; a key keeps the arrow.
+    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::Arrow);
+    // Keying l0 reveals its property row; locate l1's clip by identity.
+    let (top, height) = layer_row(&s, "l1");
+    let body = point(s.at(0, 1.5).x, s.origin().y + px(top + height / 2.));
+    assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
+}
+/// Layer ids in stacking order (top first), and each layer's group.
+fn stack(s: &Stage) -> Vec<(String, Option<String>)> {
+    s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .layers
+            .iter()
+            .map(|l| (l.id.clone(), l.group.clone()))
+            .collect()
+    })
+}
+fn ids(s: &Stage) -> Vec<String> {
+    stack(s).into_iter().map(|(id, _)| id).collect()
+}
+/// A layer row's top (panel space) and height.
+fn layer_row(s: &Stage, layer: &str) -> (f32, f32) {
+    let (frame, scene) = s
+        .surface
+        .read_with(&s.vcx, |t, _| (t.frame().unwrap(), t.scene().unwrap()));
+    let id = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(layer.into()));
+    let top =
+        tokens().metrics.ruler as f64 + scene.scroll_for(&id).unwrap() - frame.viewport.scroll_y;
+    (top as f32, tokens().metrics.track_row)
+}
+/// v1's reorder: press `layer`'s name, drag to `fraction` down `onto`'s
+/// row (past the disclosure), release.
+fn drag_layer(s: &mut Stage, cx: &mut TestAppContext, layer: &str, onto: &str, fraction: f32) {
+    let origin = s.origin();
+    let (top, height) = layer_row(s, layer);
+    let from = point(origin.x + px(120.), origin.y + px(top + height / 2.));
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_layer_row(layer.into(), from, cx)
+    });
+    let x = s.at(0, 1.).x;
+    s.vcx.simulate_mouse_move(
+        point(x, from.y + px(8.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    let (top, height) = layer_row(s, onto);
+    let to = point(x, origin.y + px(top + height * fraction));
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+}
+#[gpui::test]
+fn row_drop_hit_testing_survives_an_invalidated_paint_frame(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let from = bounds(&mut s.vcx, r#"timeline:name:["layer","l2"]"#).center();
+    let target = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
+    let to = point(from.x, target.origin.y + px(2.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, _| t.invalidate_row_frame_for_test());
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(ids(&s), ["l2", "l0", "l1"]);
+    s.undo(cx);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+}
+
+/// Whole-row input must reach the reorder gesture through the mounted outline.
+#[gpui::test]
+fn row_drag_index_and_empty_space_reorder_with_one_undo(cx: &mut TestAppContext) {
+    for source in ["index", "space", "name", "badge"] {
+        let mut s = stage(cx, 3);
+        let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
+        // Jude's quiet switches are painted after the pointer enters the row.
+        s.vcx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        s.idle(cx);
+        let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l2"]"#);
+        // The first switch column after the name (Shy left the row, PM-293).
+        let parent = bounds(&mut s.vcx, r#"timeline:parent:["layer","l2"]"#);
+        let before_history = s.rig.kernel.published(PROJECT).unwrap().history.entries;
+        let from = match source {
+            "index" => point(row.origin.x + px(12.), row.center().y),
+            "space" => point(
+                (name.origin.x + name.size.width + parent.origin.x) / 2.,
+                row.center().y,
+            ),
+            "badge" => point(
+                name.origin.x - px(tokens().metrics.gap + tokens().metrics.kind_badge / 2.),
+                row.center().y,
+            ),
+            _ => name.center(),
+        };
+        let (top, height) = layer_row(&s, "l0");
+        let to = point(from.x, s.origin().y + px(top + height * 0.1));
+        s.drag(cx, from, to, Modifiers::none());
+        assert_eq!(ids(&s), ["l2", "l0", "l1"], "header {source}");
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().history.entries,
+            before_history + 1,
+            "one Move layers entry"
+        );
+        s.undo(cx);
+        assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    }
+}
+
+#[gpui::test]
+fn row_drag_under_threshold_selects_and_escape_cancels(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
+    let from = point(row.origin.x + px(12.), row.center().y);
+    s.drag(cx, from, from + point(px(2.), px(0.)), Modifiers::none());
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    assert!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .contains("l2")
+    );
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        from - point(px(0.), px(50.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx)));
+    s.vcx
+        .simulate_mouse_up(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+}
+
+#[gpui::test]
+fn row_drag_controls_do_not_arm_reorder(cx: &mut TestAppContext) {
+    for control in ["visibility", "lock", "parent", "disclosure", "threeD"] {
+        let mut s = stage(cx, 3);
+        keyed(&mut s, cx, &[0.5]);
+        let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
+        s.vcx
+            .simulate_mouse_move(row.center(), None, Modifiers::none());
+        s.idle(cx);
+        let target = bounds(&mut s.vcx, &format!(r#"timeline:{control}:["layer","l0"]"#));
+        let from = target.center();
+        s.vcx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        let to = from - point(px(0.), px(50.));
+        s.vcx
+            .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert!(
+            !s.surface.read_with(&s.vcx, |t, _| t.row_drag_active()),
+            "{control}"
+        );
+        // Parent pick may be active; cancel it before release.
+        s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
+        s.vcx
+            .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(ids(&s), ["l0", "l1", "l2"], "{control}");
+    }
+}
+
+#[gpui::test]
+fn row_click_modifiers_select_without_reorder(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let mut shift = Modifiers::none();
+    shift.shift = true;
+    let mut command = Modifiers::none();
+    command.platform = true;
+    for (id, mods, expected) in [
+        ("l0", Modifiers::none(), vec!["l0"]),
+        ("l2", shift, vec!["l0", "l1", "l2"]),
+        ("l1", command, vec!["l0", "l2"]),
+    ] {
+        let row = bounds(&mut s.vcx, &format!(r#"timeline:row:["layer","{id}"]"#));
+        let at = point(row.origin.x + px(12.), row.center().y);
+        s.drag(cx, at, at + point(px(2.), px(0.)), mods);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+            expected
+        );
+        assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    }
+}
+
+#[gpui::test]
+fn row_drag_auto_scrolls_a_held_pointer_and_escape_stops_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 40);
+    let before = ids(&s);
+    let from = bounds(&mut s.vcx, r#"timeline:name:["layer","l0"]"#).center();
+    let (height, bar) = s.surface.read_with(&s.vcx, |t, _| {
+        (t.frame().unwrap().viewport.height, t.bar_height())
+    });
+    let origin = s.origin();
+    let to = point(from.x, origin.y + px((height - bar - 2.) as f32));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let moved = s.surface.read_with(&s.vcx, |t, _| t.scroll_y());
+    assert!(moved > 0.);
+    s.vcx.executor().advance_clock(Duration::from_millis(100));
+    s.idle(cx);
+    assert!(
+        s.surface.read_with(&s.vcx, |t, _| t.scroll_y()) > moved,
+        "stationary edge pointer keeps scrolling"
+    );
+    s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
+    let stopped = s.surface.read_with(&s.vcx, |t, _| t.scroll_y());
+    s.vcx.executor().advance_clock(Duration::from_millis(100));
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), stopped);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(ids(&s), before);
+}
+
+/// Exercise selected blocks and group membership through actual header input.
+#[gpui::test]
+fn row_drag_selected_block_enters_group_at_top_and_leaves(cx: &mut TestAppContext) {
+    let project = crate::v4_view_tests::project_json(3).replacen(
+        r#""layers":[{"#,
+        r#""layers":[{"id":"g","type":"group","name":"Group","collapsed":false,"from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},{"#,
+        1,
+    );
+    let mut s = stage_project(cx, project);
+    let drag_header =
+        |s: &mut Stage, cx: &mut TestAppContext, source: &str, target: &str, fraction: f32| {
+            let from = bounds(
+                &mut s.vcx,
+                &format!(r#"timeline:name:["layer","{source}"]"#),
+            )
+            .center();
+            let target = bounds(&mut s.vcx, &format!(r#"timeline:row:["layer","{target}"]"#));
+            let to = point(from.x, target.origin.y + target.size.height * fraction);
+            s.drag(cx, from, to, Modifiers::none());
+        };
+    // First child is an unselected anchor at the top of the group.
+    drag_header(&mut s, cx, "l0", "g", 0.5);
+    assert_eq!(stack(&s)[1], ("l0".into(), Some("g".into())));
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l1".into(), "l2".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    drag_header(&mut s, cx, "l2", "l0", 0.1);
+    assert_eq!(ids(&s), ["g", "l1", "l2", "l0"]);
+    for id in ["l1", "l2"] {
+        assert!(stack(&s).contains(&(id.into(), Some("g".into()))));
+    }
+    s.undo(cx);
+    assert_eq!(ids(&s), ["g", "l0", "l1", "l2"]);
+    drag_header(&mut s, cx, "l0", "g", 0.1);
+    assert_eq!(stack(&s)[0], ("l0".into(), None));
+}
+
+/// v1: a layer dragged by its name to the top half of another row lands
+/// before it, as one undo step; its clip moves with its row.
+#[gpui::test]
+fn a_layer_dragged_by_its_name_reorders_and_undoes_in_one_step(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    drag_layer(&mut s, cx, "l2", "l0", 0.2);
+    assert_eq!(ids(&s), ["l2", "l0", "l1"]);
+    s.undo(cx);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+}
+/// v1: the middle of a group's row takes a layer into the group; the top of
+/// the group's row takes a member back out, before the group.
+#[gpui::test]
+fn a_layer_dragged_onto_a_group_joins_it_and_back_out_leaves_it(cx: &mut TestAppContext) {
+    let project = crate::v4_view_tests::project_json(2).replacen(
+        r#""layers":[{"#,
+        r#""layers":[{"id":"g","type":"group","name":"Group","collapsed":false,"from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},{"#,
+        1,
+    );
+    let mut s = stage_project(cx, project);
+    assert_eq!(ids(&s), ["g", "l0", "l1"]);
+    drag_layer(&mut s, cx, "l1", "g", 0.5);
+    assert!(
+        stack(&s).contains(&("l1".into(), Some("g".into()))),
+        "{:?}",
+        stack(&s)
+    );
+    assert_eq!(ids(&s), ["g", "l1", "l0"]);
+    drag_layer(&mut s, cx, "l0", "l1", 0.1);
+    assert_eq!(stack(&s)[1], ("l0".into(), Some("g".into())));
+    s.undo(cx);
+    assert_eq!(ids(&s), ["g", "l1", "l0"]);
+    drag_layer(&mut s, cx, "l1", "g", 0.1);
+    assert_eq!(stack(&s)[0], ("l1".into(), None), "{:?}", stack(&s));
+}
+/// v1: dragging one of several selected layers moves them all, in order.
+#[gpui::test]
+fn a_reorder_moves_every_selected_layer_together(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l1".into(), "l2".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    drag_layer(&mut s, cx, "l2", "l0", 0.2);
+    assert_eq!(ids(&s), ["l1", "l2", "l0"]);
+}
+#[gpui::test]
+fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.5]);
+    let from = op_center(&mut s, "key:");
+    s.vcx.simulate_click(from, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    let graph = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let key = graph
+        .iter()
+        .find(|o| o.id == format!("graph-key:{}", ids[0]))
+        .expect("graph key painted")
+        .bounds;
+    let at = s.origin()
+        + point(
+            px((key.x + key.width / 2.) as f32),
+            px((key.y + key.height / 2.) as f32),
+        );
+    let value = |s: &Stage, id: &str| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model().index.key(id).unwrap().2.value.as_f64().unwrap()
+        })
+    };
+    let before = value(&s, &ids[0]);
+    s.drag(cx, at, at - point(px(0.), px(40.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(value(&s, &ids[0]) > before);
+    s.undo(cx);
+    assert_eq!(value(&s, &ids[0]), before);
+}
+/// Selects the first key and opens the Value Graph on it.
+fn graph_on_first_key(s: &mut Stage, cx: &mut TestAppContext) -> Vec<String> {
+    let ids = keyed(s, cx, &[0.5, 1.5]);
+    let from = op_center(s, "key:");
+    s.vcx.simulate_click(from, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    ids
+}
+#[gpui::test]
+fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let graph = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let handle = graph
+        .iter()
+        .find(|o| o.id == format!("graph-handle:{}:out", ids[0]))
+        .expect("the selected key shows its out handle")
+        .bounds;
+    assert!(
+        !graph
+            .iter()
+            .any(|o| o.id.starts_with(&format!("graph-handle:{}:", ids[1]))),
+        "an unselected key shows no handles"
+    );
+    let at = s.origin()
+        + point(
+            px((handle.x + handle.width / 2.) as f32),
+            px((handle.y + handle.height / 2.) as f32),
+        );
+    let ease = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model()
+                .index
+                .key(&ids[0])
+                .unwrap()
+                .2
+                .stored
+                .to_value()
+                .get("outEase")
+                .cloned()
+        })
+    };
+    let before = ease(&s);
+    s.drag(cx, at, at - point(px(0.), px(30.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let after = ease(&s);
+    assert!(
+        after.is_some() && after != before,
+        "{before:?} -> {after:?}"
+    );
+    s.undo(cx);
+    assert_eq!(ease(&s), before);
+}
+/// Chike's stray box: in the Graph view a layer bar hidden under the graph
+/// drew its hover outline and trim grip over the curves. A bar the graph
+/// covers is never hovered (nor trimmed); out of Graph view it is.
+#[gpui::test]
+fn a_bar_the_graph_covers_is_never_hovered(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    keyed(&mut s, cx, &[0.5, 1.5]);
+    let bar = s.at(0, 1.);
+    s.vcx.simulate_mouse_move(bar, None, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.hovered_clip())
+            .is_some(),
+        "the bar hovers in the dope sheet"
+    );
+    let key = op_center(&mut s, "key:");
+    s.vcx.simulate_click(key, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_move(bar + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |t, _| t.hovered_clip()),
+        None,
+        "a bar under the graph is hidden"
+    );
+    // And what is drawn there is the graph's own ground first.
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    assert_eq!(ops.first().map(|o| o.id.as_str()), Some("graph-ground"));
+}
+/// Window position of graph key `id`'s centre, as painted now.
+fn graph_key_at(s: &mut Stage, id: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let key = ops
+        .iter()
+        .find(|o| o.id == format!("graph-key:{id}"))
+        .unwrap_or_else(|| panic!("graph key {id} painted"))
+        .bounds;
+    origin
+        + point(
+            px((key.x + key.width / 2.) as f32),
+            px((key.y + key.height / 2.) as f32),
+        )
+}
+/// Chike's "keys jump when you drag them": a key pressed in the Value Graph
+/// (unselected, so the press selects it and shows its handles), dragged in
+/// small steps in value and time, stays under the pointer at every step, and
+/// stays where it was released: nothing rescales under it.
+#[gpui::test]
+fn a_dragged_graph_key_stays_under_the_pointer_and_lands_where_released(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let start = graph_key_at(&mut s, &ids[1]);
+    s.vcx
+        .simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let pressed = graph_key_at(&mut s, &ids[1]);
+    assert!(
+        (pressed.y - start.y).abs() < px(0.5),
+        "pressing (selecting) the key moved it: {start:?} -> {pressed:?}"
+    );
+    let (pps, fps) = s.surface.read_with(&s.vcx, |t, _| {
+        (t.frame().unwrap().viewport.pps, t.model().index.fps)
+    });
+    let frame = (pps / fps) as f32;
+    // Down 12 points and right 3 frames, in 12 steps, as a slow hand moves.
+    let to = start + point(px(frame * 3.), px(12.));
+    let mut last_y = start.y;
+    for step in 1..=12 {
+        let k = step as f32 / 12.;
+        let at = start + point((to.x - start.x) * k, (to.y - start.y) * k);
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        let travel = at - start;
+        if f32::from(travel.x).hypot(f32::from(travel.y)) < tokens().metrics.drag_threshold + 0.5 {
+            continue; // Under the drag threshold: nothing moves yet.
+        }
+        let key = graph_key_at(&mut s, &ids[1]);
+        assert!(
+            (key.y - at.y).abs() < px(1.),
+            "step {step}: key y {:?} left the pointer y {:?}",
+            key.y,
+            at.y
+        );
+        assert!(
+            (key.x - at.x).abs() <= px(frame / 2. + 0.5),
+            "step {step}: key x {:?} left the pointer x {:?} (frame {frame})",
+            key.x,
+            at.x
+        );
+        assert!(
+            key.y >= last_y - px(0.01),
+            "step {step}: the key went back up"
+        );
+        last_y = key.y;
+    }
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let landed = graph_key_at(&mut s, &ids[1]);
+    assert!(
+        (landed.y - to.y).abs() < px(1.) && (landed.x - to.x).abs() <= px(frame / 2. + 0.5),
+        "the key jumped on release: released at {to:?}, shown at {landed:?}"
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[1])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert!(value < 51., "dragged down: {value}");
+    s.undo(cx);
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[1])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 51.);
+}
+/// In the Speed Graph the vertical axis is speed: dragging a key up there
+/// raises its speed and leaves its value (and so the Value Graph) alone, as
+/// v1 did. It used to add the speed change to the key's value.
+#[gpui::test]
+fn a_speed_graph_drag_changes_speed_not_value(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.speed", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = graph_key_at(&mut s, &ids[0]);
+    let speed = |s: &Stage| {
+        let graph = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        graph.curves()[0].points[0].point.value
+    };
+    let before = speed(&s);
+    s.drag(cx, at, at - point(px(0.), px(20.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let values: Vec<f64> = ids
+        .iter()
+        .map(|id| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                t.model().index.key(id).unwrap().2.value.as_f64().unwrap()
+            })
+        })
+        .collect();
+    assert_eq!(values, vec![50., 51.], "a speed drag changed the values");
+    let after = speed(&s);
+    assert!(after > before + 1e-3, "speed {before} -> {after}");
+    s.undo(cx);
+    assert!((speed(&s) - before).abs() < 1e-6);
+}
+/// Window position of graph op `id`'s centre, as painted now.
+fn graph_op_at(s: &mut Stage, id: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let b = ops
+        .iter()
+        .find(|o| o.id == id)
+        .unwrap_or_else(|| panic!("{id} painted"))
+        .bounds;
+    origin
+        + point(
+            px((b.x + b.width / 2.) as f32),
+            px((b.y + b.height / 2.) as f32),
+        )
+}
+/// A stored key side's ease speed (`inEase` or `outEase`).
+fn ease_speed(s: &Stage, id: &str, side: &str) -> f64 {
+    s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(id)
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get(side)
+            .and_then(|e| e.get("speed"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN)
+    })
+}
+/// v1's transform box: two selected keys get a dashed box with eight grips;
+/// dragging the east grip scales their times about the west edge, from where
+/// the grip was (nothing jumps), as one Undo step.
+#[gpui::test]
+fn the_transform_box_scales_selected_keys_about_the_far_edge(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let second = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_click(second, Modifiers::shift());
+    s.idle(cx);
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.id.starts_with("graph-transform-handle:"))
+            .count(),
+        8
+    );
+    let east = graph_op_at(&mut s, "graph-transform-handle:3");
+    let pps = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps) as f32;
+    s.drag(
+        cx,
+        east,
+        east + point(px(pps * 0.5), px(0.)),
+        Modifiers::none(),
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert_eq!(key_time(&s, &ids[0]), 0.5, "the west edge stays");
+    assert!(
+        (key_time(&s, &ids[1]) - 2.).abs() < 0.05,
+        "{}",
+        key_time(&s, &ids[1])
+    );
+    s.undo(cx);
+    assert_eq!(key_time(&s, &ids[1]), 1.5);
+}
+/// v1: the wheel over the graph pans its values (the keys don't change);
+/// Fit Selected Curves frames them again.
+#[gpui::test]
+fn the_wheel_over_the_graph_pans_its_values(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let range = |s: &Stage| {
+        let g = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        (g.min, g.max)
+    };
+    let before = range(&s);
+    let at = graph_key_at(&mut s, &ids[0]) + point(px(40.), px(20.));
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(30.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    let panned = range(&s);
+    assert!(
+        (panned.0 - before.0).abs() > 1e-6,
+        "{before:?} -> {panned:?}"
+    );
+    assert!(
+        ((panned.1 - panned.0) - (before.1 - before.0)).abs() < 1e-9,
+        "a pan, not a zoom"
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[0])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 50.);
+    // A rebuild keeps the panned range for this view.
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(range(&s), panned);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.fit", 0., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(range(&s), before);
+}
+/// v1: ⇧ on a graph key drag keeps it on its main axis (and snaps).
+#[gpui::test]
+fn shift_keeps_a_graph_key_drag_on_its_main_axis(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let at = graph_key_at(&mut s, &ids[0]);
+    s.drag(cx, at, at + point(px(30.), px(8.)), Modifiers::shift());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[0])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 50., "sideways: the value stays");
+    assert!(key_time(&s, &ids[0]) > 0.5);
+}
+/// v1's handles: ⇧ lays a handle flat; without ⌥ the other handle stays on
+/// the same tangent through the key.
+#[gpui::test]
+fn handles_flatten_with_shift_and_mirror_without_option(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1., 1.5]);
+    let first = op_center(&mut s, "key:");
+    s.vcx.simulate_click(first, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    let middle = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_click(middle, Modifiers::none());
+    s.idle(cx);
+    let speed = |s: &Stage, side: &str| ease_speed(s, &ids[1], side);
+    let out = graph_op_at(&mut s, &format!("graph-handle:{}:out", ids[1]));
+    s.drag(cx, out, out - point(px(0.), px(25.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let (o, i) = (speed(&s, "outEase"), speed(&s, "inEase"));
+    assert!(
+        o.is_finite() && (o - i).abs() < 1e-3,
+        "mirrored: out {o} in {i}"
+    );
+    let out = graph_op_at(&mut s, &format!("graph-handle:{}:out", ids[1]));
+    s.drag(cx, out, out - point(px(0.), px(20.)), Modifiers::shift());
+    assert!(
+        speed(&s, "outEase").abs() < 1e-6,
+        "flat: {}",
+        speed(&s, "outEase")
+    );
+}
+/// v1: a double-click on a graph key edits its value; a right-click opens
+/// the keyframe menu with v1's easing names.
+#[gpui::test]
+fn graph_keys_edit_on_double_click_and_ease_from_their_menu(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let at = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+    });
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .effects
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, HostEffect::EditKeyValues(_))),
+        "{:?}",
+        s.recorder.effects.borrow()
+    );
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<String> = menus
+        .last()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_owned))
+        .collect();
+    for label in ["Edit Value…", "Easy Ease", "Exponential Out", "Overshoot"] {
+        assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
+    }
+}
+#[gpui::test]
+fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    graph_on_first_key(&mut s, cx);
+    let keys = |s: &Stage| {
+        let graph = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        let curve = &graph.curves()[0];
+        let handles = curve.points.iter().map(|p| p.handles.len()).sum::<usize>();
+        (
+            curve
+                .points
+                .iter()
+                .map(|p| p.point.value)
+                .collect::<Vec<_>>(),
+            handles,
+        )
+    };
+    let (values, handles) = keys(&s);
+    assert_eq!(values, vec![50., 51.]);
+    assert!(handles > 0);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.speed", 0., None, false, cx)
+    });
+    s.idle(cx);
+    // 50 to 51 over one second, linear: one unit per second at both keys,
+    // and the speed handle sits at speed (1.0/s) rather than value (~50.33).
+    let (speeds, handles) = keys(&s);
+    assert!(speeds.iter().all(|v| (v - 1.).abs() < 1e-3), "{speeds:?}");
+    assert!(handles > 0, "speed graph exposes speed handles");
+    let handle_values: Vec<f64> = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.graph())
+        .unwrap()
+        .curves()[0]
+        .points
+        .iter()
+        .flat_map(|p| p.handles.iter().map(|(_, tip)| tip.value))
+        .collect();
+    assert!(
+        handle_values.iter().all(|v| (v - 1.).abs() < 1e-3),
+        "speed handles plot speed, not value: {handle_values:?}"
+    );
+}
+#[gpui::test]
+fn a_timeline_value_readout_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let value = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model()
+                .index
+                .channel("l0", "opacity")
+                .unwrap()
+                .value
+                .as_f64()
+                .unwrap()
+        })
+    };
+    let before = value(&s);
+    let at = s.at(0, 0.5);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_property("l0".into(), "opacity".into(), at, cx)
+    });
+    s.vcx.simulate_mouse_move(
+        at + point(px(-20.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(
+        at + point(px(-40.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert_eq!(value(&s), before - 20.);
+    s.undo(cx);
+    assert_eq!(value(&s), before);
+}
+#[gpui::test]
+fn layer_rows_offer_a_native_menu_that_runs_commands(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    *s.recorder.choice.borrow_mut() = Some("duplicate".into());
+    let at = s.origin() + point(px(100.), s.at(1, 0.).y - s.origin().y);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["duplicate"]);
+    assert_eq!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .len(),
+        1,
+        "the row under the pointer becomes the selection"
+    );
+}
+#[gpui::test]
+fn the_column_splitter_resizes_and_double_click_resets(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
+    let y = s.at(1, 0.).y;
+    let edge = s.origin() + point(px(column as f32), px(0.));
+    let at = point(edge.x, y);
+    s.drag(cx, at, at + point(px(60.), px(0.)), Modifiers::none());
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |t, _| t.layer_column()),
+        column + 60.
+    );
+    let at = at + point(px(60.), px(0.));
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), column);
+}
+/// As v1 (GUTTER_MIN): the layer column never narrows past a row's least
+/// width, so a row's switches always fit beside a truncated name.
+#[gpui::test]
+fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let m = tokens().metrics;
+    let least = crate::timeline_surface::least_layer_column(&m);
+    // Number, disclosure, badge, three slots of name and five switches.
+    let gap = m.gap as f64;
+    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
+    assert!(least >= row && least >= 320., "{least} < {row}");
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
+    assert!(column >= least);
+    let y = s.at(1, 0.).y;
+    let at = point(s.origin().x + px(column as f32), y);
+    // Dragged far past the least: it stops there.
+    let far = point(s.origin().x + px(20.), y);
+    s.drag(cx, at, far, Modifiers::none());
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), least);
+}
+#[gpui::test]
+fn each_timeline_draws_its_own_editors_offline_media(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    let viewport = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport);
+    let offline = |surface: &Entity<TimelineSurface>, vcx: &VisualTestContext| {
+        let scene = surface.read_with(vcx, |t, _| t.scene().unwrap());
+        let frame = scene.prepare(viewport, &tokens()).unwrap();
+        frame
+            .ops
+            .iter()
+            .filter_map(|o| o.id.strip_prefix("clip-offline:").map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.set_offline_media(["source".to_owned()].into(), cx)
+    });
+    s.idle(cx);
+    assert_eq!(offline(&s.surface, &s.vcx), ["a", "b", "c"]);
+    // Another editor on the same project reads its media: its clips stay online.
+    let (kernel, outline) = (s.rig.kernel.clone(), Natives::default().outline);
+    let delegate = Rc::new(Recording(Rc::default()));
+    let other = cx.new(|cx| {
+        TimelineSurface::new(
+            kernel,
+            PROJECT.into(),
+            tokens(),
+            delegate,
+            outline,
+            Default::default(),
+            cx,
+        )
+    });
+    settle(cx, |cx| other.read_with(cx, |t, _| t.idle()));
+    assert!(offline(&other, &s.vcx).is_empty());
+    assert_eq!(offline(&s.surface, &s.vcx), ["a", "b", "c"]);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.set_offline_media(Default::default(), cx)
+    });
+    s.idle(cx);
+    assert!(offline(&s.surface, &s.vcx).is_empty());
+}
+#[gpui::test]
+fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let alt = Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    let control = Modifiers {
+        control: true,
+        ..Default::default()
+    };
+    // Ripple: Control-drag A's out edge shifts B and C with it.
+    let (a_out, b_in) = (s.out_of("a"), s.start_of("b"));
+    let from = s.at(0, a_out) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(30.), px(0.)), control);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let shifted = b_in - s.start_of("b");
+    assert!(shifted > 0., "ripple must move the suffix");
+    assert!((a_out - s.out_of("a") - shifted).abs() < 1e-9);
+    s.undo(cx);
+    assert_eq!(s.start_of("b"), b_in);
+    // Roll: Option-drag the A/B cut moves both edges and neither outer bound.
+    let (b_in, b_out) = (s.start_of("b"), s.out_of("b"));
+    let from = s.at(0, s.out_of("a")) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(30.), px(0.)), alt);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(s.start_of("b") < b_in);
+    assert_eq!(s.out_of("a"), s.start_of("b"));
+    assert_eq!(s.out_of("b"), b_out);
+    s.undo(cx);
+    assert_eq!(s.start_of("b"), b_in);
+    // Slide: Option-Shift-drag B's body keeps its length and the outer
+    // bounds (Option alone duplicates the clip).
+    let (length, c_out) = (s.out_of("b") - s.start_of("b"), s.out_of("c"));
+    let from = s.at(0, s.start_of("b") + length / 2.);
+    let slide = Modifiers {
+        alt: true,
+        shift: true,
+        ..Default::default()
+    };
+    s.drag(cx, from, from + point(px(30.), px(0.)), slide);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(s.start_of("b") > b_in);
+    assert!((s.out_of("b") - s.start_of("b") - length).abs() < 1e-9);
+    assert_eq!(s.out_of("c"), c_out);
+    s.undo(cx);
+    assert_eq!(s.start_of("b"), b_in);
+}
+/// The named edit tools (View menu) make a plain drag ripple, roll, slip or
+/// slide, with no modifier held.
+#[gpui::test]
+fn the_edit_tools_make_a_plain_drag_ripple_roll_slip_and_slide(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    let tool = |s: &mut Stage, cx: &mut TestAppContext, name: &str| {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command(&format!("timeline.tool:{name}"), 0., None, false, cx)
+        });
+        s.idle(cx);
+    };
+    let plain = Modifiers::none();
+    let clean = |s: &Stage| {
+        assert!(
+            s.recorder.reports.borrow().is_empty(),
+            "{:?}",
+            s.recorder.reports.borrow()
+        )
+    };
+    tool(&mut s, cx, "ripple");
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |t, _| t.edit_tool()),
+        pm_panel_timeline::EditTool::Ripple
+    );
+    let (a_out, b_in) = (s.out_of("a"), s.start_of("b"));
+    let from = s.at(0, a_out) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    let shifted = b_in - s.start_of("b");
+    assert!(shifted > 0., "ripple moves what follows");
+    assert!((a_out - s.out_of("a") - shifted).abs() < 1e-9);
+    s.undo(cx);
+    tool(&mut s, cx, "roll");
+    let b_out = s.out_of("b");
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") < b_in);
+    assert_eq!(s.out_of("a"), s.start_of("b"));
+    assert_eq!(s.out_of("b"), b_out, "a roll moves nothing after");
+    s.undo(cx);
+    tool(&mut s, cx, "slide");
+    let (length, c_out) = (s.out_of("b") - s.start_of("b"), s.out_of("c"));
+    let body = s.at(0, s.start_of("b") + length / 2.);
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") > b_in);
+    assert!((s.out_of("b") - s.start_of("b") - length).abs() < 1e-9);
+    assert_eq!(s.out_of("c"), c_out);
+    s.undo(cx);
+    // Slip: the content follows the pointer, so a drag right shows earlier
+    // source frames; the clip stays.
+    tool(&mut s, cx, "slip");
+    let trim = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        let b = crate::parity_tests::layer_of(&p, "b");
+        b.get("d")
+            .and_then(|d| d.get("trim"))
+            .and_then(|t| t.get("v"))
+            .and_then(pm_model::Value::as_f64)
+            .unwrap()
+    };
+    let before = trim(&s);
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(trim(&s) < before, "{} -> {}", before, trim(&s));
+    assert_eq!(s.start_of("b"), b_in);
+    s.undo(cx);
+    // Back to Selection: the same drag moves the clip.
+    tool(&mut s, cx, "selection");
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") > b_in);
+    assert_eq!(s.out_of("a"), b_in, "a plain move leaves the neighbours");
+}
+/// In Layers mode each layer is its own row: the tools run the layer-level
+/// edits, so other layers on other rows close up or follow, and one that
+/// merely overlaps never blocks the edit.
+#[gpui::test]
+fn in_layers_mode_the_edit_tools_ripple_roll_and_slide_across_rows(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    let tool = |s: &mut Stage, cx: &mut TestAppContext, name: &str| {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command(&format!("timeline.tool:{name}"), 0., None, false, cx)
+        });
+        s.idle(cx);
+    };
+    let row = |s: &Stage, id: &str| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .iter()
+            .position(|l| l.id == id)
+            .unwrap()
+    };
+    let clean = |s: &Stage| {
+        assert!(
+            s.recorder.reports.borrow().is_empty(),
+            "{:?}",
+            s.recorder.reports.borrow()
+        )
+    };
+    let plain = Modifiers::none();
+    tool(&mut s, cx, "ripple");
+    let (a_out, b_in, c_in) = (s.out_of("a"), s.start_of("b"), s.start_of("c"));
+    let from = s.at(row(&s, "a"), a_out) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    let cut = a_out - s.out_of("a");
+    assert!(cut > 0.);
+    assert!((b_in - s.start_of("b") - cut).abs() < 1e-9, "b closes up");
+    assert!((c_in - s.start_of("c") - cut).abs() < 1e-9, "c closes up");
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.history.undo_label.as_deref(), Some("Ripple Trim"));
+    s.undo(cx);
+    assert_eq!(s.start_of("b"), b_in);
+    tool(&mut s, cx, "roll");
+    let b_out = s.out_of("b");
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.out_of("a") < a_out);
+    assert!(
+        (s.out_of("a") - s.start_of("b")).abs() < 1e-9,
+        "b's start follows"
+    );
+    assert_eq!(s.out_of("b"), b_out);
+    s.undo(cx);
+    tool(&mut s, cx, "slide");
+    let length = s.out_of("b") - s.start_of("b");
+    let body = s.at(row(&s, "b"), b_in + length / 2.);
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") > b_in);
+    assert!(
+        (s.out_of("a") - s.start_of("b")).abs() < 1e-9,
+        "a grows to meet it"
+    );
+    assert!(
+        (s.out_of("b") - s.start_of("c")).abs() < 1e-9,
+        "c gives its head"
+    );
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.history.undo_label.as_deref(), Some("Slide Layer"));
+}
+#[gpui::test]
+fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &mut TestAppContext) {
+    // Eighty layers starting together, each with a key at 0.5 s.
+    let project = (0..80).fold(crate::v4_view_tests::project_json(80), |p, i| {
+        p.replace(&format!("\"from\":{},", i as f64 * 0.5), "\"from\":0,")
+    });
+    let mut s = stage_project(cx, project);
+    let commands = (0..80)
+        .map(|i| {
+            pm_kernel::KeyframeCommand::Add {
+                layer_id: format!("l{i}"),
+                channel: "opacity".into(),
+                time: 0.5,
+                key_id: format!("k{i}"),
+                value: Some(pm_model::Value::from(50.)),
+            }
+            .into()
+        })
+        .collect();
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(commands),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    // Bulk keying reveals its last edited row. Return to the top before
+    // dragging across animated layers and below the viewport.
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: origin + point(px(column + 50.), px(tokens().metrics.ruler + 20.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(100_000.))),
+        ..Default::default()
+    });
+    s.vcx.executor().advance_clock(Duration::from_millis(400));
+    s.vcx.run_until_parked();
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 0.);
+    // Down past the panel's bottom edge to just above layer l61's row: the
+    // frame holds only the rows on screen, and l60 is far below them.
+    let (frame, scene) = s
+        .surface
+        .read_with(&s.vcx, |t, _| (t.frame().unwrap(), t.scene().unwrap()));
+    let row = |layer: &str| {
+        let id = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(layer.into()));
+        tokens().metrics.ruler as f64 + scene.scroll_for(&id).unwrap() - frame.viewport.scroll_y
+    };
+    assert!(row("l60") > frame.viewport.height);
+    let key = op_center(&mut s, "key:");
+    let start = s.at(0, 3.);
+    let end = point(key.x - px(12.), s.origin().y + px(row("l61") as f32 - 2.));
+    s.drag(cx, start, end, Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let selected = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .clone();
+    assert_eq!(selected.layers().len(), 61, "{selected:?}");
+    assert!(selected.contains("l60"), "{selected:?}");
+    assert!(!selected.contains("l61"), "{selected:?}");
+    assert!(selected.keys().is_empty(), "{selected:?}");
+}
+/// PM-310: a wheel step through the rows moves the strips and the outline
+/// as they were drawn (their scroll layers), with no render of the panel;
+/// the frame hit-testing reads is at the new scroll at once. The panel
+/// renders once the steps stop, and at once for a step past the rows drawn.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, dy: f32| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    settle(&mut s);
+    let rendered = renders(&s);
+    wheel(&mut s, -30.);
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_y, 30.);
+    wheel(&mut s, -20.);
+    assert_eq!(renders(&s), rendered);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    // Past a viewport of rows: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, -2000.);
+    assert!(renders(&s) > rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
+/// PM-310: a sideways wheel step moves the tracks and the ruler as they were
+/// drawn (their scroll layers), with no render of the panel, as the steps up
+/// and down do; the frame hit-testing reads is at the new time at once. The
+/// first step of a sideways scroll draws them past each side (other draws
+/// leave that out: it costs them); the panel renders once the steps stop and
+/// at once for a step past the tracks' width drawn. A skimmer showing stays
+/// under the pointer at the time there, drawn outside the panel.
+#[gpui::test]
+fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, delta: Point<Pixels>, modifiers: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers,
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let time = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    // Zoomed in, so the time has somewhere to scroll; the view it wrote
+    // is back from the worker.
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps);
+    let before = time(&s);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered, "the first sideways step draws past each side");
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 60. / pps)).abs() < 1e-9);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_time, time(&s));
+    // Shift with the wheel scrolls sideways too; then up and down.
+    wheel(&mut s, point(px(0.), px(-20.)), Modifiers::shift());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 80. / pps)).abs() < 1e-9);
+    wheel(&mut s, point(px(0.), px(-30.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    let after = renders(&s);
+    assert!(
+        (rendered + 1..=rendered + 4).contains(&after),
+        "{after} renders once the steps stopped, from {rendered}"
+    );
+    // Past the tracks' width drawn: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    // A zoom draws no further than the view again: the next sideways step
+    // draws.
+    wheel(&mut s, point(px(0.), px(-10.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    s.idle(cx);
+    // The skimmer showing (drawn with the playhead, outside the panel): a
+    // step moves the time under it with no panel draw, and the skim follows.
+    // Back at the start, zoomed in, the sideways layers recorded.
+    wheel(&mut s, point(px(5000.), px(0.)), Modifiers::none());
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    wheel(&mut s, point(px(-10.), px(0.)), Modifiers::none());
+    settle(&mut s);
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let (pps, start, _) = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    let over = s.at(2, start + 300. / pps);
+    s.vcx.simulate_mouse_move(over, None, Modifiers::none());
+    settle(&mut s);
+    let skimmed = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    let (x, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    let skims = s.recorder.skims.borrow().len();
+    let rendered = renders(&s);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: over,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        ..Default::default()
+    });
+    s.vcx.run_until_parked();
+    assert_eq!(renders(&s), rendered);
+    assert!(s.recorder.skims.borrow().len() > skims);
+    let now = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    assert!(now > skimmed, "the time under the pointer: later after a scroll on");
+    // Still under the pointer (within the frame it snaps to).
+    let (moved, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    assert!((moved - x).abs() <= pps / 30. + 1., "{x} -> {moved}");
+    // Once the steps stop, the panel draws again.
+    settle(&mut s);
+    assert!(renders(&s) > rendered);
+}
+
+#[gpui::test]
+fn timeline_navigation_repaints_the_footer_with_every_wheel_step(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 1.);
+    let origin = s.origin();
+    let mut last_thumb_x = None;
+    for _ in 0..3 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(-60.), px(0.))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+        let thumb_x = s.vcx.update(|window, _| {
+            let scale = window.scale_factor();
+            window.painted_quads().iter().find(|quad| {
+                quad.bounds.size.height.0 == 6. * scale
+                    && quad.bounds.origin.x.0 > (f32::from(origin.x) + 200.) * scale
+                    && quad.bounds.origin.y.0 > (f32::from(origin.y) + 500.) * scale
+                    && quad.corner_radii.top_left.0 == 3. * scale
+            }).expect("the horizontal scrollbar thumb is painted").bounds.origin.x.0
+        });
+        if let Some(previous) = last_thumb_x {
+            assert!(thumb_x > previous, "the painted thumb stayed at {previous} after time scrolled");
+        }
+        last_thumb_x = Some(thumb_x);
+    }
+}
+
+/// Check the GPUI scene itself. A new hit-test frame alone used to hide
+/// stale primitives in the cached timeline view.
+fn assert_navigation_painted(s: &mut Stage, origin: Point<Pixels>, time: f64) {
+    let (frame, scene, bar, (pps, scroll_time, column)) = s.surface.read_with(&s.vcx, |t, _| {
+        let frame = t.frame().unwrap();
+        assert!(t.painted_rows_for_test().is_some());
+        (frame, t.scene().unwrap(), t.bar().unwrap(), t.time_mapping())
+    });
+    let v = frame.viewport;
+    assert_eq!((v.pps, v.scroll_time, v.layer_column), (pps, scroll_time, column));
+    assert_eq!(bar.scroll_y, v.scroll_y);
+    assert_eq!(bar.scroll_time, scroll_time);
+    assert_eq!(s.view.read_with(&s.vcx, |view, _| view.outline_scroll_for_test()), v.scroll_y as f32);
+
+    let x = column + (time - scroll_time) * pps;
+    let height = v.height - f64::from(tokens().metrics.ruler);
+    let visible = scene.visible_range(v.scroll_y, height);
+    let (row, top, _) = scene.span(visible.start + 1).unwrap();
+    let selector: &'static str = Box::leak(format!("timeline:row:{}", row.id).into_boxed_str());
+    // Full renders record debug_bounds for every mounted outline row; driven
+    // scroll-layer replays shift the recorded outline layer without prepainting.
+    if let Some(name) = s.vcx.debug_bounds(selector) {
+        let outline_shift = s.view.read_with(&s.vcx, |view, _| {
+            view.outline_scroll_shift_for_test()
+        });
+        assert!(
+            (f64::from(f32::from(name.origin.y - origin.y) + outline_shift)
+                - (v.height - height + top - v.scroll_y))
+                .abs()
+                < 1.
+        );
+    }
+    let clip = frame.ops.iter().find(|op| {
+        op.id.starts_with("clip:") && (op.bounds.y - (v.height - height + top - v.scroll_y)).abs() < 5.
+    }).expect("the same row's clip is present");
+    assert!((clip.detail["sourceEdges"][0].as_f64().unwrap() - x).abs() < 1e-6);
+
+    let ruler = frame.ops.iter().find(|op| op.id.starts_with("major:")
+        && (op.bounds.x + op.bounds.width / 2. - x).abs() < 1e-6).expect("a major ruler tick at the playhead time");
+    let grid = frame.ops.iter().find(|op| op.id.starts_with("grid:")
+        && (op.bounds.x - x).abs() < 1e-6).expect("a grid line at the playhead time");
+    let footer = bar.ops(None, &tokens());
+    s.vcx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quads = window.painted_quads();
+        let tracks = gpui::Bounds::new(
+            (origin + point(px(column as f32), px(tokens().metrics.ruler))).scale(scale),
+            gpui::size(
+                px((v.width - column) as f32),
+                px((v.height - f64::from(tokens().metrics.ruler)) as f32),
+            )
+            .scale(scale),
+        );
+        for op in [clip, ruler, grid].into_iter().chain(footer.iter().filter(|op| op.id.ends_with("-thumb"))) {
+            let b = op.bounds;
+            let expected = gpui::Bounds::new(
+                (origin + point(px(b.x as f32), px(b.y as f32))).scale(scale),
+                gpui::size(px(b.width as f32), px(b.height as f32)).scale(scale),
+            );
+            let expected = if op.id.starts_with("clip:") || op.id.starts_with("grid:") {
+                expected.intersect(&tracks)
+            } else {
+                expected
+            };
+            let close = |actual: f32, expected: f32| (actual - expected).abs() <= 1.;
+            assert!(quads.iter().any(|quad| {
+                let drawn = quad.bounds.intersect(&quad.content_mask.bounds);
+                close(drawn.origin.x.0, expected.origin.x.0)
+                    && close(drawn.origin.y.0, expected.origin.y.0)
+                    && close(drawn.size.width.0, expected.size.width.0)
+                    && close(drawn.size.height.0, expected.size.height.0)
+            }), "{} did not paint at {:?}", op.id, b);
+        }
+    });
+}
+
+#[gpui::test]
+fn timeline_navigation_keeps_all_geometry_together_on_mixed_input(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(931)).unwrap();
+    project["dur"] = 120.into();
+    for (i, row) in project["layers"].as_array_mut().unwrap().iter_mut().enumerate() {
+        row["from"] = if i == 0 { -20 } else { 5 }.into();
+        row["dur"] = 40.into();
+    }
+    let mut s = stage_with(cx, project.to_string(), true);
+    *s.recorder.time.borrow_mut() = 5.;
+    s.surface.update(&mut s.vcx, |t, cx| t.set_view(Some(90.), Some(2.), Some(0.), cx));
+    s.idle(cx);
+    let at = s.at(2, 5.);
+    let wheel = |s: &mut Stage, dx, dy, modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+            modifiers,
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let origin = s.origin();
+    assert_navigation_painted(&mut s, origin, 5.);
+    let start_moved = s.recorder.moved.get();
+    let mut time = 2.;
+    let mut y = 0.;
+    for (dx, dy, modifiers) in [
+        (-60., 0., Modifiers::none()),
+        (-25., 0., Modifiers::none()),
+        (0., -37., Modifiers::none()),
+        (-15., -32., Modifiers::none()),
+        (0., 18., Modifiers::shift()),
+        (20., 11., Modifiers::none()),
+    ] {
+        wheel(&mut s, dx, dy, modifiers);
+        if modifiers.shift {
+            time -= f64::from(dy) / 90.;
+        } else {
+            time -= f64::from(dx) / 90.;
+            y -= f64::from(dy);
+        }
+        s.surface.read_with(&s.vcx, |t, _| {
+            assert!((t.scroll_time() - time).abs() < 1e-9);
+            assert_eq!(t.scroll_y(), y);
+        });
+        assert_navigation_painted(&mut s, origin, 5.);
+    }
+    assert!(s.recorder.moved.get() > start_moved, "the paused native playhead was notified");
+
+    wheel(&mut s, 0., 18., Modifiers::control());
+    assert_navigation_painted(&mut s, origin, 5.);
+    let before_pinch = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    s.vcx.simulate_event(gpui::PinchEvent { position: at, delta: 0.12, ..Default::default() });
+    s.vcx.run_until_parked();
+    let after_pinch = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    assert!(after_pinch.0 > before_pinch.0);
+    let pointer_x = f64::from(f32::from(at.x - origin.x));
+    let anchor = |(pps, time, column)| (pointer_x - column) / pps + time;
+    assert!((anchor(before_pinch) - anchor(after_pinch)).abs() < 1e-6);
+    assert_navigation_painted(&mut s, origin, 5.);
+
+    // Crossing an entire recorded viewport used to be the path that finally
+    // redrew the cached geometry. An immediate step and its idle write must agree.
+    wheel(&mut s, 0., -1240., Modifiers::none());
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), y + 1240.);
+    assert_navigation_painted(&mut s, origin, 5.);
+    let before_idle = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    s.vcx.executor().advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.time_mapping()), before_idle);
+    assert_navigation_painted(&mut s, origin, 5.);
+
+    let before_pan = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    let to = at - point(px(24.), px(0.));
+    s.vcx.simulate_mouse_down(at, MouseButton::Middle, Modifiers::none());
+    s.vcx.simulate_mouse_move(to, MouseButton::Middle, Modifiers::none());
+    s.vcx.run_until_parked();
+    let after_pan = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    assert!((after_pan.1 - before_pan.1 - 24. / before_pan.0).abs() < 1e-9);
+    assert_navigation_painted(&mut s, origin, 5.);
+    s.vcx.simulate_mouse_up(to, MouseButton::Middle, Modifiers::none());
+    s.vcx.run_until_parked();
+
+    // Both scrollbar drags use the same clamped viewport as wheel navigation.
+    for horizontal in [true, false] {
+        let bar = s.surface.read_with(&s.vcx, |t, _| t.bar().unwrap());
+        let op = bar.ops(None, &tokens()).into_iter()
+            .find(|op| op.id == if horizontal { "time-thumb" } else { "rows-thumb" })
+            .unwrap();
+        let b = op.bounds;
+        let from = origin + point(px((b.x + b.width / 2.) as f32), px((b.y + b.height / 2.) as f32));
+        let delta = if horizontal { point(px(3.), px(0.)) } else { point(px(0.), px(10.)) };
+        s.drag(cx, from, from + delta, Modifiers::none());
+        let moved = s.surface.read_with(&s.vcx, |t, _| t.bar().unwrap());
+        if horizontal {
+            assert!(moved.scroll_time > bar.scroll_time);
+            assert_eq!(moved.scroll_y, bar.scroll_y);
+        } else {
+            assert!(moved.scroll_y > bar.scroll_y);
+            assert_eq!(moved.scroll_time, bar.scroll_time);
+        }
+        assert_navigation_painted(&mut s, origin, 5.);
+    }
+}
+
+#[gpui::test]
+fn timeline_navigation_starts_at_zero_with_a_negative_layer(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+    project["layers"][0]["from"] = (-12).into();
+    project["layers"][0]["dur"] = 18.into();
+    let mut s = stage_with(cx, project.to_string(), true);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert_eq!(t.model().index.minimum_time(), -12.);
+        t.set_view(Some(95.), Some(-12.), None, cx);
+    });
+    s.idle(cx);
+    let at = s.at(0, 1.);
+    for _ in 0..3 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(600.), px(0.))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+        s.surface.read_with(&s.vcx, |t, _| {
+            let frame = t.frame().unwrap();
+            let column = frame.viewport.layer_column;
+            assert_eq!(frame.viewport.scroll_time, 0.);
+            let zero = frame.ops.iter().find(|o| o.id == "major:0").unwrap();
+            assert_eq!(zero.bounds.x + zero.bounds.width / 2., column);
+            let clip = frame.ops.iter().find(|o| o.id == "clip:l0").unwrap();
+            assert_eq!(clip.clip.unwrap().x, column);
+            assert!(frame.ops.iter().any(|o| o.id == "clip-negative:l0"));
+            let bar = t.bar().unwrap();
+            let (x, _) = bar.time_thumb(&tokens()).unwrap();
+            assert!((x - column - f64::from(tokens().metrics.gap)).abs() < 1e-6);
+        });
+    }
+}
+
+/// PM-431: the background render reports every frame it stores; a report
+/// that changes no bar the ruler draws draws nothing (the app in front and
+/// untouched stays idle).
+#[gpui::test]
+fn a_render_cache_report_that_moves_no_bar_draws_nothing(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(20), true);
+    s.idle(cx);
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let rendered = renders(&s);
+    for _ in 0..5 {
+        s.surface.update(&mut s.vcx, |t, cx| t.render_bars_changed(cx));
+        s.vcx.run_until_parked();
+    }
+    assert_eq!(renders(&s), rendered);
+}
+/// PM-376: the canvas and outline publish independently. Each name stands
+/// on its own strip while the next set of rows is in flight and after it lands.
+#[gpui::test]
+fn names_stay_on_their_own_bars_until_the_rows_publication_lands(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let row = |id: &str| format!("[\"layer\",\"{id}\"]");
+    let name_y = |s: &mut Stage, id: &str| {
+        let selector: &'static str = Box::leak(format!("timeline:row:{}", row(id)).into_boxed_str());
+        s.vcx.debug_bounds(selector).map(|b| f32::from(b.origin.y))
+    };
+    let bar_top = |s: &Stage, id: &str| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().unwrap().scroll_for(&row(id)))
+            .unwrap() as f32
+    };
+    let offset = name_y(&mut s, "l2").unwrap() - bar_top(&s, "l2");
+    // Delete the top layer: every bar below moves up a row.
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                        pm_kernel::LayerCommand::Delete {
+                            layer_ids: vec!["l0".into()],
+                        },
+                    )]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    let surface = s.surface.clone();
+    settle(cx, |cx| surface.read_with(cx, |t, _| t.idle()));
+    s.vcx.run_until_parked();
+    // The rows' publication has not been applied yet.
+    for id in ["l1", "l2", "l3"] {
+        assert_eq!(name_y(&mut s, id).unwrap(), bar_top(&s, id) + offset, "{id}");
+    }
+    s.idle(cx);
+    s.settle_outline(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| {
+        t.scene().unwrap().scroll_for(&row("l0")).is_none()
+    }));
+    for id in ["l1", "l2", "l3"] {
+        assert_eq!(
+            name_y(&mut s, id).unwrap(),
+            bar_top(&s, id) + offset,
+            "{id}"
+        );
+    }
+}
+#[gpui::test]
+fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 200);
+    let total = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().total());
+    assert_eq!(total, 200);
+    let at = s.at(1, 0.2);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-4000.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    let scrolled = s.surface.read_with(&s.vcx, |t, _| t.scroll_y());
+    assert_eq!(scrolled, 4000.);
+    // The worker pages the JSX outline to the scrolled window on its own.
+    let view = s.view.clone();
+    let rig_runtime = s.rig.runtime.clone();
+    let vcx = &mut s.vcx;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        vcx.run_until_parked();
+        for p in rig_runtime.take_publications() {
+            view.update(vcx, |v, cx| v.publish(p, cx));
+        }
+        vcx.run_until_parked();
+        if view.read_with(vcx, |v, _| {
+            v.semantic_id_starting("timeline:row:[\"layer\",\"l143\"]")
+                .is_some()
+        }) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "outline never paged");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+fn assert_selected_strips(s: &Stage, ids: &[&str]) {
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let selected: Vec<_> = published
+        .selection
+        .layers()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(selected, ids);
+}
+
+#[gpui::test]
+fn a_timeline_strip_click_survives_an_invalidated_frame(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(1, 1.25);
+    s.surface
+        .update(&mut s.vcx, |t, _| t.invalidate_row_frame_for_test());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.frame().is_none()));
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    assert_selected_strips(&s, &["l1"]);
+}
+
+#[gpui::test]
+fn rapid_timeline_strip_clicks_select_the_second_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let first = s.at(0, 1.25);
+    let second = s.at(1, 1.25);
+    s.vcx.simulate_click(first, Modifiers::none());
+    // A rapid second press may be reported as a double-click by the platform.
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: second,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx.simulate_mouse_up(second, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_selected_strips(&s, &["l1"]);
+}
+
+#[gpui::test]
+fn timeline_strip_seams_belong_to_their_rows(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let first = s.at(0, 1.25);
+    let seam = first.y + px(tokens().metrics.track_row / 2.);
+    let half_gap = px(tokens().strip_gap() / 2.);
+    for (y, layer) in [(seam - half_gap, "l0"), (seam, "l1"), (seam + half_gap, "l1")] {
+        s.vcx.simulate_click(point(first.x, y), Modifiers::none());
+        s.idle(cx);
+        assert_selected_strips(&s, &[layer]);
+    }
+    // At this time only the upper clip exists. Its padding ends at the seam.
+    let empty = s.at(1, 0.25);
+    s.vcx
+        .simulate_click(point(empty.x, seam + half_gap), Modifiers::none());
+    s.idle(cx);
+    assert_selected_strips(&s, &[]);
+}
+
+#[gpui::test]
+fn a_timeline_strip_context_click_survives_an_invalidated_frame(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(1, 1.25);
+    s.surface
+        .update(&mut s.vcx, |t, _| t.invalidate_row_frame_for_test());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.frame().is_none()));
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.menus.borrow()[0][0]["label"], "Layer 1");
+}
+
+#[gpui::test]
+fn a_timeline_strip_keeps_its_open_hand_cursor_after_a_click(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let at = s.at(0, 1.);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    let cursor = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.cursor_style());
+    assert_eq!(cursor(&s), gpui::CursorStyle::OpenHand);
+    s.vcx.simulate_click(at, Modifiers::none());
+    assert_eq!(cursor(&s), gpui::CursorStyle::OpenHand);
+    s.surface
+        .update(&mut s.vcx, |t, _| t.invalidate_row_frame_for_test());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.frame().is_none()));
+    s.vcx
+        .simulate_mouse_move(at + point(px(1.), px(0.)), None, Modifiers::none());
+    assert_eq!(cursor(&s), gpui::CursorStyle::OpenHand);
+    s.idle(cx);
+    assert_selected_strips(&s, &["l0"]);
+}
+
+#[gpui::test]
+fn dragging_a_clip_moves_it_through_the_kernel_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let before = s.start_of("l1");
+    let from = s.at(1, before + 1.);
+    let to = from + point(px(120.), px(0.));
+    s.drag(cx, from, to, Modifiers::none());
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let moved = s.start_of("l1");
+    assert!(
+        (moved - (before + 120. / pps)).abs() <= 1. / 30.,
+        "clip at {moved}, was {before}, pps {pps}"
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    s.undo(cx);
+    assert_eq!(s.start_of("l1"), before);
+}
+#[gpui::test]
+fn a_shift_drag_crossing_another_clips_edge_holds_on_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let target = s.out_of("l0");
+    let before = s.start_of("l1");
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let from = s.at(1, before + 1.);
+    // Snapping latches on crossing, then holds through the release radius.
+    let travel = ((target - before) * pps) as f32 + 3.;
+    s.drag(
+        cx,
+        from,
+        from + point(px(travel), px(0.)),
+        Modifiers::shift(),
+    );
+    assert_eq!(s.start_of("l1"), target);
+    s.undo(cx);
+    assert_eq!(s.start_of("l1"), before);
+}
+#[gpui::test]
+fn double_clicking_a_name_renames_through_the_kernel_and_escape_cancels(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let name = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)[0]
+            .name
+            .clone()
+    };
+    let edit = |s: &mut Stage, cx: &mut TestAppContext, value: serde_json::Value| {
+        let row = s
+            .view
+            .read_with(&s.vcx, |v, _| v.id_of_text("Layer 0"))
+            .unwrap();
+        s.view.update(&mut s.vcx, |v, cx| {
+            v.send(row, "doubleclick", Default::default(), cx);
+        });
+        s.idle(cx);
+        s.idle(cx);
+        let field = s
+            .view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .expect("name field");
+        s.view
+            .update(&mut s.vcx, |v, cx| v.change(field, value, cx));
+        s.idle(cx);
+        s.idle(cx);
+        assert!(
+            s.view
+                .read_with(&s.vcx, |v, _| v.cancellable_field())
+                .is_none()
+        );
+    };
+    edit(&mut s, cx, serde_json::json!(""));
+    assert_eq!(name(&s), "Layer 0");
+    edit(&mut s, cx, serde_json::json!("Headline"));
+    assert_eq!(name(&s), "Headline");
+    s.undo(cx);
+    assert_eq!(name(&s), "Layer 0");
+}
+/// A platform request the panel sent, answered as the app would.
+fn answer(
+    s: &Stage,
+    operation: &str,
+    value: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let requests = s.rig.runtime.take_platform_requests();
+        if let Some(request) = requests.into_iter().find(|r| r.operation == operation) {
+            s.rig
+                .runtime
+                .platform_reply(request.id, Ok(value(&request.input)));
+            return request.input;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {operation} request"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+#[gpui::test]
+fn the_time_field_seeks_to_typed_timecode(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let time = s
+        .view
+        .read_with(&s.vcx, |v, _| v.semantic_id_starting("timeline:time"))
+        .unwrap();
+    s.view
+        .update(&mut s.vcx, |v, cx| v.click_semantic(&time, cx));
+    s.idle(cx);
+    s.idle(cx);
+    let field = s
+        .view
+        .read_with(&s.vcx, |v, _| v.cancellable_field())
+        .expect("time field");
+    // The native timecode layer steps aside only while the field is open.
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.field_open("timeline:time"))
+    );
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.change(field, serde_json::json!("2:15"), cx)
+    });
+    cx.run_until_parked();
+    let input = answer(&s, "timeline.effect", |_| serde_json::Value::Null);
+    assert_eq!(input["kind"], "seek");
+    assert_eq!(input["time"], 2.5);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_none()
+    );
+    assert!(
+        !s.view
+            .read_with(&s.vcx, |v, _| v.field_open("timeline:time"))
+    );
+}
+#[gpui::test]
+fn the_parent_button_opens_a_menu_and_parents_through_the_kernel(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let select = pm_kernel::SelectionCall::Layers {
+        ids: vec!["l0".into()],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.idle(cx);
+    let row = s.view.read_with(&s.vcx, |v, _| {
+        v.semantic_ids()
+            .into_iter()
+            .find(|id| id.starts_with("timeline:parent:") && id.contains("l0"))
+    });
+    let row = row.expect("parent switch");
+    s.view
+        .update(&mut s.vcx, |v, cx| v.click_semantic(&row, cx));
+    cx.run_until_parked();
+    let rows = answer(&s, "contextMenu", |_| serde_json::json!("l1"));
+    assert_eq!(rows[0]["label"], "None");
+    s.idle(cx);
+    s.idle(cx);
+    let parent = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .into_iter()
+            .find(|l| l.id == "l0")
+            .unwrap()
+            .parent
+    };
+    assert_eq!(parent(&s).as_deref(), Some("l1"));
+    s.undo(cx);
+    assert_eq!(parent(&s), None);
+}
+#[gpui::test]
+fn trimming_a_clip_edge_changes_its_out_point_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let end = s.out_of("l0");
+    let from = s.at(0, end) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(60.), px(0.)), Modifiers::none());
+    assert!(s.out_of("l0") < end, "{} vs {end}", s.out_of("l0"));
+    s.undo(cx);
+    assert_eq!(s.out_of("l0"), end);
+}
+#[gpui::test]
+fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let origin = s.origin();
+    let m = tokens().metrics;
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let y = px(m.ruler / 2.);
+    let revision = s.rig.kernel.published(PROJECT).unwrap().revision();
+    let at = origin + point(px(column + 100.), y);
+    s.drag(cx, at, at + point(px(50.), px(0.)), Modifiers::none());
+    let seeks = s.recorder.seeks.borrow().clone();
+    assert!(seeks.len() >= 2);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let last = *seeks.last().unwrap();
+    assert!((last - 150. / pps).abs() <= 1. / 30.);
+    let off_frame = (last * 30.).fract().abs();
+    assert!(off_frame.min(1. - off_frame) < 1e-6);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().revision(),
+        revision
+    );
+    // The app hears the scrub start before its first seek and end on
+    // release (PM-310: only Properties follows each frame meanwhile).
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
+}
+/// PM-310 scrub: a ruler scrub seeks only when the pointer reaches another
+/// frame. Zoomed in, a frame is many points wide and most moves stay in one:
+/// each seek is the viewer's command, the app's tick and the extensions'
+/// time, so a move inside the frame sought sends none.
+#[gpui::test]
+fn a_ruler_scrub_seeks_once_per_frame_it_reaches(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let at = s.at(0, 1.);
+    // Zoomed in about the pointer until a frame is several points wide.
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            modifiers: Modifiers::control(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let frame = pps / 30.;
+    assert!(frame >= 8., "a frame is {frame} points");
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let y = px(tokens().metrics.ruler / 2.);
+    let start = origin + point(px(column + 40.), y);
+    s.vcx.simulate_mouse_move(start, None, Modifiers::none());
+    s.vcx.simulate_event(MouseDownEvent {
+        position: start,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.vcx.run_until_parked();
+    let first = s.recorder.seeks.borrow().len();
+    assert!(first >= 1);
+    // Point by point across three frames.
+    let span = (frame * 3.).ceil() as i32;
+    for dx in 1..=span {
+        s.vcx.simulate_mouse_move(
+            start + point(px(dx as f32), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+    }
+    s.vcx.simulate_event(MouseUpEvent {
+        position: start + point(px(span as f32), px(0.)),
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.idle(cx);
+    let seeks = s.recorder.seeks.borrow().clone();
+    let during = &seeks[first - 1..];
+    assert!(
+        (3..=4).contains(&during.len()),
+        "{span} moves over three frames sought {during:?}"
+    );
+    assert!(during.windows(2).all(|w| w[0] != w[1]), "{during:?}");
+}
+#[gpui::test]
+fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    let before = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+        modifiers: Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    s.idle(cx);
+    let after = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    assert!(after > before);
+    assert!(
+        (s.at(0, 1.).x - at.x).abs() < px(1.),
+        "zoom keeps the time under the pointer"
+    );
+    s.vcx.simulate_event(gpui::PinchEvent {
+        position: at,
+        delta: 0.5,
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.pps()) > after);
+}
+#[gpui::test]
+fn audio_zoom_uses_one_frame_and_defers_view_publication(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(6)).unwrap();
+    project["layers"][0]["type"] = serde_json::json!("audio");
+    project["layers"][0]["dur"] = serde_json::json!(10.);
+    project["layers"][0]["d"] = serde_json::json!({"gain":0.5,"fadeIn":0,"fadeOut":0});
+    let mut s = stage_project(cx, project.to_string());
+    s.vcx.update(|window, _| window.activate());
+    let at = s.at(0, 2.);
+    s.recorder.skimming.set(true);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.vcx
+        .simulate_mouse_move(at + point(px(2.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.skims.borrow().iter().any(Option::is_some));
+    s.recorder.skims.borrow_mut().clear();
+    let facts = s.recorder.view_facts.get();
+    let query_builds = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.audio_query_builds_for_test());
+    assert!(query_builds > 0);
+    for _ in 0..5 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(12.))),
+            modifiers: Modifiers::control(),
+            ..Default::default()
+        });
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| {
+            assert!(std::sync::Arc::ptr_eq(
+                &t.frame().unwrap(),
+                t.painted_rows_for_test().unwrap()
+            ));
+            assert_eq!(t.audio_query_builds_for_test(), query_builds);
+        });
+        assert!(s.recorder.skims.borrow().is_empty());
+        assert_eq!(s.recorder.view_facts.get(), facts);
+    }
+    s.vcx
+        .executor()
+        .advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
+    s.idle(cx);
+    assert_eq!(s.recorder.view_facts.get(), facts + 1);
+}
+
+/// Scrolling and zooming stay on the timeline's time: a long sweep right
+/// stops a little past the end, and zooming out stops once the whole of it
+/// fits the time area (the view never sits on empty time past the end).
+#[gpui::test]
+fn scroll_and_zoom_out_stop_at_the_timelines_end(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    let end = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.model().index.maximum_time());
+    for _ in 0..40 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(-400.), px(0.))),
+            modifiers: Modifiers::none(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    // `time_view`'s width leaves Fit's 48 points: the view's right edge.
+    let right = scroll + (room + 48.) / pps;
+    assert!(right > end, "the end itself can be reached");
+    assert!(right <= end + 48. / pps + 1e-6, "{right} past {end}");
+    for _ in 0..40 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            modifiers: Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    let shown = (room + 48.) / pps;
+    assert!(
+        shown <= end + 48. / pps + 1e-6,
+        "zoomed out to {shown} s of {end}"
+    );
+    assert!(scroll >= 0. && scroll + shown >= end);
+}
+/// Wheel scrolling moves the view at once and writes it once, after it rests:
+/// every write publishes to all panels.
+#[gpui::test]
+fn a_wheel_burst_writes_the_view_once_it_rests(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    let stored = |s: &Stage| {
+        let state = s.rig.kernel.state();
+        state
+            .ui
+            .get(PROJECT)
+            .and_then(|ui| ui.timeline.get("nativeScrollTime"))
+            .and_then(pm_model::Value::as_f64)
+    };
+    let before = stored(&s);
+    for _ in 0..5 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    assert!(shown > 0., "the view moved with the wheel");
+    assert_eq!(stored(&s), before, "nothing is written mid-gesture");
+    s.vcx
+        .executor()
+        .advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
+    s.idle(cx);
+    assert_eq!(stored(&s), Some(shown));
+}
+/// The playhead is a native layer GPUI never repaints: paused, a scroll is
+/// the only thing that moves the time under it, so the panel must say so or
+/// the head stays put on screen while the ruler slides beneath it.
+#[gpui::test]
+fn scrolling_paused_tells_the_app_to_place_the_playhead_again(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    s.idle(cx);
+    let before = s.recorder.moved.get();
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        modifiers: Modifiers::none(),
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.scroll_time()) > 0.);
+    assert!(
+        s.recorder.moved.get() > before,
+        "the scroll reached the playhead"
+    );
+    // A repaint that moves nothing asks for nothing.
+    let settled = s.recorder.moved.get();
+    s.surface.update(&mut s.vcx, |_, cx| cx.notify());
+    s.idle(cx);
+    assert_eq!(s.recorder.moved.get(), settled);
+}
+#[gpui::test]
+fn right_click_runs_a_native_menu_action_on_the_kernel(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = origin + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("marker.add".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.idle(cx);
+    let markers = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().index.markers.len())
+    };
+    assert_eq!(markers(&s), 1);
+    assert!(
+        s.recorder.menus.borrow()[0]
+            .iter()
+            .any(|i| i["label"] == "Add Marker Here")
+    );
+    s.undo(cx);
+    assert_eq!(markers(&s), 0);
+}
+/// P from the keymap reveals Position under each selected layer, in both the
+/// native track rows and the outline beside them.
+#[gpui::test]
+fn the_reveal_shortcut_shows_property_rows(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":10,"kf":[]},"position.y":{"v":20,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    let rows = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.model().rows().len());
+    assert_eq!(rows(&s), 1);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:p", 0., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(rows(&s), 3, "Position X and Y rows in the native tracks");
+    bounds(&mut s.vcx, r#"timeline:row:["property","l0","position.x"]"#);
+}
+/// Hovering a layer row shows its switches; leaving hides them again.
+#[gpui::test]
+fn hovering_a_layer_row_shows_its_switches(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let lock = r#"timeline:lock:["layer","l1"]"#;
+    let painted = |s: &mut Stage| s.vcx.debug_bounds(lock).is_some();
+    assert!(!painted(&mut s), "switches stay hidden at rest");
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l1"]"#);
+    s.vcx
+        .simulate_mouse_move(row.center(), None, Modifiers::none());
+    s.idle(cx);
+    assert!(painted(&mut s), "hover reveals the lock switch");
+    s.vcx
+        .simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(!painted(&mut s), "leaving hides it");
+}
+/// The row's hover is the host's (PM-698): the pointer crossing rows
+/// publishes nothing, and the lock and the hovered fill still show.
+#[gpui::test]
+fn a_row_hover_is_no_publication_of_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let _ = s.rig.runtime.take_publications();
+    let lock = r#"timeline:lock:["layer","l1"]"#;
+    for row in ["l0", "l1", "l2", "l1"] {
+        let at = bounds(&mut s.vcx, &format!(r#"timeline:row:["layer","{row}"]"#)).center();
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.vcx.run_until_parked();
+    }
+    // Long enough for the realm to answer, had a hover reached it.
+    let until = std::time::Instant::now() + Duration::from_millis(300);
+    while std::time::Instant::now() < until {
+        s.vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let published: Vec<_> = s
+        .rig
+        .runtime
+        .take_publications()
+        .into_iter()
+        .map(|p| p.panel)
+        .collect();
+    assert!(published.is_empty(), "a hover published {published:?}");
+    s.vcx.update(|window, cx| window.simulate_next_frame(cx));
+    s.vcx.run_until_parked();
+    assert!(
+        s.vcx.debug_bounds(lock).is_some(),
+        "the hovered row shows its lock"
+    );
+    let hovered = s.view.read_with(&s.vcx, |v, _| v.hovered_row_for_test());
+    assert_eq!(hovered.as_deref(), Some(r#"timeline:row:["layer","l1"]"#));
+}
+/// PM-698 review: a row's hover is the pointer's, found again every render.
+/// A hovered row scrolled out of the rows drawn gets no leave; scrolled back
+/// with the pointer elsewhere it shows neither the hover fill nor its lock.
+#[gpui::test]
+fn a_hovered_row_scrolled_out_and_back_is_not_hovered_away_from_the_pointer(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+        s.vcx.update(|window, cx| window.simulate_next_frame(cx));
+        s.vcx.run_until_parked();
+    };
+    let lock = r#"timeline:lock:["layer","l1"]"#;
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(row, None, Modifiers::none());
+    settle(&mut s);
+    assert!(s.vcx.debug_bounds(lock).is_some(), "hovered: its lock shows");
+    // Far down the rows (l1 leaves the rows drawn), the pointer over the tracks.
+    let tracks = s.at(3, 0.2);
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: tracks,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-1500.))),
+            ..Default::default()
+        });
+        settle(&mut s);
+    }
+    // Off the rows, then back to the top with the pointer on another row's track.
+    s.vcx.simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
+    settle(&mut s);
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: tracks,
+            delta: ScrollDelta::Pixels(point(px(0.), px(1500.))),
+            ..Default::default()
+        });
+        settle(&mut s);
+    }
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 0.);
+    assert!(s.vcx.debug_bounds(r#"timeline:row:["layer","l1"]"#).is_some());
+    assert!(
+        s.vcx.debug_bounds(lock).is_none(),
+        "l1 is not under the pointer: no lock"
+    );
+    let hovered = s.view.read_with(&s.vcx, |v, _| v.hovered_row_for_test());
+    assert_ne!(hovered.as_deref(), Some(r#"timeline:row:["layer","l1"]"#));
+}
+/// A click right after the pointer enters a row selects it, although the
+/// hover restyles the row before the click lands.
+#[gpui::test]
+fn clicking_a_layer_row_selects_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l1"]"#);
+    s.vcx
+        .simulate_mouse_move(row.center(), None, Modifiers::none());
+    s.vcx.simulate_click(row.center(), Modifiers::none());
+    s.idle(cx);
+    let selected = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .layers()
+        .to_vec();
+    assert_eq!(selected, ["l1".to_string()]);
+}
+/// A click on a layer's name selects the layer, as anywhere on its header;
+/// a double-click on the name still renames it (v1's timeline).
+#[gpui::test]
+fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let selected = |s: &Stage| {
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .to_vec()
+    };
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    s.vcx.simulate_click(name, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(selected(&s), ["l1".to_string()], "the name's click selects");
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    assert!(
+        pm_shell::typing::expecting(),
+        "typed from the double-click on, ⌘A and letters wait for the name field"
+    );
+    s.idle(cx);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_some(),
+        "the double-click opens the name field"
+    );
+    assert_eq!(selected(&s), ["l1".to_string()]);
+}
+/// As the app holds the panel (a cached view in its dock, the outline's rows
+/// in their scroll layer): a double-click on a layer's name opens its field.
+#[gpui::test]
+fn a_docked_panel_opens_a_layers_name_field_on_double_click(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(2), true);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    s.vcx.simulate_click(name, Modifiers::none());
+    s.idle(cx);
+    s.vcx.executor().advance_clock(Duration::from_millis(400));
+    s.vcx.run_until_parked();
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_some(),
+        "the double-click opens the name field"
+    );
+}
+/// A double-click on an unselected layer's name, as a person makes it: the
+/// second click lands before the first one's selection has re-rendered the
+/// row, and still opens the name field, whose name typed is the layer's.
+/// (That the field has the keyboard needs AppKit's text view: checked by
+/// hand.)
+#[gpui::test]
+fn a_double_click_on_an_unselected_name_opens_its_field(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    let field = s
+        .view
+        .read_with(&s.vcx, |v, _| v.cancellable_field())
+        .expect("the name field opened");
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.change(field, serde_json::json!("Logo"), cx)
+    });
+    s.idle(cx);
+    s.idle(cx);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let names: Vec<_> = pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+        .into_iter()
+        .map(|l| (l.id, l.name))
+        .collect();
+    assert!(
+        names.contains(&("l1".to_owned(), "Logo".to_owned())),
+        "the typed name is the layer's: {names:?}"
+    );
+}
+/// Key ids may repeat across layers: pressing the earlier layer's key selects
+/// that layer and that key, never the later layer holding the same id.
+#[gpui::test]
+fn pressing_a_key_id_two_layers_share_selects_the_pressed_layer(cx: &mut TestAppContext) {
+    let layer = |id: &str| {
+        format!(
+            r##"{{"id":"{id}","type":"shape","name":"{id}","from":0,"dur":4,"on":true,"p":{{"opacity":{{"v":100,"kf":[{{"i":"k","t":1,"v":100}}]}}}},"d":{{"w":100,"h":100}},"fx":[]}}"##
+        )
+    };
+    let project = format!(
+        r##"{{"id":"integration","name":"Shared","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{},{}]}}"##,
+        layer("l0"),
+        layer("l1")
+    );
+    let mut s = stage_project(cx, project);
+    // Summary marks on a layer row are decorative (f34dec8e3): the key is
+    // pressed on its property row, revealed on both layers.
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:t", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = property_key_center(&mut s, "l0", "opacity");
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    let selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
+    assert_eq!(selection.layers(), ["l0".to_string()]);
+    assert_eq!(
+        selection.key_layers(),
+        [("l0".to_string(), "k".to_string())]
+    );
+}
+/// Clips are accessible elements in the tracks list: named, with their times
+/// and selection, and an assistive Press selects one through the pointer path.
+#[gpui::test]
+fn clips_are_accessible_elements_that_a_press_selects(cx: &mut TestAppContext) {
+    use gpui::accesskit::{Action, Role};
+    let mut s = stage(cx, 2);
+    s.vcx.update(|window, _| window.set_a11y_forced(true));
+    s.idle(cx);
+    let items = |s: &mut Stage| {
+        s.vcx.update(|window, _| {
+            let tree = window.a11y_tree().unwrap();
+            let list = tree
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::ListBox && n.label() == Some("Timeline tracks"))
+                .map(|(_, n)| n.children().to_vec())
+                .expect("the tracks list");
+            tree.nodes
+                .iter()
+                .filter(|(id, n)| list.contains(id) && n.role() == Role::ListBoxOption)
+                .map(|(id, n)| {
+                    let bounds = window.a11y_node_bounds(*id);
+                    (
+                        *id,
+                        n.label().unwrap_or_default().to_owned(),
+                        n.is_selected(),
+                        bounds,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let clips = items(&mut s);
+    assert_eq!(clips.len(), 2, "{clips:?}");
+    assert!(clips[0].1.starts_with("Layer 0, "), "{clips:?}");
+    assert!(clips[0].1.ends_with(" seconds"), "{clips:?}");
+    assert!(clips.iter().all(|c| c.2 != Some(true)));
+    // Each element sits on its painted clip, inside the tracks.
+    let tracks = bounds(&mut s.vcx, "timeline:surface");
+    for (_, _, _, b) in &clips {
+        let b = b.expect("bounds");
+        assert!(tracks.contains(&b.center()), "{b:?} outside {tracks:?}");
+    }
+    let target = clips[1].0;
+    s.vcx
+        .update(|window, cx| window.perform_a11y_action(target, Action::Click, None, cx));
+    s.idle(cx);
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let layers: Vec<String> = published
+        .selection
+        .layers()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(layers, ["l1"]);
+    let clips = items(&mut s);
+    assert_eq!(clips[1].2, Some(true));
+    // A frame that redraws the panel but not the cached tracks view keeps them.
+    s.view.update(&mut s.vcx, |_, cx| cx.notify());
+    s.vcx.run_until_parked();
+    assert_eq!(
+        items(&mut s).len(),
+        2,
+        "a reused view keeps its accessible elements"
+    );
+}
+
+#[::core::prelude::v1::test]
+fn a_long_clip_name_ends_in_an_ellipsis_that_fits() {
+    let fits = |room: usize| move |s: &str| s.chars().count() <= room;
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Interview A", fits(6)).as_deref(),
+        Some("Inter…")
+    );
+    // Trailing spaces never sit before the ellipsis.
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Interview A", fits(11)).as_deref(),
+        Some("Interview…")
+    );
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Ünïcödé", fits(3)).as_deref(),
+        Some("Ün…")
+    );
+    assert_eq!(crate::timeline_surface::fit_tail("Clip", fits(1)), None);
+}
+/// Final Cut's skimming through the real pointer path: hovering the tracks
+/// moves the skimmer (what the viewer shows) and never the playhead;
+/// leaving the timeline clears it; a click moves the playhead to it. With
+/// skimming off nothing skims.
+#[gpui::test]
+fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let near = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() <= 1. / 30. + 1e-9);
+    let hover = |s: &mut Stage, cx: &mut TestAppContext, at: Point<Pixels>| {
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+    };
+    // Off: no skimmer.
+    let at = s.at(0, 1.0);
+    hover(&mut s, cx, at);
+    assert!(s.recorder.skims.borrow().is_empty());
+    s.recorder.skimming.set(true);
+    // (The pointer rests at 1.0 now: a skim starts once it moves.)
+    for seconds in [2.0, 1.0, 1.5] {
+        let at = s.at(0, seconds);
+        hover(&mut s, cx, at);
+        let last = *s.recorder.skims.borrow().last().unwrap();
+        assert!(near(last, seconds), "{last:?} for {seconds}");
+        let shown = s.surface.read_with(&s.vcx, |t, _| t.skimmer());
+        assert_eq!(shown, last, "the ghost playhead is drawn there");
+    }
+    assert!(s.recorder.seeks.borrow().is_empty(), "skimming never seeks");
+    hover(&mut s, cx, point(px(2.), px(2.)));
+    assert_eq!(
+        *s.recorder.skims.borrow().last().unwrap(),
+        None,
+        "leaving clears it"
+    );
+    // A click moves the playhead to the skimmer in Tracks mode (Final Cut);
+    // in the Layers timeline a click only selects (see
+    // a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode).
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = s.at(1, 2.5);
+    hover(&mut s, cx, at);
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    let seeks = s.recorder.seeks.borrow().clone();
+    assert!(
+        near(seeks.first().copied(), 2.5),
+        "a click puts the playhead at the skimmer: {seeks:?}"
+    );
+}
+/// A press on the ruler with the skimmer showing scrubs from the time under
+/// the pointer: every seek is the scrub's (whose time is written once, as
+/// it ends), never a seek to the skimmer before it (which wrote the time at
+/// once and had every panel take the write as the drag began).
+#[gpui::test]
+fn a_ruler_press_with_the_skimmer_showing_seeks_only_within_the_scrub(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let tracks = s.at(0, 1.5);
+    s.vcx.simulate_mouse_move(tracks, None, Modifiers::none());
+    s.idle(cx);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let ruler = s.origin() + point(px(column + 100.), px(tokens().metrics.ruler / 2.));
+    s.vcx.simulate_mouse_move(ruler, None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(), "the skimmer shows");
+    s.drag(cx, ruler, ruler + point(px(40.), px(0.)), Modifiers::none());
+    let seeks = s.recorder.seeks.borrow().clone();
+    assert!(seeks.len() >= 2, "{seeks:?}");
+    assert!(
+        s.recorder.seeks_in_scrub.borrow().iter().all(|&s| s),
+        "a seek outside the scrub: {:?}",
+        s.recorder.seeks_in_scrub.borrow()
+    );
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
+}
+/// PM-388: a wheel scroll under a resting pointer starts no skim, in rows
+/// or in time (the viewer keeps the playhead's picture), nor does a move
+/// event that did not move the pointer; moving it does. A skim showing
+/// stays under the pointer as the time scrolls beneath it.
+#[gpui::test]
+fn a_scroll_under_a_resting_pointer_never_starts_a_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 40);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    let skimmer = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.skimmer());
+    wheel(&mut s, cx, point(px(0.), px(-40.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(0.), px(-200.)), Modifiers::control());
+    wheel(&mut s, cx, point(px(-60.), px(0.)), Modifiers::none());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()) > 0.);
+    assert_eq!(skimmer(&s), None);
+    assert!(s.recorder.skims.borrow().is_empty(), "the viewer keeps the playhead's picture");
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(skimmer(&s), None, "a move event that did not move the pointer");
+    s.vcx
+        .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let shown = skimmer(&s);
+    assert!(shown.is_some(), "the pointer moved over the clips");
+    wheel(&mut s, cx, point(px(60.), px(0.)), Modifiers::none());
+    let now = skimmer(&s);
+    assert!(now.is_some() && now != shown, "{shown:?} -> {now:?}");
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), now);
+}
+/// A sheet that covered the tracks closes over a resting pointer (the
+/// Export sheet's buttons lie over the clips): the first sight of the pointer
+/// starts no skim, so the viewer keeps the playhead's picture; moving it does.
+#[gpui::test]
+fn the_pointer_met_again_where_it_rests_starts_no_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let at = s.at(0, 1.0);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    s.vcx
+        .simulate_mouse_move(at + point(px(6.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+}
+/// PM-388, zoomed in: the pointer skimmed the clips, then the playhead moved
+/// (a key, a click, playback: the viewer is back on the playhead's frame).
+/// With the pointer resting, a time scroll slides other frames under it and
+/// a move event that does not move it comes: neither starts skimming again;
+/// moving the pointer does.
+#[gpui::test]
+fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_moved(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 4);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    // Zoomed in around the pointer.
+    wheel(&mut s, cx, point(px(0.), px(-300.)), Modifiers::control());
+    s.vcx
+        .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims > 0, "the pointer moved over the clips");
+    // While the skim shows, a time scroll keeps it under the pointer.
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims >= 2, "a showing skim follows the time under the pointer");
+    // The playhead moves: the viewer shows its frame again.
+    *s.recorder.time.borrow_mut() = 0.5;
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(40.), px(0.)), Modifiers::none());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.skims.borrow().len(), skims, "nothing skims without the pointer moving");
+    s.vcx
+        .simulate_mouse_move(at + point(px(9.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
+}
+/// Finder files dropped on the tracks land on the timeline (v1.2.0): the
+/// drag reaches the timeline through the window's file drop (the rows'
+/// scroll layer and the canvases over them do not take it).
+#[gpui::test]
+fn finder_files_dropped_on_the_tracks_reach_the_timeline(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let at = s.at(1, 1.0);
+    let paths = vec![
+        std::path::PathBuf::from("/media/drop-a.mov"),
+        std::path::PathBuf::from("/media/drop-b.png"),
+    ];
+    s.vcx.simulate_event(gpui::FileDropEvent::Entered {
+        position: at,
+        paths: gpui::ExternalPaths(paths.clone().into()),
+    });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Pending { position: at });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Submit { position: at });
+    s.idle(cx);
+    let drops = s.recorder.media_drops.borrow().clone();
+    assert_eq!(drops.len(), 1, "{drops:?}");
+    assert!(
+        matches!(&drops[0].what, crate::timeline_surface::Dropped::Files { paths: p, .. } if *p == paths),
+        "{drops:?}"
+    );
+}
+/// Cmd-Tab (the window stops being active) without moving the pointer
+/// clears the skimmer: the viewer returns to the playhead and Space plays
+/// from the playhead, not from a stale skimmer (review).
+#[gpui::test]
+fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.vcx.update(|window, _| window.activate());
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let at = s.at(0, 1.0);
+    // Coming over the tracks, then moving there: the skimmer shows.
+    s.vcx
+        .simulate_mouse_move(at - point(px(4.), px(0.)), None, Modifiers::none());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    let over = |s: &mut Stage| {
+        let surface = s.surface.clone();
+        s.vcx
+            .update(|window, cx| surface.read(cx).pointer_over(window))
+    };
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+    assert!(over(&mut s), "Space would play from the skimmer");
+    s.vcx.deactivate_window();
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), None);
+    assert!(!over(&mut s), "Space plays from the playhead");
+
+    // macOS can still deliver moves and wheel events to an inactive window.
+    s.vcx
+        .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+    s.vcx
+        .simulate_mouse_move(at + point(px(8.), px(0.)), None, Modifiers::none());
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(-20.), px(0.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), None);
+}
+/// Option-drag (Premiere, Final Cut, Resolve): the clip stays and a copy
+/// goes where the pointer lets go, selected; one Undo step removes it.
+#[gpui::test]
+fn option_dragging_a_clip_leaves_it_and_places_a_copy(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let layers = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+    };
+    let before = s.start_of("l1");
+    let from = s.at(1, before + 1.);
+    let to = from + point(px(120.), px(0.));
+    let option = Modifiers {
+        alt: true,
+        ..Modifiers::none()
+    };
+    s.drag(cx, from, to, option);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let after = layers(&s);
+    assert_eq!(after.len(), 3, "one copy");
+    assert_eq!(s.start_of("l1"), before, "the dragged clip stays");
+    let copy = after
+        .iter()
+        .find(|l| !["l0", "l1"].contains(&l.id.as_str()))
+        .unwrap();
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    assert!(
+        (copy.in_time - (before + 120. / pps)).abs() <= 1. / 30.,
+        "copy at {}, clip at {before}, pps {pps}",
+        copy.in_time
+    );
+    assert!((copy.out_time - copy.in_time - 2.).abs() < 1e-9);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(
+        p.selection.layers(),
+        std::slice::from_ref(&copy.id),
+        "the copy is selected"
+    );
+    assert_eq!(p.history.undo_label.as_deref(), Some("Duplicate Layers"));
+    s.undo(cx);
+    assert_eq!(layers(&s).len(), 2, "one Undo step");
+    assert_eq!(s.start_of("l1"), before);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        ["l1"]
+    );
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(layers(&s).len(), 3);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        std::slice::from_ref(&copy.id)
+    );
+    s.undo(cx);
+    // Without Option the same drag still moves the clip itself.
+    s.drag(cx, from, to, Modifiers::none());
+    assert_eq!(layers(&s).len(), 2);
+    assert!(s.start_of("l1") > before);
+}
+
+/// An effect dragged from the Effects panel and released over a layer's bar
+/// goes to that layer (v1.2.0's timeline drop), whichever layer is selected.
+#[gpui::test]
+fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(1, 0.5);
+    let row = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap())
+        .navigate_first(1)
+        .unwrap();
+    let pm_panel_timeline::RowId::Layer(layer) = pm_panel_timeline::v4::parse_row(&row).unwrap()
+    else {
+        panic!("row 1 is a layer: {row}");
+    };
+    s.vcx.update(|_, cx| {
+        let drag = crate::v4_view::PanelDrag::of(
+            crate::timeline_surface::EFFECTS_PANEL,
+            "Gaussian Blur",
+            Some("gaussianBlur"),
+        );
+        let view = cx.new(|_| drag.clone());
+        cx.start_drag(gpui::AnyDrag::new(drag, view));
+    });
+    s.vcx
+        .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(
+        *s.recorder.effect_drops.borrow(),
+        [crate::timeline_surface::EffectDrop {
+            panel: crate::timeline_surface::EFFECTS_PANEL.into(),
+            at: None,
+            definition: "gaussianBlur".into(),
+            label: "Gaussian Blur".into(),
+            layer: Some(layer),
+            edge: None,
+            across: None,
+        }]
+    );
+}
+
+fn axis_project() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(1)).unwrap();
+    let properties = project["layers"][0]["p"].as_object_mut().unwrap();
+    for (from, to) in [
+        ("x", "position.x"),
+        ("y", "position.y"),
+        ("sx", "scale.x"),
+        ("sy", "scale.y"),
+    ] {
+        let value = properties.remove(from).unwrap();
+        properties.insert(to.into(), value);
+    }
+    project.to_string()
+}
+
+/// v1 axisValueIndex/dragPropertyValue: a joined row edits only its grabbed axis.
+#[gpui::test]
+fn joined_position_value_columns_scrub_one_axis_and_undo(cx: &mut TestAppContext) {
+    for path in ["position.x", "position.y"] {
+        let mut s = stage_project(cx, axis_project());
+        let values = |s: &Stage| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                ["position.x", "position.y"].map(|p| {
+                    t.model()
+                        .index
+                        .channel("l0", p)
+                        .unwrap()
+                        .value
+                        .as_f64()
+                        .unwrap()
+                })
+            })
+        };
+        let before = values(&s);
+        let at = s.at(0, 0.5);
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.press_property("l0".into(), path.into(), at, cx)
+        });
+        s.vcx.simulate_mouse_move(
+            at + point(px(20.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        let after = values(&s);
+        let axis = usize::from(path == "position.y");
+        assert_eq!(after[axis], before[axis] + 10.);
+        assert_eq!(after[1 - axis], before[1 - axis]);
+        assert!(s.recorder.reports.borrow().is_empty());
+        s.undo(cx);
+        assert_eq!(values(&s), before);
+    }
+}
+
+#[gpui::test]
+fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let origin = s.at(0, 0.5);
+    let target = s.at(1, 1.);
+    // Escape cancels the pick without changing either layer.
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.press_parent("l0".into(), origin, cx));
+    s.vcx
+        .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.cancel(cx));
+    });
+    s.vcx
+        .simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| {
+        t.model().index.layer("l0").unwrap().parent.is_none()
+    }));
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.press_parent("l0".into(), origin, cx));
+    s.vcx
+        .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let parent = |s: &Stage, id| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model().index.layer(id).unwrap().parent.clone()
+        })
+    };
+    assert_eq!(parent(&s, "l0").as_deref(), Some("l1"));
+    assert!(s.recorder.reports.borrow().is_empty());
+    // Parenting the parent to its child would make a cycle.
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.press_parent("l1".into(), target, cx));
+    s.vcx
+        .simulate_mouse_move(origin, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(origin, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(parent(&s, "l1"), None);
+    s.undo(cx);
+    assert_eq!(parent(&s, "l0"), None);
+}
+
+#[gpui::test]
+fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, axis_project());
+    let at = s.at(0, 0.5);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_property("l0".into(), "position.y".into(), at, cx)
+    });
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(&*s.recorder.commands.borrow(), &["timeline.propertyEdit"]);
+    assert!(s.recorder.reports.borrow().is_empty());
+    // What is typed from the click on (⌘A, digits, Return) waits for the
+    // field it opens, never selecting every layer on the way.
+    assert!(pm_shell::typing::expecting(), "the click arms the typing hold");
+    assert!(pm_shell::typing::for_field("a", true, "cmd+a"));
+}
+
+#[gpui::test]
+fn scale_axis_columns_follow_the_linked_ratio_and_undo(cx: &mut TestAppContext) {
+    for linked in [false, true] {
+        let mut project: serde_json::Value = serde_json::from_str(&axis_project()).unwrap();
+        project["layers"][0]["scaleLinked"] = serde_json::json!(linked);
+        project["layers"][0]["p"]["scale.y"]["v"] = serde_json::json!(50.);
+        let mut s = stage_project(cx, project.to_string());
+        let value = |s: &Stage, path| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                t.model()
+                    .index
+                    .channel("l0", path)
+                    .unwrap()
+                    .value
+                    .as_f64()
+                    .unwrap()
+            })
+        };
+        let at = s.at(0, 0.5);
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.press_property("l0".into(), "scale.x".into(), at, cx)
+        });
+        s.vcx.simulate_mouse_move(
+            at + point(px(20.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(value(&s, "scale.x"), 110.);
+        assert!((value(&s, "scale.y") - if linked { 55. } else { 50. }).abs() < 1e-9);
+        assert!(s.recorder.reports.borrow().is_empty());
+        s.undo(cx);
+        assert_eq!(value(&s, "scale.x"), 100.);
+        assert_eq!(value(&s, "scale.y"), 50.);
+    }
+}
+
+#[gpui::test]
+fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
+    s.idle(cx);
+    let (v, duration, mapping, end) = s.surface.read_with(&s.vcx, |t, _| {
+        (
+            t.frame().unwrap().viewport,
+            t.model().index.duration,
+            t.time_mapping(),
+            t.model().index.work[1],
+        )
+    });
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    s.drag(
+        cx,
+        point(x_of(end) - px(2.), y),
+        point(x_of(end - 2.), y),
+        Modifiers::none(),
+    );
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.model().index.duration, duration);
+        assert_eq!(t.time_mapping(), mapping);
+        assert!(t.model().index.work[1] < end);
+    });
+}
+
+/// PM-367: the shell's first word on the timeline's focus (unfocused, at the
+/// first layout) is a change, so the scene and the panel's rows both take
+/// the neutral selection; the accent comes back with the keyboard.
+#[gpui::test]
+fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let focused = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().map(|scene| scene.focused))
+    };
+    assert_eq!(focused(&s), Some(true));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert_eq!(focused(&s), Some(false));
+    assert!(!s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
+    assert_eq!(focused(&s), Some(true));
+}
+
+#[gpui::test]
+fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let from = s.at(0, 1.);
+    let to = from + point(px(60.), px(0.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let during = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(during.revision(), before.revision());
+    assert_eq!(during.history.entries, before.history.entries);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .iter()
+            .any(Option::is_some)
+    );
+    let frame = s.surface.read_with(&s.vcx, |s, _| s.frame().unwrap());
+    let clip = frame.ops.iter().find(|op| op.id == "clip:l0").unwrap();
+    assert!(clip.detail["from"].as_f64().unwrap() > 0.);
+    // This is the surface's Escape handler; it also clears the viewer input.
+    s.surface.update(&mut s.vcx, |s, cx| assert!(s.cancel(cx)));
+    s.idle(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let from = s.at(0, 1.);
+    s.drag(cx, from, from + point(px(60.), px(0.)), Modifiers::none());
+    assert!(s.start_of("l0") > 0.);
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries + 1);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    s.undo(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+}
+
+#[gpui::test]
+fn work_area_cancel_restores_duration_without_refitting_ruler(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
+    s.idle(cx);
+    let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
+        (
+            t.frame().unwrap().viewport,
+            t.model().index.work,
+            t.model().index.duration,
+            t.time_mapping(),
+        )
+    });
+    let origin = s.origin();
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    let x_of = |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
+    s.vcx.simulate_mouse_down(
+        point(x_of(before[1]) - px(2.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(
+        point(x_of(duration + 2.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.surface
+        .read_with(&s.vcx, |t, _| assert!(t.model().index.duration > duration));
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.cancel(cx));
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.time_mapping(), mapping);
+        assert_eq!(t.model().index.work, before);
+        assert_eq!(t.model().index.duration, duration);
+    });
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
+}
+
+#[gpui::test]
+fn work_area_stream_keeps_ruler_mapping_and_tracks_pointer_through_extension(
+    cx: &mut TestAppContext,
+) {
+    for zoom_in in [false, true] {
+        for end in [false, true] {
+            let mut project: serde_json::Value =
+                serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+            project["work"] = serde_json::json!([1., 3.]);
+            let mut s = stage_project(cx, project.to_string());
+            s.surface.update(&mut s.vcx, |t, cx| {
+                t.fit_time(cx);
+                if zoom_in {
+                    t.command("timeline.zoomIn", 0., None, false, cx);
+                }
+            });
+            s.idle(cx);
+            let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
+                (
+                    t.frame().unwrap().viewport,
+                    t.model().index.work,
+                    t.model().index.duration,
+                    t.time_mapping(),
+                )
+            });
+            let origin = s.origin();
+            let y = origin.y + px(tokens().metrics.ruler / 2.);
+            let x_of =
+                |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
+            let edge = before[usize::from(end)];
+            // Start within the generous hit zone rather than on its center.
+            let from = point(x_of(edge) + px(if end { -4. } else { 4. }), y);
+            s.vcx
+                .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+            s.idle(cx);
+            let mut previous = edge;
+            let mut peak = duration;
+            let times: Vec<f64> = if end {
+                // Slow, fast, beyond comp end, then back to its interior.
+                vec![
+                    3.2, 3.21, 3.3, 3.4, 4., 6., 9., 11., 14., 14., 14., 12., 10., 8., 6., 4.,
+                ]
+            } else {
+                vec![
+                    1.2, 1.21, 1.3, 1.4, 1.8, 2., 2.2, 2.5, 2.7, 2.9, 2.9, 2.7, 2.4, 2., 1.8, 1.5,
+                ]
+            };
+            let mut previous_time = edge;
+            for &time in &times {
+                let at = point(x_of(time), y);
+                s.vcx
+                    .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+                s.idle(cx);
+                s.surface.read_with(&s.vcx, |t, _| {
+                    assert_eq!(t.time_mapping(), mapping, "ruler changed at {time}");
+                    let actual = t.model().index.work[usize::from(end)];
+                    let expected = pm_panel_timeline::frame(time, t.model().index.fps);
+                    assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
+                    if time >= previous_time {
+                        assert!(actual >= previous);
+                    } else {
+                        assert!(actual <= previous);
+                    }
+                    previous = actual;
+                    previous_time = time;
+                    peak = peak.max(actual);
+                    assert_eq!(t.model().index.duration, if end { peak } else { duration });
+                });
+            }
+            let to = point(x_of(*times.last().unwrap()), y);
+            // Queue the last pointer and release together: the pending writer
+            // sample must retain the mapping after the UI gesture becomes idle.
+            s.vcx
+                .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+            s.vcx
+                .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+            s.idle(cx);
+            s.surface
+                .read_with(&s.vcx, |t, _| assert_eq!(t.time_mapping(), mapping));
+            assert!(s.recorder.seeks.borrow().is_empty());
+            assert!(
+                s.recorder
+                    .timing_previews
+                    .borrow()
+                    .iter()
+                    .all(Option::is_none)
+            );
+            assert!(s.recorder.reports.borrow().is_empty());
+            assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 1);
+            s.undo(cx);
+            s.surface.read_with(&s.vcx, |t, _| {
+                assert_eq!(t.model().index.work, before);
+                assert_eq!(t.model().index.duration, duration);
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn timeline_scroll_436_rows_benchmark(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(436)).unwrap();
+    let rows = project["layers"].as_array_mut().unwrap();
+    rows[0]["type"] = "group".into();
+    rows[0]["collapsed"] = false.into();
+    for (i, row) in rows.iter_mut().enumerate().skip(1) {
+        row["group"] = "l0".into();
+        row["from"] = 0.into();
+        row["collapsed"] = true.into();
+        let count = if i <= 415 {
+            2
+        } else if i == 416 {
+            1
+        } else {
+            0
+        };
+        row["p"]["opacity"]["kf"] = serde_json::json!(
+            (0..count)
+                .map(|k| serde_json::json!({"i": format!("k{i}-{k}"), "t": k, "v": 100}))
+                .collect::<Vec<_>>()
+        );
+    }
+    let mut s = stage_project(cx, project.to_string());
+    let at = s.origin() + point(px(600.), px(100.));
+    let revision = s.rig.kernel.published(PROJECT).unwrap().revision();
+    let state_revision = s.rig.kernel.state().revision;
+    let mut samples = Vec::new();
+    for i in 0..120 {
+        let started = std::time::Instant::now();
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(if i < 80 { -37.25 } else { 61.5 }))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+        samples.push(started.elapsed());
+        let (offset, frame, scene) = s.surface.read_with(&s.vcx, |t, _| {
+            (t.scroll_y(), t.frame().unwrap(), t.scene().unwrap())
+        });
+        let header = s.view.read_with(&s.vcx, |v, _| v.outline_scroll_for_test());
+        assert_eq!(header, offset as f32, "header and tracks move together");
+        assert_eq!(frame.viewport.scroll_y, offset);
+        let height = frame.viewport.height - tokens().metrics.ruler as f64;
+        let visible = scene.visible_range(offset, height);
+        for row in visible.clone() {
+            assert!(frame.range.contains(&row), "no blank visible track row");
+        }
+        let mounted = scene.mount_range(offset, height);
+        assert!(mounted.start <= visible.start && mounted.end >= visible.end);
+        assert!(mounted.len() <= visible.len() + 4);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().revision(),
+            revision
+        );
+        assert_eq!(
+            s.rig.kernel.state().revision,
+            state_revision,
+            "scroll publishes no model state"
+        );
+    }
+    samples.sort();
+    eprintln!(
+        "timeline scroll 120 events: p50={:?}, p95={:?}, max={:?}",
+        samples[60], samples[114], samples[119]
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            samples[119] < Duration::from_millis(8),
+            "scroll frame exceeds 8ms"
+        );
+    }
+    // A disclosure publication must replace row geometry, not retain child height.
+    let full_height = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().content_height());
+    for (closed, expected) in [(true, 1), (false, 436)] {
+        let published = s.rig.kernel.published(PROJECT).unwrap();
+        let mut model = s.surface.read_with(&s.vcx, |t, _| (*t.model()).clone());
+        model.reveal.layers.insert(
+            "l0".into(),
+            pm_panel_timeline::Disclosure {
+                collapsed: closed,
+                group_collapsed: closed,
+                paths: None,
+            },
+        );
+        let ui = model.patch_ui(&published.ui_state);
+        s.rig
+            .kernel
+            .state_transaction(pm_kernel::state::StateTransaction {
+                expected_revision: None,
+                ops: vec![pm_kernel::state::StateOp::Ui {
+                    project: PROJECT.into(),
+                    next: ui,
+                }],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| {
+            let scene = t.scene().unwrap();
+            assert_eq!(scene.total(), expected);
+            if closed {
+                assert!(scene.content_height() < full_height);
+                assert_eq!(t.scroll_y(), 0.);
+            } else {
+                assert_eq!(scene.content_height(), full_height);
+            }
+            assert_eq!(
+                t.frame().unwrap().range,
+                scene.visible_range(
+                    t.scroll_y(),
+                    t.frame().unwrap().viewport.height - tokens().metrics.ruler as f64
+                )
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn timeline_scroll_above_retained_limit_mounts_and_pages(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1600);
+    let at = s.origin() + point(px(600.), px(100.));
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-4000.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.scene().unwrap().total(), 1600);
+        assert_eq!(t.scroll_y(), 4000.);
+    });
+}
+
+#[gpui::test]
+fn timeline_scroll_empty_composition_keeps_empty_state(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 0);
+    let empty = bounds(&mut s.vcx, "timeline:empty");
+    assert!(empty.size.width > px(0.) && empty.size.height > px(0.));
+}
+
+/// GPUI mock platform only: exercise the real pointer/preview/release path.
+#[gpui::test]
+fn agent_coedit_preview_hold_releases_on_commit_and_escape(cx:&mut TestAppContext) {
+    let mut s=stage(cx,2);
+    for cancel in [true,false] {
+        let from=s.at(0,1.);
+        let to=from+point(px(60.),px(0.));
+        s.vcx.simulate_mouse_down(from,MouseButton::Left,Modifiers::none());s.idle(cx);
+        s.vcx.simulate_mouse_move(to,MouseButton::Left,Modifiers::none());s.idle(cx);
+        assert!(pm_mcp::coedit::typing(PROJECT),"local preview must hold bound writes even without a kernel lease");
+        assert!(s.surface.read_with(&s.vcx,|t,_|t.agent_drag_holding()));
+        assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+        if cancel {s.surface.update(&mut s.vcx,|s,cx|assert!(s.cancel(cx)));}
+        s.vcx.simulate_mouse_up(to,MouseButton::Left,Modifiers::none());s.idle(cx);
+        // Other mock projects share PROJECT; check this surface's own guard.
+        assert!(!s.surface.read_with(&s.vcx,|t,_|t.agent_drag_holding()));
+        if !cancel {s.undo(cx);}
+    }
+}
+
+/// Retained outlines and scene-positioned names agree after mounting a later
+/// range: the first visible name stays beside its own track, not shifted by
+/// the rows that were left above the viewport.
+#[gpui::test]
+fn retained_names_stay_beside_tracks_after_a_large_wheel_jump(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 200);
+    let first = "[\"layer\",\"l0\"]";
+    let before = s.vcx.debug_bounds("timeline:row:[\"layer\",\"l0\"]").unwrap();
+    let origin = f32::from(before.origin.y) - s.surface.read_with(&s.vcx, |t, _| {
+        t.scene().unwrap().scroll_for(first).unwrap() as f32
+    });
+    let at = s.at(2, 0.2);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    let (id, top, scroll) = s.surface.read_with(&s.vcx, |t, _| {
+        let scene = t.scene().unwrap();
+        let height = t.frame().unwrap().viewport.height - tokens().metrics.ruler as f64;
+        let scroll = t.scroll_y();
+        let visible = scene.visible_range(scroll, height);
+        assert!(visible.start > 0);
+        assert!(visible.end > visible.start + 1);
+        let (row, top, _) = scene.span(visible.start + 1).unwrap();
+        (row.id.clone(), top, scroll)
+    });
+    let selector: &'static str = Box::leak(format!("timeline:row:{id}").into_boxed_str());
+    let header = s.vcx.debug_bounds(selector).expect("visible retained row name");
+    let expected = origin + (top - scroll) as f32;
+    assert!((f32::from(header.origin.y) - expected).abs() < 0.75,
+        "name {id} at {:?}, its track at {expected}", header.origin.y);
+}
+
+#[gpui::test]
+/// v1's ruler menu ends with what its extensions added: New Composition…,
+/// Import Captions…, Add 3D Layer; each runs its command.
+#[gpui::test]
+fn the_ruler_menu_offers_v1s_creation_items(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = s.origin() + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("New Composition…".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["newComposition"]);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<&str> = menus[0].iter().filter_map(|r| r["label"].as_str()).collect();
+    assert!(labels.ends_with(&["New Composition…", "Import Captions…", "Add 3D Layer"]), "{labels:?}");
+}
+/// A clip's menu is headed by its layer's name (v1's layer menu) and ends
+/// with the creation items; the layer's own rows still run their commands.
+#[gpui::test]
+fn a_clips_menu_names_its_layer_and_offers_the_creation_items(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    *s.recorder.choice.borrow_mut() = Some("Import Captions…".into());
+    let at = s.origin() + point(px(100.), s.at(1, 0.).y - s.origin().y);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["importCaptions"]);
+    let menus = s.recorder.menus.borrow();
+    assert_eq!(menus[0][0]["header"], true);
+    assert!(!menus[0][0]["label"].as_str().unwrap_or_default().is_empty());
+    drop(menus);
+    *s.recorder.choice.borrow_mut() = Some("duplicate".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["importCaptions", "duplicate"]);
+}
+/// The first key on a property row (opacity revealed), in window space.
+fn property_key(s: &mut Stage, cx: &mut TestAppContext) -> Point<Pixels> {
+    s.surface.update(&mut s.vcx, |t, cx| {
+        // Keying already reveals opacity. The shortcut toggles it, so use
+        // it only when the fixture has not revealed the row yet.
+        let revealed = t.model().rows().iter().any(|row| matches!(&row.id,
+            pm_panel_timeline::RowId::Property { layer_id, channel }
+                if layer_id == "l0" && channel == "opacity"));
+        if !revealed {
+            t.command("timeline.revealProperty:t", 0., None, false, cx);
+        }
+    });
+    s.idle(cx);
+    let origin = s.origin();
+    let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    let op = frame
+        .ops
+        .iter()
+        .find(|o| o.id.starts_with("key:") && o.id.contains("property"))
+        .expect("a key on the opacity row");
+    origin
+        + point(
+            px((op.bounds.x + op.bounds.width / 2.) as f32),
+            px((op.bounds.y + op.bounds.height / 2.) as f32),
+        )
+}
+/// v1's reach for a key (keyDown: 6 points across): a press 9 points
+/// beside it starts a marquee and moves no key; one within reach takes it.
+#[gpui::test]
+fn a_press_beside_a_key_starts_a_marquee_and_moves_no_key(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 3.]);
+    let key = property_key(&mut s, cx);
+    let before: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    s.drag(cx, key + point(px(9.), px(0.)), key + point(px(49.), px(0.)), Modifiers::none());
+    let after: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    assert_eq!(after, before, "a marquee beside a key moved it");
+    s.drag(cx, key + point(px(4.), px(0.)), key + point(px(44.), px(0.)), Modifiers::none());
+    let moved: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    assert_ne!(moved, before, "a press within reach takes the key");
+}
+/// v1's marks: a hold key is a square, read from what the file stores.
+#[gpui::test]
+fn a_hold_key_draws_as_a_square(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    property_key(&mut s, cx);
+    let shapes = |s: &Stage| -> Vec<&'static str> {
+        let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+        frame
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && o.id.contains("property"))
+            .map(|o| o.shape)
+            .collect()
+    };
+    assert!(!shapes(&s).contains(&"square"), "{:?}", shapes(&s));
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Keyframe(
+                        pm_kernel::KeyframeCommand::SetHold { key_ids: vec![ids[0].clone()], hold: true },
+                    )]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert!(shapes(&s).contains(&"square"), "{:?}", shapes(&s));
+}
+/// v1's marker tooltip: its name, its time and how to remove it.
+#[gpui::test]
+fn a_marker_shows_its_name_and_time_in_a_tooltip(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = s.origin() + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("marker.add".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let marker = op_center(&mut s, "marker:");
+    s.vcx.simulate_mouse_move(marker, None, Modifiers::none());
+    s.idle(cx);
+    let tip = s.surface.read_with(&s.vcx, |t, _| t.marker_tip_for_test(marker));
+    let tip = tip.expect("a tooltip over the marker");
+    assert!(tip.contains(" · 00:00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
+}
+
+/// The ruler menu's "Switch to Track Timeline" and the Layers | Tracks
+/// control drive one state: the published view (the header's control and the
+/// layer column draw from it) follows the menu both ways.
+#[gpui::test]
+fn the_ruler_menus_mode_switch_reaches_the_published_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let mode = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        p.ui_state
+            .timeline
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .map(str::to_owned)
+    };
+    for (action, want) in [("mode.tracks", "tracks"), ("mode.layers", "layers")] {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.choose_menu(
+                pm_panel_timeline::Context::Ruler { time: 0. },
+                action,
+                cx,
+            )
+        });
+        s.idle(cx);
+        assert_eq!(mode(&s).as_deref(), Some(want), "{action}");
+    }
+}
+/// Run 27: in the Layers timeline a press on a layer selects it and never
+/// moves the playhead, skimming on or off (v1 and After Effects: only the
+/// ruler does). In Tracks mode with skimming on, a press moves the playhead
+/// to the skimmer, as Final Cut does.
+#[gpui::test]
+fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    s.recorder.skimming.set(true);
+    let press = |s: &mut Stage, cx: &mut TestAppContext| {
+        let at = s.at(0, 1.0);
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+        s.idle(cx);
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(),
+            "the pointer skims"
+        );
+        s.vcx
+            .simulate_click(at + point(px(4.), px(0.)), Modifiers::none());
+        s.idle(cx);
+    };
+    press(&mut s, cx);
+    assert!(s.recorder.seeks.borrow().is_empty(), "Layers: no seek");
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    press(&mut s, cx);
+    assert_eq!(s.recorder.seeks.borrow().len(), 1, "Tracks: the press seeks");
+}
+
+#[gpui::test]
+fn palette_select_layer_expands_nested_groups_and_reveals_the_row(cx: &mut TestAppContext) {
+    use pm_panel_timeline::{RowId, v4::row_id};
+    use serde_json::{Value, json};
+
+    let mut project: Value = serde_json::from_str(&crate::v4_view_tests::project_json(80)).unwrap();
+    let layers = project["layers"].as_array_mut().unwrap();
+    layers[79]["group"] = json!("inner");
+    layers.insert(79, json!({"id":"outer","type":"group","name":"Outer","dur":10}));
+    layers.insert(80, json!({"id":"inner","type":"group","name":"Inner","group":"outer","dur":10}));
+    let mut s = stage_project(cx, project.to_string());
+    let target = row_id(&RowId::Layer("l79".into()));
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert!(t.scene().unwrap().scroll_for(&target).is_none());
+    });
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.palette_select_layer(&published, &[json!("l79")], cx));
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        let model = t.model();
+        assert_eq!(model.selection.layers(), ["l79"]);
+        assert!(!model.reveal.layers["outer"].group_collapsed);
+        assert!(!model.reveal.layers["inner"].group_collapsed);
+        let top = t.scene().unwrap().scroll_for(&target).unwrap();
+        let frame = t.frame().unwrap();
+        let scroll = t.scroll_y();
+        assert!(scroll > 0. && scroll <= top);
+        assert!(
+            top + f64::from(tokens().metrics.track_row)
+                <= scroll + frame.viewport.height - f64::from(tokens().metrics.ruler)
+        );
+    });
+}
+
+#[gpui::test]
+fn keyframe_reveal_scrolls_an_offscreen_row_without_moving_time(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 80);
+    let before = s
+        .surface
+        .read_with(&s.vcx, |t, _| (t.scroll_time(), t.scroll_y()));
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::KeyframeCommand::Add {
+                            layer_id: "l79".into(),
+                            channel: "opacity".into(),
+                            time: 1.,
+                            key_id: "reveal-key".into(),
+                            value: None,
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert!(t.scroll_y() > before.1);
+        assert_eq!(t.scroll_time(), before.0);
+        let top = t
+            .scene()
+            .unwrap()
+            .scroll_for(&pm_panel_timeline::v4::row_id(
+                &pm_panel_timeline::RowId::Property {
+                    layer_id: "l79".into(),
+                    channel: "opacity".into(),
+                },
+            ))
+            .unwrap();
+        assert!(top >= t.scroll_y());
+        assert!(top < t.scroll_y() + 600.);
+    });
+    assert!(s.recorder.seeks.borrow().is_empty());
+    let scrolled = s.surface.read_with(&s.vcx, |t, _| t.scroll_y());
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), scrolled);
+}
+
+#[gpui::test]
+fn g3_ruler_click_seeks_without_horizontal_scroll(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let before = s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    let at = s.at(0, 3.);
+    let origin = s.origin();
+    let at = point(at.x, origin.y + px(20.));
+    s.recorder.seeks.borrow_mut().clear();
+    s.vcx.simulate_event(MouseDownEvent { button: MouseButton::Left, position: at, ..Default::default() });
+    s.vcx.simulate_event(MouseUpEvent { button: MouseButton::Left, position: at, ..Default::default() });
+    s.idle(cx);
+    assert!((s.recorder.seeks.borrow().last().copied().expect("ruler seek") - 3.).abs() <= 1. / 30.);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_time()), before);
+}
+
+/// Synthetic review crops use GPUI's TestPlatform, with show(false) and
+/// focus(false) supplied by HeadlessAppContext. No native profile or window.
+#[::core::prelude::v1::test]
+#[ignore = "writes headless G3 review crops"]
+fn g3_capture_trim_review() {
+    use gpui::{HeadlessAppContext, size};
+    use std::sync::Arc;
+    let Ok(dir) = std::env::var("PM_G3_CAPTURE") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scheme) in [("light", pm_design::Scheme::Light), ("dark", pm_design::Scheme::Dark)] {
+        let fixture = crate::v4_view_tests::strips_json().replace("\"dur\":100", "\"dur\":12");
+        let rig = crate::v4_view_tests::rig_project("timeline", &fixture);
+        let first = publication(&rig);
+        let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let tooltip_delay = tokens.motion.tooltip_delay;
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
+            Arc::new(()),
+            || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+        );
+        cx.allow_parking();
+        let natives = Natives::default();
+        let recorder = Rc::new(Recorder::default());
+        let surface = cx.update(|cx| cx.new(|cx| TimelineSurface::new(
+            rig.kernel.clone(), PROJECT.into(), tokens.clone(), Rc::new(Recording(recorder)), natives.outline.clone(), Default::default(), cx,
+        )));
+        natives.views.borrow_mut().insert("timeline".into(), surface.clone().into());
+        let outline = natives.outline.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx.open_window(size(px(1000.), px(320.)), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens, natives, window, cx))
+        }).unwrap();
+        cx.update(|cx| outline.bind(window.root(cx).unwrap().downgrade()));
+        let pump = |cx: &mut HeadlessAppContext| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                cx.run_until_parked();
+                let idle = cx.update(|cx| surface.read(cx).idle());
+                if idle {
+                    for (_, ticket) in rig.runtime.publish() {
+                        let ticket = ticket.unwrap();
+                        while ticket.try_take().is_none() {
+                            assert!(std::time::Instant::now() < deadline, "outline capture timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let publications = rig.runtime.take_publications();
+                    cx.update(|cx| {
+                        let view = window.root(cx).unwrap();
+                        for p in publications { view.update(cx, |v, cx| v.publish(p, cx)); }
+                    });
+                    cx.run_until_parked();
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "timeline capture timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.run_until_parked();
+        };
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:tracks", 0., None, false, cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-before-{name}.png")).unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.tool:roll", 0., None, false, cx)));
+        pump(&mut cx);
+        let origin = cx.debug_bounds(window.into(), "timeline:surface").unwrap().unwrap().origin;
+        let position = cx.update(|cx| {
+            let s = surface.read(cx);
+            let f = s.frame().unwrap();
+            let v = f.viewport;
+            let clip = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((v.layer_column + (2. - v.scroll_time) * v.pps - 2.) as f32), px((clip.bounds.y + clip.bounds.height / 2.) as f32))
+        });
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let cursor = cx.update(|cx| surface.read(cx).cursor_style());
+        assert_eq!(cursor, gpui::CursorStyle::ResizeLeftRight);
+        std::fs::write(format!("{dir}/roll-cursor-{name}.txt"), format!("{cursor:?}\n")).unwrap();
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-cursor-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: position + point(px(35.), px(0.)), pressed_button: Some(MouseButton::Left), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-progress-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: position + point(px(35.), px(0.)), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        // Isolate the source-clamped edge after the roll comparison.
+        // A media-clamped out edge: 12 s source, trim 2 s, rate 2.
+        rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::LayerCommand::Delete { layer_ids: vec!["b".into(), "c".into()] }.into(), pm_kernel::ContentCommand::Set { layer_id: "a".into(), patch: [("speed".into(), pm_model::Value::from(2.))].into_iter().collect(), time: 0. }.into(), pm_kernel::TimingCommand::TrimOut { layer_ids: vec!["a".into()], time: 200. }.into()]),
+            label: None, expected_revision: None,
+        })).wait().unwrap().unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| { s.published(cx); s.fit_time(cx); }));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/trim-clamped-{name}.png")).unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:layers", 0., None, false, cx)));
+        pump(&mut cx);
+        rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
+            label: None, expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::LayerCommand::Set { layer_id: "a".into(), patch: pm_kernel::commands::layers::LayerPatch { from: Some(-1.), ..Default::default() } }.into()]),
+        })).wait().unwrap().unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.published(cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-start-{name}.png")).unwrap();
+        let marker = cx.update(|cx| surface.read(cx).frame().unwrap().ops.iter().find(|o| o.id == "clip-negative:a").unwrap().bounds);
+        let position = origin + point(px((marker.x + 4.) as f32), px((marker.y + marker.height / 2.) as f32));
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.advance_clock(Duration::from_secs_f64(tooltip_delay + 0.1));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-hover-{name}.png")).unwrap();
+    }
+}
+
+#[gpui::test]
+fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mut TestAppContext) {
+    let project = serde_json::json!({"id":"packed","compId":"c","name":"Packed tracks","w":640,"h":360,"fps":30,"dur":12,"assets":{"src":{"id":"src","kind":"video","dur":20}},"layers":[
+        {"id":"a","type":"video","name":"A","from":0,"dur":4,"d":{"asset":"src","trim":0,"speed":1},"p":{}},
+        {"id":"b","type":"video","name":"B","from":0,"dur":4,"d":{"asset":"src","trim":0,"speed":1},"p":{}},
+        {"id":"c","type":"video","name":"C","from":4,"dur":2,"track":1,"d":{"asset":"src","trim":4,"speed":1},"p":{}}
+    ]});
+    let mut s = stage_project(cx, project.to_string());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let lane = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            let m = t.model();
+            pm_panel_timeline::tracks::layout(&m.index, &m.reveal)
+                .item("a")
+                .unwrap()
+                .lane
+        })
+    };
+    assert_eq!(lane(&s), 1);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::LayerCommand::Set {
+                            layer_id: "b".into(),
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                from: Some(5.),
+                                ..Default::default()
+                            },
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(
+        lane(&s),
+        1,
+        "the displayed lane is held even though a fresh pack could compact it"
+    );
+    let before = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut inspector = pm_builtins::Builtins::new(s.rig.kernel.clone(), PROJECT, || {}).unwrap();
+    // G3_VIEW_SNAPSHOT_BEGIN
+    inspector.update_timeline_view(s.surface.read_with(&s.vcx, |t, _| t.model()));
+    // G3_VIEW_SNAPSHOT_END
+    let mounted = inspector.mount("inspector").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = mounted.try_take() {
+            result.unwrap();
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Properties mount timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let binding = inspector
+        .take_publications()
+        .into_iter()
+        .rev()
+        .find_map(|p| {
+            p.surface.nodes().values().find_map(|n| {
+                (n.props.get("id").and_then(serde_json::Value::as_str)
+                    == Some("value:content.speed:0"))
+                .then(|| n.props["binding"].as_str().unwrap().to_owned())
+            })
+        })
+        .expect("native Speed field");
+    let begin = inspector
+        .scrub_begin("inspector", Some("Speed"))
+        .unwrap()
+        .wait()
+        .unwrap()
+        .unwrap();
+    let pm_kernel::Reply::Gesture(gesture) = begin.reply else {
+        panic!("speed gesture did not open")
+    };
+    // A Properties slider replays from the gesture's start. Repeating a value
+    // must pin the shown lanes again, even when the current speed already matches.
+    for _ in 0..2 {
+        inspector
+            .scrub_step("inspector", &binding, gesture, serde_json::json!(2.))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .unwrap();
+        s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+        s.idle(cx);
+        assert_eq!(lane(&s), 1);
+        assert_eq!(s.start_of("a"), 0.);
+        assert_eq!(s.out_of("a"), 2.);
+        assert_eq!(s.start_of("c"), 2.);
+        assert_eq!(
+            s.start_of("b"),
+            5.,
+            "another displayed track stays in place"
+        );
+    }
+    inspector
+        .scrub_finish("inspector", gesture, true)
+        .unwrap()
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.undo(cx);
+    assert_eq!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        before
+    );
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes headless G6 review crops"]
+fn g6_capture_split_review() {
+    objc2::rc::autoreleasepool(|_| assert!(gpui_macos::split_cursor_is_custom(), "AppKit must construct the scissors cursor"));
+    use gpui::{HeadlessAppContext, size};
+    use std::sync::Arc;
+    let Ok(dir) = std::env::var("PM_G6_CAPTURE") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scheme) in [("light", pm_design::Scheme::Light), ("dark", pm_design::Scheme::Dark)] {
+        let mut project: serde_json::Value = serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+        project["layers"][1]["from"] = serde_json::json!(0.);
+        project["layers"][1]["track"] = serde_json::json!(1);
+        let fixture = project.to_string();
+        let rig = crate::v4_view_tests::rig_project("timeline", &fixture);
+        let first = publication(&rig);
+        let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
+            Arc::new(()),
+            || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+        );
+        cx.allow_parking();
+        let natives = Natives::default();
+        let recorder = Rc::new(Recorder::default());
+        let surface = cx.update(|cx| cx.new(|cx| TimelineSurface::new(
+            rig.kernel.clone(), PROJECT.into(), tokens.clone(), Rc::new(Recording(recorder)), natives.outline.clone(), Default::default(), cx,
+        )));
+        natives.views.borrow_mut().insert("timeline".into(), surface.clone().into());
+        let outline = natives.outline.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx.open_window(size(px(1000.), px(320.)), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens, natives, window, cx))
+        }).unwrap();
+        cx.update(|cx| outline.bind(window.root(cx).unwrap().downgrade()));
+        let pump = |cx: &mut HeadlessAppContext| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                cx.run_until_parked();
+                let idle = cx.update(|cx| surface.read(cx).idle());
+                if idle {
+                    for (_, ticket) in rig.runtime.publish() {
+                        let ticket = ticket.unwrap();
+                        while ticket.try_take().is_none() {
+                            assert!(std::time::Instant::now() < deadline, "outline capture timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let publications = rig.runtime.take_publications();
+                    cx.update(|cx| {
+                        let view = window.root(cx).unwrap();
+                        for p in publications { view.update(cx, |v, cx| v.publish(p, cx)); }
+                    });
+                    cx.run_until_parked();
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "timeline capture timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.run_until_parked();
+        };
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:tracks", 0., None, false, cx)));
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.tool:split", 0., None, false, cx)));
+        pump(&mut cx);
+        let baseline = cx.capture_screenshot(window.into()).unwrap();
+        baseline.save(format!("{dir}/tool-{name}.png")).unwrap();
+        let origin = cx.debug_bounds(window.into(), "timeline:surface").unwrap().unwrap().origin;
+        let position = cx.update(|cx| {
+            let s = surface.read(cx);
+            let f = s.frame().unwrap();
+            let v = f.viewport;
+            let clip = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((v.layer_column + (1. - v.scroll_time) * v.pps) as f32), px((clip.bounds.y + clip.bounds.height / 2.) as f32))
+        });
+        for (label, shift) in [("hover", false), ("all-layers", true)] {
+            cx.update_window(window.into(), |_, w, cx| {
+                if shift {
+                    w.dispatch_event(gpui::PlatformInput::ModifiersChanged(gpui::ModifiersChangedEvent { modifiers: Modifiers::shift(), ..Default::default() }), cx);
+                } else {
+                    w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+                }
+            }).unwrap();
+            pump(&mut cx);
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            let (accent, samples) = cx.update(|cx| {
+                let s = surface.read(cx);
+                let f = s.frame().unwrap();
+                let samples: Vec<_> = ["a", "b", "c"].into_iter().map(|id| {
+                    let op = f.ops.iter().find(|o| o.id == format!("clip:{id}")).unwrap();
+                    (id, origin + point(px((f.viewport.layer_column + (1. - f.viewport.scroll_time) * f.viewport.pps).floor() as f32), px((op.bounds.y + op.bounds.height / 2.) as f32)))
+                }).collect();
+                (pm_design::Tokens::new(scheme, Default::default()).colors.accent, samples)
+            });
+            let scale = image.width() as f32 / 1000.;
+            for (id, at) in samples {
+                let pixel = image.get_pixel((f32::from(at.x) * scale) as u32, (f32::from(at.y) * scale) as u32);
+                let orange = pixel[0].abs_diff((accent >> 16) as u8) <= 2 && pixel[1].abs_diff((accent >> 8) as u8) <= 2 && pixel[2].abs_diff(accent as u8) <= 2;
+                assert_eq!(orange, id == "a" || (shift && id == "b"), "{name} {label}: orange preview scope on {id}");
+            }
+            image.save(format!("{dir}/{label}-{name}.png")).unwrap();
+        }
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let image = cx.capture_screenshot(window.into()).unwrap();
+        // The readout is in the ruler, and a click must restore that region
+        // until the pointer actually moves again.
+        let scale = image.width() / 1000;
+        for y in 0..24 * scale {
+            for x in 390 * scale..490 * scale {
+                assert_eq!(image.get_pixel(x, y), baseline.get_pixel(x, y), "{name}: no lingering readout after click");
+            }
+        }
+        image.save(format!("{dir}/result-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: position + point(px(4.), px(0.)), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let moved = cx.capture_screenshot(window.into()).unwrap();
+        assert!((0..24 * scale).any(|y| (390 * scale..490 * scale).any(|x| moved.get_pixel(x, y) != baseline.get_pixel(x, y))), "{name}: readout resumes after pointer motion");
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: origin + point(px(500.), px(250.)), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let empty = cx.capture_screenshot(window.into()).unwrap();
+        for y in 0..24 * scale {
+            for x in 390 * scale..490 * scale {
+                assert_eq!(empty.get_pixel(x, y), baseline.get_pixel(x, y), "{name}: no readout outside a bar");
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAppContext) {
+    for (mode, all) in [("layers", false), ("tracks", false), ("layers", true), ("tracks", true)] {
+        let mut project: serde_json::Value = serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+        project["layers"][1]["from"] = serde_json::json!(0.);
+        project["layers"][1]["track"] = serde_json::json!(1);
+        project["layers"][2]["from"] = serde_json::json!(0.);
+        project["layers"][2]["track"] = serde_json::json!(2);
+        project["layers"][2]["lock"] = serde_json::json!(true);
+        let mut s = stage_project(cx, project.to_string());
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+            t.command("timeline.tool:split", 0., None, false, cx);
+        });
+        s.idle(cx);
+        let origin = s.origin();
+        let at = s.surface.read_with(&s.vcx, |t, _| {
+            let f = t.frame().unwrap();
+            let op = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((f.viewport.layer_column + (1. - f.viewport.scroll_time) * f.viewport.pps) as f32), px((op.bounds.y + op.bounds.height / 2.) as f32))
+        });
+        let before = s.surface.read_with(&s.vcx, |t, _| {
+            pm_panel_timeline::tracks::relative_lanes(&t.model().index, &t.model().reveal).into_iter().map(|(id, lane)| {
+                let row = t.frame().unwrap().ops.iter().find(|o| o.id == format!("clip:{id}")).unwrap().bounds.y;
+                let name = t.model().index.layer(&id).unwrap().name.to_string_lossy();
+                (id, name, lane as usize, row)
+            }).collect::<Vec<_>>()
+        });
+        let modifiers = Modifiers { shift: all, ..Default::default() };
+        s.vcx.simulate_mouse_down(at, MouseButton::Left, modifiers);
+        s.vcx.simulate_mouse_up(at, MouseButton::Left, modifiers);
+        s.idle(cx);
+        assert_eq!(s.out_of("a"), 1., "{mode}");
+        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
+        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.model().index.layers.len()), if all { 5 } else { 4 });
+        assert_eq!(s.out_of("b"), if all { 1. } else { 2. });
+        assert_eq!(s.out_of("c"), 2., "locked layer stays intact");
+        if all { assert!(s.recorder.reports.borrow().iter().any(|r| r.contains("Locked"))); }
+        if mode == "tracks" {
+            s.surface.read_with(&s.vcx, |t, _| {
+                let model = t.model();
+                let frame = t.frame().unwrap();
+                for (id, name, lane, row) in &before {
+                    let original = model.index.layer(id).unwrap();
+                    assert_eq!(original.preferred_track, *lane, "original {id} keeps its track");
+                    for layer in model.index.layers.iter().filter(|l| l.id == *id || l.name.to_string_lossy() == format!("{name} 2")) {
+                        assert_eq!(layer.preferred_track, *lane, "{} stays on the source track", layer.id);
+                        let op = frame.ops.iter().find(|o| o.id == format!("clip:{}", layer.id)).unwrap();
+                        assert_eq!(op.bounds.y, *row, "{} stays in its displayed row", layer.id);
+                    }
+                }
+            });
+        }
+        s.undo(cx);
+        assert_eq!(s.out_of("a"), 2., "one Undo restores {mode}");
+    }
+}
+
+#[gpui::test]
+fn timeline_header_starts_with_play_in_both_modes(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        let origin = stage.origin();
+        let (inset, gap) = stage.view.read_with(&stage.vcx, |view, _| {
+            let m = &view.tokens().metrics;
+            (m.inset, m.gap)
+        });
+        let play = bounds(&mut stage.vcx, "timeline:play");
+        let time = bounds(&mut stage.vcx, "timeline:time");
+        assert_eq!(play.left(), origin.x + px(inset), "{mode}");
+        assert_eq!(time.left(), play.right() + px(gap), "{mode}");
+    }
+}
+
+#[gpui::test]
+fn timeline_header_has_no_edit_tool_buttons(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        for id in ["timeline.tool:selection", "timeline.tool:roll", "timeline.tool:split"] {
+            assert!(stage.vcx.debug_bounds(id).is_none(), "{mode}: {id} is still visible");
+        }
+    }
+}
+
+#[gpui::test]
+fn g2_transition_delete_removes_the_capsule_instead_of_the_clip(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+    project["layers"][1]["from"] = serde_json::json!(2.);
+    project["layers"][0]["transitionOut"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l1","offset":-0.25,"p":{}});
+    project["layers"][1]["transitionIn"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l0","offset":-0.25,"p":{}});
+    let mut s = stage_project(cx, project.to_string());
+    let at = s.at(1, 2.);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.command("delete", 2., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["removeTransition"]);
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(
+        pm_kernel::model::list_layers(published.snapshot.root().unwrap(), None).len(),
+        2,
+        "capsule deletion must never delete its clip"
+    );
+    // A selection change from another surface retires capsule ownership.
+    s.recorder.commands.borrow_mut().clear();
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface
+        .update(&mut s.vcx, |surface, cx| surface.published(cx));
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.command("delete", 2., None, false, cx)
+    });
+    s.idle(cx);
+    assert!(
+        !s.recorder
+            .commands
+            .borrow()
+            .iter()
+            .any(|name| name == "removeTransition"),
+        "Delete follows the current selection"
+    );
+}
+
+#[gpui::test]
+fn g2_transition_retiming_cut_disables_menu_and_drop_with_fade_fallback(cx: &mut TestAppContext) {
+    let reason = pm_kernel::commands::transition_edges::CUT_RETIMING_REASON;
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+    project["layers"][0]["d"]["timeRemap"] = serde_json::json!(true);
+    let mut s = stage_project(cx, project.to_string());
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = s.at(0, 2.);
+    let refusal = s.surface.read_with(&s.vcx, |surface, _| {
+        surface.transition_drop_refusal("transition:crossfade", at)
+    });
+    assert_eq!(refusal.as_deref(), Some(reason));
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let rows = menus.last().expect("cut menu");
+    let add = rows
+        .iter()
+        .find(|row| row["label"] == "Add Transition")
+        .unwrap();
+    assert_eq!(add["disabled"], true);
+    assert_eq!(add["tooltip"], reason);
+    assert!(
+        add["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["disabled"] == true && row["tooltip"] == reason)
+    );
+    let fade = rows
+        .iter()
+        .find(|row| row["id"] == "addEdgeFade")
+        .expect("single-edge fallback");
+    assert_ne!(fade["disabled"], true);
+    drop(menus);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["b".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let layers = pm_kernel::model::list_layers(published.snapshot.root().unwrap(), None);
+    let mut menu = crate::layer_commands::TransitionMenuFacts::default();
+    assert_eq!(
+        menu.refusal(&published, &layers, 2.),
+        Some(reason),
+        "B's incoming cut includes the retimed A"
+    );
+    assert_eq!(
+        menu.refusal(&published, &layers, 4.),
+        None,
+        "B's outgoing cut remains available as the playhead moves"
+    );
+}
+
+#[gpui::test]
+fn g2_transition_resizing_uses_the_visible_shortened_span(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+    project["assets"]["short"] = serde_json::json!({"id":"short","kind":"video","dur":2.1});
+    project["layers"][0]["d"] = serde_json::json!({"asset":"short","trim":0,"speed":1});
+    project["layers"][1]["d"]["trim"] = serde_json::json!(0.4);
+    project["layers"][0]["transitionOut"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"b","p":{}});
+    project["layers"][1]["transitionIn"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"a","p":{}});
+    let mut s = stage_project(cx, project.to_string());
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.set_view(Some(200.), Some(0.), Some(0.), cx);
+        surface.command("timeline.mode:tracks", 0., None, false, cx);
+    });
+    s.idle(cx);
+    let rect = s.surface.read_with(&s.vcx, |surface, _| {
+        surface
+            .frame()
+            .unwrap()
+            .ops
+            .iter()
+            .find(|op| op.id == "transition:b:in")
+            .unwrap()
+            .bounds
+    });
+    assert!((rect.width - 40.).abs() < 1e-6);
+    let at = s.origin()
+        + point(
+            px((rect.x + rect.width - 1.) as f32),
+            px((rect.y + rect.height / 2.) as f32),
+        );
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.runs.borrow().is_empty(),
+        "a click preserves the larger stored intent"
+    );
+    s.drag(cx, at, at + point(px(-10.), px(0.)), Modifiers::none());
+    let runs = s.recorder.runs.borrow();
+    assert_eq!(runs.len(), 1, "one release action");
+    assert_eq!(runs[0].0, "editTransition");
+    assert!((runs[0].1[2].as_f64().unwrap() - 0.15).abs() < 1e-6);
+    assert!((runs[0].1[3].as_f64().unwrap() + 0.075).abs() < 1e-6);
+}
+
+
+#[gpui::test]
+fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut TestAppContext) {
+    use pm_kernel::commands::{effects::Edge, transition_edges};
+
+    for (clip, time) in [("l0", 1.), ("l1", 3.)] {
+        let mut project: serde_json::Value =
+            serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+        project["layers"].as_array_mut().unwrap().truncate(2);
+        project["layers"][0]["id"] = serde_json::json!("l0");
+        project["layers"][1]["id"] = serde_json::json!("l1");
+        project["layers"][0]["transitionOut"] =
+            serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l1","offset":-0.25,"p":{}});
+        project["layers"][1]["transitionIn"] =
+            serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l0","offset":-0.25,"p":{}});
+        let mut s = stage_project(cx, project.to_string());
+        let pair = |s: &Stage| {
+            let p = s.rig.kernel.published(PROJECT).unwrap();
+            let root = p.snapshot.root().unwrap();
+            let peers = |field: &str| {
+                pm_kernel::model::list_layers(root, None)
+                    .into_iter()
+                    .filter_map(|clip| {
+                        let loc = pm_kernel::model::find_layer(root, &clip.id)?;
+                        let row = pm_kernel::model::layer_at(root, &loc)?;
+                        let peer = row.get(field)?.get("paired")?.to_value().as_str()?.to_owned();
+                        Some((clip.id, peer))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (outs, ins) = (peers("transitionOut"), peers("transitionIn"));
+            assert_eq!(outs.len(), 1);
+            assert_eq!(ins.len(), 1);
+            assert_eq!((&outs[0].0, &outs[0].1), (&ins[0].1, &ins[0].0));
+            let left = pm_kernel::model::find_layer(root, &outs[0].0).unwrap();
+            let left = pm_kernel::model::layer_at(root, &left).unwrap();
+            let duration = transition_edges::fitted_edge(root, left, Edge::Out).unwrap().duration;
+            (outs[0].clone(), duration)
+        };
+        let before = pair(&s);
+        assert!(before.1 > 0., "fixture needs media on both sides");
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.set_view(Some(72.), Some(0.), Some(0.), cx);
+            t.command("timeline.mode:tracks", 0., None, false, cx);
+            t.command("timeline.tool:split", 0., None, false, cx);
+        });
+        s.idle(cx);
+        let origin = s.origin();
+        let at = s.surface.read_with(&s.vcx, |t, _| {
+            let frame = t.frame().unwrap();
+            let op = frame.ops.iter().find(|o| o.id == format!("clip:{clip}")).unwrap();
+            let x = frame.viewport.layer_column + (time - frame.viewport.scroll_time) * frame.viewport.pps;
+            let y = op.bounds.y + op.bounds.height / 2.;
+            assert_eq!(frame.hit_clip(x, y).map(|(id, _)| id), Some(clip));
+            origin + point(px(x as f32), px(y as f32))
+        });
+        s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(
+            s.surface.read_with(&s.vcx, |t, _| t.model().index.layers.len()),
+            3,
+            "split {clip} at {time}; reports: {:?}",
+            s.recorder.reports.borrow()
+        );
+        let after = pair(&s);
+        assert_eq!(after.0.1, "l1");
+        assert_eq!(after.0.0 == "l0", clip == "l1");
+        assert!(after.1 > 0.);
+        s.undo(cx);
+        assert_eq!(pair(&s), before);
+    }
+}
+
+/// The live timecode follows the time editor and clips with its transport.
+#[gpui::test]
+fn overlap_timeline_time_follows_the_transport(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 1);
+    for width in [1000., 480., 320.] {
+        stage.vcx.simulate_resize(gpui::size(px(width), px(420.)));
+        stage.idle(cx);
+        let play = bounds(&mut stage.vcx, "timeline:play");
+        let time = bounds(&mut stage.vcx, "timeline:time");
+        assert!(play.right() <= time.left(), "{width}: {play:?} and {time:?}");
+        let clock = stage.view.read_with(&stage.vcx, |view, _| {
+            let slot = crate::playback::timecode_slot(view.tokens());
+            view.timeline_timecode_bounds(px(width), px(slot.w))
+        });
+        assert_eq!(clock.map(|b| b.left()), Some(time.left()), "{width}");
+    }
+    stage.vcx.simulate_resize(gpui::size(px(72.), px(420.)));
+    stage.idle(cx);
+    assert!(stage.view.read_with(&stage.vcx, |view, _| {
+        let slot = crate::playback::timecode_slot(view.tokens());
+        view.timeline_timecode_bounds(px(72.), px(slot.w)).is_none()
+    }));
+}
+
+#[gpui::test]
+fn three_d_switch_toggles_all_selected_layers_and_supports_vertical_drag_paint(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 3);
+    // 1. Multi-select l0, l1, l2 and click 3D on l0 -> all three become 3D.
+    let mut shift = Modifiers::none();
+    shift.shift = true;
+    let r0 = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
+    let r2 = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
+    let p0 = point(r0.origin.x + px(12.), r0.center().y);
+    let p2 = point(r2.origin.x + px(12.), r2.center().y);
+    s.drag(cx, p0, p0 + point(px(2.), px(0.)), Modifiers::none());
+    s.drag(cx, p2, p2 + point(px(2.), px(0.)), shift);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        vec!["l0", "l1", "l2"]
+    );
+    let btn0 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l0"]"#).center();
+    s.vcx.simulate_mouse_down(btn0, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_up(btn0, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    for id in ["l0", "l1", "l2"] {
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.model().index.layer(id).unwrap().three_d),
+            "{id} should be 3D after clicking 3D on multi-selection"
+        );
+    }
+    // 2. Select only l0, then press 3D on l0 and drag down across l1 and l2 ->
+    // all three turn off in one undoable drag-paint gesture.
+    s.drag(cx, p0, p0 + point(px(2.), px(0.)), Modifiers::none());
+    let b0 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l0"]"#).center();
+    let b1 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l1"]"#).center();
+    let b2 = bounds(&mut s.vcx, r#"timeline:threeD:["layer","l2"]"#).center();
+    s.vcx.simulate_mouse_down(b0, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(b1, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(b2, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_up(b2, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    for id in ["l0", "l1", "l2"] {
+        assert!(
+            !s.surface.read_with(&s.vcx, |t, _| t.model().index.layer(id).unwrap().three_d),
+            "{id} should be 2D after dragging down across 3D switches"
+        );
+    }
+    // Single undo restores all three back to 3D.
+    s.undo(cx);
+    for id in ["l0", "l1", "l2"] {
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.model().index.layer(id).unwrap().three_d),
+            "{id} should return to 3D on a single undo of drag-paint"
+        );
+    }
+}
+
+#[gpui::test]
+fn double_clicking_precomp_and_group_in_timeline_focuses_like_a_composition(
+    cx: &mut TestAppContext,
+) {
+    let project = r##"{
+        "id": "p", "name": "Main", "compId": "main", "w": 640, "h": 360, "fps": 30, "dur": 10,
+        "layers": [
+            {"id":"pre","name":"Sub Comp","type":"precomp","from":0,"dur":6,"on":true,"d":{"comp":"sub","w":640,"h":360},"p":{}},
+            {"id":"g1","name":"Card Group","type":"group","from":0,"dur":6,"on":true,"collapsed":true,"d":{},"p":{}},
+            {"id":"c1","name":"Child","type":"solid","group":"g1","from":0,"dur":6,"on":true,"d":{"w":100,"h":100,"color":"#ff0000"},"p":{}},
+            {"id":"other","name":"Outside","type":"solid","from":0,"dur":6,"on":true,"d":{"w":100,"h":100,"color":"#00ff00"},"p":{}}
+        ],
+        "assets": {},
+        "comps": {
+            "sub": {"id":"sub","name":"Sub","w":640,"h":360,"fps":30,"dur":6,"layers":[]}
+        }
+    }"##;
+    let mut s = stage_project(cx, project.to_owned());
+
+    // 1. Double-clicking the precomp's track bar emits OpenComposition("sub").
+    let pre_clip = s.at(0, 2.0);
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: pre_clip,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: pre_clip,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .effects
+            .borrow()
+            .contains(&pm_panel_timeline::HostEffect::OpenComposition("sub".into())),
+        "double-clicking a precomp bar should open its composition"
+    );
+
+    // 2. Double-clicking the group layer in the timeline outline focuses g1:
+    //    rows scope to g1's children ("c1") and a focused group tab appears.
+    let g_name = bounds(&mut s.vcx, r#"timeline:name:["layer","g1"]"#).center();
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: g_name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: g_name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().active_focused_group().map(str::to_owned)),
+        Some("g1".to_owned()),
+        "double-clicking a group in the timeline outline should focus it"
+    );
+    let visible_layers: Vec<String> = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .rows()
+            .iter()
+            .filter_map(|r| match &r.id {
+                pm_panel_timeline::RowId::Layer(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(visible_layers, vec!["c1".to_string()]);
+    // Focused group tab is published in timeline:tabs (header slot) as active.
+    let (group_tab_selected, root_tab_id) = s.view.read_with(&s.vcx, |v, _| {
+        let nodes = v.publication.surface.nodes();
+        let group_tab = nodes
+            .values()
+            .find(|n| n.props.get("id").and_then(|v| v.as_str()) == Some("timeline:tab:group:g1"))
+            .expect("focused group tab should be published in timeline:tabs");
+        let root_tab = nodes
+            .values()
+            .find(|n| n.props.get("id").and_then(|v| v.as_str()) == Some("timeline:tab:main"))
+            .expect("root composition tab should be published in timeline:tabs");
+        (
+            group_tab.props.get("aria-selected").and_then(|v| v.as_bool()),
+            root_tab.id,
+        )
+    });
+    assert_eq!(group_tab_selected, Some(true));
+
+    // 3. Clicking the parent composition tab exits group focus back to all root layers.
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.send(root_tab_id, "click", Default::default(), cx);
+    });
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model().active_focused_group().map(str::to_owned)),
+        None,
+        "clicking parent composition tab should exit group focus"
+    );
+    let restored_layers: Vec<String> = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .rows()
+            .iter()
+            .filter_map(|r| match &r.id {
+                pm_panel_timeline::RowId::Layer(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(
+        restored_layers,
+        vec!["pre".to_string(), "g1".to_string(), "other".to_string()]
+    );
+}
+
+// Headless measurements through mounted app objects and their kernel workers.
+#[path = "drag_latency_timeline_tests.rs"]
+mod drag_latency_metrics;

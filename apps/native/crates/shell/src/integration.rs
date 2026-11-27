@@ -1,0 +1,160 @@
+//! Additive host seam. The app owns sessions/panels; the shell owns placement.
+use crate::{
+    layout::Rect,
+    native::{Command, Host},
+};
+use gpui::{AnyElement, App, Window};
+use std::{cell::RefCell, rc::Rc};
+/// Ids and names, shared: a list the shell keeps per frame and compares.
+pub type Names = std::sync::Arc<[(String, String)]>;
+
+/// A trailing action button contributed to a panel header by a v4 extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelHeaderButton {
+    pub id: String,
+    pub label: Option<String>,
+    pub icon: Option<String>,
+    pub tooltip: String,
+    pub active: bool,
+    pub command: String,
+}
+
+pub trait Integration {
+    fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
+    fn command(&self, command: &Command, window: &mut Window, cx: &mut App) -> bool;
+    /// Last measured natural body plus header height, before column clipping.
+    fn natural_panel_height(&self, _id: &str, _cx: &App) -> Option<f32> {
+        None
+    }
+    fn panel(
+        &self,
+        id: &str,
+        bounds: Rect,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement>;
+    /// Whether panel `id` holds the keyboard, told each time the shell lays
+    /// it out (the timeline's selected rows take the accent only then).
+    fn panel_focused(&self, _id: &str, _focused: bool, _cx: &mut App) {}
+    /// Content for panel `id`'s 32 pt header, replacing the shell's title
+    /// (a tab group keeps its tab strip, and then `tabbed`: the tab names
+    /// the panel, so its header leaves out its own title). `None` = the
+    /// shell's header.
+    fn header(
+        &self,
+        _id: &str,
+        _bounds: Rect,
+        _tabbed: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<AnyElement> {
+        None
+    }
+    /// Layer 1: trailing action buttons contributed to panel `id`'s header.
+    fn panel_header_actions(&self, _id: &str, _cx: &App) -> Vec<PanelHeaderButton> {
+        Vec::new()
+    }
+    /// Home (v1's Projects screen), drawn in place of the docks while the
+    /// window shows it; `None` = the docks.
+    fn home(&self, _window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
+        None
+    }
+    fn action_toast(&self, _cx: &mut App) -> Option<AnyElement> { None }
+    /// Commands that cannot run now, so menus never offer a silent no-op.
+    fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
+        Default::default()
+    }
+    /// Why the selected cut cannot accept the default transition, when refused.
+    fn transition_refusal(&self, _cx: &App) -> Option<String> {
+        None
+    }
+    /// Toggle commands that are on now: their menu rows carry a checkmark.
+    fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
+        Default::default()
+    }
+    /// Effect ids and labels the command palette offers. Asked on every
+    /// frame: answer from a value kept until it changes, never by walking
+    /// the project (the same list returns the same `Arc`, compared by
+    /// pointer).
+    fn palette_effects(&self, _cx: &App) -> Names {
+        Names::default()
+    }
+    /// Layer ids and names in the active composition, kept as
+    /// [`Self::palette_effects`] is.
+    fn palette_layers(&self, _cx: &App) -> Names {
+        Names::default()
+    }
+    /// Recent projects (library id, name), newest first.
+    fn recent(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// True when a native surface below GPUI draws this panel's body. The shell
+    /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel_id(&self, id: &str, _cx: &App) -> String {
+        id.to_owned()
+    }
+    fn native_panel(&self, _id: &str, _cx: &App) -> bool {
+        false
+    }
+    /// A tab's context menu. Return the entries to show now, or `None` when the
+    /// app adds asynchronous items and shows the menu itself.
+    fn panel_menu(
+        &self,
+        _id: &str,
+        entries: Vec<crate::native::MenuEntry>,
+        _at: (f32, f32),
+        _cx: &mut App,
+    ) -> Option<Vec<crate::native::MenuEntry>> {
+        Some(entries)
+    }
+    /// The kernel's workspace store as this window sees it, the same `Rc`
+    /// until something in it changes. `None`: the window keeps its own copy.
+    fn workspaces(&self, _cx: &App) -> Option<std::rc::Rc<crate::workspace::Store>> {
+        None
+    }
+    /// Sends one change to the kernel's workspace store, without waiting.
+    fn write_workspace(&self, _write: crate::workspace::Write, _cx: &mut App) {}
+    /// A passing note in the status line (the shell's own messages: a
+    /// workspace saved or deleted, a definition that can't be used).
+    fn note(&self, _text: &str, _cx: &mut App) {}
+    /// Panels this window's extensions contribute: id and title.
+    fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Discovery or activation is still running for this window.
+    fn panels_loading(&self, _cx: &App) -> bool { false }
+    /// Titles of panels seen before, for a tab whose panel has not
+    /// registered yet (its extension still starting).
+    fn remembered_panel_titles(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Explicit dismissal of a build, independent of workspace refreshes.
+    fn panel_closed(&self, _id: &str, _cx: &mut App) {}
+    /// The workspace's open panels, after any layout change.
+    fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
+    /// The panels on screen this frame (each tab group's front panel, or the
+    /// maximised one alone): open ones outside it are tabs behind another or
+    /// under a maximised panel, drawn by no one.
+    fn shown_panels(&self, _shown: &[&str], _cx: &mut App) {}
+    fn project_id(&self, cx: &App) -> Option<String>;
+    fn status(&self, cx: &App) -> String;
+    /// The panel's body paints its own ground (the timeline's track material);
+    /// the shell then fills only its header.
+    fn paints_own_ground(&self, _id: &str, _cx: &App) -> bool {
+        false
+    }
+    /// Format facts on the status line's trailing side (`1920×1080 · 30 fps`).
+    fn status_trailing(&self, _cx: &App) -> String {
+        String::new()
+    }
+    /// A problem the person can press to see (`2 files offline`), in
+    /// `danger` before the format facts; empty for none.
+    fn status_alert(&self, _cx: &App) -> String {
+        String::new()
+    }
+    fn status_alert_pressed(&self, _window: &mut gpui::Window, _cx: &mut App) {}
+    fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);
+}
+pub type Factory = Rc<dyn Fn(Rc<RefCell<Host>>, &mut Window, &mut App) -> Rc<dyn Integration>>;
+pub(crate) struct AppIntegration(pub Factory);
+impl gpui::Global for AppIntegration {}

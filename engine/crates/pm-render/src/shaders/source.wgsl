@@ -1,0 +1,340 @@
+// Source conversion (plan sections 9 and 13): a decoded frame or image,
+// already normalized by pm-gpu's decode-in pass, to premultiplied working
+// values at the source's size.
+//
+// - Y′CbCr: siting-aware chroma upsampling, exact at co-sited samples
+//   (pm_color::chroma): Catmull-Rom horizontally, linear vertically for
+//   4:2:0; then the matrix.
+// - Transfer and primaries into the working encoding. In Standard an
+//   E-encoded Rec.709 source is the identity: code values pass through.
+//   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 to linear
+//   light with SDR white at 1.0: kept whole in HDR projects (`hdr.w`), tone
+//   mapped with the BT.2390 EETF otherwise (pm_color::tonemap's WGSL is
+//   prepended too). The primaries columns then convert the source's
+//   primaries to Rec.709. Transfer 7 is a pure power with the exponent in
+//   `hdr.z` (PNG gAMA). Transfers 10 to 14 are camera log curves
+//   (pm_color::camera_log's WGSL is prepended).
+// - Alpha by pm_color::alpha's plan.
+//
+// `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
+// with the working storage format.
+
+struct Params {
+    // kind (0 RGB, 1 Y′CbCr, 2 packed RGB), transfer, working (0 Standard, 1 linear), alpha plan.
+    a: vec4<u32>,
+    // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
+    b: vec4<u32>,
+    // chroma plane width, height; flags (1: f16 storage, 2: legacy RGBA8 input); convert primaries.
+    c: vec4<u32>,
+    // chroma origin on the luma grid (xy).
+    origin: vec4<f32>,
+    // Y′CbCr → R′G′B′ columns.
+    m0: vec4<f32>,
+    m1: vec4<f32>,
+    m2: vec4<f32>,
+    // Primaries conversion columns (linear light).
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    p2: vec4<f32>,
+    // Matte color for "premultiplied with color".
+    matte: vec4<f32>,
+    // HDR: x the content peak in cd/m²; y 1 for BT.2020 constant luminance;
+    // z the exponent of the pure power transfer (7); w 1 to keep HDR light.
+    hdr: vec4<f32>,
+    // An HDR source's tone mapping into an SDR project (pm_color::cst): x
+    // the method (1, BT.2390 per channel, the default), y its Highlight
+    // Desaturation.
+    tone: vec4<f32>,
+};
+
+@group(0) @binding(0) var luma: texture_2d<f32>;
+@group(0) @binding(1) var chroma: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> P: Params;
+@group(0) @binding(3) var out: texture_storage_2d<OUT_FORMAT, write>;
+
+fn chroma_at(i: i32, j: i32) -> vec2<f32> {
+    let w = i32(P.c.x);
+    let h = i32(P.c.y);
+    return textureLoad(chroma, vec2<i32>(clamp(i, 0, w - 1), clamp(j, 0, h - 1)), 0).rg;
+}
+
+fn catmull_rom(t: f32) -> vec4<f32> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return vec4<f32>(
+        (-t3 + 2.0 * t2 - t) * 0.5,
+        (3.0 * t3 - 5.0 * t2 + 2.0) * 0.5,
+        (-3.0 * t3 + 4.0 * t2 + t) * 0.5,
+        (t3 - t2) * 0.5,
+    );
+}
+
+// Separable, normalized Lanczos-3, with edge extension by chroma_at.
+fn lanczos3(x: f32) -> f32 {
+    if (abs(x) < 0.000001) { return 1.0; }
+    if (abs(x) >= 3.0) { return 0.0; }
+    let p = 3.141592653589793 * x;
+    return sin(p) / p * sin(p / 3.0) / (p / 3.0);
+}
+
+// One chroma row j sampled horizontally at luma column x.
+fn chroma_row(x: u32, j: i32) -> vec2<f32> {
+    let kind = P.b.z;
+    if (kind == 0u) {
+        return chroma_at(i32(x), j);
+    }
+    let u = (f32(x) - P.origin.x) / f32(P.b.x);
+    let fi = floor(u);
+    let t = u - fi;
+    let i = i32(fi);
+    if (kind == 1u) {
+        if (t == 0.0) {
+            return chroma_at(i, j);
+        }
+        return chroma_at(i, j) * (1.0 - t) + chroma_at(i + 1, j) * t;
+    }
+    if (t == 0.0) {
+        return chroma_at(i, j);
+    }
+    if (kind == 3u) {
+        var sum = vec2<f32>(0.0);
+        var weight = 0.0;
+        for (var offset = -2; offset <= 3; offset++) {
+            let w = lanczos3(t - f32(offset));
+            sum += chroma_at(i + offset, j) * w;
+            weight += w;
+        }
+        return sum / weight;
+    }
+    let w = catmull_rom(t);
+    return chroma_at(i - 1, j) * w.x + chroma_at(i, j) * w.y + chroma_at(i + 1, j) * w.z
+        + chroma_at(i + 2, j) * w.w;
+}
+
+fn chroma_sample(x: u32, y: u32) -> vec2<f32> {
+    if (P.b.w == 0u) {
+        return chroma_row(x, i32(y));
+    }
+    let v = (f32(y) - P.origin.y) / f32(P.b.y);
+    let fj = floor(v);
+    let t = v - fj;
+    let j = i32(fj);
+    if (t == 0.0) {
+        return chroma_row(x, j);
+    }
+    if (P.b.w == 3u) {
+        var sum = vec2<f32>(0.0);
+        var weight = 0.0;
+        for (var offset = -2; offset <= 3; offset++) {
+            let w = lanczos3(t - f32(offset));
+            sum += chroma_row(x, j + offset) * w;
+            weight += w;
+        }
+        return sum / weight;
+    }
+    return chroma_row(x, j) * (1.0 - t) + chroma_row(x, j + 1) * t;
+}
+
+fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
+    switch P.a.y {
+        case 0u: {
+            return pm_e_decode3(c);
+        }
+        case 1u: {
+            // BT.1886, zero black level: gamma 2.4, odd-symmetric.
+            return sign(c) * pow(abs(c), vec3<f32>(2.4));
+        }
+        case 2u: {
+            // Inverse BT.709 OETF, odd-symmetric.
+            let m = abs(c);
+            let lo = m / 4.5;
+            let hi = pow((m + 0.099) / 1.099, vec3<f32>(1.0 / 0.45));
+            return sign(c) * select(hi, lo, m < vec3<f32>(0.081));
+        }
+        case 4u: {
+            return sign(c) * pow(abs(c), vec3<f32>(2.2));
+        }
+        case 8u, 9u: {
+            let decades = select(2.0, 2.5, P.a.y == 9u);
+            let light = pow(vec3<f32>(10.0), decades * (c - vec3<f32>(1.0)));
+            return select(light, vec3<f32>(0.0), c <= vec3<f32>(0.0));
+        }
+        case 7u: {
+            // A pure power (PNG gAMA alone), odd-symmetric.
+            return sign(c) * pow(abs(c), vec3<f32>(P.hdr.z));
+        }
+        case 10u, 11u, 12u, 13u, 14u: {
+            return pm_camera_log_decode3(c, P.a.y);
+        }
+        default: {
+            return c;
+        }
+    }
+}
+
+// The input transform: source encoding and primaries to the working encoding.
+// SDR transfers are extended and sign-preserving, so superwhites and
+// sub-blacks survive linearisation and any primaries conversion for every
+// reading; only 8-bit storage or display clips them. PQ and HLG are defined
+// on 0..1, so their signal is clipped.
+fn to_working(input: vec3<f32>) -> vec3<f32> {
+    var c = input;
+    if ((P.c.z & 2u) != 0u) {
+        c = floor(clamp(c, vec3f(0.0), vec3f(1.0)) * 255.0 + 0.5) / 255.0;
+    }
+    let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
+    if (identity) {
+        return c;
+    }
+    if (P.a.y == 5u || P.a.y == 6u) {
+        let signal = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+        let method = u32(P.tone.x + 0.5);
+        var sdr = pm_hdr_to_sdr(signal, P.a.y == 6u, P.hdr.x);
+        if (method != 1u) {
+            sdr = pm_cst_tone_sdr(pm_hdr_nits(signal, P.a.y == 6u), method, P.hdr.x, P.tone.y);
+        }
+        let light = select(sdr, pm_hdr_to_working(signal, P.a.y == 6u), P.hdr.w == 1.0);
+        let l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * light;
+        if (P.a.z == 0u) {
+            return pm_e_encode3(l);
+        }
+        return l;
+    }
+    var l = transfer_to_linear(c);
+    if (P.c.w == 1u) {
+        l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * l;
+    }
+    if (P.a.z == 0u) {
+        return pm_e_encode3(l);
+    }
+    return l;
+}
+
+fn transform_premultiplied(c: vec4<f32>) -> vec4<f32> {
+    if (!pm_may_unpremultiply(c.a)) {
+        // Below the floor (and additive pixels): kept as they are.
+        return c;
+    }
+    let s = c.rgb / c.a;
+    return vec4<f32>(to_working(s) * c.a, c.a);
+}
+
+// BT.2020 constant luminance, H.273 matrix 10 (BT.2020-2, table 4).
+// Recover G in linear light, then return R'G'B' to the source transfer
+// reading. The piecewise chroma scale cannot be expressed by P.m0..m2.
+fn bt2020_cl_decode(v: f32) -> f32 {
+    let m = abs(v);
+    var l: f32;
+    if (m < 0.0812428582986315) { l = m / 4.5; }
+    else { l = pow((m + 0.09929682680944) / 1.09929682680944, 1.0 / 0.45); }
+    return select(l, -l, v < 0.0);
+}
+fn bt2020_cl_encode(v: f32) -> f32 {
+    let m = abs(v);
+    var e: f32;
+    if (m < 0.018053968510807) { e = 4.5 * m; }
+    else { e = 1.09929682680944 * pow(m, 0.45) - 0.09929682680944; }
+    return select(e, -e, v < 0.0);
+}
+fn bt2020_cl_rgb(ycc: vec3<f32>) -> vec3<f32> {
+    let b = ycc.x + ycc.y * select(1.5816, 1.9404, ycc.y < 0.0);
+    let r = ycc.x + ycc.z * select(0.9936, 1.7184, ycc.z < 0.0);
+    let g = (bt2020_cl_decode(ycc.x) - 0.2627 * bt2020_cl_decode(r)
+        - 0.0593 * bt2020_cl_decode(b)) / 0.6780;
+    return vec3<f32>(r, bt2020_cl_encode(g), b);
+}
+
+// One source pixel in the source's own RGB(A) encoding: YCbCr through its
+// matrix, normalized integer codes restored.
+fn decoded(p: vec2<u32>) -> vec4<f32> {
+    let v = textureLoad(luma, vec2<i32>(p), 0);
+    if (P.a.x == 1u) {
+        let cbcr = chroma_sample(p.x, p.y);
+        let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
+        if (P.hdr.y == 1.0) { return vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
+        let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
+        return vec4<f32>(m * ycc, v.a);
+    }
+    if (P.a.x == 2u && P.m0.x != 0.0) {
+        return vec4<f32>((round(v.rgb * P.m0.x) - vec3<f32>(P.m0.y)) / P.m0.z,
+            round(v.a * P.m0.x) / P.m0.w);
+    }
+    return v;
+}
+
+// One source sample as premultiplied working colour (the transfer, primaries,
+// alpha and matte interpretation of the reading).
+fn working(stored: vec4<f32>) -> vec4<f32> {
+    switch P.a.w {
+        case 0u: {
+            return vec4<f32>(to_working(stored.rgb), 1.0);
+        }
+        case 1u: {
+            return vec4<f32>(to_working(stored.rgb) * stored.a, stored.a);
+        }
+        case 2u: {
+            return stored;
+        }
+        case 3u: {
+            return transform_premultiplied(stored);
+        }
+        default: {
+            let removed = vec4<f32>(stored.rgb - (1.0 - stored.a) * P.matte.rgb, stored.a);
+            let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
+            return select(transform_premultiplied(removed), removed, identity);
+        }
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(out);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+    let xy = vec2<i32>(id.xy);
+    let input_dims = textureDimensions(luma);
+    var w: vec4<f32>;
+    if (all(input_dims == dims)) {
+        // The exact path: the source pixel itself.
+        w = working(decoded(id.xy));
+    } else if (all(input_dims >= dims)) {
+        // A preview destination smaller than the source: the area average of
+        // the source pixels under each destination pixel (partial pixels at
+        // the footprint's edges weighted by their overlap), so detail finer
+        // than the destination averages out instead of aliasing into moire.
+        // Each sample is averaged as premultiplied working colour, as the
+        // exact frame's own filtering later averages it.
+        let scale = vec2<f32>(input_dims) / vec2<f32>(dims);
+        let lo = vec2<f32>(id.xy) * scale;
+        let hi = lo + scale;
+        let p0 = vec2<u32>(floor(lo));
+        let p1 = min(vec2<u32>(ceil(hi)) - vec2<u32>(1u), input_dims - vec2<u32>(1u));
+        var sum = vec4<f32>(0.0);
+        for (var y = p0.y; y <= p1.y; y++) {
+            let wy = min(f32(y + 1u), hi.y) - max(f32(y), lo.y);
+            for (var x = p0.x; x <= p1.x; x++) {
+                let wt = (min(f32(x + 1u), hi.x) - max(f32(x), lo.x)) * wy;
+                sum += working(decoded(vec2<u32>(x, y))) * wt;
+            }
+        }
+        w = sum / (scale.x * scale.y);
+    } else {
+        // A side larger than the source (preview sizing never upscales):
+        // bilinear at the destination's pixel centres.
+        let source = (vec2<f32>(id.xy) + vec2<f32>(0.5)) * vec2<f32>(input_dims) / vec2<f32>(dims) - vec2<f32>(0.5);
+        let hi = vec2<i32>(input_dims) - vec2<i32>(1);
+        let base = vec2<i32>(floor(source));
+        let a = vec2<u32>(clamp(base, vec2<i32>(0), hi));
+        let b = vec2<u32>(clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi));
+        let c = vec2<u32>(clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi));
+        let d = vec2<u32>(clamp(base + vec2<i32>(1), vec2<i32>(0), hi));
+        let t = fract(source);
+        w = mix(mix(working(decoded(a)), working(decoded(b)), t.x),
+                mix(working(decoded(c)), working(decoded(d)), t.x), t.y);
+    }
+    if ((P.c.z & 1u) != 0u) {
+        w = vec4<f32>(quantizeToF16(w.r), quantizeToF16(w.g), quantizeToF16(w.b), quantizeToF16(w.a));
+    }
+    textureStore(out, xy, w);
+}
