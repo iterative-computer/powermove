@@ -29,8 +29,9 @@ and of each frame's average of it, in cd/m² (`VerifyReport::content_light`). Th
 into the file's `clli` once every frame is encoded, and the file check holds the file to them.
 macOS writes `mdcv` and `clli` in the container only, not as SEI in the stream.
 
-**Camera log** is an Interpret Footage reading: View ▸ Interpret Selection As. Files don't
-carry a tag for these curves, so nothing is detected. A curve reads the code after the
+**Camera log** is an Interpret Footage reading: View ▸ Interpret Selection As. New native
+imports read supported camera log metadata automatically. Previously saved clips keep
+their existing reading, and a manual choice still takes precedence. A curve reads the code after the
 file's range is removed, Resolve's convention; set Range to Full for a camera that writes
 codes unscaled. Light above 1.0 stays in the working space. There's no display transform:
 an SDR project clips it at output, so use a LUT or an HDR project. Uninterpreted log

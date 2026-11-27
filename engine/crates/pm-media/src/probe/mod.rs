@@ -5,6 +5,7 @@
 //! is in [`crate::hash`]; waveforms are the mix's (`pm_audio::waveform`).
 
 pub mod cache;
+pub(crate) mod camera_log;
 pub mod color;
 pub mod timing;
 
@@ -426,14 +427,19 @@ fn probe_with_input_fingerprint(
         audio_stream,
     } = input_timing(path, &input, &container);
     measure_unstated_audio_lengths(&input, &mut streams);
+    let fmt_meta = input.all_metadata(None);
     let (video, index) = match video_stream {
         Some(v) => {
-            let (p, idx) = video_probe(path, &input, v)?;
+            let single_video = streams
+                .iter()
+                .filter(|s| s.kind == StreamKind::Video && !s.attached_picture)
+                .count()
+                == 1;
+            let (p, idx) = video_probe(path, &input, v, &container, single_video, &fmt_meta)?;
             (Some(p), Some(idx))
         }
         None => (None, None),
     };
-    let fmt_meta = input.all_metadata(None);
     let find = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
         fmt_meta
             .iter()
@@ -519,7 +525,14 @@ fn audio_probe(path: &Path, input: &Input, i: usize, container: &str) -> AudioPr
     }
 }
 
-fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, FrameIndex)> {
+fn video_probe(
+    path: &Path,
+    input: &Input,
+    v: usize,
+    container: &str,
+    single_video: bool,
+    metadata: &[(String, String)],
+) -> Result<(VideoProbe, FrameIndex)> {
     let info = input.codec_info(v);
     let idx = index::build(path, input, v)?;
     let side = SideData::read(input, v);
@@ -535,7 +548,26 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
         None
     };
     let alpha_mode = alpha.map(|_| hevc_alpha_mode(&info, &idx).unwrap_or(AlphaMode::Straight));
-    let color = color::interpret(&info, atom(b"colr"), &side, alpha_mode);
+    let camera_log = camera_log::quicktime(&idx.config)
+        .or_else(|| idx.config.sony_log_gamut.map(camera_log::sony))
+        .or_else(|| {
+            (single_video && idx.config.fourcc.is_some())
+                .then(|| camera_log::panasonic_quicktime(metadata))
+                .flatten()
+        })
+        .or_else(|| {
+            (single_video && info.codec == "prores" && idx.config.fourcc.is_some())
+                .then(|| camera_log::arri_quicktime(metadata))
+                .flatten()
+        })
+        .or_else(|| {
+            (container == "mxf" && single_video)
+                .then(|| index::mxf::picture_transfer(path).and_then(camera_log::mxf))
+                .flatten()
+        })
+        .or_else(|| (info.color_trc == ff::AVCOL_TRC_V_LOG).then(camera_log::v_log));
+    let color =
+        color::interpret_with_camera_log(&info, atom(b"colr"), &side, alpha_mode, camera_log);
 
     // Pixel aspect: `pasp`, else FFmpeg's sample aspect ratio.
     let (pixel_aspect, pixel_aspect_source) = match atom(b"pasp").filter(|p| p.len() >= 8) {

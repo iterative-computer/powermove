@@ -3671,6 +3671,7 @@ dependencies = [
  "pm-protocol",
  "pm-time",
  "resvg",
+ "roxmltree 0.21.2",
  "serde",
  "serde_json",
  "sha2",

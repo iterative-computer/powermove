@@ -13,7 +13,7 @@ use pm_media::clip::ClipTiming;
 use pm_media::decode::service::MediaSource;
 use pm_media::interlace::{self, DeinterlaceOutput, FieldOverride, FieldPlan};
 use pm_media::interpret::VideoReading;
-use pm_media::interpret::{Interpretation, OriginalReading};
+use pm_media::interpret::{CAMERA_LOG_VIDEO_COLOR, Interpretation, OriginalReading};
 use pm_media::probe::FieldInfo;
 use pm_time::{Rate, Tick};
 
@@ -30,10 +30,9 @@ pub fn interpretation(record: &pm_model::Node) -> Option<Interpretation> {
             Some(Interpretation::from_json(&value).0)
         })
         .unwrap_or_default();
-    interp.electron_color = pm_eval::node::is_str(
-        pm_eval::node::member(Some(record), "videoColor"),
-        "electron",
-    );
+    let video_color = pm_eval::node::member(Some(record), "videoColor");
+    interp.electron_color = pm_eval::node::is_str(video_color, "electron");
+    interp.auto_camera_log = pm_eval::node::is_str(video_color, CAMERA_LOG_VIDEO_COLOR);
     interp.clip = clip_timing(Some(record));
     (!interp.is_empty()).then_some(interp)
 }
@@ -92,12 +91,7 @@ pub fn for_copy(
         }
     }
     if let Some(facts) = facts {
-        use pm_media::probe::color::{electron_frame_reading, frame_reading};
-        let reading = if interp.electron_color {
-            electron_frame_reading(&facts.color, &facts.codec, sequence)
-        } else {
-            frame_reading(&facts.color, sequence)
-        };
+        let reading = interp.file_color(&facts.color, &facts.codec, sequence);
         interp.original = Some(OriginalReading {
             primaries: reading.primaries,
             transfer: reading.transfer,

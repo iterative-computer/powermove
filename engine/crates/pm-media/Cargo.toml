@@ -27,6 +27,7 @@ resvg = { version = "0.48", default-features = false, features = ["text", "syste
 # SVG sources in the encodings an XML parser in Chromium honors (usvg reads
 # UTF-8 only).
 encoding_rs = "0.8"
+roxmltree = "0.21"
 
 [dev-dependencies]
 pm-color = { path = "../pm-color" }

@@ -1215,6 +1215,7 @@ impl Builtins {
                     && matches!(kind, "video" | "audio")
                 {
                     asset["timing"] = json!(pm_media::clip::ClipTiming::imported());
+                    mark_new_video(&mut asset);
                 }
                 if let Some(definition) = &request.layer_definition {
                     asset["layerDefinition"] = json!(definition);
@@ -3392,6 +3393,49 @@ mod tests {
         path
     }
 
+    #[test]
+    fn camera_log_reading_is_stamped_on_import_but_not_on_relink() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"old":{"id":"old","name":"Old.mov","kind":"video","timing":2}},"comps":{},"layers":[]}"##,
+        );
+        let import = |name, replace: Option<&str>| {
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![clip_with_streams(&f.root, name, &[])],
+                        replace: replace.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(outcome.failed.is_empty(), "{outcome:?}");
+        };
+        let assets = || {
+            let published = f.actor.handle().published("p").unwrap();
+            crate::data::wire(&published.snapshot.root().unwrap().to_value())["assets"].clone()
+        };
+        import("New.mov", None);
+        let new = assets()
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|id| *id != "old")
+            .unwrap()
+            .clone();
+        import("Old relinked.mov", Some("old"));
+        import("New relinked.mov", Some(&new));
+        let assets = assets();
+        assert!(assets["old"].get("videoColor").is_none());
+        assert_eq!(
+            assets[new]["videoColor"],
+            pm_media::interpret::CAMERA_LOG_VIDEO_COLOR
+        );
+    }
+
     /// The clicks a person hears from `asset` as its only clip: the
     /// published record through the mix graph and offline PCM.
     fn heard(f: &Fixture, asset: &str) -> Vec<usize> {
@@ -3928,4 +3972,10 @@ pub fn probe(path: &Path) -> Result<serde_json::Value, String> {
     }
     let (record, _) = metadata(path, kind, size, Default::default())?;
     Ok(crate::data::wire(&record))
+}
+
+pub fn mark_new_video(asset: &mut serde_json::Value) {
+    if asset["kind"] == "video" {
+        asset["videoColor"] = json!(pm_media::interpret::CAMERA_LOG_VIDEO_COLOR);
+    }
 }

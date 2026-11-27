@@ -31,7 +31,10 @@
 //! ```
 
 use crate::interlace::FieldOverride;
-use crate::probe::color::{ColorInfo, HdrFormat, MasteringDisplay};
+use crate::probe::camera_log::CameraLog;
+use crate::probe::color::{
+    ColorInfo, HdrFormat, MasteringDisplay, electron_frame_reading, frame_reading,
+};
 use crate::probe::{CleanAperture, FieldOrder, VideoProbe};
 use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Primaries, Range, Transfer,
@@ -78,12 +81,17 @@ pub enum AlphaChoice {
     PremultipliedWithColor,
 }
 
+/// The asset's `videoColor` value for new native imports.
+pub const CAMERA_LOG_VIDEO_COLOR: &str = "nativeCameraLog";
+
 /// The parsed `interpret` member. `None` (or `Auto`) is "as the file says".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Interpretation {
     /// Persisted on an imported asset, outside the user's `interpret` choices.
     /// Reproduce the Electron preview's colour reading for legacy projects.
     pub electron_color: bool,
+    /// Only assets imported with the new camera-log reading use it.
+    pub auto_camera_log: bool,
     pub primaries: Option<Primaries>,
     pub transfer: Option<Transfer>,
     pub matrix: Option<MatrixCoefficients>,
@@ -368,6 +376,27 @@ impl Interpretation {
     pub fn is_empty(&self) -> bool {
         *self == Interpretation::default()
     }
+
+    fn camera_log(&self, color: &ColorInfo) -> Option<CameraLog> {
+        if self.auto_camera_log && !self.electron_color {
+            color.camera_log
+        } else {
+            None
+        }
+    }
+
+    /// The asset's automatic frame reading, before manual overrides.
+    pub fn file_color(&self, color: &ColorInfo, codec: &str, sequence: bool) -> ColorDescription {
+        if self.electron_color {
+            return electron_frame_reading(color, codec, sequence);
+        }
+        let mut reading = frame_reading(color, sequence);
+        if let Some(log) = self.camera_log(color) {
+            reading.primaries = log.primaries;
+            reading.transfer = log.transfer;
+        }
+        reading
+    }
 }
 
 /// The stored names of the tone mappings, in `pm_color::cst::TONE_MAPPING`'s
@@ -549,8 +578,22 @@ pub fn resolve_video(v: &VideoProbe, interp: &Interpretation) -> VideoReading {
     let c: &ColorInfo = &v.color;
     let o = &c.origins;
     let auto = c.interpreted;
-    let primaries = field(auto.primaries, o.primaries.clone(), interp.primaries);
-    let transfer = field(auto.transfer, o.transfer.clone(), interp.transfer);
+    let log = interp.camera_log(c);
+    let log_origin = || {
+        log.map(|log| Origin::File {
+            source: log.source.into(),
+        })
+    };
+    let primaries = field(
+        log.map_or(auto.primaries, |log| log.primaries),
+        log_origin().unwrap_or_else(|| o.primaries.clone()),
+        interp.primaries,
+    );
+    let transfer = field(
+        log.map_or(auto.transfer, |log| log.transfer),
+        log_origin().unwrap_or_else(|| o.transfer.clone()),
+        interp.transfer,
+    );
     let matrix = field(auto.matrix, o.matrix.clone(), interp.matrix);
     let range = field(auto.range, o.range.clone(), interp.range);
     let siting = field(auto.siting, o.siting.clone(), interp.siting);

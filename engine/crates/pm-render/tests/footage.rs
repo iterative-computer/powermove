@@ -26,7 +26,7 @@ use pm_color::tonemap::{HdrSignal, bt2020_to_709, to_sdr};
 use pm_color::ycbcr::Matrix;
 use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::frame::DecodedFrame;
-use pm_media::interpret::{Interpretation, resolve_video};
+use pm_media::interpret::{CAMERA_LOG_VIDEO_COLOR, Interpretation, resolve_video};
 use pm_protocol::color::{ChromaSiting, MatrixCoefficients, Precision};
 use pm_protocol::common::Size;
 use pm_render::footage::{Geometry, Timing};
@@ -1120,6 +1120,66 @@ fn untagged_hd_clip(dir: &Path) -> PathBuf {
         .unwrap();
     assert!(status.success(), "ffmpeg wrote the clip");
     output
+}
+
+#[test]
+fn saved_auto_footage_keeps_its_render_until_imported_with_camera_log_detection() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/prores422.mov");
+    let ffmpeg = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"))
+        .join("bin/ffmpeg");
+    let remux = |name, gamma: &str| {
+        let path = dir.path().join(name);
+        assert!(
+            std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-i"])
+                .arg(&fixture)
+                .args([
+                    "-map",
+                    "0:v:0",
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+use_metadata_tags",
+                    "-metadata"
+                ])
+                .arg(format!("com.arri.camera.ColorGammaSxS={gamma}"))
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        path
+    };
+    let control = remux("control.mov", "REC-709");
+    let tagged = remux("log-c.mov", "LOG-C");
+    let size = (64, 36);
+    let mut r = Renderer::headless().unwrap();
+    let draw = |r: &mut Renderer, path: &Path, mode: Option<&str>, manual: Option<Value>| {
+        let (mut doc, res) = document(path, size, 25.0, manual);
+        let asset = &mut doc["assets"]["clip"];
+        asset["timing"] = json!(2);
+        if let Some(mode) = mode {
+            asset["videoColor"] = json!(mode);
+        }
+        render(r, &doc, size, 0.0, &res)
+    };
+    let saved = draw(&mut r, &tagged, None, None);
+    assert_eq!(saved, draw(&mut r, &control, None, None));
+    let mode = Some(CAMERA_LOG_VIDEO_COLOR);
+    let imported = draw(&mut r, &tagged, mode, None);
+    assert_ne!(imported, saved);
+    let log_c = Some(json!({"primaries": "awgGen3", "transfer": "logC3"}));
+    assert_eq!(imported, draw(&mut r, &tagged, None, log_c));
+    let sdr = Some(json!({"primaries": "bt709", "transfer": "displayE"}));
+    assert_eq!(
+        draw(&mut r, &tagged, None, sdr.clone()),
+        draw(&mut r, &tagged, mode, sdr)
+    );
+    assert_eq!(
+        draw(&mut r, &tagged, Some("electron"), None),
+        draw(&mut r, &control, Some("electron"), None)
+    );
 }
 
 /// A v1 project's asset carries Electron's video reading (`videoColor:

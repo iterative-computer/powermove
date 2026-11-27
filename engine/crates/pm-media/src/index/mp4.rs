@@ -4,6 +4,7 @@
 
 use super::{CodecConfig, Cur, EditFacts, Frame, FrameIndex, IndexSource, IndexStats, Loc, Sample};
 use crate::error::{MediaError, Result};
+use crate::probe::camera_log;
 use pm_time::Rational;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -121,6 +122,36 @@ impl Movie {
             .collect()
     }
 
+    fn sony_log_gamut(&self, f: &File) -> Option<pm_protocol::color::Primaries> {
+        // XAVC stores NonRealTimeMeta in an 'nrtm' metadata box, not a video
+        // sample entry. Accept file-level metadata only for a single picture.
+        let moov = children(&self.moov).ok()?;
+        let mut gamuts = moov
+            .iter()
+            .filter(|(ty, _)| ty == b"meta")
+            .filter_map(|(_, body)| sony_meta(body))
+            .chain(
+                self.top
+                    .iter()
+                    .filter(|b| &b.ty == b"meta" && b.size <= camera_log::MAX_XML_BYTES as u64)
+                    .filter_map(|b| {
+                        let body =
+                            super::read_declared(f, b.offset + b.header, b.size - b.header).ok()?;
+                        sony_meta(&body)
+                    }),
+            );
+        let gamut = gamuts.next()?;
+        (gamuts.all(|other| other == gamut)
+            && self
+                .tracks()
+                .ok()?
+                .iter()
+                .filter(|track| &track.handler == b"vide")
+                .count()
+                == 1)
+            .then_some(gamut)
+    }
+
     pub fn track(&self, select: TrackSelect) -> Result<Track<'_>> {
         let tracks = self.tracks()?;
         let found = match select {
@@ -154,6 +185,19 @@ impl Movie {
         }
         Ok(Some(Trex::default()))
     }
+}
+
+fn sony_meta(body: &[u8]) -> Option<pm_protocol::color::Primaries> {
+    if body.len() > camera_log::MAX_XML_BYTES {
+        return None;
+    }
+    let children = children(body.strip_prefix(&[0; 4])?).ok()?;
+    let handler = children.iter().find(|(ty, _)| ty == b"hdlr")?.1;
+    if handler.get(8..12)? != b"nrtm" {
+        return None;
+    }
+    let xml = children.iter().find(|(ty, _)| ty == b"xml ")?.1;
+    camera_log::sony_nrt_xml(xml.strip_prefix(&[0; 4])?)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -300,7 +344,10 @@ pub fn build(path: &Path, select: TrackSelect) -> Result<FrameIndex> {
     let f = File::open(path)?;
     let movie = Movie::read(&f)?;
     let track = movie.track(select)?;
-    let config = track.sample_entry()?;
+    let mut config = track.sample_entry()?;
+    if &track.handler == b"vide" {
+        config.sony_log_gamut = movie.sony_log_gamut(&f);
+    }
     let mut stats = IndexStats::default();
     let mut samples = table_samples(track.stbl, &mut stats)?;
     let fragmented = child(&movie.moov, b"mvex")?.is_some();
