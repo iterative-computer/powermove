@@ -4058,9 +4058,25 @@ impl Editor {
                 let mut row = div().flex().items_center().gap(px(TAB_SPACING));
                 let mut span_x = p.rect.x + if multi { -offset } else { m.inset };
                 let mut spans = vec![];
+                // Room the strip has past its tabs: a hovered tab grows into it
+                // to show its close button beside its title, never over it.
+                let spare = if scrolling {
+                    0.
+                } else {
+                    viewport - track.widths.iter().sum::<f32>() - gaps
+                };
+                let close_room =
+                    pm_design::tab::CLOSE_PAD + pm_design::tab::CLOSE + pm_design::tab::GAP
+                        - TAB_PADDING;
                 for (ti, tab) in tabs.iter().enumerate() {
+                    let closable = layout::closable(tab) && multi;
+                    let hover_key = crate::kit::key(&format!("tab-{tab}"));
+                    // 0 at rest, 1 under the pointer, on the wash springs.
+                    let hovered = if dragging { 0. } else { kit.hovered(hover_key) };
+                    let reveal = if closable && !dragging { hovered } else { 0. };
+                    let grows = spare >= close_room;
                     let drawn = if multi {
-                        track.widths[ti]
+                        track.widths[ti] + if grows { close_room * reveal } else { 0. }
                     } else {
                         single_width
                     };
@@ -4101,17 +4117,15 @@ impl Editor {
                     let selected = ti == active;
                     let ghost = lifted.is_some_and(|d| d.id == *tab || (d.stack && d.id == id));
                     let close_id = tab.clone();
-                    let closable = layout::closable(tab) && multi;
                     let title = panels.title(tab).to_string();
-                    let hover_key = crate::kit::key(&format!("tab-{tab}"));
-                    // 0 at rest, 1 under the pointer, on the wash springs.
-                    let hovered = if dragging { 0. } else { kit.hovered(hover_key) };
+                    // Under the pointer a fainter pill than the showing tab's,
+                    // so only one tab ever reads as selected.
                     let fill = if !multi {
                         0.
                     } else if selected {
                         pm_design::tab::FILL
                     } else {
-                        pm_design::tab::FILL * hovered
+                        pm_design::tab::FILL_HOVER * hovered
                     };
                     let mut cell = div()
                         .id(format!("tab-{tab}"))
@@ -4163,9 +4177,16 @@ impl Editor {
                     // A closable tab's close button slides in at its trailing
                     // end with the hover while the title's end fades out under
                     // it (the window's tabs); the title itself never moves.
-                    let reveal = if closable && !dragging { hovered } else { 0. };
+                    // Grown, the title keeps its whole room. Only in a full
+                    // strip does the button stand over the title's end, which
+                    // fades out under it (the window's tabs); the title itself
+                    // is never cut again.
                     let close_lead = pm_design::tab::CLOSE_PAD + pm_design::tab::CLOSE;
-                    let label_right = TAB_PADDING + (close_lead - TAB_PADDING) * reveal;
+                    let label_right = if grows {
+                        TAB_PADDING
+                    } else {
+                        TAB_PADDING + (close_lead - TAB_PADDING) * reveal
+                    };
                     cell = cell
                         .when(multi, |s| s.w(px(drawn)))
                         .when(!multi, |s| s.max_w(px(drawn)))

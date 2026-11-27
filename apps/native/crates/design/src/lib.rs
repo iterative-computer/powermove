@@ -1372,6 +1372,9 @@ pub mod tab {
     /// The pill's alpha of [`ink`]: the showing tab, and the one under the
     /// pointer at the end of its wash.
     pub const FILL: f32 = 0.08;
+    /// The wash under the pointer on a tab that is not showing: about half
+    /// the showing tab's pill, so a hovered tab never reads as selected.
+    pub const FILL_HOVER: f32 = FILL * 0.5;
     /// The pill in a window that is not the main one.
     pub const FILL_INACTIVE: f32 = FILL * 0.6;
     /// A tab carried along its strip by the pointer.
