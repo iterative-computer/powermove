@@ -11,5 +11,4 @@ mod entrypoints;
 mod errors;
 mod foundation;
 mod store;
-mod updater;
 mod worker;

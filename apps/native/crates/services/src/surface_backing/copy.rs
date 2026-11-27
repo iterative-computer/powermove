@@ -1,8 +1,7 @@
 //! Exact Opus copy for model states. No views or visual-token substitutes.
 //! Authority: docs/native/design/surfaces/{mixer-3d,workspaces,takes-notes-mods,
 //! onboarding,updates,diagnostics,migration,colour,tasks-storage,os-authorization}.md.
-use super::{authorization::Authorization, maintenance::UpdateState, projects::NoteDraft};
-use crate::ServiceErrorCode;
+use super::{authorization::Authorization, projects::NoteDraft};
 
 pub fn workspace_json_error(parser: &str) -> String {
     format!("This isn’t valid JSON. {parser}")
@@ -58,27 +57,6 @@ pub fn mods_summary(count: usize, attention: usize) -> String {
         s.push_str(&format!(" · {attention} needs attention"));
     }
     s
-}
-pub fn update_status(state: &UpdateState, current: &str, manual: bool) -> Option<String> {
-    match state {
-        UpdateState::Checking if manual => Some("Checking for updates…".into()),
-        UpdateState::Current if manual => Some(format!("You’re running {current}.")),
-        UpdateState::Downloading(metadata) => Some(format!("Downloading {}…", metadata.name)),
-        UpdateState::Verifying(_) => Some("Verifying…".into()),
-        UpdateState::Ready { metadata, .. } => Some(format!(
-            "Powermove {} is ready to install",
-            metadata.version
-        )),
-        UpdateState::Failed(ServiceErrorCode::Offline) if manual => {
-            Some("Check your internet connection, then try again.".into())
-        }
-        UpdateState::Failed(_) if manual => Some("Couldn’t check for updates.".into()),
-        UpdateState::DownloadFailed(_) => Some("Couldn’t download the update.".into()),
-        UpdateState::VerificationFailed(_) => {
-            Some("This update couldn’t be verified, so it wasn’t installed.".into())
-        }
-        _ => None,
-    }
 }
 pub const PERFORMANCE_LABELS: &[(&str, &str)] = &[
     ("frame_rate", "Frame Rate"),

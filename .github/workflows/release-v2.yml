@@ -1,0 +1,284 @@
+name: Release Powermove V2
+# Run by hand only (Actions › Release Powermove V2 › Run workflow). A dry run
+# (the default) builds, signs with the Developer ID certificate, checks the
+# V1 → V2 update requirements and keeps the outputs as workflow artifacts. A
+# real run (dry_run unchecked) then waits for approval in the protected
+# `release` environment, notarizes and staples, signs the Sparkle feed and
+# publishes the GitHub release that V1 (electron-updater) and V2 (Sparkle) read.
+# Steps: docs/native/release.md. Scripts: apps/native/packaging/release.sh.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version (x.y.z, newer than V1 1.3.2; the tag is v<version>)
+        required: true
+        type: string
+      notes:
+        description: Release notes (Markdown; shown in Sparkle's update window and on GitHub)
+        required: false
+        type: string
+        default: Fixes and improvements.
+      dry_run:
+        description: Dry run (build and sign only; no notarization, no release)
+        required: true
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+env:
+  PM_RELEASE_VERSION: ${{ inputs.version }}
+  PM_RELEASE_REPO: ${{ github.repository }}
+  MACOSX_DEPLOYMENT_TARGET: '14.0'
+  V8_COMMIT: 2768994f664e8a6e3aba27503606c58339136e2a
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 340
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      PM_SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_ED_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version, the tag and the runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ $PM_RELEASE_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be x.y.z"; exit 1; }
+          python3 -c 'import sys; sys.exit(tuple(map(int,sys.argv[1].split("."))) <= (1,3,2))' "$PM_RELEASE_VERSION" \
+            || { echo "::error::V1's updater only moves forward: use a version newer than 1.3.2"; exit 1; }
+          if gh release view "v$PM_RELEASE_VERSION" -R "$PM_RELEASE_REPO" >/dev/null 2>&1; then
+            echo "::error::release v$PM_RELEASE_VERSION already exists"; exit 1
+          fi
+          test -n "$PM_SPARKLE_PUBLIC_KEY" || { echo "::error::set the SPARKLE_ED_PUBLIC_KEY repository variable"; exit 1; }
+      - name: Free runner disk (never runs on a developer Mac)
+        run: |
+          set -euo pipefail
+          sudo rm -rf /Library/Developer/CoreSimulator/Volumes /Library/Developer/CoreSimulator/Images
+          sudo rm -rf "$HOME/Library/Developer/CoreSimulator/Caches" /Users/runner/Library/Android /usr/local/share/dotnet
+          df -h /
+      - name: Toolchains
+        run: |
+          set -euo pipefail
+          export PM_ZIG_HOME="$RUNNER_TEMP/zig"
+          echo "PM_ZIG_HOME=$PM_ZIG_HOME" >> "$GITHUB_ENV"
+          echo "PM_FFMPEG_DIR=$RUNNER_TEMP/ffmpeg/out" >> "$GITHUB_ENV"
+          rustup toolchain install 1.96.1 --profile minimal
+          brew install llvm@21 meson ninja pkg-config autoconf automake libtool cmake xz openssl@3
+          echo "LIBCLANG_PATH=$(brew --prefix llvm@21)/lib" >> "$GITHUB_ENV"
+          echo "PM_OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+          apps/native/vendor/fx/install-zig.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The V8 sandbox build (rusty_v8 152.2.0) the app links, as native-v8.yml
+      # builds it; cached by its exact bytes.
+      - uses: actions/checkout@v4
+        with:
+          repository: denoland/rusty_v8
+          ref: 2768994f664e8a6e3aba27503606c58339136e2a
+          path: upstream-v8
+          submodules: recursive
+          fetch-depth: 1
+      - uses: actions/cache@v4
+        with:
+          path: upstream-v8/target/release/gn_out
+          key: release-v8-arm64-152.2.0-sandbox-rust1.96.1-gn-v2-${{ runner.os }}
+      - name: Verify cached V8 bytes
+        id: cached-v8
+        run: |
+          set -euo pipefail
+          if [[ -d upstream-v8/target/release/gn_out ]] && (cd upstream-v8/target/release/gn_out && shasum -a 256 -c <<'HASHES' >/dev/null 2>&1
+          0cc50754a6bb75fa5fbf3d8e1742723a745ab47e2de260711a77ac2aa1519ea9  obj/librusty_v8.a
+          6da40ff4a76e455222ddf2a902ab60d2e0d69a76b652d90267de4a33e47ff31f  src_binding.rs
+          5705db00255b72e65f59d907f96fcb4d5ea53b1a6a97f4e7a778cd2b6ae62464  args.gn
+          HASHES
+          ); then echo 'valid=true' >> "$GITHUB_OUTPUT"; else echo 'valid=false' >> "$GITHUB_OUTPUT"; fi
+      - name: Build V8 with the sandbox from source
+        if: steps.cached-v8.outputs.valid != 'true'
+        working-directory: upstream-v8
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/upstream-v8/target
+          V8_FROM_SOURCE: '1'
+          GN_ARGS: 'v8_enable_sandbox=true v8_enable_pointer_compression=true v8_enable_pointer_compression_shared_cage=true v8_enable_external_code_space=true symbol_level=0 mac_deployment_target="14.0"'
+        run: |
+          set -euo pipefail
+          cargo +1.96.1 build --locked --release --lib --features v8_enable_sandbox
+          cd target/release/gn_out
+          shasum -a 256 -c <<'HASHES'
+          0cc50754a6bb75fa5fbf3d8e1742723a745ab47e2de260711a77ac2aa1519ea9  obj/librusty_v8.a
+          6da40ff4a76e455222ddf2a902ab60d2e0d69a76b652d90267de4a33e47ff31f  src_binding.rs
+          HASHES
+      - name: Inputs (V8, FFmpeg, JS, Sparkle, agent and speech runtimes)
+        run: |
+          set -euo pipefail
+          echo "RUSTY_V8_ARCHIVE=$GITHUB_WORKSPACE/upstream-v8/target/release/gn_out/obj/librusty_v8.a" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=$GITHUB_WORKSPACE/upstream-v8/target/release/gn_out/src_binding.rs" >> "$GITHUB_ENV"
+          PM_FFMPEG_OUT="$PM_FFMPEG_DIR" PM_FFMPEG_WORK="$RUNNER_TEMP/ffmpeg/work" \
+            PM_FFMPEG_DOWNLOADS="$RUNNER_TEMP/ffmpeg/downloads" engine/third_party/ffmpeg/build.sh
+          for d in apps/native/js/*/; do
+            if [ -f "$d/package.json" ]; then (cd "$d" && bun install --frozen-lockfile); fi
+          done
+          apps/native/packaging/release-inputs.sh "$RUNNER_TEMP/inputs" >> "$GITHUB_ENV"
+      - name: Test packaging and the feed
+        run: python3 -m unittest discover -s apps/native/packaging/tests -p 'test_*.py'
+      - name: Build release binaries
+        run: apps/native/packaging/release.sh build
+      # As V1's release.yml: a temporary keychain on the search list for the job.
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_P12"
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          umask 077
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          identity=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"')
+          test -n "$identity"
+          echo "PM_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+      # Signs inside out and checks V1's Squirrel.Mac requirement (same id, same Team).
+      - name: Bundle and sign Powermove.app
+        run: apps/native/packaging/release.sh app "$RUNNER_TEMP/out"
+      - name: Keep the signed app
+        run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/out/Powermove.app" "$RUNNER_TEMP/signed-app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-app-${{ inputs.version }}
+          path: ${{ runner.temp }}/signed-app.zip
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: symbols-${{ inputs.version }}
+          path: ${{ runner.temp }}/out/symbols
+          if-no-files-found: error
+          retention-days: 90
+      - name: Dry run archive and feeds (not notarized, throwaway feed key)
+        if: inputs.dry_run
+        env:
+          PM_RELEASE_EPHEMERAL_KEY: '1'
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          export PM_RELEASE_NOTES="$RUNNER_TEMP/notes.md"
+          apps/native/packaging/release.sh archive "$RUNNER_TEMP/out/Powermove.app" "$RUNNER_TEMP/dry"
+          apps/native/packaging/release.sh feeds "$RUNNER_TEMP/dry/Powermove-$PM_RELEASE_VERSION-mac-arm64.zip" "$RUNNER_TEMP/dry/feeds"
+          cp "$RUNNER_TEMP/dry/"*.zip "$RUNNER_TEMP/dry/feeds/"
+          (cd "$RUNNER_TEMP" && npm install --no-save --ignore-scripts --no-audit --no-fund electron-updater@6.8.3)
+          node apps/native/packaging/tests/electron_feed_check.cjs "$RUNNER_TEMP/node_modules/electron-updater" "$RUNNER_TEMP/dry/feeds" "$PM_RELEASE_VERSION"
+      - uses: actions/upload-artifact@v4
+        if: inputs.dry_run
+        with:
+          name: dry-run-${{ inputs.version }}
+          path: |
+            ${{ runner.temp }}/dry/*.dmg
+            ${{ runner.temp }}/dry/feeds/*.yml
+            ${{ runner.temp }}/dry/feeds/appcast.xml
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+
+  release:
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    # Protected: a required reviewer approves before anything is notarized or published.
+    environment: release
+    permissions:
+      contents: write
+    env:
+      PM_SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_ED_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-app-${{ inputs.version }}
+          path: ${{ runner.temp }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Inputs
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          echo "PM_OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+          apps/native/packaging/release-inputs.sh "$RUNNER_TEMP/inputs" sparkle >> "$GITHUB_ENV"
+          mkdir "$RUNNER_TEMP/out"
+          ditto -x -k "$RUNNER_TEMP/signed-app.zip" "$RUNNER_TEMP/out"
+          python3 apps/native/packaging/package.py continuity "$RUNNER_TEMP/out/Powermove.app"
+      - name: Notarize and staple the app
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          PM_NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          PM_NOTARY_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_API_KEY_P8"
+          umask 077
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          export PM_NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          python3 apps/native/packaging/package.py notarize "$RUNNER_TEMP/out/Powermove.app"
+          # Stapling leaves the signature as it was: V1 still accepts the bundle.
+          python3 apps/native/packaging/package.py continuity "$RUNNER_TEMP/out/Powermove.app"
+          apps/native/packaging/release.sh archive "$RUNNER_TEMP/out/Powermove.app" "$RUNNER_TEMP/release"
+          python3 apps/native/packaging/package.py notarize "$RUNNER_TEMP/release/Powermove-$PM_RELEASE_VERSION-mac-arm64.dmg"
+      - name: Feeds for V1 (electron-updater) and V2 (Sparkle)
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          test -n "$SPARKLE_ED_PRIVATE_KEY"
+          umask 077
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle.key"
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          PM_SPARKLE_KEY_FILE="$RUNNER_TEMP/sparkle.key" PM_RELEASE_NOTES="$RUNNER_TEMP/notes.md" \
+            apps/native/packaging/release.sh feeds "$RUNNER_TEMP/release/Powermove-$PM_RELEASE_VERSION-mac-arm64.zip" "$RUNNER_TEMP/release/feeds"
+          rm -f "$RUNNER_TEMP/sparkle.key"
+          "$SPARKLE_DIR/bin/sign_update" --verify --ed-key-file <(printf '%s' "$SPARKLE_ED_PRIVATE_KEY") "$RUNNER_TEMP/release/feeds/appcast.xml"
+          cp "$RUNNER_TEMP/release/"*.zip "$RUNNER_TEMP/release/feeds/"
+          (cd "$RUNNER_TEMP" && npm install --no-save --ignore-scripts --no-audit --no-fund electron-updater@6.8.3)
+          node apps/native/packaging/tests/electron_feed_check.cjs "$RUNNER_TEMP/node_modules/electron-updater" "$RUNNER_TEMP/release/feeds" "$PM_RELEASE_VERSION"
+      # Draft first, every asset up, then published as Latest: V1 reads
+      # /releases/latest and its latest-mac.yml; V2 reads the latest appcast.xml.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          tag="v$PM_RELEASE_VERSION"
+          dir="$RUNNER_TEMP/release"
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Powermove $PM_RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "$dir/Powermove-$PM_RELEASE_VERSION-mac-arm64.dmg" "$dir/Powermove-$PM_RELEASE_VERSION-mac-arm64.zip" \
+            "$dir/feeds/latest-mac.yml" "$dir/feeds/beta-mac.yml" "$dir/feeds/appcast.xml"
+          gh release edit "$tag" --draft=false --latest
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/sparkle.key"
