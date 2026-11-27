@@ -15,8 +15,8 @@ export interface SimulatorRequest { provider: 'openai' | 'anthropic'; body: Reco
     (message_delta), OpenAI's `usage` (response.completed). `fail`: 'http' answers 400 before any stream, 'http500' a retryable 500; 'error'
     streams the start and some text, then an error event; 'cut' streams the start and some text, then ends; 'failed'
     ends an OpenAI response with response.failed carrying partial usage; 'cut-after-delta' ends an Anthropic
-    stream after its message_delta, before message_stop. */
-export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'http500' | 'error' | 'cut' | 'failed' | 'cut-after-delta' }
+    stream after its message_delta, before message_stop; 'stall' goes silent after its first text for 30 s. */
+export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'http500' | 'error' | 'cut' | 'failed' | 'cut-after-delta' | 'stall' }
 export interface Simulator {
   url: string;
   requests: SimulatorRequest[];
@@ -139,6 +139,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       out('response.output_item.added', { output_index: index, item: { type: 'message', id: mid, role: 'assistant', status: 'in_progress', content: [] } });
       out('response.content_part.added', { item_id: mid, output_index: index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
       for (const delta of pieces) {
+        if (script.fail === 'stall' && delta !== pieces[0]) { for (let i = 0; i < 300 && !signal.aborted; i++) await sleep(100); return; }
         if (slow) await sleep(25);
         out('response.output_text.delta', { item_id: mid, output_index: index, content_index: 0, delta, logprobs: [] });
         outputTokens += 2;
@@ -192,6 +193,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       }
       out('content_block_start', { index, content_block: { type: 'text', text: '' } });
       for (const text of pieces) {
+        if (script.fail === 'stall' && text !== pieces[0]) { for (let i = 0; i < 300 && !signal.aborted; i++) await sleep(100); return; }
         if (slow) await sleep(25);
         out('content_block_delta', { index, delta: { type: 'text_delta', text } });
         outputTokens += 2;

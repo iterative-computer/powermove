@@ -25,7 +25,7 @@ export class FakeCalls {
   readonly stored = new Map<string, Map<string, unknown>>();
   readonly alarms = new Map<string, number>();
   private readonly live = new Map<string, { call: AeroCall; storage: Storage }>();
-  constructor(private readonly env: () => CloudflareBindings, private readonly data: (env: CloudflareBindings) => Data) {}
+  constructor(public env: () => CloudflareBindings, private readonly data: (env: CloudflareBindings) => Data) {}
 
   idFromName(name: string) { return { name, toString: () => name, equals: (other: { name: string }) => other.name === name }; }
   get(id: { name: string }) { return { fetch: (input: RequestInfo, init?: RequestInit) => this.object(id.name).call.fetch(new Request(input, init)) }; }
