@@ -154,7 +154,7 @@ test('desktop social start carries a state cookie accepted by Better Auth verifi
     }, oauthState!);
     expect(parsed.callbackURL).toContain(`/v1/auth/desktop/done?state=${state}`);
   }));
-test('duplicate desktop state is a bad request and done page is not cacheable', () =>
+test('a reloaded start link carries on; a reused state is a page, not JSON; done page is not cacheable', () =>
   withData(async (data) => {
     const env = makeEnv(data), browser = await seedSession(data, env), app = createApp({ data: () => data });
     env.GOOGLE_CLIENT_ID = 'test-google-client';
@@ -164,9 +164,17 @@ test('duplicate desktop state is a bad request and done page is not cacheable', 
     const challenge = b64(crypto.getRandomValues(new Uint8Array(32)));
     const path = `/v1/auth/desktop?provider=google&state=${state}&challenge=${challenge}`;
     expect((await app.request(path, {}, env)).status).toBe(302);
-    const duplicate = await app.request(path, {}, env);
+    // The same link again (a reload, a browser opening it twice) still reaches Google.
+    expect((await app.request(path, {}, env)).status).toBe(302);
+    // Another challenge on that state is refused, with a page that says what to do.
+    const other = b64(crypto.getRandomValues(new Uint8Array(32)));
+    const duplicate = await app.request(`/v1/auth/desktop?provider=google&state=${state}&challenge=${other}`, {}, env);
     expect(duplicate.status).toBe(400);
-    expect(await duplicate.json() as any).toEqual({ error: 'bad_request' });
+    expect(duplicate.headers.get('Content-Type')).toContain('text/html');
+    expect(await duplicate.text()).toContain('choose Continue with Google again');
+    // Once used, the same link is refused too.
+    await data.db.update(desktopAuth).set({ consumedAt: new Date() }).where(eq(desktopAuth.state, state));
+    expect((await app.request(path, {}, env)).status).toBe(400);
     const doneState = crypto.randomUUID().replaceAll('-', '');
     await data.db.insert(desktopAuth).values({ state: doneState, challenge, expiresAt: new Date(Date.now() + 600000) });
     const done = await app.request(`/v1/auth/desktop/done?state=${doneState}`, { headers: browser.headers }, env);
