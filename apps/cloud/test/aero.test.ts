@@ -25,6 +25,13 @@ test('the catalogue: v1 shape, provider ids, efforts, one default', async () =>
       expect(models.map(m => m.id)).toEqual(['openai/gpt-6.2-sol', 'openai/gpt-6.2-astra', 'openai/gpt-6-luna', 'anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5']);
       expect(models.filter(m => m.default)).toHaveLength(1);
       for (const m of models) { expect(m.id).toMatch(/^(openai|anthropic)\/[A-Za-z0-9._-]+$/); expect(m.efforts).toContain(m.defaultEffort); }
+      expect(Object.fromEntries(models.map(m => [m.id, m.defaultEffort]))).toEqual({
+        'openai/gpt-6.2-sol': 'medium',
+        'openai/gpt-6.2-astra': 'medium',
+        'openai/gpt-6-luna': 'low',
+        'anthropic/claude-opus-5-5': 'medium',
+        'anthropic/claude-sonnet-5-5': 'medium',
+      });
     } finally { await s.stop(); }
   }));
 
@@ -179,7 +186,7 @@ test('caching is on for both providers: a stable prompt_cache_key per thread, An
       const marks = JSON.stringify(sent).match(/"cache_control"/g) ?? [];
       expect(marks.length).toBeLessThanOrEqual(4);
       expect(sent.thinking?.type).toBe('adaptive');
-      expect(sent.output_config?.effort).toBe('high');
+      expect(sent.output_config?.effort).toBe('medium');
     } finally { await s.stop(); }
   }));
 

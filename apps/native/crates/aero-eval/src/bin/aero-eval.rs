@@ -1,5 +1,6 @@
 //! `aero-eval`: check the suite, run tasks or batches, summarise, regrade,
 //! and serve recorded model streams. See docs/native/aero-eval.md.
+use pm_aero_eval::credits::{self, Pricing};
 use pm_aero_eval::replay::Recording;
 use pm_aero_eval::replay::replayer::{ReplayServer, Replayer};
 use pm_aero_eval::runner::harness::HarnessId;
@@ -15,7 +16,8 @@ const USAGE: &str = "usage:
                 [--repeats N] [--harness-bin PATH] [--approved \"who, when\"] [--replay REC] [--ablate a,b]
                 [--cohort ID] [--sandbox-read PATH]…
                 (exit 1 when a replayed run diverged, did not complete or errored)
-  aero-eval summarize DIR [--data DIR]
+  aero-eval summarize DIR [--data DIR] [--pricing FILE] [--credit-nano-usd N]
+  aero-eval credits --pricing FILE [--credit-nano-usd N] [--runs DIR | --recording REC] [--data DIR]
   aero-eval regrade RUN_DIR [--data DIR]
   aero-eval replay check REC
   aero-eval replay serve REC [--folder PATH]…   (serves until stdin closes, then prints the report)
@@ -201,7 +203,32 @@ fn run(args: &[String]) -> Result<i32, String> {
         Some("summarize") => {
             let dir = PathBuf::from(args.get(1).ok_or(USAGE)?);
             let suite = Suite::load(&a.data())?;
-            write_summary(&dir, &runner::load_runs(&dir)?, suite.version)?;
+            let records = runner::load_runs(&dir)?;
+            write_summary(&dir, &records, suite.version)?;
+            if let Some(pricing) = load_pricing(&a)? {
+                let groups = credits::summarize_runs(&records, suite.version, &pricing);
+                println!("\n{}", credits::render_run_credits(&groups, &pricing));
+            }
+            Ok(0)
+        }
+        Some("credits") => {
+            let pricing = load_pricing(&a)?.ok_or_else(|| format!("--pricing is required\n{USAGE}"))?;
+            if let Some(runs_dir) = a.value("--runs") {
+                let suite = Suite::load(&a.data())?;
+                let records = runner::load_runs(&PathBuf::from(runs_dir))?;
+                let groups = credits::summarize_runs(&records, suite.version, &pricing);
+                print!("{}", credits::render_run_credits(&groups, &pricing));
+            } else if let Some(rec_path) = a.value("--recording") {
+                let rec = Recording::load(&PathBuf::from(rec_path))?;
+                let exchanges = credits::recording_exchanges(&rec);
+                let title = format!(
+                    "recording {} ({} / {} / {})",
+                    rec.task, rec.harness, rec.model, rec.effort
+                );
+                print!("{}", credits::render_exchanges_table(&title, &exchanges, &pricing));
+            } else {
+                print!("{}", credits::render_profiles(&pricing));
+            }
             Ok(0)
         }
         Some("regrade") => {
@@ -248,6 +275,23 @@ fn run(args: &[String]) -> Result<i32, String> {
         },
         _ => Err(USAGE.into()),
     }
+}
+
+fn load_pricing(a: &Args<'_>) -> Result<Option<Pricing>, String> {
+    let Some(path) = a.value("--pricing") else {
+        return Ok(None);
+    };
+    let mut pricing = Pricing::load(&PathBuf::from(path))?;
+    if let Some(unit) = a.value("--credit-nano-usd") {
+        let parsed: u64 = unit
+            .parse()
+            .map_err(|_| "--credit-nano-usd must be a positive integer")?;
+        if parsed == 0 {
+            return Err("--credit-nano-usd must be positive".into());
+        }
+        pricing.credit_nano_usd = parsed;
+    }
+    Ok(Some(pricing))
 }
 
 fn catalog() -> PathBuf {

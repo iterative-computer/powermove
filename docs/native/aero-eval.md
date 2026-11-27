@@ -64,6 +64,8 @@ aero-eval run --task cut-drop-flubbed-take --harness codex --model gpt-6.2-sol -
 # Seeding, collection and grading on the real host with no model:
 aero-eval run --task all --harness none --model none --effort none --mcp-bin <powermove-mcp> --out <runs>
 aero-eval summarize <runs>
+aero-eval summarize <runs> --pricing <pricing.json> [--credit-nano-usd 5000000]
+aero-eval credits --pricing <pricing.json> [--credit-nano-usd 5000000] [--runs <runs> | --recording <rec>]
 aero-eval regrade <runs>/<task>/<run>      # after adding spot-check.json
 ```
 

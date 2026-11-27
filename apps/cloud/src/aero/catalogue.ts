@@ -17,8 +17,8 @@ export const MODELS: readonly AeroModel[] = [
   { id: 'openai/gpt-6.2-sol', name: 'GPT-6.2 Sol', provider: 'openai', providerModel: 'gpt-6.2-sol', efforts: ['none', 'low', 'medium', 'high', 'xhigh'], defaultEffort: 'medium', default: true, context: 1_050_000, maxOutput: 128_000 },
   { id: 'openai/gpt-6.2-astra', name: 'GPT-6.2 Astra', provider: 'openai', providerModel: 'gpt-6.2-astra', efforts: ['none', 'low', 'medium', 'high', 'xhigh'], defaultEffort: 'medium', context: 1_050_000, maxOutput: 128_000 },
   { id: 'openai/gpt-6-luna', name: 'GPT-6 Luna', provider: 'openai', providerModel: 'gpt-6-luna', efforts: ['none', 'low', 'medium', 'high'], defaultEffort: 'low', context: 1_050_000, maxOutput: 128_000 },
-  { id: 'anthropic/claude-opus-5-5', name: 'Claude Opus 5.5', provider: 'anthropic', providerModel: 'claude-opus-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high', context: 1_000_000, maxOutput: 128_000 },
-  { id: 'anthropic/claude-sonnet-5-5', name: 'Claude Sonnet 5.5', provider: 'anthropic', providerModel: 'claude-sonnet-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high', context: 1_000_000, maxOutput: 128_000 },
+  { id: 'anthropic/claude-opus-5-5', name: 'Claude Opus 5.5', provider: 'anthropic', providerModel: 'claude-opus-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium', context: 1_000_000, maxOutput: 128_000 },
+  { id: 'anthropic/claude-sonnet-5-5', name: 'Claude Sonnet 5.5', provider: 'anthropic', providerModel: 'claude-sonnet-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium', context: 1_000_000, maxOutput: 128_000 },
 ];
 export const modelById = (id: string): AeroModel | undefined => MODELS.find(model => model.id === id);
 

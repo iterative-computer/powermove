@@ -251,7 +251,7 @@ while any development setting is present or a required one is missing
 2. **Vars set** (wrangler.jsonc or `--var`): `ENVIRONMENT=production`,
    `TURNSTILE_ENABLED=1`, a live `TURNSTILE_SITE_KEY`, `STRIPE_PRICE_AEROLITE`
    (and `STRIPE_PRICE_AERO`) as the live price ids `stripe:setup --live`
-   printed, `AERO_GLOBAL_DAILY_USD` (default 50) and `EMAIL_DAILY_LIMIT`
+   printed, `AERO_GLOBAL_DAILY_USD` (250 in `wrangler.jsonc`, fallback 50) and `EMAIL_DAILY_LIMIT`
    (default 150, under the 200-message mail quota).
    `POSTHOG_KEY` is the desktop app's public PostHog project key
    (`apps/native/crates/telemetry`); set it with `wrangler secret put POSTHOG_KEY`

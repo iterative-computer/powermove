@@ -918,6 +918,15 @@ export function harnessSignedOut(s: Snapshot, n: NativeFacts): boolean {
 export function aeroNeedsPlan(s: Snapshot, n: NativeFacts): boolean {
   return s.settings.provider === "aero" && n.connection === "unavailable" && !n.signedOut && !!n.aero?.needsPlan;
 }
+/** Quiet credit notice copy for Aero once 80% or 95% of monthly credits are used. */
+export function aeroLowCreditsCopy(
+  low: NonNullable<NonNullable<NativeFacts["aero"]>["lowCredits"]>,
+): string {
+  const fmt = (v: number) => v.toLocaleString("en-US");
+  const head = low.level === "critical" ? "Almost out of credits" : "Low on credits";
+  const reset = low.resets ? ` · resets ${low.resets}` : "";
+  return `${head}: ${fmt(low.remaining)} of ${fmt(low.included)} left${reset}`;
+}
 /** The one quiet line under a signed-out composer: what the chosen harness
  * runs on, and where to sign in. One line at the narrowest dock. */
 export function signInCopy(harness: string): string {
@@ -4000,6 +4009,44 @@ export function AgentView({
           </div>
         )}
       </div>
+      {!setup &&
+        harness &&
+        s.settings.provider === "aero" &&
+        !aeroNeedsPlan(s, n) &&
+        !n.aero?.outOfCredits &&
+        n.aero?.lowCredits && (
+          <div
+            id="agent-low-credits"
+            role="status"
+            label={aeroLowCreditsCopy(n.aero.lowCredits)}
+            style={{
+              ...row,
+              flexShrink: 0,
+              gap: t("metrics.gap"),
+              paddingLeft: t("metrics.agent_gap"),
+              paddingRight: t("metrics.agent_gap"),
+              paddingBottom: t("space.xs"),
+            }}
+          >
+            <div
+              metadata={{ symbol: "exclamationmark.triangle.fill" }}
+              style={{
+                color: t(n.aero.lowCredits.level === "critical" ? "colors.danger" : "colors.warning"),
+                symbolSize: t("metrics.symbol_inline"),
+                flexShrink: 0,
+              }}
+            />
+            <text
+              style={{
+                ...quiet,
+                ...shrink,
+                color: t(n.aero.lowCredits.level === "critical" ? "colors.danger" : "colors.warning"),
+              }}
+            >
+              {aeroLowCreditsCopy(n.aero.lowCredits)}
+            </text>
+          </div>
+        )}
       {!setup && (
         <Composer
           key={s.threadId}

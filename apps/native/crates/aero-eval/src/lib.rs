@@ -4,6 +4,7 @@
 //! model-stream recorder/replayer that lets pm-gate catch harness regressions
 //! without a paid model. See `docs/native/aero-eval.md`.
 pub mod artifacts;
+pub mod credits;
 pub mod graders;
 pub mod image;
 pub mod pmv;

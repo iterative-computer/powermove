@@ -498,11 +498,52 @@ const MONTHS: [&str; 12] = [
 pub fn short_day((_, month, day): Day) -> String {
     format!("{} {day}", MONTHS[month as usize - 1])
 }
+/// Low-credit threshold crossed in the current billing period.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreditWarningLevel {
+    /// 80%–94% of the period's credits have been spent.
+    Warning,
+    /// 95%+ of the period's credits have been spent (still above 0).
+    Critical,
+}
+/// When an account is running low on credits (80%+ used, before hitting 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LowCredits {
+    pub remaining: u64,
+    pub included: u64,
+    pub percent_used: u8,
+    pub level: CreditWarningLevel,
+}
 impl Billing {
     /// On a plan that runs Aero: bought and not cancelled (a plan whose
     /// payment failed still runs on the credits it has).
     pub fn subscribed(&self) -> bool {
         self.plan.is_some() && self.status != Some(Status::Canceled)
+    }
+    /// Low-credit warning at 80% (`Warning`) and 95% (`Critical`) used.
+    /// Returns `None` when no credits are included, below 80%, or already at 0
+    /// (zero remaining is shown as out-of-credits instead).
+    pub fn low_credits(&self) -> Option<LowCredits> {
+        if self.included == 0 || self.remaining == 0 {
+            return None;
+        }
+        let used = self.included.saturating_sub(self.remaining);
+        let used_100 = u128::from(used) * 100;
+        let included = u128::from(self.included);
+        let level = if used_100 >= included * 95 {
+            CreditWarningLevel::Critical
+        } else if used_100 >= included * 80 {
+            CreditWarningLevel::Warning
+        } else {
+            return None;
+        };
+        let percent_used = ((used_100 / included).min(99)) as u8;
+        Some(LowCredits {
+            remaining: self.remaining,
+            included: self.included,
+            percent_used,
+            level,
+        })
     }
     /// When this period's credits are replaced by the next grant.
     pub fn resets(&self) -> Option<Day> {
@@ -1059,5 +1100,65 @@ mod tests {
                 .get("reasoning_efforts")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn low_credits_triggers_at_80_and_95_percent_and_yields_to_zero() {
+        let billing = |included, remaining| Billing {
+            plan: Some(Plan {
+                id: "aerolite".into(),
+                name: "Aerolite".into(),
+                price_cents: 999,
+            }),
+            status: Some(Status::Active),
+            cancel_at_period_end: false,
+            included,
+            used: included.saturating_sub(remaining),
+            remaining,
+            period: Some(((2026, 11, 25), (2026, 12, 25))),
+            daily: vec![],
+            plans: vec![],
+        };
+        assert_eq!(billing(0, 0).low_credits(), None);
+        assert_eq!(billing(1000, 1000).low_credits(), None);
+        assert_eq!(billing(1000, 201).low_credits(), None);
+        assert_eq!(
+            billing(1000, 200).low_credits(),
+            Some(LowCredits {
+                remaining: 200,
+                included: 1000,
+                percent_used: 80,
+                level: CreditWarningLevel::Warning,
+            })
+        );
+        assert_eq!(
+            billing(1000, 51).low_credits(),
+            Some(LowCredits {
+                remaining: 51,
+                included: 1000,
+                percent_used: 94,
+                level: CreditWarningLevel::Warning,
+            })
+        );
+        assert_eq!(
+            billing(1000, 50).low_credits(),
+            Some(LowCredits {
+                remaining: 50,
+                included: 1000,
+                percent_used: 95,
+                level: CreditWarningLevel::Critical,
+            })
+        );
+        assert_eq!(
+            billing(1000, 1).low_credits(),
+            Some(LowCredits {
+                remaining: 1,
+                included: 1000,
+                percent_used: 99,
+                level: CreditWarningLevel::Critical,
+            })
+        );
+        // Zero remaining is handled by outOfCredits instead of lowCredits.
+        assert_eq!(billing(1000, 0).low_credits(), None);
     }
 }

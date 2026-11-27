@@ -121,6 +121,14 @@ export interface NativeFacts {
     usage: [label: string, value: string][];
     /** Signed in on Free: Aero needs Aerolite (quiet, never a fault). */
     needsPlan?: boolean;
+    /** Running low on credits this period (80%+ warning, 95%+ critical). */
+    lowCredits?: {
+      remaining: number;
+      included: number;
+      percentUsed: number;
+      level: "warning" | "critical";
+      resets: string | null;
+    } | null;
     /** No credits left this period. */
     outOfCredits?: { resets: string | null; upgrade: string | null } | null;
   };

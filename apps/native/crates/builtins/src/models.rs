@@ -919,11 +919,26 @@ impl Backend {
             .and_then(|models| models.iter().find(|(_, _, is_default)| *is_default))
             .map(|(id, _, _)| pm_agents::account::codex_model_label(id));
         // Aero's usage monitor (credits, plan, reset day); on Free, that Aero
-        // needs a plan; out of credits, the reset day and the bigger plan.
+        // needs a plan; low credits (80%+ / 95%+); out of credits, the reset
+        // day and the bigger plan.
         let (usage, billing) = self.native.agent_link.aero_usage();
         let out = billing.as_ref().filter(|b| b.remaining == 0);
+        let low = billing.as_ref().and_then(|b| {
+            let w = b.low_credits()?;
+            Some(json!({
+                "remaining": w.remaining,
+                "included": w.included,
+                "percentUsed": w.percent_used,
+                "level": match w.level {
+                    pm_agents::inference::CreditWarningLevel::Warning => "warning",
+                    pm_agents::inference::CreditWarningLevel::Critical => "critical",
+                },
+                "resets": b.resets().map(pm_agents::inference::short_day),
+            }))
+        });
         let aero = json!({"usage": usage.into_iter().map(|(l, v)| json!([l, v])).collect::<Vec<_>>(),
             "needsPlan": self.native.agent_link.aero_needs_plan(),
+            "lowCredits": low,
             "outOfCredits": out.map(|b| json!({
                 "resets": b.resets().map(pm_agents::inference::short_day),
                 "upgrade": b.upgrade().map(|p| p.name.clone())}))});

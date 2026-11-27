@@ -2372,6 +2372,44 @@ test("Aero on Free offers Subscribe beside the model pill and in the empty panel
   expect(paid.inspect().nodes.some((node) => node.props.id === "agent-subscribe")).toBe(false);
   paid.dispose();
 });
+test("Aero shows a quiet low-credit notice at 80% (warning) and 95% (critical), hidden when out of credits or on other harnesses", async () => {
+  for (const [level, remaining, percentUsed, expected] of [
+    ["warning", 180, 82, "Low on credits: 180 of 1,000 left · resets Dec 25"],
+    ["critical", 40, 96, "Almost out of credits: 40 of 1,000 left · resets Dec 25"],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6.2-sol", "GPT-6.2 Sol"]], ["medium"]);
+    p.snapshot.settings.provider = "aero";
+    p.snapshot.settings.model = "pm/openai/gpt-6.2-sol";
+    p.native.aero = {
+      usage: [["Credits", `${remaining} of 1,000 left`]],
+      lowCredits: { remaining, included: 1000, percentUsed, level, resets: "Dec 25" },
+    };
+    await root.render(<AgentView publication={p} send={() => {}} />);
+    const notice = byId(root, "agent-low-credits");
+    expect(notice.props.label).toBe(expected);
+    root.dispose();
+  }
+  // Hidden when out of credits (outOfCredits takes over) or on another harness.
+  for (const [provider, outOfCredits] of [
+    ["aero", { resets: "Dec 25", upgrade: null }],
+    ["claude", null],
+  ] as const) {
+    const { root } = mount();
+    const p = fixture();
+    p.snapshot.catalog = harnessCatalog([["pm/openai/gpt-6.2-sol", "GPT-6.2 Sol"]], ["medium"]);
+    p.snapshot.settings.provider = provider;
+    p.native.aero = {
+      usage: [["Credits", "40 of 1,000 left"]],
+      lowCredits: { remaining: 40, included: 1000, percentUsed: 96, level: "critical", resets: "Dec 25" },
+      outOfCredits,
+    };
+    await root.render(<AgentView publication={p} send={() => {}} />);
+    expect(root.inspect().nodes.some((node) => node.props.id === "agent-low-credits")).toBe(false);
+    root.dispose();
+  }
+});
 test("the pill shows Claude Code's logo, OpenAI's for Codex, and the Aero (Powermove) mark for every Aero model", async () => {
   for (const [harness, model, mark] of [
     ["claude", "claude-opus-5-5", "provider.claude"],
