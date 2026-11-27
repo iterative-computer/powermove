@@ -20,7 +20,7 @@ const until = async (check: () => Promise<boolean>, ms = 6000) => { for (let i =
 async function leave(data: Data, s: Stack, nano: number) {
   await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: keyOf(s, `spent-${nano}`), credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD - nano, model: 'openai/gpt-6-luna', ...await periodOf(data, s.user.id) });
 }
-/** What the provider billed for a settled row: its reported tokens at list price (not what the ledger charged). */
+/** What the provider billed for a settled row: its reported tokens at the catalogue rates (not what the ledger charged). */
 const upstream = (row: typeof creditLedger.$inferSelect) => cost(modelById(row.model!)!, { input: row.inputTokens, cacheRead: row.cachedInputTokens, cacheWrite: row.cacheWriteTokens, cacheWriteLong: row.cacheWriteLongTokens, output: row.outputTokens }).nanoUsd;
 
 test('2. admission never trusts a low token count: what the provider bills stays within the balance', async () =>

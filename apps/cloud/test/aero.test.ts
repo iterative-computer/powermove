@@ -26,7 +26,7 @@ test('the catalogue: v1 shape, provider ids, efforts, one default', async () =>
     } finally { await s.stop(); }
   }));
 
-test('costs are exact nano-USD at list price: no rounding, cached input at the cached rate, the long tier above 272k', () => {
+test('costs are exact nano-USD at the catalogue rates: no rounding, cached input at the cached rate, the long tier above 272k', () => {
   const sol = modelById('openai/gpt-6.2-sol')!;
   const usage = (input: number, more: Partial<Parameters<typeof cost>[1]> = {}) => ({ input, cacheRead: 0, cacheWrite: 0, cacheWriteLong: 0, output: 0, ...more });
   expect(CREDIT_NANO_USD).toBe(5_000_000);

@@ -24,12 +24,11 @@ them on the desktop.
 - `src/billing/` plans (`plans.ts`, matching the website), the credit ledger and
   billing state (`ledger.ts`), the Stripe client (`stripe.ts`) and the webhook's
   event handling (`webhook.ts`, idempotent by event id via `stripe_events`).
-- `src/aero/` the model catalogue and credit prices (`catalogue.ts`; 1 credit =
-  $0.005 of list price), Chat Completions in to AI SDK `streamText` out
+- `src/aero/` the model catalogue (`catalogue.ts`), Chat Completions in to AI SDK `streamText` out
   (`translate.ts`, prompt caching for both providers), and AI SDK stream parts
   back to Chat Completions SSE in the subset fx parses (`sse.ts`). Each call runs in
   a Durable Object of its own (`call.ts`, binding `AERO_CALLS`) that reserves, calls the
-  provider once and settles in exact nano-USD (`meter.ts`); uncertain bills take the whole
+  provider once and settles the request's credits (`meter.ts`); an uncertain settle takes the whole
   hold, and a period never spends past its grant.
 - `src/lifecycle.ts` is the state table (visibility × moderation × tombstone
   × yank). Every read decides through it.
