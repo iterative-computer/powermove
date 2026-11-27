@@ -381,12 +381,13 @@ fn the_primary_button_never_moves_between_frames() {
     });
 }
 
-/// The account step's Continue with Google stands under the email and its
-/// note, Continue's width, above the actions: with it or without it, the
-/// field, the note and Continue stay where they were.
+/// The account step's Continue with Google stands under the email's note,
+/// above the actions: with it or without it, the title, the note (and the
+/// email above it), Continue and the links stay where they were. The email
+/// is a real AppKit field, which a headless window can't make: the note
+/// under it stands for it.
 #[test]
 fn continue_with_google_moves_nothing_on_the_account_step() {
-    use pm_shell::welcome::{SignIn, SignInStage};
     let account = |google: bool| {
         let mut buttons = vec![
             Button::new("continue", "Continue"),
@@ -400,10 +401,6 @@ fn continue_with_google_moves_nothing_on_the_account_step() {
             title: "Create your account".into(),
             line: "Your account remembers the extensions you install on each Mac, and lets you publish your own on the Store.".into(),
             note: Some("Already have an account? Use the same email.".into()),
-            sign_in: Some(SignIn {
-                stage: SignInStage::Email,
-                ..SignIn::default()
-            }),
             buttons,
             default: Some("continue".into()),
             back: Some("Back to Timeline Choice".into()),
@@ -449,9 +446,10 @@ fn continue_with_google_moves_nothing_on_the_account_step() {
                     .save(format!("{dir}/account-google-{google}.png"))
                     .unwrap();
             }
-            let bounds = |id: &str| cx.debug_bounds(window.into(), id).unwrap();
-            let (field, primary, links, button) = (
-                bounds("welcome-sign-in").expect("the email"),
+            let mut bounds = |id: &str| cx.debug_bounds(window.into(), id).unwrap();
+            let (title, note, primary, links, button) = (
+                bounds("welcome-title").expect("the title"),
+                bounds("welcome-note").expect("the note"),
                 bounds("welcome-primary").expect("Continue"),
                 bounds("welcome-links").expect("the links"),
                 bounds("welcome-google-row"),
@@ -459,13 +457,13 @@ fn continue_with_google_moves_nothing_on_the_account_step() {
             assert_eq!(button.is_some(), google);
             // The links row is as wide as before: Google is not one of them.
             if let Some(button) = button {
-                assert!(button.top() >= field.bottom(), "{button:?} over {field:?}");
+                assert!(button.top() >= note.bottom(), "{button:?} over {note:?}");
                 assert!(
                     button.bottom() <= primary.top(),
                     "{button:?} on {primary:?}"
                 );
             }
-            laid.push((field, primary, links));
+            laid.push((title, note, primary, links));
         }
         assert_eq!(laid[0], laid[1], "something moved for the Google button");
     });

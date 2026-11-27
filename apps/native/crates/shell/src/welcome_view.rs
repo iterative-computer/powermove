@@ -1008,6 +1008,7 @@ impl WelcomeView {
         if let Some(note) = &frame.note {
             controls = controls.child(
                 div()
+                    .debug_selector(|| "welcome-note".into())
                     .text_size(px(ts().sm))
                     .text_color(rgb(c.secondary))
                     .text_center()
