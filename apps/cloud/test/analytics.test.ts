@@ -66,7 +66,8 @@ test('the overview adds up: usage today and over 30 days, per model and per day,
     // Today: $0.30 + $1.20 = $1.50 = 300 credits; 2 calls, 1 estimated; live hold excluded.
     expect(o.today).toMatchObject({ calls: 3, estimatedCalls: 1, inputTokens: 1000, cachedTokens: 600, cacheWriteTokens: 100, outputTokens: 50, cacheHitRatio: 0.6 });
     expect(o.today.costUsd).toBeCloseTo(1.5, 9);
-    expect(o.today.credits).toBeCloseTo(300, 9);
+    // $1.50 at the fixture's fake unit ($0.001 a credit).
+    expect(o.today.credits).toBeCloseTo(1500, 9);
     expect(o.today.estimatedUsd).toBeCloseTo(1.2, 9);
     // 30 days: + $2 + the expired $0.50 = $4.00; the 40-day-old row is out.
     expect(o.last30.costUsd).toBeCloseTo(4, 9);
@@ -82,9 +83,9 @@ test('the overview adds up: usage today and over 30 days, per model and per day,
     expect(o.daily.at(-6).costUsd).toBeCloseTo(2, 9);
     expect(o.daily.reduce((sum: number, d: any) => sum + d.costUsd, 0)).toBeCloseTo(4, 9);
     expect(o.subscriptions).toEqual({ active: 2, mrrCents: 1998, new30: 3, cancelling: 1, pastDue: 1 });
-    // Top accounts: b ($2.50) then a ($1.50, 1000 - 300 - the live hold's 140 credits = 560 left).
+    // Top accounts: b ($2.50) then a ($1.50 plus a $0.70 live hold against a $1 grant at the fixture's unit: none left).
     expect(o.topAccounts.map((t: any) => t.user.email)).toEqual(['b@example.com', 'a@example.com']);
-    expect(o.topAccounts[1].creditsLeft).toBe(560);
+    expect(o.topAccounts[1].creditsLeft).toBe(0);
     expect(o.estimated).toHaveLength(1);
     expect(o.estimated[0]).toMatchObject({ model: 'anthropic/claude-opus-5-5', source: 'hold' });
     expect(o.blocked).toEqual([expect.objectContaining({ user: { id: b.id, email: 'b@example.com' }, reason: 'spend over hold' })]);

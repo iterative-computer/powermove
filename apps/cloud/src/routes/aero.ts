@@ -6,6 +6,7 @@ import { AERO_BODY_BYTES, readJsonLimited } from '../body';
 import { MODELS, modelById } from '../aero/catalogue';
 import type { CallStart } from '../aero/call';
 import { endpointFor } from '../aero/providers';
+import { pricingOf } from '../aero/pricing';
 import { ChatRequest, UnsupportedRequest, prepare } from '../aero/translate';
 import { V2Error } from '../v2-error';
 
@@ -26,6 +27,8 @@ async function cacheKey(c: Context<Env>, userId: string, request: ChatRequest): 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
 
 export const aero = new Hono<Env>()
+  // Aero (and only Aero) needs the pricing secret: without a usable one every Aero route answers 503 `misconfigured`.
+  .use('*', async (c, next) => { pricingOf(c.env); await next(); })
   .get('/models', (c) => {
     if (!c.var.session) throw new V2Error(401, 'unauthorized');
     return c.json({
@@ -41,7 +44,7 @@ export const aero = new Hono<Env>()
     if (edge && !edge.success) throw new V2Error(429, 'rate_limited', 60);
     const rate = await consume(c.var.data.db, 'aero_user', userId);
     if (!rate.ok) throw new V2Error(429, 'rate_limited', rate.retryAfterSeconds);
-    const { remainingNano, subscriptionId, period } = await spendable(c.var.data.db, userId);
+    const { remainingNano, subscriptionId, period } = await spendable(c.var.data.db, userId, pricingOf(c.env).creditNanoUsd);
     if (remainingNano <= 0 || !subscriptionId || !period) throw new V2Error(402, 'credits_exhausted');
     const parsed = ChatRequest.safeParse(await readJsonLimited(c, AERO_BODY_BYTES));
     if (!parsed.success) throw new V2Error(400, 'invalid_request');

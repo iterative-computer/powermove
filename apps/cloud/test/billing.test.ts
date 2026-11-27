@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { and, eq } from 'drizzle-orm';
 import { withData } from './db';
 import { billing, periodOf, stack, subscribe } from './billing-helpers';
+import { CREDIT_NANO_USD } from './pricing';
 import { creditLedger, stripeEvents, subscriptions } from '../src/db/schema';
 
 test('signed out: every v2 billing and Aero route answers 401 with a code only', async () =>
@@ -108,7 +109,7 @@ test('a renewal resets credits to the plan’s grant; nothing rolls over', async
     const s = await stack(data);
     try {
       const { subscriptionId } = await subscribe(s);
-      await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: 'request:test:one', credits: 0, costNanoUsd: 188 * 5_000_000, model: 'openai/gpt-6.2-sol', ...await periodOf(data, s.user.id) });
+      await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: 'request:test:one', credits: 0, costNanoUsd: 188 * CREDIT_NANO_USD, model: 'openai/gpt-6.2-sol', ...await periodOf(data, s.user.id) });
       expect((await billing(s)).credits).toEqual({ included: 1000, used: 188, remaining: 812 });
       await new Promise(resolve => setTimeout(resolve, 1100)); // the new period starts on a later second
       await s.stripe.renew(subscriptionId);

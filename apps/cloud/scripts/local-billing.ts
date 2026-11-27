@@ -12,7 +12,10 @@ import { Pool } from 'pg';
 import { databaseUrl, ports, stack, workerUrl } from './lib/local-env';
 import { FAKE_SECRET_KEY, FAKE_WEBHOOK_SECRET, startFakeStripe } from './fake-stripe';
 import { startAiSimulator } from './ai-simulator';
-import { CREDIT_NANO_USD } from '../src/aero/catalogue';
+import { readFileSync } from 'node:fs';
+// The development pricing (production's is the AERO_PRICING secret).
+const AERO_PRICING = JSON.stringify(JSON.parse(readFileSync(new URL('../test/fixtures/pricing.json', import.meta.url), 'utf8')));
+const CREDIT_NANO_USD = (JSON.parse(AERO_PRICING) as { creditNanoUsd: number }).creditNanoUsd;
 
 const cloud = resolve(import.meta.dir, '..');
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
@@ -29,6 +32,7 @@ process.stdout.write(await run(['bun', 'scripts/local-up.ts']));
 const stripe = startFakeStripe({ port: ports.stripe, webhookUrl: `${workerUrl}/v2/stripe/webhook` });
 const ai = startAiSimulator({ port: ports.ai });
 const billingVars: Record<string, string> = {
+  AERO_PRICING,
   ENVIRONMENT: 'development',
   LOCAL_POSTGRES: '1',
   DATABASE_URL: databaseUrl,

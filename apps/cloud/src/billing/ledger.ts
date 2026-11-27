@@ -2,7 +2,6 @@ import { and, desc, eq, gte, isNull, lt, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import { billingReversals, creditLedger, subscriptions } from '../db/schema';
 import { PLANS, isPlanId, planById } from './plans';
-import { CREDIT_NANO_USD } from '../aero/catalogue';
 
 export type Status = 'active' | 'past_due' | 'canceled';
 /** Stripe's subscription statuses as the app sees them. `incomplete` (Checkout not paid yet) is no plan. */
@@ -39,22 +38,23 @@ const spent = sql`case when ${creditLedger.kind} = 'spend' then ${creditLedger.c
 const reserved = sql`case when ${live} then ${creditLedger.holdNanoUsd} else 0 end`;
 
 /** The period's balance: its grants minus the requests made inside it. Nothing carries over. */
-export async function periodBalance(db: Db, userId: string, period: Period): Promise<Balance> {
+/** `unit` is one credit in nano-USD (the pricing's creditNanoUsd). */
+export async function periodBalance(db: Db, userId: string, period: Period, unit: number): Promise<Balance> {
   const [row] = await db.select({
     included: sql<string>`coalesce(sum(${creditLedger.credits}) filter (where ${creditLedger.kind} = 'grant' and ${creditLedger.revokedAt} is null and ${creditLedger.periodStart} = ${period.start.toISOString()}::timestamptz), 0)`,
     used: sql<string>`coalesce(sum(${spent}) filter (where ${inPeriod(period)}), 0)`,
     held: sql<string>`coalesce(sum(${reserved}) filter (where ${inPeriod(period)}), 0)`,
   }).from(creditLedger).where(eq(creditLedger.userId, userId));
-  const includedNano = Number(row?.included ?? 0) * CREDIT_NANO_USD, usedNano = Number(row?.used ?? 0), heldNano = Number(row?.held ?? 0);
+  const includedNano = Number(row?.included ?? 0) * unit, usedNano = Number(row?.used ?? 0), heldNano = Number(row?.held ?? 0);
   return { includedNano, usedNano, heldNano, remainingNano: includedNano - usedNano - heldNano };
 }
 
 /** Whole credits to show, derived from the exact balance (rounding is display only, never charged): `used` rounds
     up and `remaining` down, so the two add up to `included` whenever nothing is held, and the account never shows a
     credit it doesn't have. */
-export function displayCredits(balance: Balance): Credits {
-  const included = balance.includedNano / CREDIT_NANO_USD;
-  return { included, used: Math.ceil(balance.usedNano / CREDIT_NANO_USD), remaining: Math.max(0, Math.floor(balance.remainingNano / CREDIT_NANO_USD)) };
+export function displayCredits(balance: Balance, unit: number): Credits {
+  const included = balance.includedNano / unit;
+  return { included, used: Math.ceil(balance.usedNano / unit), remaining: Math.max(0, Math.floor(balance.remainingNano / unit)) };
 }
 
 export interface BillingState {
@@ -69,7 +69,8 @@ export interface BillingState {
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
 
-export async function billingState(db: Db, userId: string, now = new Date()): Promise<BillingState> {
+/** `unit` is one credit in nano-USD; null (no usable pricing) shows every credit figure as zero. */
+export async function billingState(db: Db, userId: string, unit: number | null, now = new Date()): Promise<BillingState> {
   const plans = PLANS.filter(plan => plan.forSale).map(({ id, name, priceCents, credits }) => ({ id, name, priceCents, credits }));
   const sub = await currentSubscription(db, userId);
   const status = sub ? publicStatus(sub.status) : null;
@@ -78,7 +79,7 @@ export async function billingState(db: Db, userId: string, now = new Date()): Pr
   }
   const plan = planById(sub.plan);
   const period = { start: sub.currentPeriodStart, end: sub.currentPeriodEnd };
-  const balance = await periodBalance(db, userId, period);
+  const balance = unit === null ? null : await periodBalance(db, userId, period, unit);
   const rows = await db.select({
     date: sql<string>`to_char(${creditLedger.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`,
     nano: sql<string>`sum(${spent})`,
@@ -92,7 +93,7 @@ export async function billingState(db: Db, userId: string, now = new Date()): Pr
   let total = 0, shown = 0;
   for (let cursor = new Date(`${day(period.start)}T00:00:00Z`); day(cursor) <= last; cursor = new Date(cursor.getTime() + 86_400_000)) {
     total += byDay.get(day(cursor)) ?? 0;
-    const upTo = Math.ceil(total / CREDIT_NANO_USD);
+    const upTo = unit === null ? 0 : Math.ceil(total / unit);
     daily.push({ date: day(cursor), credits: upTo - shown });
     shown = upTo;
   }
@@ -100,7 +101,7 @@ export async function billingState(db: Db, userId: string, now = new Date()): Pr
     plan: { id: plan.id, name: plan.name, priceCents: plan.priceCents, interval: 'month' },
     status,
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
-    credits: displayCredits(balance),
+    credits: balance && unit !== null ? displayCredits(balance, unit) : { included: 0, used: 0, remaining: 0 },
     period: { start: period.start.toISOString(), end: period.end.toISOString() },
     daily,
     plans,
@@ -130,10 +131,10 @@ export async function spendingPeriod(db: Db, userId: string): Promise<{ subscrip
 }
 
 /** What an Aero request may spend now, in nano-USD: the current period's balance less running holds, or nothing. */
-export async function spendable(db: Db, userId: string): Promise<{ remainingNano: number; subscriptionId: string | null; period: Period | null }> {
+export async function spendable(db: Db, userId: string, unit: number): Promise<{ remainingNano: number; subscriptionId: string | null; period: Period | null }> {
   const current = await spendingPeriod(db, userId);
   if (!current) return { remainingNano: 0, subscriptionId: null, period: null };
-  return { remainingNano: (await periodBalance(db, userId, current.period)).remainingNano, ...current };
+  return { remainingNano: (await periodBalance(db, userId, current.period, unit)).remainingNano, ...current };
 }
 
 /** Holds past their expiry become spends of the whole hold, marked estimated: their calls never settled (an

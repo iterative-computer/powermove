@@ -24,7 +24,8 @@ import type { LanguageModelUsage, TextStreamPart, ToolSet } from 'ai';
 import type { Data } from '../db/client';
 import { aeroBlocks, creditLedger } from '../db/schema';
 import { lockBalance, periodBalance, spendingPeriod } from '../billing/ledger';
-import { type AeroModel, CREDIT_NANO_USD, type Metered, PRICE_VERSION, ceilingRates, cost, modelById } from './catalogue';
+import { type AeroModel, type Metered, modelById } from './catalogue';
+import { type Pricing, ceilingRates, cost } from './pricing';
 import type { Emit } from '../telemetry';
 import type { Fetch } from './providers';
 import { imageTokens } from './images';
@@ -143,6 +144,8 @@ export interface MeterOptions {
   requestedMax: number | undefined;
   /** The most Aero may spend across all accounts in a UTC day, in nano-USD. */
   globalDailyNano: number;
+  /** What calls cost (the AERO_PRICING secret). */
+  pricing: Pricing;
   /** Server analytics (telemetry.ts): best-effort, never blocking. */
   emit?: Emit;
   fetch?: Fetch;
@@ -231,7 +234,7 @@ export class Meter {
     const desired = Math.min(requestedMax ?? model.maxOutput, model.maxOutput);
     const floor = Math.min(MIN_OUTPUT, desired);
     const bound = inputBound(model.provider, body);
-    const rates = ceilingRates(model, bound);
+    const rates = ceilingRates(this.options.pricing, model, bound);
     await data.tx(async (tx) => {
       // Under the account's lock (which period changes take too), the period by the database clock.
       await lockBalance(tx, userId);
@@ -244,7 +247,7 @@ export class Meter {
       const [{ running }] = await tx.select({ running: sql<number>`count(*)::int` }).from(creditLedger)
         .where(and(eq(creditLedger.userId, userId), eq(creditLedger.kind, 'hold'), sql`${creditLedger.holdExpiresAt} > clock_timestamp()`)) as [{ running: number }];
       if (running >= MAX_IN_FLIGHT) throw new V2Error(429, 'too_many_calls', 5);
-      const available = (await periodBalance(tx, userId, now.period)).remainingNano;
+      const available = (await periodBalance(tx, userId, now.period, this.options.pricing.creditNanoUsd)).remainingNano;
       const cap = Math.min(desired, Math.floor((available - bound * rates.input) / rates.output));
       if (cap < floor) throw new V2Error(402, 'credits_exhausted');
       const hold = bound * rates.input + cap * rates.output;
@@ -260,7 +263,7 @@ export class Meter {
       const claimed = await tx.insert(creditLedger).values({
         userId, kind: 'hold', idempotencyKey: this.options.key, credits: 0, subscriptionId: now.subscriptionId,
         periodStart: now.period.start, periodEnd: now.period.end, model: model.id, holdNanoUsd: hold,
-        holdExpiresAt: sql`clock_timestamp() + ${`${HOLD_TTL_MS} milliseconds`}::interval`, outputCap: cap, priceVersion: PRICE_VERSION,
+        holdExpiresAt: sql`clock_timestamp() + ${`${HOLD_TTL_MS} milliseconds`}::interval`, outputCap: cap, priceVersion: this.options.pricing.version,
       }).onConflictDoNothing({ target: creditLedger.idempotencyKey }).returning({ id: creditLedger.id });
       if (claimed.length === 0) throw new V2Error(409, 'duplicate_request');
       this.call = { userId, key: this.options.key, model: model.id, holdNano: hold, outputCap: cap, dispatchedAt: Date.now() };
@@ -313,13 +316,13 @@ export class Meter {
     await this.reserving;
     if (!this.held) return;
     await this.saving;
-    await settleStored(this.options.store, this.options.data, this.options.emit);
+    await settleStored(this.options.store, this.options.data, this.options.pricing, this.options.emit);
   }
 }
 
 /** Settles a call from what its object stored: the live stream's end, or the alarm after the object died. Throws
     when the database write fails; the caller retries later. */
-export async function settleStored(store: CallStore, data: Data, emit?: Emit): Promise<'settled' | 'none'> {
+export async function settleStored(store: CallStore, data: Data, pricing: Pricing, emit?: Emit): Promise<'settled' | 'none'> {
   const call = await store.get<Call>('call');
   if (!call) {
     // Killed between its intent and its record: if its hold committed, it is billed in full.
@@ -340,7 +343,7 @@ export async function settleStored(store: CallStore, data: Data, emit?: Emit): P
     // hold bounds the input by its bytes and the output by its cap, so the report can't pass it; a spend that
     // would is still held to it (a period never passes its grant) and logged.
     const usage = sdk ?? final;
-    const price = cost(model, usage);
+    const price = cost(pricing, model, usage);
     if (price.nanoUsd > call.holdNano) {
       // The circuit breaker: a bound that didn't hold stops the account until someone reviews it.
       console.error('aero spend over its hold: account blocked for review', call.key, price.nanoUsd, call.holdNano);
@@ -363,7 +366,7 @@ export async function settleStored(store: CallStore, data: Data, emit?: Emit): P
       model: call.model, provider: model.provider, usage_source: settlement.source, estimated: settlement.estimated,
       input_tokens: u.input, fresh_input_tokens: settlement.fresh, cache_read_tokens: u.cacheRead, cache_write_tokens: u.cacheWrite,
       cache_write_long_tokens: u.cacheWriteLong, output_tokens: u.output, reasoning_tokens: u.reasoning,
-      cache_hit_ratio: u.input > 0 ? u.cacheRead / u.input : 0, cost_usd: settlement.nanoUsd / 1e9, credits: settlement.nanoUsd / CREDIT_NANO_USD,
+      cache_hit_ratio: u.input > 0 ? u.cacheRead / u.input : 0, cost_usd: settlement.nanoUsd / 1e9, credits: settlement.nanoUsd / pricing.creditNanoUsd,
       duration_ms: call.dispatchedAt ? Date.now() - call.dispatchedAt : null,
     });
   }

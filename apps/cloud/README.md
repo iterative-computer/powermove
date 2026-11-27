@@ -24,8 +24,8 @@ them on the desktop.
 - `src/billing/` plans (`plans.ts`, matching the website), the credit ledger and
   billing state (`ledger.ts`), the Stripe client (`stripe.ts`) and the webhook's
   event handling (`webhook.ts`, idempotent by event id via `stripe_events`).
-- `src/aero/` the model catalogue and credit prices (`catalogue.ts`; 1 credit =
-  $0.005 of list price), Chat Completions in to AI SDK `streamText` out
+- `src/aero/` the model catalogue (`catalogue.ts`, public facts only) and what calls
+  cost (`pricing.ts`, from the `AERO_PRICING` secret), Chat Completions in to AI SDK `streamText` out
   (`translate.ts`, prompt caching for both providers), and AI SDK stream parts
   back to Chat Completions SSE in the subset fx parses (`sse.ts`). Each call runs in
   a Durable Object of its own (`call.ts`, binding `AERO_CALLS`) that reserves, calls the
@@ -242,7 +242,8 @@ and its cron refuse to serve (503 `misconfigured`, names logged, never values)
 while any development setting is present or a required one is missing
 (`src/production.ts`). Check, in order:
 
-1. **Secrets set** (`wrangler secret put`): `BETTER_AUTH_SECRET`,
+1. **Secrets set** (`wrangler secret put`): `AERO_PRICING` (JSON, shape in
+   `src/aero/pricing.ts`; without it Aero answers 503 `misconfigured`), `BETTER_AUTH_SECRET`,
    `TURNSTILE_SECRET_KEY` (live, not Cloudflare's `1x0000…` test key),
    `STRIPE_SECRET_KEY` (`sk_live_` or a live restricted `rk_live_` key),
    `STRIPE_WEBHOOK_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
