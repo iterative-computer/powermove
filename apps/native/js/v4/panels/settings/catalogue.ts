@@ -91,6 +91,8 @@ export interface Row {
   group: string;
   label: string;
   detail?: string;
+  /** The detail is the row's state (a session that ended), always in view. */
+  reading?: boolean;
   control: Control;
   value?: Json;
   options?: Option[];

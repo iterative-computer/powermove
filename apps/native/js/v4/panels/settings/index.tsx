@@ -401,11 +401,12 @@ function SettingRow({
           row.id === "media.location" ||
           (row.section !== "providers" &&
             !READINGS.has(row.id) &&
+            !row.reading &&
             !explained(row.id))
             ? undefined
             : row.detail
         }
-        help={row.section !== "providers" && !READINGS.has(row.id)}
+        help={row.section !== "providers" && !READINGS.has(row.id) && !row.reading}
       >
         {row.error && (
           <div
