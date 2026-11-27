@@ -3001,3 +3001,104 @@ mod routes {
         assert_eq!(levels("claude-3-7-sonnet-20250219"), (String::new(), None));
     }
 }
+
+/// Every model call carries the system prompt, the tools and the thread so
+/// far: Aero's own instructions and session context, never the CLI
+/// providers' launch brief or the whole layer catalogue, and a summary that
+/// is a paged index, not every layer's properties (w119: a first call was
+/// ~100 KB on an 80-layer project, its follow-up ~143 KB).
+#[test]
+fn a_turn_on_a_working_project_sends_a_lean_request() {
+    use pm_agents::edge::{Chunk, Net, NetRequest};
+    use std::sync::atomic::AtomicBool;
+    #[derive(Debug, Default)]
+    struct Wire(Mutex<Vec<Vec<u8>>>);
+    impl Net for Wire {
+        fn stream(
+            &self,
+            request: &NetRequest<'_>,
+            _: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            let mut sent = self.0.lock().unwrap();
+            sent.push(request.body.to_vec());
+            on(Chunk::Status(200))?;
+            let delta = if sent.len() == 1 {
+                json!({"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function",
+                    "function":{"name":"project","arguments":"{\"op\":\"summary\"}"}}]})
+            } else {
+                json!({"role":"assistant","content":"Hello."})
+            };
+            let chunk = json!({"id":"c","object":"chat.completion.chunk","created":0,"model":"m",
+                "choices":[{"index":0,"delta":delta,"finish_reason":if sent.len() == 1 {"tool_calls"} else {"stop"}}]});
+            on(Chunk::Data(
+                format!("data: {chunk}\n\ndata: [DONE]\n\n").as_bytes(),
+            ))
+        }
+    }
+    let mut fixture = Fixture::new();
+    {
+        let mut seed = McpSession::new(fixture.host.clone());
+        seed.dispatch("start_session", &json!({"prompt":"Seed"}))
+            .unwrap();
+        let commands: Vec<Value> = (0..80)
+            .map(|i| {
+                json!({"type":"add_layer","id":format!("l{i}"),"name":format!("Title card {i}"),
+                "layerType":"solid","from":i as f64 * 0.05,"duration":2})
+            })
+            .collect();
+        seed.dispatch("apply_commands", &json!({"commands":commands}))
+            .unwrap();
+        seed.finish(true).unwrap();
+    }
+    fixture.revision = fixture
+        .host
+        .lock()
+        .unwrap()
+        .revision(&fixture.project)
+        .unwrap();
+    let wire = Arc::new(Wire::default());
+    let configured = json!({"custom":{"protocol":"openai-chat-completions",
+        "base_url":"http://127.0.0.1:9/v1","auth":{"type":"none"},"tool_choice_mode":"omit",
+        "model_metadata":{"m":{"supports_tool_use":true,"supports_vision":true}}}});
+    let live = aero::Live {
+        provider: "custom".into(),
+        configured: configured.to_string(),
+        model: "m".into(),
+        net: wire.clone(),
+        current: Arc::new(|| true),
+        credentials: Arc::new(|_| Ok(("http://127.0.0.1:9".into(), vec![]))),
+    };
+    let scope = fixture.profile.path().join("aero/sessions/lean");
+    let (turn, _notes) = fixture.start_prompt("lean", scope, "hello", Model::live(live), |tools| {
+        Box::new(tools)
+    });
+    assert_eq!(
+        complete(&turn),
+        RunResult::success("Hello.".into(), Access::Project)
+    );
+    let sent = wire.0.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    let (first, second) = (sent[0].len(), sent[1].len());
+    assert!(first < 14_000, "first call {first} bytes");
+    assert!(second < 26_000, "follow-up {second} bytes");
+    let body: Value = serde_json::from_slice(&sent[1]).unwrap();
+    // The cached prefix: Aero's system prompt first, then the tools, the same on both calls.
+    let prefix = |body: &[u8]| {
+        let v: Value = serde_json::from_slice(body).unwrap();
+        (v["messages"][0].clone(), v["tools"].clone())
+    };
+    assert_eq!(prefix(&sent[0]), prefix(&sent[1]));
+    assert_eq!(body["messages"][0]["role"], "system");
+    let text = body.to_string();
+    for brief in [
+        "TASK FOCUS",
+        "LIVE COMPOSITION",
+        "EDITABLE SOURCE CATALOG",
+        "\"keyframes\"",
+    ] {
+        assert!(!text.contains(brief), "{brief} reached the model");
+    }
+    // The summary is the paged index: names to find targets, a next page.
+    assert!(text.contains("Title card 79") && text.contains("nextLayerOffset"));
+}
