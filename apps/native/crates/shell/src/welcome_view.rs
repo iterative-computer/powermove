@@ -970,9 +970,12 @@ impl WelcomeView {
         if !frame.choices.is_empty() {
             controls = controls.child(self.choice_list(window, cx));
         }
-        if let Some(offer) = &frame.offer {
-            controls = controls.child(self.offer_card(&kit, offer, cx));
-        }
+        // A plan to buy takes the stage's other half (below): the column
+        // keeps its list, and the whole card shows beside it.
+        let offer = frame
+            .offer
+            .as_ref()
+            .map(|offer| self.offer_card(&kit, offer, cx));
         if !frame.rows.is_empty() || frame.names.is_some() {
             let mut body = div()
                 .id("welcome-body")
@@ -1148,14 +1151,31 @@ impl WelcomeView {
             // The mark at one height on every step; the step under it.
             .pt(px(wt().logo_top))
             .child(column);
+        // The other half: the step's picture; or, while a plan is offered,
+        // its whole card in the picture's place, at the column's width and
+        // centred on the column's span (the mark down to the primary).
         let right = div()
             .absolute()
             .top_0()
             .bottom_0()
             .right_0()
             .left(px(wt().half))
-            .overflow_hidden()
-            .children(frame.preview.as_deref().and_then(|id| preview(id, window)));
+            .overflow_hidden();
+        let right = match offer {
+            Some(card) => right.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(wt().logo_top))
+                    .h(px(wt().actions_top + wt().primary_height - wt().logo_top))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().w(px(wt().column)).child(card)),
+            ),
+            None => right.children(frame.preview.as_deref().and_then(|id| preview(id, window))),
+        };
         div()
             .id("welcome")
             .role(Role::Group)

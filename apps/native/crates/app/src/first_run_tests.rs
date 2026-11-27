@@ -1645,3 +1645,97 @@ fn aeros_connect_on_the_agent_step_is_the_powermove_account_sign_in() {
     );
     titled(&flow.frame(), "Create your account");
 }
+
+/// Onboarding's agent step on Free, signed in, Aero chosen: the plan's whole
+/// card (name, price, note, Get Aerolite, the features, Maybe Later) shows
+/// in the welcome window at its default size, above the pinned actions,
+/// with nothing scrolled out of sight (w127: it was cut off under the
+/// price). `PM_STAGE_SHOTS=<folder>` keeps the picture.
+#[test]
+fn the_agent_step_shows_the_whole_plan_card_in_the_welcome_window() {
+    use gpui::{AppContext, HeadlessAppContext, px, size};
+    use pm_design::{Accessibility, Scheme, Tokens};
+    use pm_services::surface_backing::onboarding::Step as Onboard;
+    let choices = Choices {
+        aero: AeroPlan::from_fact(&json!({"state":"ready","subscribed":false,
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]})),
+        ..Choices::default()
+    };
+    let frame = step_frame(
+        Onboard::Agent,
+        &choices,
+        &Default::default(),
+        Some("ana@example.com"),
+        None,
+    );
+    assert!(frame.offer.is_some(), "Aero on Free offers its plan");
+    objc2::rc::autoreleasepool(|_| {
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let m = tokens.metrics;
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(
+                gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                    .with_automatic_optical_sizing(),
+            ),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let window = cx
+            .open_window(size(px(m.welcome_width), px(m.welcome_height)), |_, cx| {
+                cx.new(|cx| {
+                    let mut view = pm_shell::welcome_view::WelcomeView::new(
+                        tokens.clone(),
+                        frame,
+                        Rc::new(|_, _| {}),
+                        cx,
+                    );
+                    view.stage = true;
+                    view.clock = Some(1.);
+                    view
+                })
+            })
+            .unwrap();
+        let mut image = None;
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            image = cx.capture_screenshot(window.into()).ok();
+        }
+        if let (Some(dir), Some(image)) = (std::env::var_os("PM_STAGE_SHOTS"), image) {
+            fs::create_dir_all(&dir).unwrap();
+            image
+                .save(std::path::Path::new(&dir).join("agent-offer-stage.png"))
+                .unwrap();
+        }
+        let mut bounds = |id: &str| {
+            cx.debug_bounds(window.into(), id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+        };
+        // The list whole in the column, above the actions; the card whole
+        // in the stage's other half, inside the window.
+        let content = bounds("welcome-content");
+        let actions = bounds("welcome-actions");
+        let list = bounds("welcome-choices");
+        assert!(
+            list.top() >= content.top() - px(0.5)
+                && list.bottom() <= content.bottom() + px(0.5)
+                && list.bottom() <= actions.top(),
+            "the list {list:?} shows whole in the content {content:?}, above the actions {actions:?}"
+        );
+        // The card and Maybe Later under it: one group.
+        let offer = bounds("welcome-offer");
+        assert!(
+            offer.left() >= px(m.welcome_width / 2.)
+                && offer.right() <= px(m.welcome_width)
+                && offer.top() >= px(0.)
+                && offer.bottom() <= actions.bottom(),
+            "the offer {offer:?} shows whole in the stage's other half"
+        );
+    });
+}
