@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { ne } from 'drizzle-orm';
 import { withData } from './db';
-import { billing, frames, fxReduce, stack, subscribe, type Stack } from './billing-helpers';
+import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger } from '../src/db/schema';
 import { consume } from '../src/abuse';
 import { CREDIT_NANO_USD, MODELS, cost, modelById } from '../src/aero/catalogue';
@@ -67,7 +67,7 @@ test('402 at zero credits: Free accounts and spent plans', async () =>
       expect(r.status).toBe(402);
       expect(await r.json() as unknown).toEqual({ error: { code: 'credits_exhausted' } });
       await subscribe(s);
-      await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: 'request:all', credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD, model: 'openai/gpt-6.2-sol' });
+      await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: 'request:all', credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD, model: 'openai/gpt-6.2-sol', ...await periodOf(data, s.user.id) });
       r = await chat(s, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: 'hi' }] });
       expect(r.status).toBe(402);
       expect(s.ai.requests).toHaveLength(0);
@@ -79,7 +79,7 @@ test('bad requests answer codes, never text; the rate limit answers 429', async 
     const s = await stack(data);
     try {
       await subscribe(s);
-      for (const body of [{ model: 'openai/gpt-6.2-sol', messages: [] }, { model: 'nope/model', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', reasoning_effort: 'max', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] }] }]) {
+      for (const body of [{ model: 'openai/gpt-6.2-sol', messages: [] }, { model: 'nope/model', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', reasoning_effort: 'max', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] }] }, { model: 'anthropic/claude-opus-5-5', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:application/pdf;base64,JVBERi0xLjQK' } }] }] }]) {
         const r = await chat(s, body);
         expect(r.status).toBe(400);
         const json = await r.json() as any;

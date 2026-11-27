@@ -12,9 +12,9 @@
 
 export interface SimulatorRequest { provider: 'openai' | 'anthropic'; body: Record<string, any>; headers: Record<string, string> }
 /** One scripted reply. `usage` is the provider's own usage JSON: Anthropic's `start` (message_start) and `delta`
-    (message_delta), OpenAI's `usage` (response.completed). `fail`: 'http' answers 400 before any stream; 'error'
+    (message_delta), OpenAI's `usage` (response.completed). `fail`: 'http' answers 400 before any stream, 'http500' a retryable 500; 'error'
     streams the start and some text, then an error event; 'cut' streams the start and some text, then ends. */
-export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'error' | 'cut' }
+export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'http500' | 'error' | 'cut' }
 export interface Simulator {
   url: string;
   requests: SimulatorRequest[];
@@ -29,7 +29,8 @@ export interface Simulator {
 
 const encoder = new TextEncoder();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-const tokens = (value: unknown) => Math.max(1, Math.ceil(JSON.stringify(value ?? '').length / 4));
+/** The simulator's token count: a token per four characters of JSON. */
+export const tokens = (value: unknown) => Math.max(1, Math.ceil(JSON.stringify(value ?? '').length / 4));
 
 function lastUserText(messages: any[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -72,6 +73,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
         const provider = url.pathname.startsWith('/openai') ? 'openai' : 'anthropic';
         requests.push({ provider, body, headers });
         const script = queue.shift() ?? {};
+        if (script.fail === 'http500') return Response.json({ type: 'error', error: { type: 'api_error', message: 'scripted failure' } }, { status: 500 });
         if (script.fail === 'http') return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'scripted failure' } }, { status: 400 });
         return provider === 'openai' ? openai(body, request.signal, script) : anthropic(body, request.signal, script);
       }

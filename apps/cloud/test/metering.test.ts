@@ -6,10 +6,10 @@
 import { expect, test } from 'bun:test';
 import { and, eq, ne } from 'drizzle-orm';
 import { withData } from './db';
-import { billing, frames, fxReduce, stack, subscribe, type Stack } from './billing-helpers';
+import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger } from '../src/db/schema';
 import { CREDIT_NANO_USD, modelById } from '../src/aero/catalogue';
-import { HOLD_TTL_MS, imageBound, inputBound } from '../src/aero/meter';
+import { HOLD_TTL_MS, anthropicRaw, imageBound, inputBound, openaiRaw } from '../src/aero/meter';
 import { displayCredits } from '../src/billing/ledger';
 import type { Data } from '../src/db/client';
 import type { Script } from '../scripts/ai-simulator';
@@ -23,7 +23,7 @@ const rows = (data: Data) => data.db.select().from(creditLedger).where(ne(credit
 const rowFor = async (data: Data, s: Stack, id: string) => (await data.db.select().from(creditLedger).where(eq(creditLedger.idempotencyKey, `request:${s.user.id}:${id}`)))[0]!;
 /** Sets the user's period balance to exactly `nano` remaining, with one spend. */
 async function leave(data: Data, s: Stack, nano: number) {
-  await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:spent-${++ids}`, credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD - nano, model: 'openai/gpt-6-luna' });
+  await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:spent-${++ids}`, credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD - nano, model: 'openai/gpt-6-luna', ...await periodOf(data, s.user.id) });
 }
 
 interface Case {
@@ -113,38 +113,58 @@ test('a model switch mid-thread: the new model has no cache, so the whole contex
     } finally { await s.stop(); }
   }));
 
-test('a provider error mid-stream bills only what is proven; a refused call costs nothing', async () =>
+test('uncertain bills round up: a stream that reports no usage bills its whole hold, marked estimated; a refused call costs nothing', async () =>
   withData(async (data) => {
     const s = await stack(data);
     try {
       await subscribe(s);
-      // Anthropic: message_start proved the input (and its one output token).
-      s.ai.queue.push({ start: { input_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 50, output_tokens: 1 }, fail: 'error' });
-      let r = await chat(s, { model: 'anthropic/claude-opus-5-5', messages: [{ role: 'user', content: 'x' }] }, 'req-error-0001');
-      expect((await frames(r)).at(-1)).toEqual({ error: { code: 'upstream_error' } });
-      expect(await rowFor(data, s, 'req-error-0001')).toMatchObject({ kind: 'spend', usageSource: 'partial', estimated: false, costNanoUsd: 100 * 4_000 + 50 * 200 + 1 * 20_000 });
-      // A stream cut off with no usage at all: Anthropic still has message_start.
-      s.ai.queue.push({ start: { input_tokens: 7, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }, fail: 'cut' });
-      r = await chat(s, { model: 'anthropic/claude-opus-5-5', messages: [{ role: 'user', content: 'x' }] }, 'req-error-0002');
-      expect((await frames(r)).at(-1)).toEqual({ error: { code: 'upstream_error' } });
-      expect(await rowFor(data, s, 'req-error-0002')).toMatchObject({ usageSource: 'partial', costNanoUsd: 7 * 4_000 + 20_000 });
-      // OpenAI reports nothing before the end: the hold is billed, marked estimated.
-      for (const [fail, id] of [['error', 'req-error-0003'], ['cut', 'req-error-0004']] as const) {
-        s.ai.queue.push({ fail });
-        r = await chat(s, { model: 'openai/gpt-6-luna', messages: [{ role: 'user', content: 'x' }] }, id);
+      const cases = [
+        // Anthropic: message_start reported the input, then the stream failed or was cut before the final usage.
+        { model: 'anthropic/claude-opus-5-5', script: { start: { input_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 50, output_tokens: 1 }, fail: 'error' as const } },
+        { model: 'anthropic/claude-opus-5-5', script: { start: { input_tokens: 7, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }, fail: 'cut' as const } },
+        // OpenAI reports nothing before the end.
+        { model: 'openai/gpt-6-luna', script: { fail: 'error' as const } },
+        { model: 'openai/gpt-6-luna', script: { fail: 'cut' as const } },
+      ];
+      for (const [i, c] of cases.entries()) {
+        s.ai.queue.push(c.script);
+        // A small output cap keeps each (billed in full) hold small.
+        const r = await chat(s, { model: c.model, max_completion_tokens: 2_000, messages: [{ role: 'user', content: 'x' }] }, `req-uncertain-000${i}`);
         expect((await frames(r)).at(-1)).toEqual({ error: { code: 'upstream_error' } });
-        const row = await rowFor(data, s, id);
+        const row = await rowFor(data, s, `req-uncertain-000${i}`);
         expect(row).toMatchObject({ kind: 'spend', usageSource: 'hold', estimated: true });
         expect(row.costNanoUsd).toBe(row.holdNanoUsd);
         expect(row.costNanoUsd).toBeGreaterThan(0);
       }
+      expect(s.ai.counts).toHaveLength(0);
       // The provider refused the call (HTTP 400): no stream, nothing billed.
       s.ai.queue.push({ fail: 'http' });
-      r = await chat(s, { model: 'openai/gpt-6-luna', messages: [{ role: 'user', content: 'x' }] }, 'req-error-0005');
+      const r = await chat(s, { model: 'openai/gpt-6-luna', messages: [{ role: 'user', content: 'x' }] }, 'req-error-0005');
       expect((await frames(r)).at(-1)).toEqual({ error: { code: 'upstream_error' } });
       expect(await rowFor(data, s, 'req-error-0005')).toMatchObject({ kind: 'spend', usageSource: 'none', costNanoUsd: 0 });
     } finally { await s.stop(); }
   }));
+
+test('one dispatch per call: a retryable provider error is not retried under the same hold', async () =>
+  withData(async (data) => {
+    const s = await stack(data);
+    try {
+      await subscribe(s);
+      s.ai.queue.push({ fail: 'http500' }, {});
+      const r = await chat(s, { model: 'anthropic/claude-sonnet-5-5', messages: [{ role: 'user', content: 'x' }] }, 'req-retry-0001');
+      expect((await frames(r)).at(-1)).toEqual({ error: { code: 'upstream_error' } });
+      expect(s.ai.requests).toHaveLength(1);
+      expect(await rowFor(data, s, 'req-retry-0001')).toMatchObject({ kind: 'spend', usageSource: 'none', costNanoUsd: 0 });
+    } finally { await s.stop(); }
+  }));
+
+test('the raw usage converters the fallback settles with agree with the AI SDK converters on every recorded case', () => {
+  for (const c of CASES) {
+    const raw = c.model.startsWith('anthropic/') ? anthropicRaw({ ...c.script.start, ...c.script.delta }) : openaiRaw(c.script.usage!);
+    expect({ input: raw.input, cacheRead: raw.cacheRead, cacheWrite: raw.cacheWrite, cacheWriteLong: raw.cacheWriteLong, output: raw.output })
+      .toEqual({ input: c.tokens.input, cacheRead: c.tokens.cacheRead, cacheWrite: c.tokens.cacheWrite, cacheWriteLong: c.tokens.cacheWriteLong ?? 0, output: c.tokens.output });
+  }
+});
 
 test('the output cap: at most what the balance allows (and the model max), never past the balance', async () =>
   withData(async (data) => {
@@ -174,9 +194,9 @@ test('the output cap: at most what the balance allows (and the model max), never
       expect(row.holdNanoUsd).toBeLessThanOrEqual(100_000_000);
       // What the cap and the input bound allow can never cost more than the balance: the hold covers both.
       expect(sent * 20_000).toBeLessThanOrEqual(100_000_000);
-      // Less than a minimal request can cost: 402, and the provider never sees it.
+      // Less than a minimal request (its input and 16 output tokens) can cost: 402, and the provider never sees it.
       await data.db.delete(creditLedger).where(and(eq(creditLedger.userId, s.user.id), ne(creditLedger.kind, 'grant')));
-      await leave(data, s, 1_000_000); // $0.001
+      await leave(data, s, 1_000); // a millionth of a dollar: less than 16 output tokens cost
       const before = s.ai.requests.length;
       const refused = await chat(s, { model: opus.id, messages: [{ role: 'user', content: 'x' }] }, 'req-cap-0004');
       expect(refused.status).toBe(402);
@@ -195,7 +215,8 @@ test('parallel requests near zero: each sees the others’ holds, so together th
       fxReduce(await frames(await chat(s, body(0), 'req-probe-0000')));
       const hold = (await rowFor(data, s, 'req-probe-0000')).holdNanoUsd;
       await data.db.delete(creditLedger).where(and(eq(creditLedger.userId, s.user.id), ne(creditLedger.kind, 'grant')));
-      const balance = 2 * hold + Math.floor(hold / 10);
+      // Room for two holds, and less than the 16 output tokens a third would need.
+      const balance = 2 * hold + 1_000;
       await leave(data, s, balance);
       const answers = await Promise.all([1, 2, 3, 4, 5].map(n => chat(s, body(n), `req-parallel-000${n}`)));
       const statuses = answers.map(r => r.status).sort();
@@ -209,16 +230,17 @@ test('parallel requests near zero: each sees the others’ holds, so together th
     } finally { await s.stop(); }
   }));
 
-test('holds: a running request reserves its hold; an expired one (its Worker died) reserves nothing but keeps what it proved', async () =>
+test('holds: a running request reserves its whole hold; one that never settled counts in full as spent', async () =>
   withData(async (data) => {
     const s = await stack(data);
     try {
       await subscribe(s);
-      const insert = (id: string, hold: number, proven: number, expires: Date) => data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'hold', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, model: 'anthropic/claude-opus-5-5', holdNanoUsd: hold, costNanoUsd: proven, holdExpiresAt: expires });
-      await insert('live', 100 * CREDIT_NANO_USD, 3 * CREDIT_NANO_USD, new Date(Date.now() + HOLD_TTL_MS));
-      await insert('dead', 200 * CREDIT_NANO_USD, 2 * CREDIT_NANO_USD, new Date(Date.now() - 1000));
-      // Used: what both proved (5). Remaining: 1000 - 5 - the live hold's other 97.
-      expect((await billing(s)).credits).toEqual({ included: 1000, used: 5, remaining: 898 });
+      const period = await periodOf(data, s.user.id);
+      const insert = (id: string, hold: number, proven: number, expires: Date) => data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'hold', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, model: 'anthropic/claude-opus-5-5', holdNanoUsd: hold, costNanoUsd: proven, holdExpiresAt: expires, ...period });
+      await insert('live', 100 * CREDIT_NANO_USD, 0, new Date(Date.now() + HOLD_TTL_MS));
+      await insert('dead', 200 * CREDIT_NANO_USD, 0, new Date(Date.now() - 1000));
+      // The live hold reserves its 100; the one that never settled counts its whole 200 as spent.
+      expect((await billing(s)).credits).toEqual({ included: 1000, used: 200, remaining: 700 });
     } finally { await s.stop(); }
   }));
 
@@ -227,10 +249,10 @@ test('a period reset: last period’s spends and holds count for nothing in the 
     const s = await stack(data);
     try {
       const { subscriptionId } = await subscribe(s);
-      s.ai.queue.push({ usage: { input_tokens: 1_000_000, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 1_000_000 } });
+      s.ai.queue.push({ usage: { input_tokens: 200_000, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 200_000 } });
       fxReduce(await frames(await chat(s, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: 'x' }] }, 'req-period-0001')));
-      // 1M input over 272k: $4 = 800 credits.
-      expect((await billing(s)).credits).toEqual({ included: 1000, used: 800, remaining: 200 });
+      // 200k input at $2/M: $0.40 = 80 credits.
+      expect((await billing(s)).credits).toEqual({ included: 1000, used: 80, remaining: 920 });
       await new Promise(resolve => setTimeout(resolve, 1100));
       await s.stripe.renew(subscriptionId);
       expect((await billing(s)).credits).toEqual({ included: 1000, used: 0, remaining: 1000 });
@@ -248,7 +270,7 @@ test('display credits: derived from exact nano-USD, used rounds up, remaining do
       expect(displayCredits({ includedNano: 1000 * CREDIT_NANO_USD, usedNano: 0, heldNano: 0, remainingNano: 1000 * CREDIT_NANO_USD })).toEqual({ included: 1000, used: 0, remaining: 1000 });
       await subscribe(s);
       // Three requests of 0.4 credits each: 1.2 credits spent, shown as 2 used, never 3.
-      for (const id of ['a', 'b', 'c']) await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, costNanoUsd: 2_000_000, model: 'openai/gpt-6-luna' });
+      for (const id of ['a', 'b', 'c']) await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, costNanoUsd: 2_000_000, model: 'openai/gpt-6-luna', ...await periodOf(data, s.user.id) });
       const state = await billing(s);
       expect(state.credits).toEqual({ included: 1000, used: 2, remaining: 998 });
       expect(state.daily.reduce((sum: number, d: { credits: number }) => sum + d.credits, 0)).toBe(2);
@@ -281,11 +303,11 @@ test('Anthropic cache breakpoints: never more than four, all on the 5-minute TTL
 test('the input bound is above what the provider counts, and images are bounded by pixels, not base64', async () => {
   const body = { model: 'm', system: [{ type: 'text', text: 'é'.repeat(1000) }], messages: [{ role: 'user', content: [{ type: 'text', text: 'hello world '.repeat(500) }] }] };
   // A byte-level tokenizer can't take more tokens than bytes: 2,000 bytes of é and 6,000 of ASCII.
-  expect(inputBound(body)).toBeGreaterThanOrEqual(8_000);
+  expect(inputBound('anthropic', body)).toBeGreaterThanOrEqual(8_000);
   // A 1x1 PNG's bound is its pixel bound, and a big base64 payload doesn't count byte for byte.
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
   expect(imageBound(png)).toBe(1 + 1024);
-  const withImage = (data: string) => inputBound({ messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }] }] });
+  const withImage = (data: string) => inputBound('anthropic', { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }] }] });
   const padded = Buffer.concat([Buffer.from(png, 'base64'), Buffer.alloc(300_000)]).toString('base64');
   expect(withImage(padded)).toBe(withImage(png));
   // Unreadable: its base64 length.
