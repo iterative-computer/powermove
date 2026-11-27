@@ -448,6 +448,31 @@ fn capture_home_recent_work() {
         });
     }
 }
+#[::core::prelude::v1::test]
+fn dismissing_the_aerolite_offer_persists_across_reopens() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, _) = open(&mut cx, &fixture);
+    assert!(!view.read_with(cx, |v, _| v.offer_closed));
+    view.update(cx, |v, cx| v.dismiss_aero_offer(cx));
+    assert!(view.read_with(cx, |v, _| v.offer_closed));
+    let start = Instant::now();
+    while fixture
+        .actor
+        .handle()
+        .state()
+        .settings
+        .get("homeAeroliteOfferDismissed")
+        != Some(&pm_model::Value::Bool(true))
+    {
+        assert!(start.elapsed() < Duration::from_secs(10), "never stored");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // A fresh Home view initialized from the same profile stays dismissed.
+    let mut cx2 = TestAppContext::single();
+    let (reopened, cx2, _) = open(&mut cx2, &fixture);
+    assert!(reopened.read_with(cx2, |v, _| v.offer_closed));
+}
 struct Backed {
     view: Entity<ProjectLibrary>,
     fill: u32,

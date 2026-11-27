@@ -409,7 +409,7 @@ export function accountRows(): Row[] {
     },
     // No status until the subscription service publishes one: a default
     // "Restart needed" would claim a state nobody observed (design review).
-    ...["ChatGPT", "Claude"].map((name) =>
+    ...["Aerolite", "ChatGPT", "Claude"].map((name) =>
       row(name.toLowerCase(), "Subscriptions", name, "status"),
     ),
     {

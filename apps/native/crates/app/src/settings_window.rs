@@ -84,11 +84,15 @@ pub(crate) fn watch_close(
     })
 }
 
-/// `events` in order, each run of searches as its last.
+/// `events` in order, each run of searches or section selections as its last.
 fn latest_searches(events: Vec<Event>) -> Vec<Event> {
     let mut out: Vec<Event> = vec![];
     for event in events {
-        if let (Event::Search(_), Some(Event::Search(_))) = (&event, out.last()) {
+        if matches!(
+            (&event, out.last()),
+            (Event::Search(_), Some(Event::Search(_)))
+                | (Event::Select(_), Some(Event::Select(_)))
+        ) {
             out.pop();
         }
         out.push(event);
@@ -140,6 +144,7 @@ pub(crate) fn install(
                             }
                         })
                         .await;
+                    let _ = weak.update(cx, |v, cx| v.drain_builtins(cx));
                 }
             }
         }
@@ -155,13 +160,18 @@ pub(crate) fn install(
     // The panel showed before its window was here: it says again what the
     // sidebar lists.
     if let Some(runtime) = runtime {
-        cx.background_executor()
-            .spawn(async move {
-                if let Ok(ticket) = runtime.panel_act("settings", &json!({ "tell": true })) {
-                    let _ = ticket.await;
-                }
-            })
-            .detach();
+        let tell_owner = owner.downgrade();
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Ok(ticket) = runtime.panel_act("settings", &json!({ "tell": true })) {
+                        let _ = ticket.await;
+                    }
+                })
+                .await;
+            let _ = tell_owner.update(cx, |v, cx| v.drain_builtins(cx));
+        })
+        .detach();
     }
     Some(chrome)
 }

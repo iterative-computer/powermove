@@ -3024,7 +3024,6 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
 pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
     use objc2::AnyThread;
     let side = (points * 3.).ceil().max(1.) as u32;
-    let coverage = crate::icons::coverage(glyph, side)?;
     let rep = unsafe {
         objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             objc2_app_kit::NSBitmapImageRep::alloc(),
@@ -3045,18 +3044,24 @@ pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) 
         return None;
     }
     let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
-    // Black at the glyph's coverage, premultiplied: a template takes its
-    // shape. A mark with its own colour is drawn in it and never tinted.
-    let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
-    let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
-    for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
-        p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
+    if glyph.full_color {
+        let rgba = crate::icons::rgba(glyph, side, 0.)?;
+        pixels.copy_from_slice(&rgba);
+    } else {
+        let coverage = crate::icons::coverage(glyph, side)?;
+        // Black at the glyph's coverage, premultiplied: a template takes its
+        // shape. A mark with its own colour is drawn in it and never tinted.
+        let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+        let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+        for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
+            p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
+        }
     }
     let size = NSSize::new(points, points);
     rep.setSize(size);
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.addRepresentation(&rep);
-    image.setTemplate(glyph.color.is_none());
+    image.setTemplate(!glyph.full_color && glyph.color.is_none());
     image.setAccessibilityDescription(Some(&NSString::from_str(label)));
     Some(image)
 }

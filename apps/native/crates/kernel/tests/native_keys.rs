@@ -10,8 +10,17 @@ use pm_model::json::parse;
 
 #[test]
 fn the_keymap_is_a_setting_that_is_stored_and_read_back() {
-    assert_eq!(NATIVE_KEYS, ["keymap", "openProjectsIn", "shareUsageData"]);
+    assert_eq!(
+        NATIVE_KEYS,
+        [
+            "keymap",
+            "openProjectsIn",
+            "shareUsageData",
+            "homeAeroliteOfferDismissed",
+        ]
+    );
     assert!(is_setting("shareUsageData"));
+    assert!(is_setting("homeAeroliteOfferDismissed"));
     assert!(is_setting("keymap"));
     assert_eq!(parse_key("keymap"), Some(StoreKey::Static("keymap".into())));
     let keymap = parse(

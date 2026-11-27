@@ -187,6 +187,10 @@ impl Controller {
                 let window = self.host.borrow().window.clone();
                 crate::updates::check_now(self.profile.clone(), window, cx)
             }
+            "whatsNew" => {
+                let window = self.host.borrow().window.clone();
+                crate::updates::show_whats_new(self.profile.clone(), window, cx)
+            }
             "backgroundTasks" => self.open_tasks_window(cx),
             "cloudSignIn" => {
                 let window = self.account_window(cx);

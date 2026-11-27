@@ -401,7 +401,7 @@ impl Stage {
             .overflow_hidden()
             .child(self.room(t, area, scale))
             .child(intro::credit(t, &self.sheet, area, scale))
-            .child(intro::words(t, &self.sheet, area, &self.tokens, motion))
+            .child(intro::words(t, &self.sheet, area, &self.tokens, scale, motion))
             .into_any_element()
     }
     /// The Welcome window's rectangle on the stage: centred.
@@ -510,15 +510,13 @@ impl Stage {
         if !self.prepared {
             self.prepared = true;
             let reduced = !self.motion();
-            // The wave starts from the mark: its rectangle in the window.
-            let mark = intro::rest();
-            let h = f64::from(area.height);
-            let (mw, mh) = (mark.height() * h * 138. / 112., mark.height() * h);
+            // The wave starts from the wordmark's rectangle in the window.
+            let (wl, wt, ww, wh) = intro::wordmark_rect(area);
             let source = WaveRect {
-                x: mark.x * f64::from(area.width) - mw / 2. - f64::from(rect.origin.x),
-                y: mark.y * h - mh / 2. - f64::from(rect.origin.y),
-                w: mw,
-                h: mh,
+                x: f64::from(wl) - f64::from(rect.origin.x),
+                y: f64::from(wt) - f64::from(rect.origin.y),
+                w: f64::from(ww),
+                h: f64::from(wh),
             };
             self.wave.update(cx, |w, _| {
                 w.clear();

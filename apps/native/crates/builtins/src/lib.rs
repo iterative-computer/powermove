@@ -675,7 +675,7 @@ impl Builtins {
                     Provider::Chatgpt => "ChatGPT",
                     Provider::Claude => "Claude",
                     Provider::Compatible => "your compatible provider",
-                    Provider::Aero => "Aero",
+                    Provider::Aero => "Aerolite",
                 };
                 return Err(format!(
                     "Sign in to {name} in Settings › Agents before starting a run."

@@ -1261,30 +1261,26 @@ pub(crate) fn step_frame(
                 // Signed in on Free: its plan to buy, right here; on a plan,
                 // the plan's name.
                 match (&choices.aero, powermove) {
-                    (AeroPlan::Offer { name, .. }, Some(_)) => Choice {
+                    (AeroPlan::Offer { .. }, Some(_)) => Choice {
                         badge: Some("Recommended".into()),
-                        detail: Some(format!("Runs on {name}, Powermove's inference.")),
+                        detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: None,
-                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
                     },
-                    // On a plan the row keeps the Free row's lines (the
-                    // tag beside the name, the detail under it), so buying
-                    // here moves nothing; the plan's name stands at the end,
-                    // so the detail leaves it out and fits beside it.
                     (AeroPlan::On(plan), Some(_)) => Choice {
                         badge: Some("Recommended".into()),
                         detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: Some(plan.clone()),
-                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
                     },
                     _ => Choice {
                         badge: Some("Recommended".into()),
                         detail: None,
                         pill: powermove.is_none().then(|| "Connect".into()),
                         status: powermove.map(str::to_owned),
-                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
                     },
                 },
                 agent(
@@ -1312,10 +1308,10 @@ pub(crate) fn step_frame(
                         name: name.clone(),
                         price: price.clone(),
                         period: "per month".into(),
-                        note: "Aero, our agent, with inference included.".into(),
+                        note: "Your editing agent, with inference included.".into(),
                         features: vec![(
                             format!("{credits} credits a month"),
-                            "Inference for Aero, run by Powermove".into(),
+                            "Inference for Aerolite, run by Powermove".into(),
                         )],
                         action: format!("Get {name}"),
                     })
@@ -2315,7 +2311,7 @@ mod step_frame_tests {
         let frame = step_frame(Onboard::Agent, &choices, &none, None, None);
         let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["aero", "claude", "chatgpt"]);
-        assert_eq!(frame.choices[0].label, "Aero");
+        assert_eq!(frame.choices[0].label, "Aerolite");
         assert_eq!(frame.chosen.as_deref(), Some("aero"));
         assert!(frame.choices.iter().all(|c| c.pill.as_deref() == Some("Connect") && c.status.is_none()));
         // A ChatGPT sign-in is Codex's only; the Powermove account is Aero's.

@@ -17,6 +17,8 @@ pub mod drag;
 pub mod agent_menu;
 pub mod area;
 #[cfg(target_os = "macos")]
+pub mod brand;
+#[cfg(target_os = "macos")]
 pub mod ease;
 #[cfg(target_os = "macos")]
 pub mod grade;

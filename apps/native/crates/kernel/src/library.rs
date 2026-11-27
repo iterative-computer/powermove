@@ -80,7 +80,14 @@ pub const STATIC_KEYS: [&str; 42] = [
 /// keymap (Settings › Shortcuts) and how projects open (Settings › General ›
 /// Open Projects In).
 /// Native-only settings (no v1 key). `shareUsageData`: Settings › Privacy.
-pub const NATIVE_KEYS: [&str; 3] = ["keymap", "openProjectsIn", "shareUsageData"];
+/// `homeAeroliteOfferDismissed`: Home sidebar's Aerolite offer card stays
+/// hidden once dismissed.
+pub const NATIVE_KEYS: [&str; 4] = [
+    "keymap",
+    "openProjectsIn",
+    "shareUsageData",
+    "homeAeroliteOfferDismissed",
+];
 
 /// `DYNAMIC_PREFIXES` at v1.2.0.
 pub const DYNAMIC_PREFIXES: [&str; 10] = [

@@ -20,6 +20,9 @@ pub struct Glyph {
     pub mirror: bool,
     pub size: f32,
     pub color: Option<u32>,
+    /// True when the SVG carries its own full-colour artwork (e.g. the
+    /// Powermove app icon) rather than a single-ink template mask.
+    pub full_color: bool,
 }
 
 macro_rules! pierre {
@@ -42,6 +45,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             mirror: false,
             size: 1.,
             color: None,
+            full_color: false,
         })
     };
     let turned = |svg, turns| {
@@ -51,6 +55,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             mirror: false,
             size: 1.,
             color: None,
+            full_color: false,
         })
     };
     match name {
@@ -63,6 +68,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             mirror: false,
             size: 16. / 14.,
             color: None,
+            full_color: false,
         }),
         "align.horizontal.left" => g(pierre!("AlignLeft")),
         "align.horizontal.center" => g(pierre!("AlignCenter")),
@@ -98,6 +104,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             // its square): drawn at the sparkle's size.
             size: 2.,
             color: None,
+            full_color: false,
         }),
         "provider.claude" | "provider.anthropic" => Some(Glyph {
             svg: include_str!("../../app/assets/settings-agent-icons/claude-ai-icon.svg"),
@@ -105,16 +112,17 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             mirror: false,
             size: 1.,
             color: Some(0xD97757),
+            full_color: false,
         }),
         "provider.compatible" => g(pierre!("Sparkle")),
-        // The Powermove harness: the app's own mark (assets/brand), filled
-        // in one ink, a touch smaller than its box as the sparkle is.
+        // Powermove Aerolite: the app's own icon, drawn in full colour.
         "provider.powermove" => Some(Glyph {
             svg: drawn!("powermove"),
             turns: 0,
             mirror: false,
-            size: 0.8,
+            size: 1.,
             color: None,
+            full_color: true,
         }),
         "minus" => g(pierre!("Minus")),
         "xmark" => g(pierre!("X")),
@@ -139,6 +147,7 @@ pub fn glyph(name: &str) -> Option<Glyph> {
             mirror: true,
             size: 1.,
             color: None,
+            full_color: false,
         }),
         // Pierre's chevron points down; the others are it turned.
         "chevron.down" => g(pierre!("Chevron")),
@@ -219,9 +228,9 @@ pub fn coverage(glyph: Glyph, side: u32) -> Option<Vec<u8>> {
     turned(glyph, side, 0.)
 }
 
-/// `glyph`'s coverage turned `degrees` clockwise about its centre (a
-/// chevron springing round to point up while its menu is open).
-fn turned(glyph: Glyph, side: u32, degrees: f32) -> Option<Vec<u8>> {
+/// `glyph` rasterised on a `side` × `side` canvas, centred, turned `degrees`
+/// clockwise, as premultiplied RGBA (`tiny_skia` pixel layout).
+pub fn rgba(glyph: Glyph, side: u32, degrees: f32) -> Option<Vec<u8>> {
     let tree = usvg::Tree::from_str(glyph.svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(side, side)?;
     let (w, h) = (tree.size().width(), tree.size().height());
@@ -237,12 +246,39 @@ fn turned(glyph: Glyph, side: u32, degrees: f32) -> Option<Vec<u8>> {
     }
     let transform = transform.pre_translate(-cx, -cy);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
-    Some(pixmap.pixels().iter().map(|p| p.alpha()).collect())
+    Some(pixmap.take())
+}
+
+/// `glyph`'s coverage turned `degrees` clockwise about its centre (a
+/// chevron springing round to point up while its menu is open).
+fn turned(glyph: Glyph, side: u32, degrees: f32) -> Option<Vec<u8>> {
+    Some(
+        rgba(glyph, side, degrees)?
+            .chunks_exact(4)
+            .map(|p| p[3])
+            .collect(),
+    )
 }
 
 /// `glyph` tinted `color` (0xRRGGBB), or in its own colour, turned
 /// `degrees` clockwise, as straight BGRA, GPUI's sprite format.
 pub fn tinted_bgra(glyph: Glyph, side: u32, color: u32, degrees: f32) -> Option<Vec<u8>> {
+    if glyph.full_color {
+        let premul = rgba(glyph, side, degrees)?;
+        let mut out = Vec::with_capacity(premul.len());
+        for p in premul.chunks_exact(4) {
+            let a = p[3];
+            if a == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            } else if a == 255 {
+                out.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            } else {
+                let un = |v: u8| ((u16::from(v) * 255 + u16::from(a) / 2) / u16::from(a)).min(255) as u8;
+                out.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), a]);
+            }
+        }
+        return Some(out);
+    }
     let color = glyph.color.unwrap_or(color);
     let (r, g, b) = ((color >> 16) as u8, (color >> 8) as u8, color as u8);
     Some(

@@ -21,7 +21,8 @@ struct Light {
     float reach;       // the mark's resting height, device pixels: its light's size
     float soft;        // the outline's softness, device pixels
     float iris;        // the body's colour drift (0–1)
-    float2 pad;
+    float angle;       // clockwise mark rotation, radians (0 = upright playhead)
+    float pad;
     float4 domain;     // the field's rectangle in mark units: min.xy, max.xy
 };
 
@@ -47,7 +48,9 @@ fragment float4 light_fragment(Out in [[stage_in]], constant Light &u [[buffer(0
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float2 px = in.position.xy;
     float h = u.size.y;
-    float2 p = (px - u.centre) / u.scale;
+    float2 rel = (px - u.centre) / u.scale;
+    float ca = cos(u.angle), sa = sin(u.angle);
+    float2 p = float2(ca * rel.x + sa * rel.y, -sa * rel.x + ca * rel.y);
     // Distance to the mark, in mark units; outside the field's rectangle,
     // add the way to it.
     float2 lo = u.domain.xy, hi = u.domain.zw;
@@ -81,30 +84,28 @@ fragment float4 light_fragment(Out in [[stage_in]], constant Light &u [[buffer(0
     float3 glow = mix(float3(1.0, 0.46, 0.17), float3(1.0, 0.68, 0.42), hot);
     add += u.bloom * breathe * (0.55 * near + 0.20 * far) * glow;
 
-    // The body: a gradient from a pale top to an ember base, darker and more
-    // saturated away from the rim, a bright rim at the outline, and a soft
-    // highlight near the top; tone-mapped by the exposure.
+    // The body: vibrant Powermove orange gradient with a subtle warm ember rim
+    // (never a harsh white outline), tone-mapped by the exposure.
     float3 lit = float3(0.);
     float cover = 0.;
     if (u.mark > 0. && dpx < max(2., u.soft)) {
         float depth = max(-d, 0.);
         float v = clamp((p.y + 55.) / 112., 0., 1.);
-        float3 top = float3(1.00, 0.84, 0.64);
-        float3 mid = float3(1.00, 0.50, 0.18);
-        float3 base = float3(0.78, 0.22, 0.07);
+        float3 top = float3(1.00, 0.56, 0.20);
+        float3 mid = float3(0.96, 0.36, 0.06);
+        float3 base = float3(0.76, 0.20, 0.04);
         float3 body = v < 0.45 ? mix(top, mid, v / 0.45) : mix(mid, base, (v - 0.45) / 0.55);
-        body *= mix(1.0, 0.62, smoothstep(0., 16., depth));
-        float rim = exp(-depth / 2.6);
-        body += rim * float3(1.0, 0.86, 0.70) * 0.95;
-        float2 sp = (p - float2(-2., -26.)) / float2(16., 24.);
-        body += 0.42 * exp(-dot(sp, sp)) * float3(1.0, 0.93, 0.84);
-        // Living colour once landed: a slow warm drift through rose, gold
-        // and peach inside the body, never at the rim.
+        body *= mix(1.0, 0.78, smoothstep(0., 16., depth));
+        float rim = exp(-depth / 2.2);
+        body += rim * float3(1.0, 0.48, 0.14) * 0.32;
+        float2 sp = (p - float2(-4., -24.)) / float2(18., 24.);
+        body += 0.26 * exp(-dot(sp, sp)) * float3(1.0, 0.68, 0.36);
+        // Living colour once landed: a slow warm drift inside the body.
         float drift = u.time * 0.45 + p.x * 0.016 - p.y * 0.011;
-        float3 tint = mix(mix(float3(1.0, 0.62, 0.62), float3(1.0, 0.86, 0.50), 0.5 + 0.5 * sin(drift)),
-                          float3(1.0, 0.70, 0.42), 0.5 + 0.5 * sin(drift * 0.73 + 2.1));
-        body = mix(body, body * tint * 1.25, 0.45 * u.iris * (1. - rim));
-        body *= 1.55 * (0.96 + 0.04 * breathe);
+        float3 tint = mix(mix(float3(1.0, 0.56, 0.32), float3(1.0, 0.74, 0.34), 0.5 + 0.5 * sin(drift)),
+                          float3(1.0, 0.58, 0.26), 0.5 + 0.5 * sin(drift * 0.73 + 2.1));
+        body = mix(body, body * tint * 1.18, 0.35 * u.iris * (1. - rim));
+        body *= 1.45 * (0.96 + 0.04 * breathe);
         // The body glows with its own bloom on it, as before over black.
         lit = 1. - exp(-body * u.exposure) + add;
         float edgeWidth = max(max(u.density, 1.), u.soft);

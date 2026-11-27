@@ -1381,7 +1381,7 @@ function Welcome({
         )}
         {aeroNeedsPlan(s, n) && (
           <div id="agent-welcome-plan" style={{ ...row, gap: t("metrics.gap") }}>
-            <text style={quiet}>Aero needs Aerolite.</text>
+            <text style={quiet}>Subscribe to Aerolite.</text>
             <button
               id="agent-welcome-subscribe"
               role="button"
@@ -3010,7 +3010,7 @@ function Composer({
     // Aero on Free: one quiet line and Subscribe…, which opens Settings ›
     // Account on its plans.
     if (aeroNeedsPlan(s, n) && s.runId === null) {
-      options.push({ kind: "status", label: "Aero needs Aerolite.", value: "" });
+      options.push({ kind: "status", label: "Subscribe to Aerolite.", value: "" });
       options.push({ kind: "action", label: "Subscribe…", value: "subscribe:" });
       return { options };
     }
@@ -3528,7 +3528,7 @@ function Composer({
             role="button"
             tabIndex={0}
             label="Subscribe"
-            title="Aero needs Aerolite: subscribe in your browser"
+            title="Subscribe to Aerolite in your browser"
             onClick={() => send({ type: "subscribe" })}
             style={{
               ...target,

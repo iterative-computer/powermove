@@ -2319,7 +2319,7 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     [
       true,
       [
-        ["status", "Aero needs Aerolite."],
+        ["status", "Subscribe to Aerolite."],
         ["action", "Subscribe…"],
       ],
     ],
