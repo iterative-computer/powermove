@@ -24,8 +24,12 @@ test('a new account is Free: no plan, no credits, and the plans it can buy', asy
     try {
       expect(await billing(s)).toEqual({
         plan: null, status: null, cancelAtPeriodEnd: false, credits: { included: 0, used: 0, remaining: 0 }, period: null, daily: [],
-        plans: [{ id: 'aerolite', name: 'Aerolite', priceCents: 999, credits: 1000 }, { id: 'aero', name: 'Aero', priceCents: 1999, credits: 2500 }],
+        plans: [{ id: 'aerolite', name: 'Aerolite', priceCents: 999, credits: 1000 }],
       });
+      // Aero isn't for sale yet: checkout refuses it.
+      const aero = await s.request('/v2/billing/checkout', { json: { plan: 'aero' } });
+      expect(aero.status).toBe(400);
+      expect(await aero.json() as unknown).toEqual({ error: { code: 'invalid_plan' } });
     } finally { await s.stop(); }
   }));
 
@@ -53,7 +57,7 @@ test('checkout to active: the webhooks grant the period’s 1,000 credits; a sec
       expect(state.credits).toEqual({ included: 1000, used: 0, remaining: 1000 });
       expect(new Date(state.period.end).getTime()).toBeGreaterThan(new Date(state.period.start).getTime());
       expect(state.daily).toEqual([{ date: new Date().toISOString().slice(0, 10), credits: 0 }]);
-      const again = await s.request('/v2/billing/checkout', { json: { plan: 'aero' } });
+      const again = await s.request('/v2/billing/checkout', { json: { plan: 'aerolite' } });
       expect(again.status).toBe(409);
       expect(await again.json() as unknown).toEqual({ error: { code: 'has_plan' } });
       expect(s.stripe.state.customers.size).toBe(1);
@@ -154,6 +158,6 @@ test('cancel at period end keeps the plan to the end, then it ends', async () =>
       const [row] = await data.db.select().from(subscriptions).where(and(eq(subscriptions.id, subscriptionId)));
       expect(row!.status).toBe('canceled');
       // Ended: a new checkout is allowed again.
-      expect((await s.request('/v2/billing/checkout', { json: { plan: 'aero' } })).status).toBe(200);
+      expect((await s.request('/v2/billing/checkout', { json: { plan: 'aerolite' } })).status).toBe(200);
     } finally { await s.stop(); }
   }));

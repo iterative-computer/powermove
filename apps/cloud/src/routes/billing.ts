@@ -5,7 +5,7 @@ import type { Env } from '../env';
 import { user } from '../db/auth-schema';
 import { stripeCustomers } from '../db/schema';
 import { billingState, currentSubscription, publicStatus } from '../billing/ledger';
-import { type Plan, isPlanId, planById } from '../billing/plans';
+import { type Plan, isForSale, planById } from '../billing/plans';
 import { stripeClient } from '../billing/stripe';
 import { consume } from '../abuse';
 import { icons, page } from '../page';
@@ -57,7 +57,7 @@ export const billing = new Hono<Env>()
   .post('/checkout', async (c) => {
     const userId = signedIn(c);
     const body = await c.req.json().catch(() => null) as { plan?: unknown } | null;
-    if (!isPlanId(body?.plan)) throw new V2Error(400, 'invalid_plan');
+    if (!isForSale(body?.plan)) throw new V2Error(400, 'invalid_plan');
     await limited(c, userId);
     const sub = await currentSubscription(c.var.data.db, userId);
     const status = sub ? publicStatus(sub.status) : null;

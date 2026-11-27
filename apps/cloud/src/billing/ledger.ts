@@ -49,7 +49,7 @@ export interface BillingState {
 const day = (date: Date) => date.toISOString().slice(0, 10);
 
 export async function billingState(db: Db, userId: string, now = new Date()): Promise<BillingState> {
-  const plans = PLANS.map(({ id, name, priceCents, credits }) => ({ id, name, priceCents, credits }));
+  const plans = PLANS.filter(plan => plan.forSale).map(({ id, name, priceCents, credits }) => ({ id, name, priceCents, credits }));
   const sub = await currentSubscription(db, userId);
   const status = sub ? publicStatus(sub.status) : null;
   if (!sub || !status || status === 'canceled' || !isPlanId(sub.plan)) {
