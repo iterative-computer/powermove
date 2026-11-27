@@ -174,45 +174,19 @@ pub fn shown_workspaces(
 }
 
 /// Pure shelf geometry, shared with Electron's shelves.ts.
-fn shelf_scale(width: f32) -> f32 {
+/// The grid's columns for a content `width`: as many cards as fit at
+/// `least` wide, `gap` apart; each card's width fills the row.
+fn grid(width: f32, least: f32, gap: f32) -> (usize, f32) {
     if !width.is_finite() || width <= 0. {
-        0.5
-    } else {
-        (width / 1700.).clamp(0.4, 0.56)
+        return (1, least);
     }
+    let columns = (((width + gap) / (least + gap)).floor() as usize).max(1);
+    let card = (width - gap * (columns - 1) as f32) / columns as f32;
+    (columns, card.max(1.))
 }
-fn preview_bounds((w, h): (f32, f32)) -> (f32, f32) {
-    (w.min(960.), h.min(720.))
-}
-fn cover_size(size: (f32, f32), scale: f32, max_width: f32) -> (f32, f32) {
-    let (w, h) = preview_bounds(size);
-    let fit = scale.min(420. / h).min(max_width / w);
-    let next = if fit.is_finite() && fit > 0. {
-        fit
-    } else {
-        scale
-    };
-    ((w * next).round(), (h * next).round())
-}
-fn pack_rows(widths: &[f32], width: f32, gap: f32) -> Vec<Vec<usize>> {
-    let mut rows = Vec::new();
-    let mut row = Vec::new();
-    let mut used = 0.;
-    for (i, w) in widths.iter().enumerate() {
-        let next = if row.is_empty() { *w } else { used + gap + w };
-        if !row.is_empty() && next > width {
-            rows.push(std::mem::take(&mut row));
-            used = *w;
-        } else {
-            used = next;
-        }
-        row.push(i);
-    }
-    if !row.is_empty() {
-        rows.push(row);
-    }
-    rows
-}
+/// A cover's shape inside its card: a fixed 16:10 frame, the panel's
+/// picture fitted inside it, never stretched.
+const COVER_ASPECT: f32 = 10. / 16.;
 pub(super) fn panel_size(id: &str) -> (f32, f32) {
     match id {
         "timeline" => (960., 360.),
@@ -228,14 +202,20 @@ pub struct PanelLibrary {
     shell: Option<WeakEntity<pm_shell::view::Editor>>,
     page: Page,
     query: String,
-    search: Option<Entity<pm_shell::text::TextField>>,
+    /// The sidebar's system search field (no AppKit window: none).
+    search: Option<Entity<pm_shell::native_control::NativeControl>>,
     tokens: pm_design::Tokens,
     motion: pm_shell::motion::Motion<u64>,
     focus: std::collections::HashMap<String, FocusHandle>,
     focused: Option<String>,
     scroll: ScrollHandle,
-    packing: std::cell::RefCell<std::collections::HashMap<String, Vec<Vec<usize>>>>,
+    /// Each card's system push button, by card and title (a button's title
+    /// is fixed when it is made: Add becoming Show makes a new one).
+    buttons: std::collections::HashMap<String, Entity<pm_shell::native_control::NativeControl>>,
     previews: std::collections::HashMap<String, std::sync::Arc<Image>>,
+    /// Each cover's bytes as last shown: a capture that brings the same
+    /// picture keeps the shown image (no re-upload, no flicker).
+    preview_sums: std::collections::HashMap<String, u64>,
     preview_stamp: Vec<(String, u64)>,
     preview_task: Option<Task<()>>,
     preview_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -246,45 +226,34 @@ pub struct PanelLibrary {
     fixture: Option<(Vec<PanelCard>, Vec<WorkspaceCard>)>,
 }
 impl PanelLibrary {
-    // Geometry is independent of scroll position. Keep the small packed-row
-    // model until width/data changes, rather than repacking on every wheel frame.
-    fn rows(&self, widths: &[f32], width: f32) -> Vec<Vec<usize>> {
-        let key = format!("{width}:{widths:?}");
-        let mut cache = self.packing.borrow_mut();
-        if !cache.contains_key(&key) {
-            if cache.len() >= 8 {
-                cache.clear();
-            }
-            cache.insert(key.clone(), pack_rows(widths, width, 16.));
-        }
-        cache[&key].clone()
-    }
     fn refresh_previews(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_ref().and_then(WeakEntity::upgrade) else {
             return;
         };
         let e = editor.read(cx);
-        let mut stamp: Vec<_> = e
-            .builtins
-            .views
+        // Covers are drawn again only when what they show changes: the
+        // panels listed, which are open, the project. Not on every panel
+        // publication (a playing viewer republishes each frame, and every
+        // capture swapped every cover: the flicker and blanks).
+        let (panels, _) = cards(e, None);
+        let mut stamp: Vec<_> = panels
             .iter()
-            .map(|(id, view)| {
-                (
-                    format!("{id}@{}", view.read(cx).publication.generation),
-                    view.read(cx).shown(),
-                )
-            })
+            .map(|card| (card.id.clone(), u64::from(card.open)))
             .collect();
         if let Some(p) = &e.published {
-            stamp.push((format!("document-{}", p.snapshot.doc_id), p.revision()));
+            stamp.push((format!("document-{}", p.snapshot.doc_id), 0));
         }
         if self.preview_task.is_some() && stamp == self.preview_stamp {
             return;
         }
         self.preview_stamp = stamp;
-        let (panels, _) = cards(e, None);
         let kernel = e.kernel.clone();
         let project = e.session.as_ref().map(|s| s.project.clone());
+        // The viewer's cover is the project's own poster frame (Home's, in
+        // the profile's thumbnail cache): its picture is the engine's.
+        let poster = project.as_ref().map(|id| {
+            crate::poster::files(&e.profile.join("caches/thumbnails"), id).0
+        });
         let dir = crate::media::cache_root(&e.profile).join("panel-covers-v1");
         let tokens = self.tokens.clone();
         self.preview_cancel
@@ -324,6 +293,9 @@ impl PanelLibrary {
                 e.builtins
                     .views
                     .keys()
+                    // The viewer's picture is the engine's own layer, not in
+                    // the window's image: its crop would be a blank slab.
+                    .filter(|id| id.as_str() != "viewer")
                     .filter_map(|id| {
                         let mut body = shell.read(cx).panel_rect(id)?;
                         body.y += self.tokens.metrics.header;
@@ -398,20 +370,39 @@ impl PanelLibrary {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                         }
                     }
+                    if let Some(png) = poster.and_then(|path| std::fs::read(path).ok()) {
+                        images.insert("viewer".into(), png);
+                    }
+                    // A cover with nothing on it (an empty panel's plain
+                    // ground) is no picture: the card keeps its symbol.
+                    images.retain(|_, png| !crate::panel_library_preview::blank(png));
                     images
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                v.previews = images
-                    .into_iter()
-                    .map(|(id, png)| {
-                        (
-                            id,
-                            std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, png)),
-                        )
-                    })
-                    .collect();
-                cx.notify();
+                // Merged, never replaced: a cover this pass couldn't draw
+                // keeps the one shown, and the same picture keeps its image.
+                let mut changed = false;
+                for (id, png) in images {
+                    let sum = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        png.hash(&mut h);
+                        h.finish()
+                    };
+                    if v.preview_sums.get(&id) == Some(&sum) {
+                        continue;
+                    }
+                    v.preview_sums.insert(id.clone(), sum);
+                    v.previews.insert(
+                        id,
+                        std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, png)),
+                    );
+                    changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
             });
         }));
     }
@@ -427,7 +418,7 @@ impl PanelLibrary {
         self.page = page;
         self.query.clear();
         if let Some(search) = &self.search {
-            search.update(cx, |f, cx| f.set_value("", cx));
+            search.read(cx).clear_search();
         }
         cx.notify();
     }
@@ -486,306 +477,333 @@ impl PanelLibrary {
             editor.read(cx).host.borrow().send_command(&command, vec![]);
         }
     }
-    fn panel_card(
-        &self,
-        card: &PanelCard,
+    /// A system push button for `command` titled `title` (Add, Show,
+    /// Activate…): made once per title and kept; pressing it runs the
+    /// command. Only a real AppKit window holds one (tests have none).
+    fn push(
+        &mut self,
+        command: &str,
+        title: &str,
+        disabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<pm_shell::native_control::NativeControl>> {
+        use pm_shell::native_control::{ControlSpec, Kind, NativeControl};
+        crate::platform::ns_window(window)?;
+        let key = format!("{command}|{title}");
+        if !self.buttons.contains_key(&key) {
+            let prefix = format!("{command}|");
+            self.buttons.retain(|k, _| !k.starts_with(&prefix));
+            let tokens = self.tokens.clone();
+            let control = cx.new(|cx| {
+                NativeControl::new(
+                    ControlSpec {
+                        kind: Kind::Push,
+                        label: title,
+                        identifier: command,
+                        value: &serde_json::Value::Null,
+                        options: vec![],
+                        disabled,
+                        default: false,
+                        destructive: false,
+                        inline: false,
+                        quiet: false,
+                        pull: false,
+                        tint: None,
+                        symbol: None,
+                        glass: false,
+                        well: false,
+                    },
+                    &tokens,
+                    window,
+                    cx,
+                )
+            });
+            let run = command.to_owned();
+            cx.subscribe(&control, move |v: &mut Self, _, _: &serde_json::Value, cx| {
+                v.send(run.clone(), cx)
+            })
+            .detach();
+            self.buttons.insert(key.clone(), control);
+        }
+        let control = self.buttons[&key].clone();
+        control.update(cx, |c, cx| c.update(&serde_json::Value::Null, &[], disabled, cx));
+        Some(control)
+    }
+    /// The action under a card: the system button, or (a test window) the
+    /// kit's.
+    fn action(
+        &mut self,
         kit: &Kit,
-        scale: f32,
-        width: f32,
+        command: String,
+        title: &str,
+        disabled: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        match self.push(&command, title, disabled, window, cx) {
+            Some(control) => div().flex_none().child(control).into_any_element(),
+            None => kit
+                .button(
+                    SharedString::from(format!("library-action-{command}")),
+                    title.to_owned(),
+                    kit::Button::Neutral,
+                    None,
+                    None,
+                )
+                .on_click(cx.listener(move |v, _, _, cx| v.send(command.clone(), cx)))
+                .into_any_element(),
+        }
+    }
+    /// One card, Settings' card anatomy: the well, its corner, one inset
+    /// (`space.sm`) on every side; the cover in a fixed 16:10 frame whose
+    /// corner is the card's less that inset; under it the name, its source
+    /// and the action.
+    #[allow(clippy::too_many_arguments)]
+    fn card(
+        &self,
+        kit: &Kit,
+        id: &str,
+        width: f32,
+        cover: AnyElement,
+        title: String,
+        source: String,
+        action: AnyElement,
+        delete: Option<AnyElement>,
+        dimmed: bool,
+    ) -> Stateful<Div> {
         let t = &kit.t;
         let c = &t.colors;
-        let (w, h) = cover_size(panel_size(&card.id), scale, width);
-        let key = kit::key(&format!("library-cover-{}", card.id));
-        let hover = if self.focused.as_deref() == Some(&card.id) {
-            1.
-        } else {
-            kit.hovered(key)
-        };
+        let st = pm_shell::scale().settings;
+        let inset = t.space.sm;
+        let corner = st.group_radius;
+        let inner = t.radius.nested(corner, inset);
+        let cover_w = width - 2. * inset;
+        div()
+            .id(SharedString::from(format!("library-card-{id}")))
+            .flex_none()
+            .w(px(width))
+            .p(px(inset))
+            .flex()
+            .flex_col()
+            .gap(px(inset))
+            .rounded(px(corner))
+            .bg(kit::ink(c.text, pm_design::Ink::new().well))
+            .border_1()
+            .border_color(kit::ink(c.text, pm_design::Ink::new().edge * 0.5))
+            .opacity(if dimmed { 0.62 } else { 1. })
+            .child(
+                div()
+                    .relative()
+                    .w(px(cover_w))
+                    .h(px((cover_w * COVER_ASPECT).round()))
+                    .rounded(px(inner))
+                    .overflow_hidden()
+                    .bg(kit::ink(c.text, pm_design::Ink::new().well))
+                    .child(cover)
+                    .children(delete.map(|d| {
+                        div()
+                            .absolute()
+                            .top(px(t.space.xs))
+                            .right(px(t.space.xs))
+                            .child(d)
+                    })),
+            )
+            .child(
+                div()
+                    .px(px(t.space.xs))
+                    .pb(px(t.space.xs))
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.sm))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_role(t, Text::Label)
+                                    .text_color(rgb(c.text))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_role(t, Text::Caption)
+                                    .text_color(rgb(c.secondary))
+                                    .child(source),
+                            ),
+                    )
+                    .child(action),
+            )
+    }
+    /// A panel's cover: its real picture, fitted in the frame (never
+    /// stretched), fading in once; until it is drawn, the panel's symbol,
+    /// quietly.
+    fn cover(&self, kit: &Kit, id: &str, symbol: &str) -> AnyElement {
+        let t = &kit.t;
+        match self.previews.get(id) {
+            Some(image) => {
+                let fade = if t.accessibility.reduce_motion {
+                    1.
+                } else {
+                    kit.animate(
+                        kit::key(&format!("preview-{id}")),
+                        1.,
+                        Some(pm_design::motion::Preset::Show),
+                    )
+                };
+                img(ImageSource::Image(image.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .opacity(fade)
+                    .into_any_element()
+            }
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(kit.symbol(symbol, t.metrics.symbol_panel * 1.5, Weight::Regular, t.colors.faint))
+                .into_any_element(),
+        }
+    }
+    fn panel_card(
+        &mut self,
+        card: &PanelCard,
+        kit: &Kit,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = kit.t.clone();
+        let c = &t.colors;
         let command = format!("panel:activate:{}", card.id);
-        let click = command.clone();
-        let keyboard = command.clone();
-        let action_command = command.clone();
-        let action = panel_action(
+        let title = panel_action(
             card.open,
             self.added.get(&card.id).map(std::time::Instant::elapsed),
         );
-        let label = format!("{action} {} in Workspace", card.title);
-        let owner = self
-            .editor
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .and_then(|e| {
-                e.read(cx)
-                    .extensions
-                    .stores
-                    .get(&card.id)
-                    .map(|(id, _)| id.clone())
-            });
-        let dimmed = owner.as_ref().is_some_and(|id| {
-            self.editor
-                .as_ref()
-                .and_then(WeakEntity::upgrade)
-                .is_some_and(|e| {
-                    e.read(cx)
-                        .kernel
-                        .state()
-                        .extensions
-                        .get(id)
-                        .is_none_or(|entry| !entry.enabled || !entry.installed)
-                })
+        let editor = self.editor.as_ref().and_then(WeakEntity::upgrade);
+        let owner = editor.as_ref().and_then(|e| {
+            e.read(cx)
+                .extensions
+                .stores
+                .get(&card.id)
+                .map(|(id, _)| id.clone())
         });
-        let seed = owner.clone().unwrap_or_else(|| card.id.clone());
-        let metadata = owner.as_ref().and_then(|id| {
-            self.editor
-                .as_ref()
-                .and_then(WeakEntity::upgrade)
-                .and_then(|e| {
-                    let state = e.read(cx).kernel.state();
-                    let entry = state.extensions.get(id)?;
+        let (dimmed, metadata) = match (owner.as_ref(), editor.as_ref()) {
+            (Some(id), Some(e)) => {
+                let state = e.read(cx).kernel.state();
+                let entry = state.extensions.get(id);
+                let dimmed = entry.is_none_or(|entry| !entry.enabled || !entry.installed);
+                let metadata = entry.map(|entry| {
                     let record = entry.source.get("hostRecord").unwrap_or(&entry.source);
                     let name = record
                         .get("name")
                         .and_then(pm_model::Value::as_str)
-                        .unwrap_or(id);
-                    let maker = record.get("maker").and_then(|m| {
-                        m.get("handle")
-                            .and_then(pm_model::Value::as_str)
-                            .or_else(|| m.as_str())
-                    });
-                    let label = maker
-                        .map_or_else(|| name.to_owned(), |maker| format!("{name} · by {maker}"));
+                        .unwrap_or(id)
+                        .to_owned();
                     let icon = entry
                         .source
                         .get("manifest")
                         .and_then(|m| m.get("icon"))
                         .and_then(pm_model::Value::as_str)
                         .map(str::to_owned);
-                    Some((label, icon))
-                })
-        });
-        let subline = metadata
-            .as_ref()
-            .map(|(label, _)| label.clone())
-            .or_else(|| owner.clone());
-        let manifest_icon = metadata.as_ref().and_then(|(_, icon)| icon.as_deref());
+                    (name, icon)
+                });
+                (dimmed, metadata)
+            }
+            _ => (false, None),
+        };
+        let source = match card.origin {
+            Origin::BuiltIn => "Built In".to_owned(),
+            Origin::Yours => metadata
+                .as_ref()
+                .map_or_else(|| "Made by You".to_owned(), |(name, _)| name.clone()),
+            Origin::Store => metadata
+                .as_ref()
+                .map_or_else(|| "From the Store".to_owned(), |(name, _)| name.clone()),
+        };
+        let symbol = pm_shell::symbol::panel_symbol_with_manifest(
+            &card.id,
+            metadata.as_ref().and_then(|(_, icon)| icon.as_deref()),
+        )
+        .to_owned();
         let delete_command = owner
             .map(|id| format!("extensionArchive.{id}"))
-            .or_else(|| {
-                (card.origin == Origin::Yours).then(|| format!("library-delete:{}", card.id))
-            });
-        let keyboard_delete = delete_command.clone();
-        let art = card.origin != Origin::BuiltIn;
-        let (from, to) = crate::store_window::art(&seed);
-        let cover = div()
-            .id(SharedString::from(format!("library-panel-{}", card.id)))
-            .track_focus(self.focus.get(&card.id).expect("cover focus"))
-            .role(Role::Button)
-            .aria_label(label.clone())
+            .or_else(|| (card.origin == Origin::Yours).then(|| format!("library-delete:{}", card.id)));
+        let key = kit::key(&format!("library-card-{}", card.id));
+        let hover = if self.focused.as_deref() == Some(&card.id) {
+            1.
+        } else {
+            kit.hovered(key)
+        };
+        let delete = delete_command.clone().map(|command| {
+            kit.destructive_icon_button(
+                format!("library-delete-{}", card.id),
+                "trash",
+                format!("Delete {}", card.title),
+            )
+            .opacity(hover)
+            .rounded(px(t.radius.nested(
+                t.radius.nested(pm_shell::scale().settings.group_radius, t.space.sm),
+                t.space.xs,
+            )))
+            .bg(rgb(c.floating))
+            .on_click(cx.listener(move |v, _, _, cx| {
+                cx.stop_propagation();
+                v.send(command.clone(), cx)
+            }))
+            .into_any_element()
+        });
+        let action = self.action(kit, command.clone(), title, false, window, cx);
+        let cover = self.cover(kit, &card.id, &symbol);
+        let keyboard = command.clone();
+        let element = self
+            .card(kit, &card.id, width, cover, card.title.clone(), source, action, delete, dimmed)
+            .track_focus(self.focus.get(&card.id).expect("card focus"))
+            .role(Role::Group)
+            .aria_label(format!("{}, {}", card.title, title))
             .tab_index(0)
-            .focus_visible_style(|s| {
-                s.shadow(vec![BoxShadow {
-                    color: rgb(c.focus).into(),
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: true,
-                }])
-            })
             .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "enter" {
                     v.send(keyboard.clone(), cx);
                     cx.stop_propagation();
-                } else if matches!(e.keystroke.key.as_str(), "backspace" | "delete") {
-                    if let Some(command) = &keyboard_delete {
-                        v.send(command.clone(), cx);
-                        cx.stop_propagation();
-                    }
+                } else if matches!(e.keystroke.key.as_str(), "backspace" | "delete")
+                    && let Some(command) = &delete_command
+                {
+                    v.send(command.clone(), cx);
+                    cx.stop_propagation();
                 }
-            }))
-            .opacity(if dimmed { 0.62 + hover * 0.18 } else { 1. })
-            .relative()
-            .w(px(w))
-            .h(px(h))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(12.))
-            .corner(t, t.radius.lg)
-            .bg(rgb(c.panel))
-            .active_style(|s| {
-                if art {
-                    s.bg(linear_gradient(
-                        135.,
-                        linear_color_stop(rgb(pm_design::color::mix(from, c.text, 0.04)), 0.),
-                        linear_color_stop(rgb(pm_design::color::mix(to, c.text, 0.04)), 1.),
-                    ))
-                } else {
-                    s.bg(rgb(pm_design::color::mix(c.panel, c.text, 0.04)))
-                }
-            })
-            .elevated(
-                t,
-                if hover > 0.1 {
-                    pm_design::Elevation::Menu
-                } else {
-                    pm_design::Elevation::Raised
-                },
-            )
-            .when(art, |d| {
-                d.bg(linear_gradient(
-                    135.,
-                    linear_color_stop(rgb(from), 0.),
-                    linear_color_stop(rgb(to), 1.),
-                ))
-            })
-            .child(kit.symbol(
-                pm_shell::symbol::panel_symbol_with_manifest(&card.id, manifest_icon),
-                26.,
-                Weight::Regular,
-                if art { 0xffffff } else { c.muted },
-            ))
-            .child(
-                div()
-                    .w(px(w * 0.85))
-                    .truncate()
-                    .text_center()
-                    .text_role(t, Text::Body)
-                    .font_weight(FontWeight(t.typography.medium_weight))
-                    .text_color(if art {
-                        kit::ink(0xffffff, 0.94)
-                    } else {
-                        rgb(c.secondary).into()
-                    })
-                    .child(card.title.clone()),
-            )
-            .children(self.previews.get(&card.id).map(|image| {
-                let fade = if t.accessibility.reduce_motion {
-                    1.
-                } else {
-                    kit.animate(
-                        kit::key(&format!("preview-{}", card.id)),
-                        1.,
-                        Some(pm_design::motion::Preset::Show),
-                    )
-                };
-                div()
-                    .absolute()
-                    .inset_0()
-                    .overflow_hidden()
-                    .corner(t, t.radius.lg)
-                    .child(
-                        img(ImageSource::Image(image.clone()))
-                            .size_full()
-                            .object_fit(ObjectFit::Fill)
-                            .opacity(fade),
-                    )
-            }))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(t.space.md))
-                    .right(px(t.space.md))
-                    .opacity(hover)
-                    .flex()
-                    .gap(px(4.))
-                    .children(delete_command.map(|command| {
-                        kit.destructive_icon_button(
-                            format!("library-delete-{}", card.id),
-                            "trash",
-                            format!("Delete {}", card.title),
-                        )
-                        .rounded(px((t.radius.lg - t.space.md).max(t.radius.xs)))
-                        .bg(rgb(c.floating))
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            cx.stop_propagation();
-                            v.send(command.clone(), cx)
-                        }))
-                    })),
-            )
-            .on_click(cx.listener(move |v, _, _, cx| v.send(click.clone(), cx)));
+            }));
         div()
             .flex_none()
-            .w(px(w))
             .flex()
             .flex_col()
-            .child(kit.track_hover(cover, key))
-            .child(self.ledge(kit, card.title.clone(), subline, w))
-            .child(
-                kit.button(
-                    format!("library-action-{}", card.id),
-                    action,
-                    kit::Button::Quiet,
-                    None,
-                    None,
-                )
-                .on_click(cx.listener(move |v, _, _, cx| v.send(action_command.clone(), cx))),
-            )
-            .children(
-                self.errors
-                    .get(&card.id)
-                    .map(|error| div().text_color(rgb(c.danger)).child(error.clone())),
-            )
+            .gap(px(t.space.xs))
+            .child(kit.track_hover(element, key))
+            .children(self.errors.get(&card.id).map(|error| {
+                div()
+                    .w(px(width))
+                    .text_role(&t, Text::Caption)
+                    .text_color(rgb(c.danger))
+                    .child(error.clone())
+            }))
             .into_any_element()
     }
-    fn ledge(&self, kit: &Kit, title: String, detail: Option<String>, width: f32) -> Div {
-        let t = &kit.t;
-        div()
-            .w(px(width))
-            .h(px(42.))
-            .pl(px(14.))
-            .pr(px(10.))
-            .flex()
-            .flex_col()
-            .justify_center()
-            .corner(t, t.radius.lg)
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(kit::ink(t.colors.text, 0.), 0.),
-                linear_color_stop(
-                    kit::ink(
-                        t.colors.text,
-                        if t.accessibility.increase_contrast {
-                            t.translucency.selected
-                        } else {
-                            t.translucency.hover
-                        },
-                    ),
-                    0.75,
-                ),
-            ))
-            .child(
-                div()
-                    .truncate()
-                    .text_role(t, Text::Body)
-                    .font_weight(FontWeight(t.typography.medium_weight))
-                    .child(title),
-            )
-            .children(detail.map(|s| {
-                div()
-                    .truncate()
-                    .text_role(t, Text::Caption)
-                    .text_color(rgb(if s == "Active" {
-                        t.colors.accent_text
-                    } else {
-                        t.colors.muted
-                    }))
-                    .child(s)
-            }))
-    }
     fn workspace_card(
-        &self,
+        &mut self,
         card: &WorkspaceCard,
         kit: &Kit,
-        scale: f32,
         width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let t = &kit.t;
+        let t = kit.t.clone();
         let c = &t.colors;
-        let (w, h) = cover_size((400., 250.), scale, width);
         let layout = self
             .editor
             .as_ref()
@@ -797,14 +815,17 @@ impl PanelLibrary {
                     .map(workspace::layout)
             })
             .or_else(|| workspace::preset(&card.id).as_ref().map(workspace::layout));
+        // The workspace's docks drawn as its map: each panel a tile with its
+        // symbol, one inset apart, corners nested in the cover's.
         let names = pm_shell::layout::Panels::new(Vec::new());
-        let map_inset = t.metrics.gap;
-        let mut map = div().size_full().flex().gap(px(t.space.xs)).p(px(map_inset));
+        let inset = t.space.xs;
+        let cover_corner = t.radius.nested(pm_shell::scale().settings.group_radius, t.space.sm);
+        let mut map = div().size_full().flex().gap(px(inset)).p(px(inset));
         if let Some(layout) = layout {
             for dock in &layout.docks {
-                let mut col = div().h_full().flex().flex_col().gap(px(4.));
+                let mut col = div().h_full().flex().flex_col().gap(px(inset));
                 col = if dock.size.is_some() {
-                    col.w(px(w * 0.22))
+                    col.w(px((width - 2. * t.space.sm) * 0.24))
                 } else {
                     col.flex_1()
                 };
@@ -816,21 +837,24 @@ impl PanelLibrary {
                             .min_h(px(0.))
                             .overflow_hidden()
                             .flex()
+                            .flex_col()
                             .items_center()
                             .justify_center()
-                            .gap(px(4.))
-                            .rounded(px(t.radius.nested(t.radius.lg, map_inset)))
+                            .gap(px(t.space.hair))
+                            .rounded(px(t.radius.nested(cover_corner, inset)))
                             .bg(kit::ink(c.text, t.translucency.hover))
                             .child(kit.symbol(
                                 pm_shell::symbol::panel_symbol(id),
-                                14.,
+                                t.metrics.symbol_panel,
                                 Weight::Regular,
                                 c.secondary,
                             ))
                             .child(
                                 div()
+                                    .max_w_full()
+                                    .px(px(inset))
                                     .truncate()
-                                    .text_role(t, Text::Caption)
+                                    .text_role(&t, Text::Caption)
                                     .text_color(rgb(c.secondary))
                                     .child(names.title(id).to_owned()),
                             ),
@@ -839,112 +863,65 @@ impl PanelLibrary {
                 map = map.child(col);
             }
         }
-        let activate = format!("workspace:{}", card.id);
-        let keyboard_activate = activate.clone();
-        let keyboard_delete = (!card.builtin).then(|| (card.id.clone(), card.name.clone()));
-        let key = kit::key(&format!("workspace-cover-{}", card.id));
+        let command = format!("workspace:{}", card.id);
+        let action = self.action(
+            kit,
+            command.clone(),
+            if card.active { "Active" } else { "Activate" },
+            card.active,
+            window,
+            cx,
+        );
+        let key = kit::key(&format!("workspace-card-{}", card.id));
+        let hover = if self.focused.as_deref() == Some(&card.id) {
+            1.
+        } else {
+            kit.hovered(key)
+        };
         let (id, name) = (card.id.clone(), card.name.clone());
-        let cover = div()
-            .id(SharedString::from(format!("library-workspace-{}", card.id)))
-            .relative()
-            .role(Role::Button)
-            .track_focus(self.focus.get(&card.id).expect("workspace focus"))
-            .aria_label(format!("Activate {}", card.name))
-            .tab_index(0)
-            .focus_visible_style(|s| {
-                s.shadow(vec![BoxShadow {
-                    color: rgb(c.focus).into(),
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: true,
-                }])
-            })
-            .on_key_down(cx.listener(move |v, event: &KeyDownEvent, _, cx| {
-                match event.keystroke.key.as_str() {
-                    "enter" => {
-                        v.send(keyboard_activate.clone(), cx);
-                        cx.stop_propagation();
-                    }
-                    "backspace" | "delete" => {
-                        if let Some((id, name)) = &keyboard_delete {
-                            if let Some(e) = v.editor.as_ref().and_then(WeakEntity::upgrade) {
-                                e.update(cx, |v, cx| {
-                                    v.confirm_workspace_delete(id.clone(), name.clone(), cx)
-                                });
-                            }
-                            cx.stop_propagation();
-                        }
-                    }
-                    _ => {}
+        let delete = (!card.builtin).then(|| {
+            kit.destructive_icon_button(
+                format!("workspace-delete-{}", card.id),
+                "trash",
+                format!("Delete {}", card.name),
+            )
+            .opacity(hover)
+            .rounded(px(t.radius.nested(cover_corner, t.space.xs)))
+            .bg(rgb(c.floating))
+            .on_click(cx.listener(move |v, _, _, cx| {
+                cx.stop_propagation();
+                if let Some(e) = v.editor.as_ref().and_then(WeakEntity::upgrade) {
+                    e.update(cx, |e, cx| e.confirm_workspace_delete(id.clone(), name.clone(), cx));
                 }
             }))
-            .w(px(w))
-            .h(px(h))
-            .corner(t, t.radius.lg)
-            .bg(rgb(c.panel))
-            .elevated(t, pm_design::Elevation::Raised)
-            .when(card.active, |d| {
-                d.shadow(vec![BoxShadow {
-                    color: rgb(c.accent).into(),
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: true,
-                }])
-            })
-            .child(map)
-            .when(!card.builtin, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top(px(t.space.md))
-                        .right(px(t.space.md))
-                        .opacity(if self.focused.as_deref() == Some(&card.id) {
-                            1.
-                        } else {
-                            kit.hovered(key)
-                        })
-                        .child(
-                            kit.destructive_icon_button(
-                                format!("workspace-delete-{}", card.id),
-                                "trash",
-                                format!("Delete {}", card.name),
-                            )
-                            .rounded(px((t.radius.lg - t.space.md).max(t.radius.xs)))
-                            .bg(rgb(c.floating))
-                            .on_click(cx.listener(
-                                move |v, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(e) = v.editor.as_ref().and_then(WeakEntity::upgrade)
-                                    {
-                                        e.update(cx, |e, cx| {
-                                            e.confirm_workspace_delete(id.clone(), name.clone(), cx)
-                                        });
-                                    }
-                                },
-                            )),
-                        ),
-                )
-            })
-            .on_click(cx.listener(move |v, _, _, cx| v.send(activate.clone(), cx)));
-        div()
-            .w(px(w))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .child(kit.track_hover(cover, key))
-            .child(self.ledge(
-                kit,
-                card.name.clone(),
-                Some(if card.active {
-                    "Active".into()
-                } else {
-                    format!("{} panels", card.panels)
-                }),
-                w,
-            ))
             .into_any_element()
+        });
+        let source = if card.builtin { "Built In" } else { "Saved by You" };
+        let detail = format!("{source} · {} panels", card.panels);
+        let keyboard = command.clone();
+        let keyboard_delete = (!card.builtin).then(|| (card.id.clone(), card.name.clone()));
+        let element = self
+            .card(kit, &card.id, width, map.into_any_element(), card.name.clone(), detail, action, delete, false)
+            .track_focus(self.focus.get(&card.id).expect("workspace focus"))
+            .role(Role::Group)
+            .aria_label(card.name.clone())
+            .tab_index(0)
+            .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
+                "enter" => {
+                    v.send(keyboard.clone(), cx);
+                    cx.stop_propagation();
+                }
+                "backspace" | "delete" => {
+                    if let Some((id, name)) = &keyboard_delete
+                        && let Some(e) = v.editor.as_ref().and_then(WeakEntity::upgrade)
+                    {
+                        e.update(cx, |v, cx| v.confirm_workspace_delete(id.clone(), name.clone(), cx));
+                        cx.stop_propagation();
+                    }
+                }
+                _ => {}
+            }));
+        kit.track_hover(element, key).into_any_element()
     }
 }
 impl Drop for PanelLibrary {
@@ -960,6 +937,7 @@ impl Render for PanelLibrary {
         let t = self.tokens.clone();
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
+        let st = pm_shell::scale().settings;
         let (ground, ground_alpha) = t.ground();
         let saves = self.saves_current(cx);
         let (panels, workspaces) = self
@@ -994,35 +972,25 @@ impl Render for PanelLibrary {
                 self.focus.insert(id.clone(), handle);
             }
         }
+        // The sidebar: Settings' (its width, its inset, the search on top,
+        // quiet group names, the source list's rows).
         let mut sidebar = div()
             .flex()
             .flex_col()
             .flex_none()
-            .gap(px(m.border))
-            .w(px(m.settings_sidebar))
+            .w(px(st.sidebar))
             .h_full()
             .pt(px(m.toolbar))
-            .px(px(m.gap))
+            .px(px(st.sidebar_inset))
+            .pb(px(st.sidebar_inset))
             .bg(pm_shell::view::tint(ground, ground_alpha))
-            .child(kit.search(self.search.clone(), None).h(px(34.)));
+            .children(self.search.clone().map(|field| div().mb(px(t.space.md)).child(field)));
         for page in Page::ALL {
             let heading = match page {
-                Page::Panels(None) => Some("PANELS"),
-                Page::Workspaces(None) => Some("WORKSPACES"),
+                Page::Panels(None) => Some("Panels"),
+                Page::Workspaces(None) => Some("Workspaces"),
                 _ => None,
             };
-            if let Some(heading) = heading {
-                sidebar = sidebar.child(
-                    div()
-                        .pt(px(m.gap))
-                        .px(px(m.gap))
-                        .text_role(&t, Text::Caption)
-                        .font_weight(FontWeight(ty.semibold_weight))
-                        .letter_spacing(px(t.text(Text::Caption).size * 0.05))
-                        .text_color(rgb(c.faint))
-                        .child(heading),
-                );
-            }
             let count = match page {
                 Page::Panels(o) => shown_panels(&panels, o, "").len(),
                 Page::Workspaces(b) => shown_workspaces(&workspaces, b, "").len(),
@@ -1030,167 +998,99 @@ impl Render for PanelLibrary {
             if count == 0
                 && matches!(
                     page,
-                    Page::Panels(Some(Origin::Yours)) | Page::Workspaces(Some(false))
+                    Page::Panels(Some(Origin::Yours | Origin::Store)) | Page::Workspaces(Some(false))
                 )
             {
                 continue;
             }
+            if let Some(heading) = heading {
+                sidebar = sidebar.child(
+                    div()
+                        .pt(px(if page == Page::Panels(None) { 0. } else { t.space.lg }))
+                        .pb(px(t.space.xs))
+                        .px(px(t.space.md))
+                        .text_role(&t, Text::Caption)
+                        .font_weight(FontWeight(st.group_weight))
+                        .text_color(rgb(c.muted))
+                        .child(heading),
+                );
+            }
             let symbol = match page {
                 Page::Panels(None) => "square.grid.2x2",
-                Page::Panels(Some(Origin::BuiltIn)) | Page::Workspaces(Some(true)) => {
-                    "square.stack"
-                }
+                Page::Panels(Some(Origin::BuiltIn)) | Page::Workspaces(Some(true)) => "square.stack",
                 Page::Panels(Some(Origin::Yours)) => "wand.and.stars",
-                Page::Panels(Some(Origin::Store)) => "basket",
+                Page::Panels(Some(Origin::Store)) => "puzzlepiece.extension",
                 Page::Workspaces(None) => "rectangle.3.group",
                 Page::Workspaces(Some(false)) => "person.crop.circle",
             };
             sidebar = sidebar.child(
-                kit.row(format!("library-page-{page:?}"), self.page == page)
-                    .role(Role::Button)
-                    // A quiet list: the page's name, no count (owner rule).
-                    .aria_label(page.title().to_string())
-                    .tab_index(0)
-                    .child(kit.symbol(symbol, m.symbol_panel, Weight::Regular, c.muted))
-                    .child(div().flex_1().child(page.title()))
-                    .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
-                        if e.keystroke.key == "enter" {
-                            v.set_page(page, cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
+                kit.nav_row(
+                    format!("library-page-{page:?}"),
+                    symbol,
+                    page.title().to_owned(),
+                    None,
+                    self.page == page,
+                )
+                .tab_index(0)
+                .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "enter" {
+                        v.set_page(page, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
             );
         }
-        sidebar = sidebar.child(div().flex_1()).child(
-            kit.button(
-                "library-store",
-                "Browse the Store",
-                kit::Button::Neutral,
-                Some("basket"),
-                None,
-            )
-            .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))),
-        );
-        let width =
-            (f32::from(window.viewport_size().width) - m.settings_sidebar - 2. * (m.inset + m.gap))
-                .max(200.);
-        let scale = shelf_scale(width);
-        let mut shelf = div()
+        let store = self.action(&kit, "store".into(), "Browse the Store…", false, window, cx);
+        sidebar = sidebar.child(div().flex_1()).child(div().flex().justify_center().child(store));
+        // The content: the page's title on the traffic lights' line, then
+        // the cards, as many to a row as fit, the room shared out.
+        let gap = t.space.lg;
+        let width = (f32::from(window.viewport_size().width) - st.sidebar - 2. * st.page_inset).max(160.);
+        let (columns, card_w) = grid(width, 200., gap);
+        let mut cells: Vec<AnyElement> = vec![];
+        let empty = match self.page {
+            Page::Panels(origin) => {
+                let shown = shown_panels(&panels, origin, &self.query);
+                for card in &shown {
+                    let cell = self.panel_card(card, &kit, card_w, window, cx);
+                    cells.push(cell);
+                }
+                shown.is_empty()
+            }
+            Page::Workspaces(builtin) => {
+                let shown = shown_workspaces(&workspaces, builtin, &self.query);
+                for card in &shown {
+                    let cell = self.workspace_card(card, &kit, card_w, window, cx);
+                    cells.push(cell);
+                }
+                shown.is_empty()
+            }
+        };
+        let mut grid_el = div()
             .id("library-shelf")
             .flex_none()
             .role(Role::List)
             .aria_label(self.page.title())
             .flex()
             .flex_col()
-            .gap(px(30.));
-        let empty = match self.page {
-            Page::Panels(origin) => {
-                let shown = shown_panels(&panels, origin, &self.query);
-                for source in [Origin::BuiltIn, Origin::Yours, Origin::Store] {
-                    if origin.is_some_and(|o| o != source) {
-                        continue;
-                    }
-                    let books: Vec<_> = shown.iter().filter(|p| p.origin == source).collect();
-                    if books.is_empty() && source != Origin::Store {
-                        continue;
-                    }
-                    let mut section = div().flex_none().flex().flex_col().gap(px(12.));
-                    if origin.is_none() {
-                        section = section.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .text_role(&t, Text::Title)
-                                .child(Page::Panels(Some(source)).title()),
-                        );
-                    }
-                    let mut widths: Vec<_> = books
-                        .iter()
-                        .map(|p| cover_size(panel_size(&p.id), scale, width).0)
-                        .collect();
-                    if source == Origin::Store && self.query.trim().is_empty() {
-                        widths.push(180.);
-                    }
-                    for row in self.rows(&widths, width) {
-                        section = section.child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_end()
-                                .gap(px(16.))
-                                .mb(px(24.))
-                                .children(row.into_iter().map(|i| {
-                                    if i < books.len() {
-                                        self.panel_card(books[i], &kit, scale, width, cx)
-                                    } else {
-                                        div()
-                                            .flex_none()
-                                            .w(px(180.))
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                kit.row("library-find-store", false)
-                                                    .w_full()
-                                                    .h(px(160.))
-                                                    .flex_col()
-                                                    .justify_center()
-                                                    .bg(rgb(c.field))
-                                                    .child(kit.symbol(
-                                                        "basket",
-                                                        26.,
-                                                        Weight::Regular,
-                                                        c.muted,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .text_center()
-                                                            .child("Find panels in the Store"),
-                                                    )
-                                                    .on_click(cx.listener(|v, _, _, cx| {
-                                                        v.send("store".into(), cx)
-                                                    })),
-                                            )
-                                            .child(div().h(px(42.)))
-                                            .into_any_element()
-                                    }
-                                })),
-                        );
-                    }
-                    shelf = shelf.child(section);
-                }
-                shown.is_empty()
-            }
-            Page::Workspaces(builtin) => {
-                let shown = shown_workspaces(&workspaces, builtin, &self.query);
-                let widths = vec![cover_size((400., 250.), scale, width).0; shown.len()];
-                for row in self.rows(&widths, width) {
-                    shelf = shelf.child(
-                        div().flex_none().flex().items_end().gap(px(16.)).children(
-                            row.into_iter()
-                                .map(|i| self.workspace_card(&shown[i], &kit, scale, width, cx)),
-                        ),
-                    );
-                }
-                shown.is_empty()
-            }
-        };
+            .gap(px(gap));
+        let mut cells = cells.into_iter().peekable();
+        while cells.peek().is_some() {
+            let row: Vec<AnyElement> = cells.by_ref().take(columns).collect();
+            grid_el = grid_el.child(div().flex_none().flex().items_start().gap(px(gap)).children(row));
+        }
         let fade = if t.accessibility.reduce_motion {
             1.
         } else {
-            kit.animate(
-                kit::key("library-page-fade"),
-                1.,
-                Some(pm_design::motion::Preset::Show),
-            )
+            kit.animate(kit::key("library-page-fade"), 1., Some(pm_design::motion::Preset::Show))
         };
         let body = if empty {
             let (symbol, heading, detail) = if !self.query.trim().is_empty() {
                 (
                     "magnifyingglass",
                     "No Results",
-                    format!("Nothing matches “{}”.", self.query),
+                    format!("Nothing matches “{}”.", self.query.trim()),
                 )
             } else {
                 match self.page {
@@ -1199,53 +1099,35 @@ impl Render for PanelLibrary {
                         "No Panels Yet",
                         "Panels you make with the agent appear here.".into(),
                     ),
-                    Page::Panels(Some(Origin::Store)) => {
-                        ("basket", "Nothing from the Store", String::new())
-                    }
-                    Page::Workspaces(Some(false)) => {
-                        ("rectangle.3.group", "No Saved Workspaces", String::new())
-                    }
-                    _ => ("square.grid.2x2", "No Panels Yet", String::new()),
+                    Page::Panels(Some(Origin::Store)) => (
+                        "puzzlepiece.extension",
+                        "No Extension Panels",
+                        "Extensions from the Store add their panels here.".into(),
+                    ),
+                    Page::Workspaces(Some(false)) => (
+                        "rectangle.3.group",
+                        "No Saved Workspaces",
+                        "Save the current layout to keep it here.".into(),
+                    ),
+                    _ => ("square.grid.2x2", "No Panels", String::new()),
                 }
             };
+            let follow = match self.page {
+                Page::Panels(Some(Origin::Store)) if self.query.trim().is_empty() => {
+                    Some(self.action(&kit, "store".into(), "Browse the Store…", false, window, cx))
+                }
+                Page::Workspaces(Some(false)) if self.query.trim().is_empty() => Some(self.action(
+                    &kit,
+                    "layout:save".into(),
+                    "Save Current as New",
+                    !saves,
+                    window,
+                    cx,
+                )),
+                _ => None,
+            };
             kit.empty_state(symbol, heading, &detail)
-                .when(
-                    self.query.trim().is_empty()
-                        && matches!(self.page, Page::Panels(Some(Origin::Store))),
-                    |d| {
-                        d.child(
-                            kit.button(
-                                "empty-store",
-                                "Browse the Store",
-                                kit::Button::Neutral,
-                                Some("basket"),
-                                None,
-                            )
-                            .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))),
-                        )
-                    },
-                )
-                .when(
-                    self.query.trim().is_empty()
-                        && matches!(self.page, Page::Workspaces(Some(false))),
-                    |d| {
-                        d.child(
-                            kit.button(
-                                "empty-save",
-                                "Save Current as New",
-                                kit::Button::Neutral,
-                                Some("plus"),
-                                None,
-                            )
-                            .when(!saves, |d| kit.disabled(d).aria_disabled(true))
-                            .when(saves, |d| {
-                                d.on_click(cx.listener(|v, _, _, cx| {
-                                    v.send("layout:save".into(), cx)
-                                }))
-                            }),
-                        )
-                    },
-                )
+                .children(follow)
                 .flex_1()
                 .into_any_element()
         } else {
@@ -1255,12 +1137,16 @@ impl Render for PanelLibrary {
                 .flex_1()
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
-                .px(px(m.inset + m.gap))
-                .pb(px(m.inset))
+                .px(px(st.page_inset))
+                .pt(px(st.page_top))
+                .pb(px(st.page_bottom))
                 .opacity(fade)
-                .child(shelf)
+                .child(grid_el)
                 .into_any_element()
         };
+        let save = matches!(self.page, Page::Workspaces(_)).then(|| {
+            self.action(&kit, "layout:save".into(), "Save Current as New", !saves, window, cx)
+        });
         let content = div()
             .flex_1()
             .min_w(px(0.))
@@ -1274,32 +1160,16 @@ impl Render for PanelLibrary {
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .gap(px(m.inset))
+                    .gap(px(st.page_inset))
                     .h(px(m.toolbar))
-                    .px(px(m.inset + m.gap))
+                    .px(px(st.page_inset))
                     .child(
                         div()
                             .text_size(px(ty.heading))
-                            .font_weight(FontWeight(ty.semibold_weight))
+                            .font_weight(FontWeight(st.header_weight))
                             .child(self.page.title()),
                     )
-                    .when(matches!(self.page, Page::Workspaces(_)), |d| {
-                        d.child(
-                            kit.button(
-                                "library-save",
-                                "Save Current as New",
-                                kit::Button::Neutral,
-                                Some("plus"),
-                                None,
-                            )
-                            .when(!saves, |d| kit.disabled(d).aria_disabled(true))
-                            .when(saves, |d| {
-                                d.on_click(cx.listener(|v, _, _, cx| {
-                                    v.send("layout:save".into(), cx)
-                                }))
-                            }),
-                        )
-                    }),
+                    .children(save),
             )
             .child(body);
         div()
@@ -1425,6 +1295,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
     let shell = editor.read(cx).shell.as_ref().and_then(WeakEntity::upgrade);
     let t = pm_shell::tokens();
     let (m, tokens) = (t.metrics, t.clone());
+    let st = t.settings;
     let background = if t.translucent() {
         gpui::MacosWindowBackground::Transparent
     } else {
@@ -1438,13 +1309,11 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                 appears_transparent: true,
                 ..Default::default()
             }))
-            .window_min_size(Some(size(px(720.), px(400.))))
+            // The Settings window family: its width and heights.
+            .window_min_size(Some(size(px(st.window_width), px(st.window_height))))
             .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                 point(px(m.toolbar), px(m.toolbar)),
-                size(
-                    px(m.settings_width + m.settings_sidebar),
-                    px(m.settings_height),
-                ),
+                size(px(st.window_width), px(st.window_default_height)),
             )))),
         |window, cx| {
             if tokens.translucent() {
@@ -1467,26 +1336,26 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                 {
                     cx.observe(&view, |_, _, cx| cx.notify()).detach();
                 }
+                // The system search field, as Settings' sidebar has.
                 let search = cx.new(|cx| {
-                    let mut field = pm_shell::text::TextField::new(
-                        pm_shell::text::TextKind::Primary,
-                        "Search the Panel Library",
+                    pm_shell::native_control::NativeControl::header_search(
+                        "Search",
+                        "panel-library-search",
                         "",
-                        tokens.clone(),
+                        &tokens,
                         window,
                         cx,
-                    );
-                    field.set_placeholder("Search");
-                    field
+                    )
                 });
-                search.update(cx, |field, cx| field.begin_editing(cx));
-                cx.subscribe(&search, |v: &mut PanelLibrary, _, event, cx| {
-                    use pm_shell::text::TextEvent;
-                    if let TextEvent::Changed(text)
-                    | TextEvent::Committed(text)
-                    | TextEvent::Submitted(text) = event
-                    {
-                        v.query = text.clone();
+                cx.subscribe(&search, |v: &mut PanelLibrary, _, event: &serde_json::Value, cx| {
+                    if let Some(text) = event.as_str() {
+                        v.query = text.to_owned();
+                        cx.notify();
+                    } else if event["key"] == "Escape" {
+                        if let Some(field) = &v.search {
+                            field.read(cx).clear_search();
+                        }
+                        v.query.clear();
                         cx.notify();
                     }
                 })
@@ -1502,8 +1371,9 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                     focus: Default::default(),
                     focused: None,
                     scroll: ScrollHandle::new(),
-                    packing: Default::default(),
+                    buttons: Default::default(),
                     previews: Default::default(),
+                    preview_sums: Default::default(),
                     preview_stamp: Default::default(),
                     preview_task: None,
                     preview_cancel: Default::default(),
@@ -1642,28 +1512,15 @@ mod shelf_geometry_tests {
         );
         assert!(super::without_generated_panel(&after, "custom-a").is_none());
     }
-    use super::{cover_size, pack_rows, preview_bounds, shelf_scale};
+    use super::grid;
+    /// The grid takes as many columns as fit, the cards share the room, and
+    /// a narrow or invalid width still gives one column.
     #[test]
-    fn scale_clamps_and_handles_invalid_widths() {
-        assert_eq!(shelf_scale(f32::NAN), 0.5);
-        assert_eq!(shelf_scale(0.), 0.5);
-        assert_eq!(shelf_scale(300.), 0.4);
-        assert_eq!(shelf_scale(1700.), 0.56);
-    }
-    #[test]
-    fn covers_crop_then_fit_without_changing_proportions() {
-        assert_eq!(preview_bounds((2000., 1000.)), (960., 720.));
-        assert_eq!(cover_size((960., 360.), 0.5, 240.), (240., 90.));
-        assert_eq!(cover_size((320., 600.), 0.5, 500.), (160., 300.));
-    }
-    #[test]
-    fn rows_pack_greedily_and_allow_oversized_books() {
-        assert_eq!(
-            pack_rows(&[100., 100., 100.], 220., 16.),
-            vec![vec![0, 1], vec![2]]
-        );
-        assert_eq!(pack_rows(&[500., 40.], 200., 16.), vec![vec![0], vec![1]]);
-        assert!(pack_rows(&[], 200., 16.).is_empty());
+    fn the_grid_reflows_to_its_width() {
+        assert_eq!(grid(450., 200., 12.), (2, 219.));
+        assert_eq!(grid(890., 200., 12.).0, 4);
+        assert_eq!(grid(150., 200., 12.), (1, 150.));
+        assert_eq!(grid(f32::NAN, 200., 12.), (1, 200.));
     }
 }
 
@@ -1743,8 +1600,9 @@ mod capture_tests {
                                 focus: Default::default(),
                                 focused: None,
                                 scroll: ScrollHandle::new(),
-                                packing: Default::default(),
+                                buttons: Default::default(),
                                 previews: Default::default(),
+                                preview_sums: Default::default(),
                                 preview_stamp: Default::default(),
                                 preview_task: None,
                                 preview_cancel: Default::default(),
@@ -1897,8 +1755,9 @@ mod scrolling_tests {
             focus: Default::default(),
             focused: None,
             scroll: ScrollHandle::new(),
-            packing: Default::default(),
+            buttons: Default::default(),
             previews: Default::default(),
+            preview_sums: Default::default(),
             preview_stamp: Default::default(),
             preview_task: None,
             preview_cancel: Default::default(),
@@ -1922,7 +1781,6 @@ mod scrolling_tests {
                 handle.max_offset().y > px(500.),
                 "packed shelves must have their full height"
             );
-            let cache_size = view.read_with(&vcx, |v, _| v.packing.borrow().len());
             for delta in [
                 ScrollDelta::Lines(point(0., -3.)),
                 ScrollDelta::Pixels(point(px(0.), px(-42.5))),
@@ -1964,11 +1822,6 @@ mod scrolling_tests {
                 vcx.run_until_parked();
                 assert!(handle.offset().y <= px(0.) && handle.offset().y >= -handle.max_offset().y);
             }
-            assert_eq!(
-                cache_size,
-                view.read_with(&vcx, |v, _| v.packing.borrow().len()),
-                "scrolling cannot repack rows"
-            );
             let before = handle.offset();
             vcx.run_until_parked();
             assert_eq!(
