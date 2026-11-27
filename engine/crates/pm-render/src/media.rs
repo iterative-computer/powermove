@@ -1047,14 +1047,16 @@ const fn extended_light(transfer: Transfer) -> bool {
     is_hdr_signal(transfer) || pm_color::camera_log::is_log(transfer)
 }
 
-fn preview_size(native: (u32, u32), edge: Option<u32>) -> (u32, u32) {
-    let scale = edge.map_or(1., |e| {
-        (f64::from(e) / f64::from(native.0.max(native.1).max(1))).min(1.)
-    });
-    (
-        ((f64::from(native.0) * scale).round() as u32).max(1),
-        ((f64::from(native.1) * scale).round() as u32).max(1),
-    )
+/// Choose an exact box footprint while keeping at least the draw's density.
+fn video_preview_size(mut size: (u32, u32), needed: (u32, u32)) -> (u32, u32) {
+    while size.0 % 2 == 0
+        && size.1 % 2 == 0
+        && size.0 / 2 >= needed.0.max(1)
+        && size.1 / 2 >= needed.1.max(1)
+    {
+        size = (size.0 / 2, size.1 / 2);
+    }
+    size
 }
 
 /// The texture format a converted video frame is stored in: the project's
@@ -1300,20 +1302,38 @@ fn convert_format_scaled(
         // stores the f32 conversion directly.
         uniform.c[2] &= !1;
     }
+    dispatch_source(
+        device, queue, pipelines, encoder, &out, luma, chroma, cr, &uniform,
+    );
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_source(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipelines: &Pipelines,
+    encoder: &mut wgpu::CommandEncoder,
+    out: &Target,
+    luma: &wgpu::Texture,
+    chroma: Option<&wgpu::Texture>,
+    cr: Option<&wgpu::Texture>,
+    uniform: &SourceUniform,
+) {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
         size: size_of::<SourceUniform>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(&buffer, 0, bytes_of(&uniform));
+    queue.write_buffer(&buffer, 0, bytes_of(uniform));
     let luma_view = luma.create_view(&Default::default());
     // RGB never samples the chroma binding (source_uniform sets kind=0).
     // Both bindings accept an unfilterable float texture, so reuse its view.
     let chroma_view =
         chroma.map_or_else(|| luma_view.clone(), |c| c.create_view(&Default::default()));
     let cr_view = cr.map_or_else(|| luma_view.clone(), |c| c.create_view(&Default::default()));
-    let layout = pipelines.source_layout(format);
+    let layout = pipelines.source_layout(out.format());
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pm source"),
         layout: &layout,
@@ -1344,11 +1364,9 @@ fn convert_format_scaled(
         label: Some("pm source"),
         timestamp_writes: None,
     });
-    pass.set_pipeline(pipelines.source(format));
+    pass.set_pipeline(pipelines.source(out.format()));
     pass.set_bind_group(0, &bind, &[]);
-    pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-    drop(pass);
-    out
+    pass.dispatch_workgroups(out.width().div_ceil(8), out.height().div_ceil(8), 1);
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1387,7 +1405,7 @@ struct FrameKey {
     reading: u64,
     linear: bool,
     hdr_light: bool,
-    edge: Option<u32>,
+    preview: Option<(u32, u32)>,
 }
 
 struct ConvertedFrame {
@@ -1485,7 +1503,7 @@ pub struct MediaCache {
     pub(crate) preview_media: bool,
     /// Video frames converted at the view's resolution.
     pub(crate) preview_video: bool,
-    pub(crate) draw_edge: Option<u32>,
+    pub(crate) draw_density: Option<(u32, u32)>,
     /// Stills decoded ahead of the playhead ([`Self::prepare_image`]).
     stills: stills::StillPrefetch,
     /// Recent still requests: the two-second look-ahead has time to reach
@@ -1580,7 +1598,7 @@ impl MediaCache {
             frame_budget: 24 << 20,
             preview_media: false,
             preview_video: false,
-            draw_edge: None,
+            draw_density: None,
             stills: Default::default(),
             still_prepared_at: None,
             sources: BTreeMap::new(),
@@ -2223,13 +2241,14 @@ impl MediaCache {
             format!("{interp:?}{composition:?}{sequence}{override_color:?}").hash(&mut h);
             h.finish()
         };
-        let edge = if self.preview_video
+        let preview = if self.preview_video
             && !export
             && !source_exact
             && Geometry::of(&reading, (v.width, v.height)).is_identity()
             && !timing.deinterlaced()
         {
-            self.draw_edge
+            self.draw_density
+                .map(|needed| video_preview_size((v.width, v.height), needed))
         } else {
             None
         };
@@ -2243,7 +2262,7 @@ impl MediaCache {
             reading: reading_key,
             linear: working == WorkingEncoding::LinearLight,
             hdr_light,
-            edge,
+            preview,
         };
         // A converted source frame (e.g. a paused redraw or a held frame).
         if let Some(target) = self.cached_video_frame(&key_of(n)) {
@@ -2354,8 +2373,8 @@ impl MediaCache {
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
-        let preview_edge = key.edge;
-        let compact = preview_edge.is_some()
+        let preview = key.preview;
+        let compact = preview.is_some()
             && frame.format.bits <= 8
             && !self.hdr_light
             && working == WorkingEncoding::Standard
@@ -2370,7 +2389,7 @@ impl MediaCache {
         // A converted frame retired by an earlier render (its reads are
         // submitted) is overwritten instead of allocating another.
         let native = (frame.format.width as u32, frame.format.height as u32);
-        let (w, h) = preview_size(native, preview_edge);
+        let (w, h) = preview.map_or(native, |needed| video_preview_size(native, needed));
         let reuse =
             if self.playback.is_some() && !export && Geometry::of(&reading, (w, h)).is_identity() {
                 self.take_video_target(&key, w, h, format)

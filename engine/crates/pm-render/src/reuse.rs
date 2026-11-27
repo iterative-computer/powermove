@@ -106,6 +106,17 @@ struct Entry {
     used: u64,
 }
 
+type LocalKey = ((JsString, bool), JsString, [u64; 6]);
+
+struct LocalEntry {
+    layer: Node,
+    media: Option<(String, PathBuf)>,
+    quad: Quad,
+    plane: bool,
+    raster: Option<RasterProjection>,
+    used: u64,
+}
+
 /// The reuse state a renderer keeps across frames.
 #[derive(Default)]
 pub struct DrawReuse {
@@ -117,6 +128,8 @@ pub struct DrawReuse {
     time: Option<u64>,
     /// Entries by composition id and pass, then by layer id.
     passes: HashMap<(JsString, PassKey), HashMap<JsString, Entry>>,
+    local: HashMap<LocalKey, LocalEntry>,
+    local_hits: u64,
     /// Builds so far (an entry's `used`).
     builds: u64,
     /// Whether this build looks up and stores.
@@ -201,7 +214,13 @@ pub(crate) enum RasterProjection {
     Text {
         bounds: [f64; 4],
         density: f64,
-        world: pm_eval::transform::Mat2d,
+    },
+    AffineText {
+        density: f64,
+    },
+    AffineShape {
+        bounds: kurbo::Rect,
+        density: f64,
     },
     Shape {
         bounds: [f64; 4],
@@ -210,6 +229,7 @@ pub(crate) enum RasterProjection {
 }
 
 pub(crate) struct PlaneDraw {
+    pub affine: pm_eval::transform::Mat2d,
     pub world: pm_eval::space3d::Mat4,
     pub quad: [f64; 4],
     pub raster: Option<(RasterProjection, pm_eval::anchor::Offset)>,
@@ -233,6 +253,7 @@ impl PlaneDraw {
                 RasterProjection::Text { bounds, .. } | RasterProjection::Shape { bounds, .. } => {
                     bounds
                 }
+                _ => return None,
             };
             let content = crate::plan::plane_at_origin(
                 fold(&matrix, scale, 1., 1., -offset.x, -offset.y),
@@ -242,8 +263,8 @@ impl PlaneDraw {
                 return None;
             }
             let same_density = match raster {
-                RasterProjection::Text { density, world, .. } => {
-                    crate::plan::legacy_plane_text_density(&content, bounds, &world, true)
+                RasterProjection::Text { density, .. } => {
+                    crate::plan::legacy_plane_text_density(&content, bounds, &self.affine, true)
                         == density
                 }
                 RasterProjection::Shape { density, .. } => {
@@ -257,6 +278,7 @@ impl PlaneDraw {
                         local::playback_density_capped(dy, bounds[3]),
                     ) == density
                 }
+                _ => return None,
             };
             if !same_density {
                 return None;
@@ -409,6 +431,7 @@ impl DrawReuse {
     /// Drops every entry (the next build at the same time stores again).
     pub fn clear(&mut self) {
         self.passes.clear();
+        self.local.clear();
         self.geometry = FrameGeometry::default();
         self.geometry_active = false;
         self.facts.clear();
@@ -457,6 +480,7 @@ impl DrawReuse {
                 && (build.read_ahead || build.sampling == crate::sampling::Sampling::Playback));
         if !same_doc || !same_build || !reusable_time {
             self.passes.clear();
+            self.local.clear();
         }
         if !same_snapshot || !same_build || !reusable_time {
             self.geometry = FrameGeometry {
@@ -484,6 +508,8 @@ impl DrawReuse {
     /// Ends a build: entries it did not use go, the rest are valid at its
     /// revision.
     pub(crate) fn end(&mut self) {
+        self.local
+            .retain(|_, e| self.builds.saturating_sub(e.used) <= 2);
         self.geometry
             .memberships
             .retain(|_, entry| entry.used == self.builds);
@@ -735,6 +761,178 @@ fn media_of(scope: &Scope<'_, '_>, b: &Build<'_>, layer: &Node) -> Option<(Strin
     Some((asset, path))
 }
 
+/// The retained payload is local to the leaf. The caller reached the
+/// ordinary draw path already, after activity, opacity and DOF evaluation.
+pub(crate) fn local_quad<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    kind: &str,
+    time: f64,
+    (width, height): (u32, u32),
+    scale: (f64, f64),
+    plan: impl FnOnce(&mut Scope<'_, 'd>, &mut Build<'_>) -> JsResult<Option<Quad>>,
+) -> JsResult<Option<Quad>> {
+    let Some(id) = node::string(layer.get("id")) else {
+        return plan(scope, b);
+    };
+    if !matches!(kind, "solid" | "text" | "shape" | "image")
+        || !b.can_reuse_draws()
+        || !b.interactive_rasters()
+        || b.matte_depth != 0
+        || b.forced_on.is_some()
+        || b.video_center.is_some()
+        || !simple_layer(layer)
+        || node::truthy(node::member(
+            layer.get("d").and_then(|d| d.get("extrusion")),
+            "enabled",
+        ))
+        || !b.reuse.as_ref().is_some_and(|r| r.active)
+        || !matches!(scope.layer_index().strings.get(id), Some((_, false)))
+    {
+        return plan(scope, b);
+    }
+    let media = if kind == "image" {
+        let Some((asset, path)) = media_of(scope, b, layer) else {
+            return plan(scope, b);
+        };
+        let Some(record) = node::member(scope.comp.root().get("assets"), &asset) else {
+            return plan(scope, b);
+        };
+        if crate::footage::is_sequence(record)
+            || !node::string(record.get("format"))
+                .is_some_and(|f| !f.to_string_lossy().eq_ignore_ascii_case("svg"))
+            || b.assets
+                .original(&asset)
+                .is_some_and(|original| original != path)
+        {
+            return plan(scope, b);
+        }
+        Some((asset, path))
+    } else {
+        None
+    };
+    let reuse = b.reuse.as_mut().expect("active");
+    if !reuse.layer_traits(scope.comp, id, layer).static_time || !reuse.fields_unchanged(scope) {
+        return plan(scope, b);
+    }
+    let key = (
+        (scope.comp.id().clone(), scope.comp.at_root()),
+        id.clone(),
+        [
+            width.into(),
+            height.into(),
+            scale.0.to_bits(),
+            scale.1.to_bits(),
+            b.origin.0.to_bits(),
+            b.origin.1.to_bits(),
+        ],
+    );
+    let plane = scope.is_3d_layer(layer)?;
+    let cached = reuse
+        .local
+        .get(&key)
+        .filter(|e| unchanged(layer, &e.layer, reuse.stamp) && e.plane == plane && e.media == media)
+        .map(|e| (e.quad.clone(), e.raster));
+    if let Some((quad, raster)) = cached
+        && local_density_matches(scope, b, layer, time, (width, height), scale, raster)?
+    {
+        let reuse = b.reuse.as_mut().expect("active");
+        reuse.local.get_mut(&key).expect("existing payload").used = reuse.builds;
+        reuse.local_hits += 1;
+        b.raster_projection = raster;
+        return Ok(Some(quad));
+    }
+
+    b.raster_projection = None;
+    let record = std::mem::replace(&mut b.record_projection, true);
+    let reports = (b.failures.len(), b.unsupported.len());
+    let quad = plan(scope, b);
+    b.record_projection = record;
+    let quad = quad?;
+    let raster = b.raster_projection;
+    let keep = match &quad {
+        Some(Quad::Solid { .. }) => true,
+        Some(Quad::Texture {
+            source: crate::plan::Source::Image { .. },
+            ..
+        }) => media.is_some(),
+        Some(Quad::Texture {
+            source: crate::plan::Source::Text(_) | crate::plan::Source::Vector(_),
+            ..
+        }) => raster.is_some(),
+        _ => false,
+    };
+    if keep && reports == (b.failures.len(), b.unsupported.len()) {
+        let reuse = b.reuse.as_mut().expect("active");
+        reuse.local.insert(
+            key,
+            LocalEntry {
+                layer: layer.clone(),
+                media,
+                quad: quad.as_ref().unwrap().clone(),
+                plane,
+                raster,
+                used: reuse.builds,
+            },
+        );
+    }
+    Ok(quad)
+}
+
+fn local_density_matches<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    target: (u32, u32),
+    scale: (f64, f64),
+    raster: Option<RasterProjection>,
+) -> JsResult<bool> {
+    use crate::space25d::local;
+    let Some(raster) = raster else {
+        return Ok(true);
+    };
+    match raster {
+        RasterProjection::AffineText { density } => {
+            Ok(crate::text::playback_raster_scale(&b.world(scope, layer, time, scale)?) == density)
+        }
+        RasterProjection::AffineShape { bounds, density } => {
+            let world = crate::plan::vector_world(scope, b, layer, time, scale)?;
+            Ok(crate::plan::playback_shape_route(&world)
+                && crate::text::playback_raster_scale(&world) == density
+                && crate::plan::playback_shape_visible(&world, bounds, target))
+        }
+        RasterProjection::Text {
+            bounds, density, ..
+        } => {
+            let Some(plane) = local::content_plane(scope, layer, time, scale)? else {
+                return Ok(false);
+            };
+            let plane = crate::plan::plane_at_origin(plane, b.origin);
+            let world = b.world(scope, layer, time, scale)?;
+            Ok(!local::outside_target(&plane, bounds, target.0, target.1)
+                && crate::plan::legacy_plane_text_density(&plane, bounds, &world, true) == density)
+        }
+        RasterProjection::Shape { bounds, density } => {
+            let Some(plane) = local::content_plane(scope, layer, time, scale)? else {
+                return Ok(false);
+            };
+            let plane = crate::plan::plane_at_origin(plane, b.origin);
+            let (x, y) = if b.camera_preview() && scope.view_camera.is_some() {
+                scale
+            } else {
+                local::density(scope, layer, time, scale, bounds)?
+            };
+            Ok(!local::outside_target(&plane, bounds, target.0, target.1)
+                && (
+                    local::playback_density_capped(x, bounds[2]),
+                    local::playback_density_capped(y, bounds[3]),
+                ) == density)
+        }
+    }
+}
+
 /// `draw_layer` through the reuse: the kept draws when they are still
 /// valid, else `plan` (which plans the layer) and, when the layer can be
 /// kept, an entry for the next frame.
@@ -904,8 +1102,7 @@ pub(crate) fn draw<'d>(
         pm_perf::bump(pm_perf::Counter::DrawReuseHits);
         return Ok(draws);
     }
-    reuse.stats.planned += 1;
-    pm_perf::bump(pm_perf::Counter::DrawReuseMisses);
+    let local_hits = reuse.local_hits;
     // Plan the layer and keep it when it qualifies.
     let failures = b.failures.len();
     let unsupported = b.unsupported.len();
@@ -920,6 +1117,14 @@ pub(crate) fn draw<'d>(
     b.record_projection = old_record;
     let projection = b.plane_draw.take();
     b.raster_projection = None;
+    let reuse = b.reuse.as_mut().expect("eligible");
+    if !group && reuse.local_hits > local_hits {
+        reuse.stats.reused += 1;
+        pm_perf::bump(pm_perf::Counter::DrawReuseHits);
+    } else {
+        reuse.stats.planned += 1;
+        pm_perf::bump(pm_perf::Counter::DrawReuseMisses);
+    }
     let draws = result?;
     let reported = b.failures.len() != failures || b.unsupported.len() != unsupported;
     let svg = ty == "image"

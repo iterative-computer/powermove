@@ -1,0 +1,16 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="trailTinted" x1="322" y1="789" x2="509" y2="789" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="0.30" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.68" stop-color="#FFFFFF" stop-opacity="0.46"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.78"/>
+    </linearGradient>
+    <radialGradient id="trailWarmthTinted" cx="496" cy="830" r="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="322" y="554" width="187" height="470" fill="url(#trailTinted)"/>
+  <rect x="322" y="554" width="187" height="470" fill="url(#trailWarmthTinted)"/>
+</svg>

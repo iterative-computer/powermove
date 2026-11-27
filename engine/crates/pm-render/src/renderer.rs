@@ -462,6 +462,7 @@ pub struct Renderer {
     /// renderer neither clear nor repeat them.
     svg_warned: std::collections::HashMap<String, Vec<(String, String)>>,
     pipelines: Pipelines,
+    prewarmed_formats: std::collections::HashSet<(wgpu::TextureFormat, bool, bool)>,
     media: MediaCache,
     pool: TargetPool,
     scene3d: Scene3dRenderer,
@@ -472,6 +473,7 @@ pub struct Renderer {
     /// [`Renderer::set_vector_batching`], kept across cache resets.
     vector_batching: bool,
     pyramids: crate::sampling::gpu::PyramidCache,
+    playback_targets: Option<(u64, u64)>,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
     /// A fallback runner the renderer waits on ([`Renderer::set_fallback_host`]).
@@ -547,6 +549,7 @@ impl Renderer {
             text: crate::text::TextContext::default(),
             text_gpu,
             pipelines,
+            prewarmed_formats: Default::default(),
             media,
             pool: TargetPool::new(),
             scene3d: Scene3dRenderer::default(),
@@ -554,6 +557,7 @@ impl Renderer {
             vector: crate::vector::cache::VectorCache::new(),
             vector_batching: true,
             pyramids: crate::sampling::gpu::PyramidCache::new(),
+            playback_targets: None,
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
             queue,
@@ -649,19 +653,59 @@ impl Renderer {
     /// background compiler workers. Host-provided effects retain their own
     /// lifecycle.
     pub fn prewarm_programs(&mut self, document: &pm_model::Document) -> usize {
-        let precision = document
+        let composition = document
             .root()
-            .and_then(|root| crate::composite::color::project_color(root).ok())
-            .map_or(pm_protocol::color::Precision::Float16, |color| {
-                color.precision
-            });
+            .and_then(|root| {
+                pm_eval::node::string(root.get("compId"))
+                    .or_else(|| pm_eval::node::string(root.get("id")))
+            })
+            .and_then(|id| id.as_str())
+            .unwrap_or_default();
+        self.prewarm_programs_for(document, composition)
+    }
+
+    pub fn prewarm_programs_for(&mut self, document: &Document, composition: &str) -> usize {
+        let layers = media_prepare::program_layers(document, composition);
+        let color = document
+            .root()
+            .and_then(|root| crate::composite::color::project_color(root).ok());
+        let precision = color.as_ref().map_or(Precision::Float16, |c| c.precision);
+        let linear = color
+            .as_ref()
+            .is_some_and(|c| c.working() == WorkingEncoding::LinearLight);
         let format = pm_gpu::target::working_format(precision);
         let mut queued = 0;
+        let mut effects = false;
         if self.effect_host.is_none() {
-            let first = crate::effects::prewarm::document_definitions(document, &self.effects);
+            let first = crate::effects::prewarm::document_definitions(
+                layers.iter().copied(),
+                &self.effects,
+            );
+            effects = !first.is_empty();
             queued += self.effects.prewarm(&self.device, format, &first);
         }
-        queued += self.shaders.prewarm(&self.device, format, document);
+        if self.prewarmed_formats.insert((format, effects, linear)) {
+            let warm_pipelines = self.pipelines.prewarm_variants(format);
+            let warm_pixels = self
+                .effects
+                .prewarm_pixel_passes(&self.device, format, linear);
+            let _ = std::thread::Builder::new()
+                .name("pm-frame-prewarm".into())
+                .spawn(move || {
+                    warm_pipelines();
+                    if effects {
+                        warm_pixels();
+                    }
+                });
+        }
+        queued += self.shaders.prewarm(
+            &self.device,
+            format,
+            layers
+                .into_iter()
+                .filter_map(crate::shader_layers::exec::prewarm_source),
+            false,
+        );
         queued
     }
 
@@ -785,10 +829,19 @@ impl Renderer {
     }
     /// Worker-only query against the attached Studio scene. No frame render,
     /// path-tracing samples or image readback is needed.
-    pub fn pick_studio_surface(&mut self, request: &crate::scene3d::provider::SceneRequest, x:f32, y:f32) -> Result<Option<crate::scene3d::provider::SurfaceHit>, String> {
-        let Some(settings) = self.options3d.studio else {return Ok(None)};
-        let Some(pass) = self.scene3d.provider.as_mut() else {return Ok(None)};
-        pass.pick_surface(&self.device, &self.queue, request, settings.preview,x,y)
+    pub fn pick_studio_surface(
+        &mut self,
+        request: &crate::scene3d::provider::SceneRequest,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<crate::scene3d::provider::SurfaceHit>, String> {
+        let Some(settings) = self.options3d.studio else {
+            return Ok(None);
+        };
+        let Some(pass) = self.scene3d.provider.as_mut() else {
+            return Ok(None);
+        };
+        pass.pick_surface(&self.device, &self.queue, request, settings.preview, x, y)
     }
 
     /// Runs layer effects and adjustment layers through `host` instead of
@@ -1450,7 +1503,7 @@ impl Renderer {
         }
         self.media.preview_media = stills;
         self.media.preview_video = video;
-        self.media.draw_edge = None;
+        self.media.draw_density = None;
     }
 
     /// Drops the stills kept at their full size (`MediaCache::release_whole_images`).
@@ -1494,11 +1547,27 @@ impl Renderer {
     /// Divide the playback target allowance between working textures and
     /// the auxiliary caches that reference them.
     pub fn set_playback_target_budget(&mut self, total: u64, pool: u64, shader: u64) {
-        let pool = pool.min(total);
-        let auxiliary = total - pool;
-        self.pyramids.set_budget(auxiliary / 2);
-        self.binds.set_budget(auxiliary - auxiliary / 2);
-        self.set_playback_retention(pool, shader);
+        self.set_playback_retention(pool.min(total), shader);
+        self.playback_targets = Some((total, pool));
+        self.binds.set_budget(total / 32);
+        self.update_playback_target_budget();
+    }
+
+    fn update_playback_target_budget(&mut self) {
+        if let Some((total, pool)) = self.playback_targets {
+            let remaining = total - total / 32;
+            // Leave at least a third for working targets. A single large
+            // source can need a deeper tail than several working targets.
+            let pyramids = self
+                .pyramids
+                .playback_demand()
+                .min(remaining - remaining / 3);
+            self.pyramids.set_budget(pyramids);
+            let pool = pool.min(remaining - pyramids).min(96 << 20);
+            if self.pool.playback_budget().unwrap_or(0) != pool {
+                self.pool.set_playback_budget(pool);
+            }
+        }
     }
 
     /// Bytes the pooled targets, kept pyramids and kept bindings hold now
@@ -1510,6 +1579,7 @@ impl Renderer {
     /// Visible play shares a 128 MiB ceiling across both kinds of retention.
     /// Charge the whole playback pool, even if the ordinary pool was empty.
     pub fn set_playback_retention(&mut self, pool: u64, shader: u64) {
+        self.playback_targets = None;
         if (pool > 0) != self.pool.playback_retention() {
             // Pooled views sampled before the switch can still have a
             // persistent binding or pyramid under the previous policy.
@@ -2458,6 +2528,7 @@ impl Renderer {
         // The previous frame's vector textures become evictable, and the
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
+        self.update_playback_target_budget();
         self.pool.begin_frame();
         self.media
             .begin_frame(request.read_ahead && !request.export);

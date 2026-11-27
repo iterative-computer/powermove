@@ -557,7 +557,7 @@ fn draw(
             if !crate::render::large_scene(scene) {
                 renderer.prewarm(&scene.doc);
             }
-            renderer.prewarm_programs(&scene.doc);
+            renderer.prewarm_programs_for(&scene.doc, &scene.comp);
             *document = Some(state);
         }
         if let Some(host) = &job.fonts {

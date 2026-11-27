@@ -2,7 +2,7 @@
 //! `shaders/mips.wgsl`): mip pyramids of sources, the content polygon and
 //! inverse mapping of a draw, and its pipelines.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::pipelines::PassBlend;
 
@@ -36,7 +36,7 @@ pub(crate) const MAX_EDGES: usize = 5;
 pub(crate) struct Pyramid {
     /// Retained downsample levels for a physical pyramid. The source view is
     /// borrowed as logical level zero.
-    tail: Option<wgpu::Texture>,
+    tail: Option<Arc<TailStorage>>,
     pub view: wgpu::TextureView,
     tail_view: Option<wgpu::TextureView>,
     pub width: u32,
@@ -92,20 +92,31 @@ struct CachedPyramid {
     source: wgpu::Texture,
     revision: Option<u64>,
     pyramid: Pyramid,
-    used_frame: u64,
 }
 
 /// Tail storage without a source handle, source view, or first downsample
 /// binding. These are rebuilt if a different source takes the allocation.
 struct IdleTail {
-    texture: wgpu::Texture,
+    storage: Arc<TailStorage>,
+    used_frame: u64,
     width: u32,
     height: u32,
     levels: u32,
 }
 
+struct TailStorage {
+    levels: Vec<wgpu::TextureView>,
+    view: wgpu::TextureView,
+}
+
+impl TailStorage {
+    fn texture(&self) -> &wgpu::Texture {
+        self.view.texture()
+    }
+}
+
 impl CachedPyramid {
-    fn into_idle(self) -> IdleTail {
+    fn into_idle(self, used_frame: u64) -> IdleTail {
         let Pyramid {
             tail,
             width,
@@ -114,7 +125,8 @@ impl CachedPyramid {
             ..
         } = self.pyramid;
         IdleTail {
-            texture: tail.expect("physical pyramid"),
+            storage: tail.expect("physical pyramid"),
+            used_frame,
             width,
             height,
             levels,
@@ -137,6 +149,7 @@ pub(crate) struct PyramidCache {
 /// Sources whose pyramids are kept.
 const CACHED_PYRAMIDS: usize = 16;
 const CACHED_PYRAMID_BYTES: u64 = 16 * 1024 * 1024;
+const IDLE_TAIL_FRAMES: u64 = 8;
 
 impl PyramidCache {
     pub fn new() -> PyramidCache {
@@ -150,20 +163,18 @@ impl PyramidCache {
         }
     }
 
-    /// The previous frame has been submitted; writes in the next submission
-    /// follow its reads on the same queue. Unknown revisions cannot skip
-    /// regeneration, so release their source handles and reuse their tails.
+    /// Submitted commands keep their own source views. Retain only the
+    /// reusable tail storage across frames, so retired sources can go.
     pub fn begin_frame(&mut self) {
+        let previous = self.frame;
         self.frame = self.frame.wrapping_add(1);
-        let mut i = 0;
-        while i < self.entries.len() {
-            if self.entries[i].revision.is_none() {
-                self.idle
-                    .push_back(self.entries.remove(i).unwrap().into_idle());
-            } else {
-                i += 1;
-            }
-        }
+        self.idle
+            .retain(|tail| self.frame.wrapping_sub(tail.used_frame) <= IDLE_TAIL_FRAMES);
+        self.idle.extend(
+            self.entries
+                .drain(..)
+                .map(|entry| entry.into_idle(previous)),
+        );
         self.enforce_budget();
     }
 
@@ -182,75 +193,33 @@ impl PyramidCache {
         levels: u32,
     ) -> Option<Pyramid> {
         let revision = revision?;
-        let i = self.entries.iter().position(|entry| {
-            entry.source == *source
-                && entry.revision == Some(revision)
-                && entry.pyramid.levels >= levels
-        })?;
-        let entry = self.entries.remove(i)?;
-        let p = entry.pyramid.clone();
-        let mut entry = entry;
-        entry.used_frame = self.frame;
-        self.entries.push_front(entry);
-        Some(p)
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.source == *source
+                    && entry.revision == Some(revision)
+                    && entry.pyramid.levels >= levels
+            })
+            .map(|entry| entry.pyramid.clone())
     }
 
     fn take_tail(
         &mut self,
-        source: &wgpu::Texture,
         width: u32,
         height: u32,
         levels: u32,
         format: wgpu::TextureFormat,
-    ) -> Option<(wgpu::Texture, u32)> {
-        let fits = |w: u32, h: u32, n: u32, f: wgpu::TextureFormat| {
-            w == width && h == height && n >= levels && f == format
-        };
-        // A tail already read by this encoder cannot be written again.
-        // Prefer a stale association with this source, then any idle tail.
-        let entry = self.entries.iter().rposition(|entry| {
-            entry.used_frame != self.frame
-                && entry.source == *source
-                && fits(
-                    entry.pyramid.width,
-                    entry.pyramid.height,
-                    entry.pyramid.levels,
-                    entry
-                        .pyramid
-                        .tail
-                        .as_ref()
-                        .expect("physical pyramid")
-                        .format(),
-                )
-        });
-        if let Some(i) = entry {
-            let idle = self.entries.remove(i).unwrap().into_idle();
-            return Some((idle.texture, idle.levels));
-        }
-        if let Some(i) = self
-            .idle
-            .iter()
-            .position(|tail| fits(tail.width, tail.height, tail.levels, tail.texture.format()))
-        {
-            let idle = self.idle.remove(i).unwrap();
-            return Some((idle.texture, idle.levels));
-        }
-        let entry = self.entries.iter().rposition(|entry| {
-            entry.used_frame != self.frame
-                && fits(
-                    entry.pyramid.width,
-                    entry.pyramid.height,
-                    entry.pyramid.levels,
-                    entry
-                        .pyramid
-                        .tail
-                        .as_ref()
-                        .expect("physical pyramid")
-                        .format(),
-                )
-        });
-        let idle = self.entries.remove(entry?).unwrap().into_idle();
-        Some((idle.texture, idle.levels))
+    ) -> Option<(Arc<TailStorage>, u32)> {
+        // A tail referenced by this encoder stays in entries until the
+        // submission. Only source-free storage can be overwritten.
+        let i = self.idle.iter().position(|tail| {
+            tail.width == width
+                && tail.height == height
+                && tail.levels >= levels
+                && tail.storage.texture().format() == format
+        })?;
+        let idle = self.idle.remove(i).unwrap();
+        Some((idle.storage, idle.levels))
     }
 
     fn put(&mut self, source: wgpu::Texture, revision: Option<u64>, pyramid: Pyramid) {
@@ -258,28 +227,25 @@ impl PyramidCache {
             source,
             revision,
             pyramid,
-            used_frame: self.frame,
         });
         self.enforce_budget();
     }
 
     fn enforce_budget(&mut self) {
-        while self.entries.len() + self.idle.len() > CACHED_PYRAMIDS
-            || self.retained_bytes() > self.budget
-        {
-            if self.idle.pop_front().is_some() {
+        while self.entries.len() + self.idle.len() > CACHED_PYRAMIDS || self.bytes() > self.budget {
+            if let Some(i) = self
+                .idle
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, tail)| self.frame.wrapping_sub(tail.used_frame))
+                .map(|(i, _)| i)
+            {
+                self.idle.remove(i);
                 continue;
             }
-            let Some(i) = self
-                .entries
-                .iter()
-                .rposition(|entry| entry.used_frame != self.frame)
-            else {
-                // All tails are referenced by draws in the current encoder.
-                // Revisit the cap at the next frame boundary.
-                break;
-            };
-            self.entries.remove(i);
+            // All remaining tails are referenced by the current encoder.
+            // Revisit the cap at the next frame boundary.
+            break;
         }
     }
 
@@ -361,26 +327,36 @@ impl PyramidCache {
                         .tail
                         .as_ref()
                         .expect("physical pyramid")
+                        .texture()
                         .format(),
                 )
             })
             .chain(self.idle.iter().map(|tail| {
-                tail_bytes(tail.width, tail.height, tail.levels, tail.texture.format())
+                tail_bytes(
+                    tail.width,
+                    tail.height,
+                    tail.levels,
+                    tail.storage.texture().format(),
+                )
             }))
             .sum()
     }
 
-    /// The source handle also keeps an otherwise retired allocation alive.
-    /// Include it in the retention cap even while another cache shares it.
-    fn retained_bytes(&self) -> u64 {
+    /// Storage to retain at the next boundary, including a few recent
+    /// frames for cuts and intermittently visible layers.
+    pub fn playback_demand(&self) -> u64 {
         self.bytes()
-            + self
-                .entries
+            - self
+                .idle
                 .iter()
-                .map(|entry| {
-                    u64::from(entry.source.width())
-                        * u64::from(entry.source.height())
-                        * u64::from(entry.source.format().block_copy_size(None).unwrap())
+                .filter(|tail| self.frame.wrapping_sub(tail.used_frame) > 1)
+                .map(|tail| {
+                    tail_bytes(
+                        tail.width,
+                        tail.height,
+                        tail.levels,
+                        tail.storage.texture().format(),
+                    )
                 })
                 .sum::<u64>()
     }
@@ -417,12 +393,12 @@ impl Default for PyramidCache {
 pub(crate) struct Resampler {
     uniform_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
-    /// Per [`MIP_FORMATS`] entry: the level above and the level written.
-    mip_layouts: [wgpu::BindGroupLayout; 3],
+    /// Per format and dispatch length: the level above and the levels written.
+    mip_layouts: [Vec<wgpu::BindGroupLayout>; 3],
     trilinear: wgpu::Sampler,
     /// `[format][blend]`: rgba16float, rgba32float, rgba8unorm × over, additive.
     draw: [[crate::pipelines::LazyRenderPipeline; 2]; 3],
-    down: [crate::pipelines::LazyComputePipeline; 3],
+    down: [Vec<crate::pipelines::LazyComputePipeline>; 3],
 }
 
 const FORMATS: [wgpu::TextureFormat; 3] = [
@@ -439,6 +415,15 @@ fn format_index(format: wgpu::TextureFormat) -> usize {
         wgpu::TextureFormat::Rgba8Unorm => 2,
         other => panic!("unsupported resampler format: {other:?}"),
     }
+}
+
+fn mip_view(texture: &wgpu::Texture, level: u32) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("pm pyramid level"),
+        base_mip_level: level,
+        mip_level_count: Some(1),
+        ..Default::default()
+    })
 }
 
 impl Resampler {
@@ -491,25 +476,35 @@ impl Resampler {
             ],
         });
         let mip_layouts = MIP_FORMATS.map(|format| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("pm mips"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
+            let batches = if format == wgpu::TextureFormat::Rgba8Unorm {
+                1
+            } else {
+                4
+            };
+            (0..batches)
+                .map(|step| {
+                    let mut entries = vec![wgpu::BindGroupLayoutEntry {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ..texture(0)
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                ],
-            })
+                    }];
+                    for binding in 1..=step as u32 + 1 {
+                        entries.push(wgpu::BindGroupLayoutEntry {
+                            binding,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::StorageTexture {
+                                access: wgpu::StorageTextureAccess::WriteOnly,
+                                format,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                            },
+                            count: None,
+                        });
+                    }
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("pm mips"),
+                        entries: &entries,
+                    })
+                })
+                .collect::<Vec<_>>()
         });
         let trilinear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pm trilinear clamp"),
@@ -599,8 +594,6 @@ impl Resampler {
             })
         });
         let down = std::array::from_fn(|i| {
-            let device = device.clone();
-            let layout = mip_layouts[i].clone();
             let (storage, store) = match MIP_FORMATS[i] {
                 wgpu::TextureFormat::Rgba16Float => (
                     "rgba16float",
@@ -615,30 +608,44 @@ impl Resampler {
                     "fn store(c: vec4<f32>) -> vec4<f32> { return c; }",
                 ),
             };
-            crate::pipelines::LazyPipeline::new(move || {
-                let source = format!(
-                    "{}\n{store}\n{}",
-                    crate::nearest_half::NEAREST_HALF_WGSL,
-                    include_str!("../shaders/mips.wgsl").replace("STORE", storage)
-                );
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("pm-render mips"),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("pm mips"),
-                    bind_group_layouts: &[Some(&layout)],
-                    immediate_size: 0,
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("cs_down"),
-                    layout: Some(&layout),
-                    module: &module,
-                    entry_point: Some("cs_down"),
-                    compilation_options: Default::default(),
-                    cache: None,
+            let module = Arc::new(std::sync::OnceLock::new());
+            mip_layouts[i]
+                .iter()
+                .enumerate()
+                .map(|(step, layout)| {
+                    let device = device.clone();
+                    let layout = layout.clone();
+                    let module = module.clone();
+                    let entry = ["cs_down", "cs_down2", "cs_down3", "cs_down4"][step];
+                    crate::pipelines::LazyPipeline::new(move || {
+                        let module = module.get_or_init(|| {
+                            let source = format!(
+                                "{}\n{store}\n{}",
+                                crate::nearest_half::NEAREST_HALF_WGSL,
+                                include_str!("../shaders/mips.wgsl").replace("STORE", storage)
+                            );
+                            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                                label: Some("pm-render mips"),
+                                source: wgpu::ShaderSource::Wgsl(source.into()),
+                            })
+                        });
+                        let layout =
+                            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                                label: Some("pm mips"),
+                                bind_group_layouts: &[Some(&layout)],
+                                immediate_size: 0,
+                            });
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: Some(&layout),
+                            module,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            cache: None,
+                        })
+                    })
                 })
-            })
+                .collect()
         });
         Resampler {
             uniform_layout,
@@ -678,8 +685,8 @@ impl Resampler {
         // Multiple draws in one encoder must keep distinct tails unless
         // they read the same revision. Prior-frame storage can change source
         // identity after its old source bindings are dropped.
-        let reused = cache.take_tail(source, width, height, levels, format);
-        let (texture, levels) = reused.unwrap_or_else(|| {
+        let reused = cache.take_tail(width, height, levels, format);
+        let (tail, levels) = reused.unwrap_or_else(|| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("pm raster pyramid"),
                 size: wgpu::Extent3d {
@@ -694,22 +701,20 @@ impl Resampler {
                 usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            (texture, levels)
+            let storage = TailStorage {
+                levels: (0..levels - 1)
+                    .map(|level| mip_view(&texture, level))
+                    .collect(),
+                view: texture.create_view(&Default::default()),
+            };
+            (Arc::new(storage), levels)
         });
-        let above = source.create_view(&wgpu::TextureViewDescriptor {
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            ..Default::default()
-        });
-        self.write_levels(device, encoder, above, &texture, 0, levels - 1);
+        let view = mip_view(source, 0);
+        self.write_levels(device, encoder, &view, &tail.levels, 0, 4);
         let pyramid = Pyramid {
-            view: source.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: 0,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }),
-            tail_view: Some(texture.create_view(&Default::default())),
-            tail: Some(texture),
+            view,
+            tail_view: Some(tail.view.clone()),
+            tail: Some(tail),
             width,
             height,
             levels,
@@ -719,79 +724,67 @@ impl Resampler {
         pyramid
     }
 
-    /// Writes `count` box-filtered levels of `dest` from `dest_level` on,
-    /// each from the level above (`above` for the first), in one compute
-    /// pass with a dispatch per level.
-    fn write_levels(
+    /// Dispatches up to four levels at once, carrying the stored values
+    /// through workgroup memory between levels.
+    fn write_levels<'a>(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        mut above: wgpu::TextureView,
-        dest: &wgpu::Texture,
-        dest_level: u32,
-        count: u32,
+        mut above: &'a wgpu::TextureView,
+        levels: &'a [wgpu::TextureView],
+        mut level: u32,
+        batch: usize,
     ) {
-        if count == 0 {
+        let Some(first) = levels.first() else {
             return;
-        }
-        let i = format_index(dest.format());
+        };
+        let i = format_index(first.texture().format());
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("pm pyramid"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(self.down[i].get());
-        for level in dest_level..dest_level + count {
-            let target = dest.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("pm pyramid level"),
-                base_mip_level: level,
-                mip_level_count: Some(1),
-                ..Default::default()
+        for dest in levels.chunks(batch) {
+            let step = dest.len() - 1;
+            let entries = std::array::from_fn::<_, 5, _>(|binding| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource: wgpu::BindingResource::TextureView(if binding == 0 {
+                    above
+                } else {
+                    dest.get(binding - 1).unwrap_or(above)
+                }),
             });
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pm pyramid"),
-                layout: &self.mip_layouts[i],
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&above),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&target),
-                    },
-                ],
+                layout: &self.mip_layouts[i][step],
+                entries: &entries[..=dest.len()],
             });
+            pass.set_pipeline(self.down[i][step].get());
             pass.set_bind_group(0, &bind, &[]);
-            let (w, h) = (
-                (dest.width() >> level).max(1),
-                (dest.height() >> level).max(1),
+            let target = dest[0].texture();
+            let (w, h) = (target.width(), target.height());
+            pass.dispatch_workgroups(
+                (w >> level).max(1).div_ceil(8),
+                (h >> level).max(1).div_ceil(8),
+                1,
             );
-            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-            above = target;
+            above = dest.last().unwrap();
+            level += dest.len() as u32;
         }
     }
 
-    /// Fills every level below level 0 of a still's own mip chain, once at
-    /// upload: no separate pyramid storage for stills.
-    pub(crate) fn fill_mips(
+    /// A still is converted into mip 0; fill its own mip chain in place.
+    pub fn fill_mips(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         texture: &wgpu::Texture,
     ) {
-        let above = texture.create_view(&wgpu::TextureViewDescriptor {
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            ..Default::default()
-        });
-        self.write_levels(
-            device,
-            encoder,
-            above,
-            texture,
-            1,
-            texture.mip_level_count() - 1,
-        );
+        let views: Vec<_> = (0..texture.mip_level_count())
+            .map(|level| mip_view(texture, level))
+            .collect();
+        // Keep hardware UNORM quantization between levels.
+        let batch = self.down[format_index(texture.format())].len();
+        self.write_levels(device, encoder, &views[0], &views[1..], 1, batch);
     }
 
     pub fn pipeline(&self, format: wgpu::TextureFormat, blend: PassBlend) -> &wgpu::RenderPipeline {
@@ -812,6 +805,7 @@ impl Resampler {
             + self
                 .down
                 .iter()
+                .flatten()
                 .filter(|pipeline| pipeline.is_built())
                 .count()
     }
@@ -830,9 +824,14 @@ impl Resampler {
             }
         }
         for (i, format) in MIP_FORMATS.into_iter().enumerate() {
-            let start = std::time::Instant::now();
-            self.down[i].get();
-            times.push((format!("resample down {format:?}"), start.elapsed()));
+            for (step, pipeline) in self.down[i].iter().enumerate() {
+                let start = std::time::Instant::now();
+                pipeline.get();
+                times.push((
+                    format!("resample down {} {format:?}", step + 1),
+                    start.elapsed(),
+                ));
+            }
         }
         times
     }
@@ -1165,6 +1164,139 @@ impl Resampler {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fused_mips_match_each_separately_stored_box_mean() {
+        let gpu = pm_gpu::Gpu::new("fused mips parity").unwrap();
+        let resampler = Resampler::new(&gpu.device);
+        let mut seed = 1u32;
+        for (w, h) in [(67, 35), (5, 33), (9, 1), (1, 17)] {
+            for format in [
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rgba32Float,
+            ] {
+                let make = || {
+                    pm_gpu::Target::with_mips(
+                        &gpu.device,
+                        "fused mip parity",
+                        w,
+                        h,
+                        format,
+                        pm_gpu::target::working_usage(),
+                    )
+                    .texture
+                };
+                let fused = make();
+                let separate = make();
+                let bpp = format.block_copy_size(None).unwrap();
+                let mut bytes = Vec::new();
+                for i in 0..w * h * 4 {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let scale = if i % 3 == 0 { 1.0e-5 } else { 3.0 };
+                    let value = (f32::from((seed >> 16) as u16) / 32768.0 - 1.0) * scale;
+                    if format == wgpu::TextureFormat::Rgba16Float {
+                        bytes.extend(pm_gpu::readback::f32_to_half(value).to_le_bytes());
+                    } else {
+                        bytes.extend(value.to_le_bytes());
+                    }
+                }
+                for texture in [&fused, &separate] {
+                    gpu.queue.write_texture(
+                        texture.as_image_copy(),
+                        &bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(w * bpp),
+                            rows_per_image: None,
+                        },
+                        texture.size(),
+                    );
+                }
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                resampler.fill_mips(&gpu.device, &mut encoder, &fused);
+                let views: Vec<_> = (0..separate.mip_level_count())
+                    .map(|level| mip_view(&separate, level))
+                    .collect();
+                resampler.write_levels(&gpu.device, &mut encoder, &views[0], &views[1..], 1, 1);
+                gpu.queue.submit([encoder.finish()]);
+                for level in 1..fused.mip_level_count() {
+                    let size = wgpu::Extent3d {
+                        width: (w >> level).max(1),
+                        height: (h >> level).max(1),
+                        depth_or_array_layers: 1,
+                    };
+                    let read = |texture: &wgpu::Texture| {
+                        let copy = pm_gpu::Target::new(
+                            &gpu.device,
+                            "mip read",
+                            size.width,
+                            size.height,
+                            format,
+                            pm_gpu::target::working_usage(),
+                        );
+                        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                        encoder.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                mip_level: level,
+                                ..texture.as_image_copy()
+                            },
+                            copy.texture.as_image_copy(),
+                            size,
+                        );
+                        gpu.queue.submit([encoder.finish()]);
+                        pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &copy.texture).unwrap()
+                    };
+                    assert_eq!(
+                        read(&fused),
+                        read(&separate),
+                        "{format:?} {w}×{h} mip {level}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn playback_reuses_tail_storage_and_views_after_releasing_the_source() {
+        let gpu = pm_gpu::Gpu::new("playback mip storage reuse").unwrap();
+        let resampler = Resampler::new(&gpu.device);
+        let mut cache = PyramidCache::new();
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let (w, h, n) = (64, 36, 7);
+        cache.set_budget(tail_bytes(w, h, n, format));
+        let draw = |cache: &mut PyramidCache| {
+            let source = pm_gpu::Target::new(
+                &gpu.device,
+                "different source frame",
+                w,
+                h,
+                format,
+                pm_gpu::target::working_usage(),
+            );
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let revision = cache.changed();
+            let tail = resampler
+                .pyramid(
+                    &gpu.device,
+                    &mut encoder,
+                    &source.texture,
+                    n,
+                    Some(revision),
+                    cache,
+                )
+                .tail
+                .unwrap();
+            gpu.queue.submit([encoder.finish()]);
+            tail
+        };
+        cache.begin_frame();
+        let first = draw(&mut cache);
+        cache.begin_frame();
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.idle.len(), 1);
+        let second = draw(&mut cache);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
     /// A still's own mips are box means rounded to nearest at every
     /// storage depth: 2×2 texels 0, 1, 1, 1 (in 1/255) average 0.75/255.
     #[test]

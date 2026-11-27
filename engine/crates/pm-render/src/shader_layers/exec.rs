@@ -267,72 +267,86 @@ struct BuiltShader {
 /// layers ahead of their first visible frame (matching `effects::prewarm`).
 #[derive(Default)]
 struct ShaderPrewarm {
-    worker: Option<(mpsc::Sender<PrewarmJob>, Mutex<mpsc::Receiver<BuiltShader>>)>,
+    worker: Option<(
+        crate::effects::prewarm::JobQueue<PrewarmJob>,
+        Mutex<mpsc::Receiver<BuiltShader>>,
+    )>,
     in_flight: HashSet<Key>,
-    started: Arc<Mutex<HashMap<Key, bool>>>,
 }
 
 impl Drop for ShaderPrewarm {
     fn drop(&mut self) {
-        self.started
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        if let Some((jobs, _)) = &self.worker {
+            jobs.clear();
+        }
     }
 }
 
 impl ShaderPrewarm {
-    fn worker(&mut self) -> Option<&mpsc::Sender<PrewarmJob>> {
+    fn worker(&mut self) -> Option<&crate::effects::prewarm::JobQueue<PrewarmJob>> {
         if self.worker.is_none() {
-            let (jobs, rx) = mpsc::channel::<PrewarmJob>();
+            let (jobs, rx, pending) = crate::effects::prewarm::JobQueue::<PrewarmJob>::new();
             let (tx, done) = mpsc::channel::<BuiltShader>();
-            let claims = self.started.clone();
-            std::thread::Builder::new()
-                .name("pm-shader-prewarm".into())
-                .spawn(move || {
-                    while let Ok(job) = rx.recv() {
-                        let _gate = crate::effects::prewarm::prewarm_gate()
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        {
-                            let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
-                            match claims.get_mut(&job.key) {
-                                Some(started) => *started = true,
-                                None => continue,
+            // While one job compiles its Metal pipeline, another can use
+            // the reserved background compiler permit.
+            let rx = Arc::new(Mutex::new(rx));
+            let mut workers = 0;
+            for index in 0..2 {
+                let (rx, pending, tx) = (rx.clone(), pending.clone(), tx.clone());
+                let spawned = std::thread::Builder::new()
+                    .name(format!("pm-shader-prewarm-{index}"))
+                    .spawn(move || {
+                        pm_glsl::compiler::background_worker();
+                        loop {
+                            let job = {
+                                let rx = rx.lock().unwrap_or_else(|e| e.into_inner());
+                                if rx.recv().is_err() {
+                                    break;
+                                }
+                                pending
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .pop_front()
+                            };
+                            let Some(job) = job else { continue };
+                            let result =
+                                match super::translate::verdict(&job.source, job.line_offset).1 {
+                                    super::translate::Verdict::Ready(prepared) => Some(
+                                        prepared
+                                            .as_ref()
+                                            .as_ref()
+                                            .map_err(|f| f.clone())
+                                            .and_then(|p| p.finish())
+                                            .and_then(|p| {
+                                                GpuProgram::new(&job.device, p, "pm shader layer")
+                                            })
+                                            .and_then(|mut program| {
+                                                program.pipeline(&job.device, job.format)?;
+                                                Ok(program)
+                                            }),
+                                    ),
+                                    super::translate::Verdict::Refused(_) => None,
+                                    super::translate::Verdict::NeedsFallback(f) => {
+                                        f.stage.retryable().then_some(Err(f))
+                                    }
+                                };
+                            if tx
+                                .send(BuiltShader {
+                                    key: job.key,
+                                    result,
+                                })
+                                .is_err()
+                            {
+                                break;
                             }
                         }
-                        let result = match super::translate::verdict(&job.source, job.line_offset).1
-                        {
-                            super::translate::Verdict::Ready(prepared) => Some(
-                                prepared
-                                    .as_ref()
-                                    .as_ref()
-                                    .map_err(|f| f.clone())
-                                    .and_then(|p| p.finish())
-                                    .and_then(|p| {
-                                        GpuProgram::new(&job.device, p, "pm shader layer")
-                                    })
-                                    .and_then(|mut program| {
-                                        program.pipeline(&job.device, job.format)?;
-                                        Ok(program)
-                                    }),
-                            ),
-                            super::translate::Verdict::Refused(_)
-                            | super::translate::Verdict::NeedsFallback(_) => None,
-                        };
-                        drop(_gate);
-                        if tx
-                            .send(BuiltShader {
-                                key: job.key,
-                                result,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-                .ok()?;
+                    })
+                    .is_ok();
+                workers += usize::from(spawned);
+            }
+            if workers == 0 {
+                return None;
+            }
             self.worker = Some((jobs, Mutex::new(done)));
         }
         self.worker.as_ref().map(|(jobs, _)| jobs)
@@ -352,27 +366,15 @@ impl ShaderPrewarm {
         let Some(jobs) = self.worker() else {
             return false;
         };
-        let jobs = jobs.clone();
-        self.started
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, false);
-        let sent = jobs
-            .send(PrewarmJob {
-                key,
-                source,
-                line_offset,
-                device: device.clone(),
-                format,
-            })
-            .is_ok();
+        let sent = jobs.send(PrewarmJob {
+            key,
+            source,
+            line_offset,
+            device: device.clone(),
+            format,
+        });
         if sent {
             self.in_flight.insert(key);
-        } else {
-            self.started
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&key);
         }
         sent
     }
@@ -382,10 +384,11 @@ impl ShaderPrewarm {
     }
 
     fn reclaim(&mut self, key: &Key) -> bool {
-        let mut claims = self.started.lock().unwrap_or_else(|e| e.into_inner());
-        if claims.get(key) == Some(&false) {
-            claims.remove(key);
-            drop(claims);
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|(jobs, _)| jobs.remove(|job| &job.key == key).is_some())
+        {
             self.in_flight.remove(key);
             return true;
         }
@@ -427,10 +430,8 @@ impl ShaderPrewarm {
     }
 
     fn settle(&mut self, built: &[BuiltShader]) {
-        let mut claims = self.started.lock().unwrap_or_else(|e| e.into_inner());
         for b in built {
             self.in_flight.remove(&b.key);
-            claims.remove(&b.key);
         }
     }
 
@@ -439,62 +440,26 @@ impl ShaderPrewarm {
     }
 }
 
-/// Unique shader-layer programs in `doc` (root and all precomps), sorted by
-/// earliest appearance (`from`) so playback hits warmed programs first.
-fn document_shader_sources(doc: &pm_model::Document) -> Vec<(Key, String, u32)> {
+pub(crate) fn prewarm_source(layer: &pm_model::Node) -> Option<(Key, String, u32)> {
     use pm_eval::node;
-    let Some(root) = doc.root() else {
-        return Vec::new();
-    };
-    let mut lists = vec![node::member(Some(root), "layers")];
-    if let Some(comps) = node::member(Some(root), "comps") {
-        lists.extend(
-            node::entries(comps)
-                .into_iter()
-                .map(|(_, comp)| node::member(comp.node(), "layers")),
-        );
-    }
-    let cache = super::translate::cache();
-    let mut by_key: HashMap<Key, (f64, String, u32)> = HashMap::new();
-    for layer in lists.into_iter().filter_map(node::array).flatten() {
-        if !node::is_str(node::member(Some(layer), "type"), "shader") {
-            continue;
-        }
-        if matches!(
-            node::member(Some(layer), "on").map(pm_model::Node::kind),
+    if !node::is_str(layer.get("type"), "shader")
+        || matches!(
+            layer.get("on").map(pm_model::Node::kind),
             Some(pm_model::NodeKind::Bool(false))
-        ) {
-            continue;
-        }
-        let Some(code) = node::string(node::member(node::member(Some(layer), "d"), "code")) else {
-            continue;
-        };
-        let code = code.to_string_lossy();
-        if code.is_empty() {
-            continue;
-        }
-        let from = node::number(node::member(Some(layer), "from")).unwrap_or(0.0);
-        let (source, line_offset) = super::shader_layer_program(&code);
-        let key = cache.key(&source, line_offset);
-        by_key
-            .entry(key)
-            .and_modify(|entry| {
-                if from < entry.0 {
-                    entry.0 = from;
-                }
-            })
-            .or_insert((from, source, line_offset));
+        )
+    {
+        return None;
     }
-    let mut ordered: Vec<(f64, Key, String, u32)> = by_key
-        .into_iter()
-        .map(|(key, (from, source, line_offset))| (from, key, source, line_offset))
-        .collect();
-    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    ordered.truncate(PROGRAMS);
-    ordered
-        .into_iter()
-        .map(|(_, key, source, line_offset)| (key, source, line_offset))
-        .collect()
+    let code = node::string(node::member(layer.get("d"), "code"))?.to_string_lossy();
+    if code.is_empty() {
+        return None;
+    }
+    let (source, line_offset) = super::shader_layer_program(&code);
+    Some((
+        super::translate::cache().key(&source, line_offset),
+        source,
+        line_offset,
+    ))
 }
 
 /// GPU programs of shader-layer code kept by a renderer (by source key),
@@ -619,20 +584,30 @@ impl ShaderState {
         &mut self,
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        document: &pm_model::Document,
+        sources: impl IntoIterator<Item = (Key, String, u32)>,
+        promote: bool,
     ) -> usize {
         let done = self.prewarm.take();
         self.absorb(done);
         let mut queued = 0;
-        for (key, source, line_offset) in document_shader_sources(document) {
-            if self.programs.contains_key(&key) || super::translate::native_failed(&key) {
+        for (key, source, line_offset) in sources {
+            if self.programs.contains_key(&key)
+                || super::translate::native_failed(&key)
+                || self
+                    .retry
+                    .get(&key)
+                    .and_then(crate::effects::retry::Retry::waiting)
+                    .is_some()
+            {
                 continue;
             }
-            if self
-                .prewarm
-                .queue(key, source, line_offset, device, format)
+            if self.prewarm.pending() < PROGRAMS
+                && self.prewarm.queue(key, source, line_offset, device, format)
             {
                 queued += 1;
+            }
+            if promote && let Some((jobs, _)) = &self.prewarm.worker {
+                jobs.promote(|job| job.key == key);
             }
         }
         queued

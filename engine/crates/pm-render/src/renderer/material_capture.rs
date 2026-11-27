@@ -600,7 +600,7 @@ impl Renderer {
         // Sample footage at the capture's pixel density. In particular,
         // converting a 6K source into a 512 px map needs no 6K RGBA target.
         let preview_video = self.media.preview_video;
-        let draw_edge = self.media.draw_edge;
+        let draw_density = self.media.draw_density;
         let playback = self.media.playback;
         self.media.preview_video = !request.final_output;
         if nonblocking {
@@ -636,7 +636,7 @@ impl Renderer {
             None,
         );
         self.media.preview_video = preview_video;
-        self.media.draw_edge = draw_edge;
+        self.media.draw_density = draw_density;
         self.media.playback = playback;
         self.material.evaluator = Some(std::mem::replace(&mut self.evaluator, original));
         self.reuse_enabled = reused;

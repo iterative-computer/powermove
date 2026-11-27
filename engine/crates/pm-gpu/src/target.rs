@@ -140,6 +140,7 @@ struct KeyUse {
     misses: u64,
     outstanding: usize,
     peak: usize,
+    previous_peak: usize,
 }
 
 type Fence = std::sync::Arc<std::sync::atomic::AtomicBool>;
@@ -229,6 +230,8 @@ impl TargetPool {
 
     pub const FREE_BUDGET: u64 = 48 << 20;
     const MAX_IDLE_FRAMES: u64 = 30;
+    // Auto resolution may alternate working sizes across several frames.
+    const RECENT_PLAYBACK_FRAMES: u64 = 8;
     /// Idle targets kept at most, at any time.
     const MAX_FREE: usize = 128;
 
@@ -277,8 +280,14 @@ impl TargetPool {
         {
             let usage = self.usage.entry(key).or_default();
             if usage.frames == 0 || usage.frame != self.frame {
+                usage.previous_peak = if self.frame.wrapping_sub(usage.frame) <= 1 {
+                    usage.peak
+                } else {
+                    0
+                };
                 usage.frame = self.frame;
                 usage.frames += 1;
+                usage.peak = 0;
                 usage.outstanding = 0;
             }
             usage.takes += 1;
@@ -427,21 +436,31 @@ impl TargetPool {
     /// Frees the idle targets unused longest until at most `budget` bytes
     /// and [`Self::MAX_FREE`] targets are idle.
     fn evict_over(&mut self, budget: u64) {
-        while self.free_bytes > budget.min(self.retention_budget_or_unbounded(budget))
-            || self.free.len() > Self::MAX_FREE
-        {
+        let playback = self.playback_retention();
+        let budget = budget.min(self.retention_budget_or_unbounded(budget));
+        while self.free_bytes > budget || self.free.len() > Self::MAX_FREE {
             let oldest = self
                 .free
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, (key, _, at))| {
-                    let heat = self
-                        .playback_retention()
+                .min_by_key(|(_, (key, target, at))| {
+                    let heat = playback
                         .then(|| self.usage.get(key))
                         .flatten()
-                        .filter(|use_| use_.frames >= 2 && self.frame.wrapping_sub(use_.frame) <= 1)
-                        .map_or((0, 0), |use_| (use_.peak.min(4), use_.takes));
-                    (heat, *at)
+                        .filter(|use_| use_.frames >= 2)
+                        .map_or((0, 0, 0), |use_| {
+                            let age = self.frame.wrapping_sub(use_.frame);
+                            let recency = Self::RECENT_PLAYBACK_FRAMES.saturating_sub(age);
+                            if recency == 0 {
+                                (0, 0, 0)
+                            } else {
+                                (recency, use_.peak.max(use_.previous_peak).min(4), use_.takes)
+                            }
+                        });
+                    // With the same reuse history, evict the cheaper
+                    // allocation first. A small excess need not discard a
+                    // full-frame scratch texture.
+                    (heat, *at, if playback { target.bytes() } else { 0 })
                 })
                 .map(|(index, _)| index)
                 .expect("over budget");
@@ -656,6 +675,26 @@ mod tests {
         pool.set_playback_budget(0);
         assert_eq!(pool.idle(), 1);
         assert_eq!(pool.bytes(), bytes);
+    }
+
+    #[test]
+    fn playback_keeps_the_larger_of_equally_reused_targets() {
+        let gpu = crate::device::Gpu::new("playback target eviction cost").unwrap();
+        let mut pool = TargetPool::new();
+        pool.set_playback_budget(half_bytes(64) + half_bytes(65));
+        for _ in 0..2 {
+            pool.begin_frame();
+            let small = pool.take_working(&gpu.device, 64, 64, Precision::Float16);
+            let large = pool.take_working(&gpu.device, 65, 65, Precision::Float16);
+            gpu.queue.submit([]);
+            pool.end_submitted_frame(&gpu.queue, [large, small]);
+        }
+
+        pool.set_playback_budget(half_bytes(65));
+        assert_eq!(pool.idle(), 1);
+        let large = pool.take_working(&gpu.device, 65, 65, Precision::Float16);
+        assert_eq!(pool.created(), 2);
+        pool.give(large);
     }
 
     #[test]

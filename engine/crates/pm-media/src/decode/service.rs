@@ -774,6 +774,18 @@ impl DecodeService {
         self.active_display.lock().unwrap().contains(&key)
     }
 
+    /// How many display readers currently compete for forward playback.
+    pub(super) fn active_display_share(&self, source: u64, instance: InstanceId) -> Option<usize> {
+        let active = self.active_display.lock().unwrap();
+        active
+            .contains(&SessionKey {
+                source,
+                instance,
+                purpose: DecodePurpose::Display,
+            })
+            .then_some(active.len())
+    }
+
     /// Closes one display instance without invalidating the shared source
     /// frames used by other instances or the source viewer.
     pub fn release_display_instance(&self, source: u64, instance: InstanceId) {

@@ -1494,10 +1494,7 @@ impl<'c> Gpu<'c> {
             self.encoder,
             crate::slices::Class::Effect,
         );
-        let pipeline = self
-            .effects
-            .simple_pipeline(self.device, op, out.format())
-            .clone();
+        let pipeline = self.effects.simple_pipeline(self.device, op, out.format());
         let layout = pipeline.get_bind_group_layout(0);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pm effect pixel pass"),
