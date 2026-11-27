@@ -2073,12 +2073,18 @@ impl WelcomeView {
     fn choices(&self, kit: &Kit, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
+        // A list's rows stand one inset inside it on every side, their
+        // corners concentric with its (the Settings sidebar's rule): the
+        // chosen row's raised fill and a row's hover never meet its edge.
+        let inset = t.space.xs;
+        let row_radius = t.radius.nested(m.group_radius, inset);
         let mut group = if self.frame.cards {
             div().flex().flex_row().gap(px(m.inset))
         } else {
             div()
                 .flex()
                 .flex_col()
+                .p(px(inset))
                 .rounded(px(m.group_radius))
                 .bg(rgb(c.panel))
         };
@@ -2142,9 +2148,17 @@ impl WelcomeView {
                         .child(choice.label.clone()),
                 );
             } else {
-                if selected {
-                    item = item.bg(rgb(c.raised)).elevated(t, Elevation::Raised);
-                }
+                // The text keeps its place: the list's inset comes off the
+                // row's own padding.
+                item = item
+                    .px(px(m.inset - inset))
+                    .py(px(m.inset - inset))
+                    .rounded(px(row_radius));
+                item = if selected {
+                    item.bg(rgb(c.raised)).elevated(t, Elevation::Raised)
+                } else {
+                    item.hover(|s| s.bg(tint(c.text, t.translucency.hover)))
+                };
                 item = item.child(
                     div()
                         .text_size(px(t.typography.body))

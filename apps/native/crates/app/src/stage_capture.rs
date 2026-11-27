@@ -78,44 +78,70 @@ pub fn offer_stills(out: std::path::PathBuf) -> anyhow::Result<()> {
     use crate::first_run::{AeroPlan, Choices, step_frame};
     use pm_services::surface_backing::onboarding::Step as Onboard;
     std::fs::create_dir_all(&out)?;
-    let choices = Choices {
+    let base = Choices {
         aero: AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":false,
             "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]})),
         ..Choices::default()
     };
-    let frame = step_frame(
-        Onboard::Agent,
-        &choices,
-        &Default::default(),
-        Some("ana@example.com"),
-        None,
-    );
-    for scheme in [Scheme::Light, Scheme::Dark] {
-        let tokens = Tokens::new(scheme, Accessibility::default());
-        let mut cx = headless();
-        let frame = frame.clone();
-        let window = cx
-            .open_window(size(px(560.), px(900.)), move |_, cx| {
-                cx.new(|cx| WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx))
-            })
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        for _ in 0..3 {
-            cx.update_window(window.into(), |_, w, cx| {
-                w.refresh();
-                w.draw(cx).clear(cx);
-            })
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-            cx.run_until_parked();
+    // Aero chosen (the card), then each other row position chosen, then the
+    // pointer over an unchosen row (window points of the middle row).
+    let chosen = |agent: &str| Choices {
+        agent: agent.into(),
+        agent_picked: agent != "aero",
+        aero: base.aero.clone(),
+        ..Choices::default()
+    };
+    let shots: [(&str, &str, Option<(f32, f32)>); 4] = [
+        ("onboarding-offer", "aero", None),
+        ("onboarding-rows-middle", "claude", None),
+        ("onboarding-rows-last", "chatgpt", None),
+        ("onboarding-rows-hover", "aero", Some((280., 330.))),
+    ];
+    for (name, agent, pointer) in shots {
+        let frame = step_frame(
+            Onboard::Agent,
+            &chosen(agent),
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        );
+        for scheme in [Scheme::Light, Scheme::Dark] {
+            let tokens = Tokens::new(scheme, Accessibility::default());
+            let mut cx = headless();
+            let frame = frame.clone();
+            let window = cx
+                .open_window(size(px(560.), px(900.)), move |_, cx| {
+                    cx.new(|cx| WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx))
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            for pass in 0..3 {
+                cx.update_window(window.into(), |_, w, cx| {
+                    if let (1, Some((x, y))) = (pass, pointer) {
+                        w.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent {
+                                position: point(px(x), px(y)),
+                                pressed_button: None,
+                                modifiers: Modifiers::default(),
+                            }),
+                            cx,
+                        );
+                    }
+                    w.refresh();
+                    w.draw(cx).clear(cx);
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                cx.run_until_parked();
+            }
+            let image = cx
+                .capture_screenshot(window.into())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let look = if scheme == Scheme::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            image.save(out.join(format!("{name}-{look}.png")))?;
         }
-        let image = cx
-            .capture_screenshot(window.into())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let name = if scheme == Scheme::Dark {
-            "dark"
-        } else {
-            "light"
-        };
-        image.save(out.join(format!("onboarding-offer-{name}.png")))?;
     }
     Ok(())
 }
