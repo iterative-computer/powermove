@@ -144,6 +144,8 @@ pub enum Message {
     /// Who is signed in to Powermove changed (name or email), `None` for
     /// nobody: the account step shows it.
     Powermove(Option<String>),
+    /// The account's billing changed: Aero's plan on the agent step.
+    AeroPlan(AeroPlan),
     /// The account step's code went out, or why it didn't (the registry's
     /// error code: `network`, `api:rate_limited` …).
     CodeSent(Result<(), String>),
@@ -213,6 +215,8 @@ pub enum Effect {
     /// Sign in to an agent's provider, as Settings › Providers does (the
     /// provider's own sign-in, in the browser).
     Connect(pm_agents::Provider),
+    /// Checkout for Aero's plan (this id), in the browser.
+    Subscribe(String),
     /// The account step: email a code to this address (the sign-in sheet's
     /// own request, `cloud::send_code`).
     SendCode(String),
@@ -246,17 +250,80 @@ pub(crate) struct Choices {
     pub timeline: String,
     /// The agent's provider: `aero` is Powermove's own harness.
     pub agent: String,
+    /// The person chose an agent on its step (else it follows the sign-ins).
+    pub agent_picked: bool,
+    /// The Powermove account's plan: what Aero's row offers on Free.
+    pub aero: AeroPlan,
     /// The speech models to download once the library is open, one after
     /// another in the order asked for; none unless the person asks.
     pub speech: Vec<String>,
     /// `import` (bring the After Effects workspace) or `fresh`.
     pub workspace: String,
 }
+/// Aero's plan as the account's billing has it: not read yet (or signed
+/// out), Free with the plan the backend offers (its id, name and price), or
+/// on a plan.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum AeroPlan {
+    #[default]
+    Unknown,
+    Offer {
+        id: String,
+        name: String,
+        price: String,
+    },
+    On(String),
+}
+impl AeroPlan {
+    /// From the account fact's billing (`cloud::fact`).
+    pub(crate) fn from_fact(billing: &serde_json::Value) -> Self {
+        if billing["state"] != "ready" {
+            return Self::Unknown;
+        }
+        if billing["subscribed"] == true {
+            return billing["plan"]["name"]
+                .as_str()
+                .map_or(Self::Unknown, |name| Self::On(name.to_owned()));
+        }
+        let plan = &billing["plans"][0];
+        match (
+            plan["id"].as_str(),
+            plan["name"].as_str(),
+            plan["priceCents"].as_u64(),
+        ) {
+            (Some(id), Some(name), Some(cents)) => Self::Offer {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                price: format!("${}.{:02} per month", cents / 100, cents % 100),
+            },
+            _ => Self::Unknown,
+        }
+    }
+}
+impl Choices {
+    /// The agent the step shows chosen: the person's pick; else Codex or
+    /// Claude Code when a sign-in to it already exists; else Aero.
+    pub(crate) fn agent_for(
+        &self,
+        accounts: &std::collections::BTreeMap<String, String>,
+    ) -> String {
+        if self.agent_picked {
+            return self.agent.clone();
+        }
+        ["chatgpt", "claude"]
+            .into_iter()
+            .find(|p| accounts.contains_key(*p))
+            .unwrap_or("aero")
+            .to_owned()
+    }
+}
 impl Default for Choices {
     fn default() -> Self {
         Self {
             timeline: "layers".into(),
             agent: "aero".into(),
+            agent_picked: false,
+            aero: AeroPlan::default(),
             // Nothing downloads unless the person asks.
             speech: vec![],
             workspace: "import".into(),
@@ -453,6 +520,10 @@ impl Flow {
                 if !(cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ACCOUNT").is_some()) {
                     self.powermove = identity;
                 }
+                vec![]
+            }
+            Message::AeroPlan(plan) => {
+                self.choices.aero = plan;
                 vec![]
             }
             Message::CodeSent(result) => self.code_sent(result),
@@ -733,7 +804,10 @@ impl Flow {
         if let Some(choice) = id.strip_prefix("choose:") {
             match onboarding.step {
                 Onboard::Timeline => self.choices.timeline = choice.into(),
-                Onboard::Agent => self.choices.agent = choice.into(),
+                Onboard::Agent => {
+                    self.choices.agent = choice.into();
+                    self.choices.agent_picked = true;
+                }
                 // A queued model's row: a press takes the download back
                 // (its Download pill asks for it).
                 Onboard::Transcription => self.choices.speech.retain(|id| id != choice),
@@ -749,6 +823,13 @@ impl Flow {
                     let provider = match row {
                         "claude" => pm_agents::Provider::Claude,
                         "chatgpt" => pm_agents::Provider::Chatgpt,
+                        // Aero on Free: Checkout for the plan offered, in the
+                        // browser; it comes back here, on that plan.
+                        _ if let AeroPlan::Offer { id, .. } = &self.choices.aero => {
+                            self.choices.agent = "aero".into();
+                            self.choices.agent_picked = true;
+                            return vec![Effect::Subscribe(id.clone())];
+                        }
                         // Aero's Connect is the Powermove account's sign-in.
                         _ => {
                             let _ = onboarding.back();
@@ -794,9 +875,10 @@ impl Flow {
                     "timelineMode": self.choices.timeline,
                     "workspaceImport": serde_json::Value::Null,
                 });
+                let agent = self.choices.agent_for(&self.accounts);
                 raw["agent"] = serde_json::json!({
-                    "provider": self.choices.agent,
-                    "model": match self.choices.agent.as_str() {
+                    "provider": agent,
+                    "model": match agent.as_str() {
                         "claude" => "claude-opus",
                         "compatible" => "compatible",
                         "aero" => "auto",
@@ -1134,12 +1216,30 @@ pub(crate) fn step_frame(
                 // name, clear of the row's Connect.
                 // Aero runs on the Powermove account: signed in, its name;
                 // signed out, Connect leads back to the account step.
-                Choice {
-                    badge: Some("Recommended".into()),
-                    detail: None,
-                    pill: powermove.is_none().then(|| "Connect".into()),
-                    status: powermove.map(str::to_owned),
-                    ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                // Signed in on Free: its plan to buy, right here; on a plan,
+                // the plan's name.
+                match (&choices.aero, powermove) {
+                    (AeroPlan::Offer { name, price, .. }, Some(_)) => Choice {
+                        badge: Some("Recommended".into()),
+                        detail: Some(format!("Inference included, {price}.")),
+                        pill: Some(format!("Get {name}")),
+                        status: None,
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                    },
+                    (AeroPlan::On(plan), Some(_)) => Choice {
+                        badge: Some("Recommended".into()),
+                        detail: None,
+                        pill: None,
+                        status: Some(plan.clone()),
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                    },
+                    _ => Choice {
+                        badge: Some("Recommended".into()),
+                        detail: None,
+                        pill: powermove.is_none().then(|| "Connect".into()),
+                        status: powermove.map(str::to_owned),
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                    },
                 },
                 agent(
                     "claude",
@@ -1150,7 +1250,7 @@ pub(crate) fn step_frame(
                 ),
                 agent("chatgpt", "Codex", "With your ChatGPT account.", "provider.chatgpt", "chatgpt"),
             ],
-            chosen: Some(choices.agent.clone()),
+            chosen: Some(choices.agent_for(accounts)),
             preview: Some("agent".into()),
             ..Frame::default()
         }),
@@ -1664,8 +1764,10 @@ impl Driver {
             crate::cloud::init(self.library.plan.profile.clone(), cx);
             let tx = self.tx.clone();
             let _ = tx.try_send(Message::Powermove(crate::cloud::identity(cx)));
-            crate::cloud::on_change(cx, move |identity, _| {
+            crate::cloud::on_change(cx, move |identity, cx| {
                 let _ = tx.try_send(Message::Powermove(identity));
+                let billing = crate::cloud::fact(cx)["billing"].clone();
+                let _ = tx.try_send(Message::AeroPlan(AeroPlan::from_fact(&billing)));
             });
         }
         self.show(cx);
@@ -1813,6 +1915,7 @@ impl Driver {
         for effect in effects {
             match effect {
                 Effect::Connect(provider) => self.connect(provider),
+                Effect::Subscribe(plan) => crate::cloud::subscribe(plan, cx),
                 Effect::SendCode(email) => {
                     let tx = self.tx.clone();
                     crate::cloud::send_code(email, cx, move |result, _| {
@@ -2165,6 +2268,56 @@ mod step_frame_tests {
             assert_eq!(choice.status.is_some(), connected, "{}", choice.id);
         }
         assert_eq!(frame.choices[0].status.as_deref(), Some("ana@example.com"));
+    }
+
+    /// Aero leads; it is chosen unless a Codex or Claude Code sign-in
+    /// already exists (then that one), and the person's own pick wins. On
+    /// Free its row offers the plan the backend lists, with its price; on a
+    /// plan it names the plan.
+    #[test]
+    fn aero_leads_offers_its_plan_on_free_and_follows_existing_sign_ins() {
+        let mut choices = Choices::default();
+        let codex =
+            std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected".to_owned())]);
+        let frame = step_frame(
+            Onboard::Agent,
+            &choices,
+            &codex,
+            Some("ana@example.com"),
+            None,
+        );
+        assert_eq!(frame.choices[0].id, "aero");
+        assert_eq!(frame.chosen.as_deref(), Some("chatgpt"));
+        choices.agent_picked = true;
+        assert_eq!(choices.agent_for(&codex), "aero");
+        choices.aero = AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":false,
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}));
+        let frame = step_frame(
+            Onboard::Agent,
+            &choices,
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        );
+        assert_eq!(frame.choices[0].pill.as_deref(), Some("Get Aerolite"));
+        assert_eq!(
+            frame.choices[0].detail.as_deref(),
+            Some("Inference included, $9.99 per month.")
+        );
+        // Signed out: Connect, whatever the plans.
+        let frame = step_frame(Onboard::Agent, &choices, &Default::default(), None, None);
+        assert_eq!(frame.choices[0].pill.as_deref(), Some("Connect"));
+        choices.aero = AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":true,
+            "plan":{"id":"aerolite","name":"Aerolite"}}));
+        let frame = step_frame(
+            Onboard::Agent,
+            &choices,
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        );
+        assert_eq!(frame.choices[0].pill, None);
+        assert_eq!(frame.choices[0].status.as_deref(), Some("Aerolite"));
     }
 
     /// The speech step lists every model in the catalogue, in its order,
