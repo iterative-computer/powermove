@@ -1685,7 +1685,9 @@ pub fn cancel_checkout(cx: &mut App) {
 /// may use one. Kept canonical; nothing else is ever opened.
 fn billing_url(raw: &str) -> Option<String> {
     let url = url::Url::parse(raw).ok()?;
-    let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+    // Stripe's own Checkout links carry a `#…` fragment the page needs, so a
+    // fragment is allowed on Stripe's hosts only.
+    let plain = url.username().is_empty() && url.password().is_none();
     let stripe = url.scheme() == "https"
         && url.port().is_none()
         && matches!(
@@ -1693,6 +1695,7 @@ fn billing_url(raw: &str) -> Option<String> {
             Some("checkout.stripe.com" | "billing.stripe.com")
         );
     let local = pm_agents::inference::LOCAL_ORIGINS
+        && url.fragment().is_none()
         && url.scheme() == "http"
         && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
         && url.port().is_some();
@@ -1880,6 +1883,8 @@ mod billing_tests {
         for ok in [
             "https://checkout.stripe.com/c/pay/cs_test_1",
             "https://billing.stripe.com/p/session/test_1",
+            // Live Checkout links end in a fragment the page needs.
+            "https://checkout.stripe.com/c/pay/cs_live_a1#fidkdWxOYHwnPyd1blpxYHZxWjA0",
         ] {
             assert_eq!(billing_url(ok).as_deref(), Some(ok));
         }
