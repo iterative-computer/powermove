@@ -5,7 +5,7 @@ import type { Db } from './db/client';
 import { abuseCounters } from './db/schema';
 import type { Env } from './env';
 
-export type Scope = 'email_send_addr' | 'email_send_ip' | 'email_send_global' | 'email_verify_ip' | 'email_verify_addr'
+export type Scope = 'email_send_addr' | 'email_send_addr_day' | 'email_send_ip' | 'email_send_ip_day' | 'email_send_global' | 'email_verify_ip' | 'email_verify_addr'
   | 'auth_start_ip' | 'exchange_ip' | 'handle_claim_user' | 'publish_user_hour' | 'publish_user_day'
   | 'human_verify_ip' | 'upload_req_user' | 'missing_req_user' | 'report_ip' | 'report_repo_ip' | 'install_user' | 'admin_write_user'
   | 'billing_user' | 'aero_user';
@@ -13,8 +13,11 @@ export interface Rule { scope: Scope; limit: number; windowSeconds: number }
 export const RULES: Record<Scope, Omit<Rule, 'scope'>> = {
   human_verify_ip: { limit: 30, windowSeconds: 3600 },
   email_send_addr: { limit: 3, windowSeconds: 900 },
+  email_send_addr_day: { limit: 5, windowSeconds: 86400 },
   email_send_ip: { limit: 20, windowSeconds: 3600 },
-  email_send_global: { limit: 5000, windowSeconds: 86400 },
+  email_send_ip_day: { limit: 50, windowSeconds: 86400 },
+  // Below the mail quota (200 a day); EMAIL_DAILY_LIMIT overrides it.
+  email_send_global: { limit: 150, windowSeconds: 86400 },
   email_verify_addr: { limit: 5, windowSeconds: 900 },
   email_verify_ip: { limit: 30, windowSeconds: 3600 },
   auth_start_ip: { limit: 30, windowSeconds: 3600 },
@@ -38,10 +41,11 @@ export function rateLimited(c: Context<Env>, retryAfterSeconds: number): never {
   throw new ApiError({ error: 'rate_limited' });
 }
 
-export async function consume(db: Db, scope: Scope, key: string, now = new Date()): Promise<
+export async function consume(db: Db, scope: Scope, key: string, now = new Date(), limitOverride?: number): Promise<
   { ok: true; remaining: number } | { ok: false; retryAfterSeconds: number }
 > {
-  const { limit, windowSeconds } = RULES[scope];
+  const { windowSeconds } = RULES[scope];
+  const limit = limitOverride ?? RULES[scope].limit;
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key))))
     .map(byte => byte.toString(16).padStart(2, '0')).join('').slice(0, 32);
   const windowStart = sql<Date>`to_timestamp(floor(extract(epoch from ${now.toISOString()}::timestamptz) / ${windowSeconds}) * ${windowSeconds})`;
@@ -54,8 +58,14 @@ export async function consume(db: Db, scope: Scope, key: string, now = new Date(
   return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil((windowSeconds * 1000 - (now.getTime() % (windowSeconds * 1000))) / 1000)) };
 }
 
+/** A scope's limit as this environment sets it. */
+export function limitOf(env: CloudflareBindings, scope: Scope): number {
+  if (scope === 'email_send_global') { const n = Number(env.EMAIL_DAILY_LIMIT); if (Number.isInteger(n) && n > 0) return n; }
+  return RULES[scope].limit;
+}
+
 export async function enforce(c: Context<Env>, scope: Scope, key: string): Promise<void> {
-  const result = await consume(c.var.data.db, scope, key);
+  const result = await consume(c.var.data.db, scope, key, new Date(), limitOf(c.env, scope));
   if (!result.ok) {
     if (scope === 'email_send_global') console.error('email ceiling reached');
     rateLimited(c, result.retryAfterSeconds);

@@ -1,5 +1,5 @@
 /* App-level hardening: production refuses development settings, and API routes trust the bearer alone. */
-import { expect, test } from 'bun:test';
+import { expect, setSystemTime, test } from 'bun:test';
 import { makeSignature } from 'better-auth/crypto';
 import { withData } from './db';
 import { makeEnv } from './env';
@@ -44,4 +44,36 @@ test('11. API routes take the bearer alone: a session cookie is never a fallback
       expect([path, (await app.request(path, { headers: { cookie } }, env)).status]).toEqual([path, 401]);
       expect([path, (await app.request(path, { headers: { cookie, authorization: 'Bearer not-a-real-token' } }, env)).status]).toEqual([path, 401]);
     }
+  }));
+
+const send = (app: ReturnType<typeof createApp>, env: CloudflareBindings, email: string, ip = '203.0.113.7') =>
+  app.request('/v1/auth/email/send', { method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': ip }, body: JSON.stringify({ email }) }, env);
+
+test('8. sign-in codes have a daily budget per address and a global one below the mail quota', async () =>
+  withData(async (data) => {
+    const env = makeEnv(data), app = createApp({ data: () => data });
+    const start = Date.parse('2026-11-26T01:00:00Z');
+    try {
+      // Five a day to one address, even spread across the short (15-minute) windows.
+      const statuses: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        setSystemTime(new Date(start + i * 16 * 60_000));
+        statuses.push((await send(app, env, 'budget@example.com', `203.0.113.${i + 1}`)).status);
+      }
+      expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
+      // The global budget: EMAIL_DAILY_LIMIT (default 150) across every address and IP.
+      const limited = { ...env, EMAIL_DAILY_LIMIT: '7' };
+      setSystemTime(new Date(start + 3 * 3_600_000));
+      const global: number[] = [];
+      for (let i = 0; i < 3; i++) global.push((await send(app, limited, `someone${i}@example.com`, `198.51.100.${i + 1}`)).status);
+      expect(global).toEqual([200, 200, 429]);
+    } finally { setSystemTime(); }
+  }));
+
+test('8. the direct OAuth routes share the auth routes’ per-IP edge limit', async () =>
+  withData(async (data) => {
+    const env = { ...makeEnv(data), RL_AUTH: { limit: async () => ({ success: false }) } as RateLimit };
+    const app = createApp({ data: () => data });
+    expect((await app.request('/v1/auth/sign-in/oauth2', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ providerId: 'google' }) }, env)).status).toBe(429);
+    expect((await app.request('/v1/auth/oauth2/callback/google?code=x&state=y', {}, env)).status).toBe(429);
   }));

@@ -23,6 +23,7 @@ import { stripeWebhook } from './routes/stripe-webhook';
 import { aero } from './routes/aero';
 import { V2Error } from './v2-error';
 import { productionProblems } from './production';
+import { rateAuth } from './routes/session';
 export const MIN_DESKTOP_VERSION = '0.0.0';
 export function createApp(deps: {
   data: (env: CloudflareBindings) => Data;
@@ -125,7 +126,9 @@ export function createApp(deps: {
     '/v1/store',
     storeUtility,
   ).route('/v1/installs', installRoutes).route('/v2/billing', billing).route('/v2/stripe/webhook', stripeWebhook).route('/v2/aero', aero);
+  // The direct OAuth routes share the auth routes' per-IP edge limit.
   app.post('/v1/auth/sign-in/oauth2', async (c) => {
+    await rateAuth(c);
     const body = await c.req.json().catch(() => null) as { providerId?: unknown; callbackURL?: unknown } | null;
     if (body?.providerId !== 'google') return c.json({ error: 'not_found' }, 404);
     const url = new URL(c.req.url);
@@ -135,7 +138,8 @@ export function createApp(deps: {
       body: JSON.stringify({ provider: 'google', callbackURL: body.callbackURL }),
     }));
   });
-  app.get('/v1/auth/oauth2/callback/:providerId', (c) => {
+  app.get('/v1/auth/oauth2/callback/:providerId', async (c) => {
+    await rateAuth(c);
     if (c.req.param('providerId') !== 'google') return c.json({ error: 'not_found' }, 404);
     const url = new URL(c.req.url);
     url.pathname = '/v1/auth/callback/google';
