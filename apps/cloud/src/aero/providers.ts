@@ -1,4 +1,4 @@
-/* Where Aero's provider calls go, and the one call besides generation: token counting (free, no generation). */
+/* Where Aero's provider calls go. */
 import type { LanguageModel } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
@@ -32,20 +32,4 @@ export function languageModel(env: CloudflareBindings, model: AeroModel, fetch: 
   const { base } = endpointFor(env, model.provider);
   if (model.provider === 'openai') return createOpenAI({ apiKey: env.OPENAI_API_KEY, baseURL: base, fetch: fetch as typeof globalThis.fetch }).responses(model.providerModel);
   return createAnthropic({ apiKey: env.ANTHROPIC_API_KEY, baseURL: base, fetch: fetch as typeof globalThis.fetch })(model.providerModel);
-}
-
-const COUNT_FIELDS: Record<Provider, readonly string[]> = {
-  anthropic: ['model', 'system', 'messages', 'tools', 'tool_choice', 'thinking'],
-  openai: ['model', 'instructions', 'input', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning', 'text'],
-};
-
-/** The provider's own count of a generation request's input tokens. Throws when it can't say. */
-export async function countInput(endpoint: Endpoint, provider: Provider, body: Record<string, unknown>, fetch: Fetch): Promise<number> {
-  const subset = Object.fromEntries(COUNT_FIELDS[provider].filter(field => body[field] !== undefined).map(field => [field, body[field]]));
-  const url = provider === 'anthropic' ? `${endpoint.base}/messages/count_tokens` : `${endpoint.base}/responses/input_tokens`;
-  const response = await fetch(url, { method: 'POST', headers: endpoint.headers, body: JSON.stringify(subset), signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) throw new Error(`token count answered ${response.status}`);
-  const counted = (await response.json() as { input_tokens?: unknown }).input_tokens;
-  if (typeof counted !== 'number' || !Number.isInteger(counted) || counted < 0) throw new Error('token count unreadable');
-  return counted;
 }

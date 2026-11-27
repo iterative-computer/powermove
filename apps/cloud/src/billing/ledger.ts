@@ -107,21 +107,41 @@ export async function billingState(db: Db, userId: string, now = new Date()): Pr
   };
 }
 
-/** The subscription and period an Aero request spends against now: a live plan whose period hasn't ended. Past
-    the period's end, before the renewal arrives, there is nothing to spend against. */
-export async function spendingPeriod(db: Db, userId: string, now = new Date()): Promise<{ subscriptionId: string; period: Period } | null> {
-  const sub = await currentSubscription(db, userId);
+/** Serialises everything that changes what an account may spend (admitting a request, a subscription's period
+    changing) for the rest of the transaction. */
+export async function lockBalance(tx: Db, userId: string) {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`aero-balance:${userId}`}))`);
+}
+
+/** The subscription and period an Aero request spends against now, by the database's clock (sampled with the
+    subscription, after any lock the caller holds): a live plan whose period hasn't ended. Past the period's end,
+    before the renewal arrives, there is nothing to spend against. */
+export async function spendingPeriod(db: Db, userId: string): Promise<{ subscriptionId: string; period: Period } | null> {
+  const [sub] = await db.select({
+    id: subscriptions.id, status: subscriptions.status, start: subscriptions.currentPeriodStart, end: subscriptions.currentPeriodEnd,
+    live: sql<boolean>`${subscriptions.currentPeriodStart} <= clock_timestamp() and clock_timestamp() < ${subscriptions.currentPeriodEnd}`,
+  }).from(subscriptions)
+    .where(and(eq(subscriptions.userId, userId), notInArray(subscriptions.status, ['canceled', 'incomplete_expired', 'incomplete'])))
+    .orderBy(desc(subscriptions.currentPeriodStart)).limit(1);
   const status = sub ? publicStatus(sub.status) : null;
-  if (!sub || (status !== 'active' && status !== 'past_due')) return null;
-  if (now < sub.currentPeriodStart || now >= sub.currentPeriodEnd) return null;
-  return { subscriptionId: sub.id, period: { start: sub.currentPeriodStart, end: sub.currentPeriodEnd } };
+  if (!sub || (status !== 'active' && status !== 'past_due') || !sub.live) return null;
+  return { subscriptionId: sub.id, period: { start: sub.start, end: sub.end } };
 }
 
 /** What an Aero request may spend now, in nano-USD: the current period's balance less running holds, or nothing. */
-export async function spendable(db: Db, userId: string, now = new Date()): Promise<{ remainingNano: number; subscriptionId: string | null; period: Period | null }> {
-  const current = await spendingPeriod(db, userId, now);
+export async function spendable(db: Db, userId: string): Promise<{ remainingNano: number; subscriptionId: string | null; period: Period | null }> {
+  const current = await spendingPeriod(db, userId);
   if (!current) return { remainingNano: 0, subscriptionId: null, period: null };
   return { remainingNano: (await periodBalance(db, userId, current.period)).remainingNano, ...current };
+}
+
+/** Holds past their expiry become spends of the whole hold, marked estimated: their calls never settled (an
+    object killed before its alarm was armed, a database down past the hold's life). Conditional, so a hold that
+    settles meanwhile keeps its own spend. Returns how many it converted. */
+export async function sweepHolds(db: Db): Promise<number> {
+  const swept = await db.update(creditLedger).set({ kind: 'spend', costNanoUsd: sql`${creditLedger.holdNanoUsd}`, estimated: true, usageSource: 'hold' })
+    .where(and(eq(creditLedger.kind, 'hold'), sql`${creditLedger.holdExpiresAt} < now()`)).returning({ id: creditLedger.id });
+  return swept.length;
 }
 
 /** Grants a period's credits, once per key (the invoice id). */

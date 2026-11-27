@@ -3,7 +3,7 @@ import { and, eq, inArray, lte, sql } from 'drizzle-orm';
 import type { Data, Db } from '../db/client';
 import { user } from '../db/auth-schema';
 import { stripeCustomers, stripeEvents, subscriptions } from '../db/schema';
-import { grantedFor, recordGrant } from './ledger';
+import { grantedFor, lockBalance, recordGrant } from './ledger';
 import { type Plan, planForPrice } from './plans';
 import { idOf, invoiceSubscriptionId, stripeClient, subscriptionPeriod } from './stripe';
 
@@ -115,6 +115,8 @@ async function upsertSubscription(tx: Db, env: CloudflareBindings, sub: Stripe.S
     await tx.insert(stripeCustomers).values({ userId, stripeCustomerId: customerId }).onConflictDoNothing();
   }
   if (!userId) return null;
+  // A period change waits for any request being admitted against the old one (and the other way round).
+  await lockBalance(tx, userId);
   const period = subscriptionPeriod(sub);
   const item = sub.items.data.find(entry => planForPrice(env, entry.price))!;
   const values = {

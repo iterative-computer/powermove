@@ -7,73 +7,76 @@
    can finish the job.
 
    Reserve (in the provider fetch, where the exact provider request is known): under a per-account lock, find the
-   current billing period (none past its end), bound the request's input tokens from above, cap its output at what
-   the balance allows and hold the most it can cost. The holds and spends of a period never pass its grant: a
-   request the balance can't fully cover is refused (402). The request goes to the provider once (no retries: an
-   ambiguous lost response is never generated twice under one hold).
+   current billing period by the database clock (none past its end), bound the request's input tokens from above
+   by its bytes (a bound no estimate lowers), cap its output at what the balance allows and hold the most it can
+   cost. The holds and spends of a period never pass its grant: a request the balance can't fully cover is
+   refused (402). A recovery intent and the object's alarm are recorded before the hold, so no hold is stranded.
+   The request goes to the provider once (no retries: an ambiguous lost response is never generated twice under
+   one hold).
    Settle: the hold becomes the spend in one conditional update, retried, and a spend never exceeds its hold.
-   - The provider reported the usage: its exact cost.
-   - The provider refused the call (an HTTP error, no stream): nothing.
-   - Anything uncertain (no usage reported, a stream that failed before it, a settle that never happened, an
-     object that died mid-call): the whole hold, marked estimated. A hold that is never settled counts in full. */
+   - The provider's final usage event came: its exact cost.
+   - The provider refused the call definitively (a 4xx before any generation, per its API semantics): nothing.
+   - Anything else (a 5xx, no final usage event, a stream that failed or was cut, a settle that never happened,
+     an object that died mid-call): the whole hold, marked estimated. A hold that never settles counts in full,
+     and the scheduled sweep turns it into that spend. */
 import { and, eq, sql } from 'drizzle-orm';
 import type { LanguageModelUsage, TextStreamPart, ToolSet } from 'ai';
 import type { Data } from '../db/client';
 import { creditLedger } from '../db/schema';
-import { periodBalance, spendingPeriod } from '../billing/ledger';
+import { lockBalance, periodBalance, spendingPeriod } from '../billing/ledger';
 import { type AeroModel, type Metered, PRICE_VERSION, ceilingRates, cost, modelById } from './catalogue';
-import { type Endpoint, type Fetch, countInput } from './providers';
+import type { Fetch } from './providers';
 import { V2Error } from '../v2-error';
 
 /** A hold this old is shown as spent (in full) rather than reserved; its call's object settles it in the end. */
 export const HOLD_TTL_MS = 60 * 60 * 1000;
 /** The least output a request is let through with: OpenAI's smallest max_output_tokens. */
 export const MIN_OUTPUT = 16;
-/** An output cap this large needs no exact input count; under it (and under what was asked) the provider counts. */
-const COMFORT_OUTPUT = 32_768;
 /** Tokens a provider adds to the request beyond its bytes: message framing (the JSON's own punctuation covers
     more), and Anthropic's tool-use system prompt when tools are offered (346 tokens on current models). */
 export function promptOverhead(provider: 'openai' | 'anthropic', body: Record<string, unknown>): number {
   const tools = Array.isArray(body.tools) && body.tools.length > 0;
   return provider === 'anthropic' ? 64 + (tools ? 512 : 0) : 64;
 }
-/** Margin over a provider's own token count (its documentation calls the count an estimate). */
-const countMargin = (counted: number) => Math.ceil(counted / 20) + 64;
 /** Settle-write attempts in one go before the object's alarm takes over. */
 const WRITE_ATTEMPTS = 4;
 
 export type Source = 'reported' | 'hold' | 'none';
 type Usage = Metered & { reasoning: number };
 
-/** An upper bound on the provider request's input tokens: one token per UTF-8 byte of the request as sent (every
-    token of a byte-level tokenizer covers at least one byte), images at a bound from their pixel size instead of
-    their base64, plus the provider's prompt overhead. Documents are refused before they get here. */
-export function inputBound(provider: 'openai' | 'anthropic', body: Record<string, unknown>): number {
-  let images = 0;
-  const json = JSON.stringify(body, (_key, value: unknown) => {
-    if (value && typeof value === 'object') {
-      const v = value as Record<string, any>;
-      if (v.type === 'document' || v.type === 'input_file') throw new V2Error(400, 'invalid_request');
-      if (v.type === 'image' && v.source?.type === 'base64' && typeof v.source.data === 'string') {
-        images += imageBound(v.source.data);
-        return { ...v, source: { ...v.source, data: '' } };
-      }
-      if (v.type === 'input_image' && typeof v.image_url === 'string' && v.image_url.startsWith('data:')) {
-        images += imageBound(v.image_url.slice(v.image_url.indexOf(',') + 1));
-        return { ...v, image_url: '' };
-      }
+/** An upper bound on the provider request's input tokens: one token per UTF-8 byte of the whole request as sent
+    (every token of a byte-level tokenizer covers at least one byte), plus the provider's prompt overhead. The one
+    exception is a real image part of a message (where the provider reads pixels, not bytes): its base64 counts at
+    a bound from its pixel size instead. Anything image-shaped elsewhere (a tool schema, say) is text and counts
+    byte for byte. Documents are refused before they get here. */
+export function inputBound(provider: 'openai' | 'anthropic', body: Record<string, any>): number {
+  let bound = new TextEncoder().encode(JSON.stringify(body)).length + promptOverhead(provider, body);
+  const image = (part: any) => {
+    if (part?.type === 'document' || part?.type === 'input_file') throw new V2Error(400, 'invalid_request');
+    let data: string | null = null;
+    if (provider === 'anthropic' && part?.type === 'image' && part.source?.type === 'base64' && typeof part.source.data === 'string') data = part.source.data;
+    if (provider === 'openai' && part?.type === 'input_image' && typeof part.image_url === 'string' && part.image_url.startsWith('data:')) data = part.image_url.slice(part.image_url.indexOf(',') + 1);
+    // Base64 is plain ASCII that JSON doesn't escape: its bytes in the request are its length.
+    if (data !== null) bound += imageBound(data) - data.length;
+  };
+  const messages: any[] = provider === 'anthropic' ? (Array.isArray(body.messages) ? body.messages : []) : (Array.isArray(body.input) ? body.input : []);
+  for (const message of messages) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const part of message.content) {
+      image(part);
+      // An Anthropic tool result can carry images of its own.
+      if (provider === 'anthropic' && part?.type === 'tool_result' && Array.isArray(part.content)) for (const inner of part.content) image(inner);
     }
-    return value;
-  });
-  return new TextEncoder().encode(json).length + images + promptOverhead(provider, body);
+  }
+  return bound;
 }
 
-/** An image's most input tokens: a token per 16x16 pixels plus a constant (Anthropic bills about one per 750 pixels;
+/** An image's most input tokens (never more than its base64 counts byte for byte): a token per 16x16 pixels plus a constant (Anthropic bills about one per 750 pixels;
     OpenAI at most ~1.6 per 32x32 patch, or 170 per 512x512 tile plus 85). Without readable dimensions, its base64
     length (a provider can't take more tokens from an image than it has bytes, and refuses one it can't decode). */
 export function imageBound(base64: string): number {
   const size = imageSize(base64);
-  return size ? Math.ceil(size.width / 16) * Math.ceil(size.height / 16) + 1024 : base64.length;
+  return size ? Math.min(base64.length, Math.ceil(size.width / 16) * Math.ceil(size.height / 16) + 1024) : base64.length;
 }
 
 function imageSize(base64: string): { width: number; height: number } | null {
@@ -144,17 +147,25 @@ export interface CallStore {
 }
 
 /** What the store holds for a call. */
-interface Call { userId: string; key: string; model: string; holdNano: number; outputCap: number }
-type Stage = 'dispatched' | 'opened' | 'refused';
+interface Call { userId: string; key: string; model: string; holdNano: number; outputCap: number; dispatchedAt: number }
+/** Recorded before the hold is reserved, so an object that dies between the two still finds and bills its hold. */
+interface Intent { userId: string; key: string; model: string }
+/** Where the call got to: sent; answered with a stream; refused definitively; finished with its final usage. */
+type Stage = 'dispatched' | 'opened' | 'refused' | 'complete';
+/** A provider answer that is a definitive refusal: a 4xx (the request was rejected before any generation), except
+    a timeout, which says nothing about what the provider did. */
+export const definitiveRefusal = (status: number) => status >= 400 && status < 500 && status !== 408;
 interface Settlement { source: Source; usage: Usage; nanoUsd: number; fresh: number; estimated: boolean }
 /** When the object's alarm checks on a call: soon after dispatch, then while it runs, then with backoff. */
 export const ALARM_AFTER_MS = 30_000;
+/** The longest a call may stream (128k output tokens at a slow 30 a second is about 70 minutes). Past it the
+    object's watchdog stops the drain and the call settles at its hold. */
+export const MAX_DRAIN_MS = 90 * 60_000;
 export const retryDelay = (attempt: number) => Math.min(60_000 * 2 ** attempt, 60 * 60_000);
 
 export interface MeterOptions {
   data: Data;
   store: CallStore;
-  endpoint: Endpoint;
   userId: string;
   key: string;
   model: AeroModel;
@@ -201,21 +212,26 @@ export class Meter {
     if (this.dispatched) throw new Error('aero: a call is dispatched once');
     this.dispatched = true;
     const body = JSON.parse(init.body) as Record<string, any>;
+    const { store, model, userId, key } = this.options;
     let sent: string;
     try {
-      await this.reserve(body);
-      const field = this.options.model.provider === 'anthropic' ? 'max_tokens' : 'max_output_tokens';
+      // The recovery intent and the alarm come first: whatever happens after the hold commits, the alarm finds it.
+      await this.save({ intent: { userId, key, model: model.id } satisfies Intent });
+      await store.setAlarm(Date.now() + ALARM_AFTER_MS);
+      try { await this.reserve(body); } catch (error) {
+        // Nothing was held: the intent goes (the alarm then finds nothing to do).
+        if (error instanceof V2Error) { await store.deleteAll(); await store.deleteAlarm(); }
+        throw error;
+      }
+      const field = model.provider === 'anthropic' ? 'max_tokens' : 'max_output_tokens';
       body[field] = Math.min(typeof body[field] === 'number' ? body[field] : Infinity, this.call!.outputCap);
       sent = JSON.stringify(body);
-      // Recorded before it is sent: if this object dies from here on, its alarm still bills the call. (If it dies
-      // before, the provider never saw the call: its hold stays and counts in full, the safe side.)
       this.stage = 'dispatched';
       await this.save({ call: this.call, stage: this.stage });
-      await this.options.store.setAlarm(Date.now() + ALARM_AFTER_MS);
     } catch (error) { this.admit.reject(error); throw error; }
     this.admit.resolve();
     const response = await this.upstream(input, { ...init, body: sent });
-    this.stage = response.ok ? 'opened' : 'refused';
+    this.stage = response.ok ? 'opened' : definitiveRefusal(response.status) ? 'refused' : 'dispatched';
     await this.save({ stage: this.stage });
     return response;
   };
@@ -227,34 +243,24 @@ export class Meter {
     const { model, requestedMax, userId, data } = this.options;
     const desired = Math.min(requestedMax ?? model.maxOutput, model.maxOutput);
     const floor = Math.min(MIN_OUTPUT, desired);
-    let bound = inputBound(model.provider, body);
-    const capFor = (available: number, input: number) => {
-      const rates = ceilingRates(model, input);
-      return Math.min(desired, Math.floor((available - input * rates.input) / rates.output));
-    };
-    const current = await spendingPeriod(data.db, userId);
-    const before = current ? (await periodBalance(data.db, userId, current.period)).remainingNano : 0;
-    if (before > 0 && capFor(before, bound) < Math.min(desired, COMFORT_OUTPUT)) {
-      const counted = await countInput(this.options.endpoint, model.provider, body, this.upstream).catch(() => null);
-      if (counted !== null) bound = Math.min(bound, counted + countMargin(counted));
-    }
+    const bound = inputBound(model.provider, body);
+    const rates = ceilingRates(model, bound);
     await data.tx(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`aero-balance:${userId}`}))`);
-      // The period is decided under the lock: a period that has ended admits nothing until its renewal arrives.
+      // Under the account's lock (which period changes take too), the period by the database clock.
+      await lockBalance(tx, userId);
       const now = await spendingPeriod(tx, userId);
       if (!now) throw new V2Error(402, 'credits_exhausted');
       const available = (await periodBalance(tx, userId, now.period)).remainingNano;
-      const cap = capFor(available, bound);
+      const cap = Math.min(desired, Math.floor((available - bound * rates.input) / rates.output));
       if (cap < floor) throw new V2Error(402, 'credits_exhausted');
-      const rates = ceilingRates(model, bound);
       const hold = bound * rates.input + cap * rates.output;
       const claimed = await tx.insert(creditLedger).values({
         userId, kind: 'hold', idempotencyKey: this.options.key, credits: 0, subscriptionId: now.subscriptionId,
         periodStart: now.period.start, periodEnd: now.period.end, model: model.id, holdNanoUsd: hold,
-        holdExpiresAt: new Date(Date.now() + HOLD_TTL_MS), outputCap: cap, priceVersion: PRICE_VERSION,
+        holdExpiresAt: sql`clock_timestamp() + ${`${HOLD_TTL_MS} milliseconds`}::interval`, outputCap: cap, priceVersion: PRICE_VERSION,
       }).onConflictDoNothing({ target: creditLedger.idempotencyKey }).returning({ id: creditLedger.id });
       if (claimed.length === 0) throw new V2Error(409, 'duplicate_request');
-      this.call = { userId, key: this.options.key, model: model.id, holdNano: hold, outputCap: cap };
+      this.call = { userId, key: this.options.key, model: model.id, holdNano: hold, outputCap: cap, dispatchedAt: Date.now() };
     });
     this.held = true;
   }
@@ -279,14 +285,21 @@ export class Meter {
         this.started = { ...raw.message.usage };
         void this.save({ started: this.started });
       } else if (raw.type === 'message_delta' && raw.usage) {
+        // Cumulative, but not final: only message_stop says the message (and its usage) is complete.
         this.delta = { ...this.delta, ...Object.fromEntries(Object.entries(raw.usage).filter(([, v]) => v != null)) };
-        this.final = anthropicRaw({ ...this.started, ...this.delta });
-        void this.save({ delta: this.delta, final: this.final });
+      } else if (raw.type === 'message_stop' && this.started && this.delta) {
+        this.complete(anthropicRaw({ ...this.started, ...this.delta }));
       }
-    } else if ((raw.type === 'response.completed' || raw.type === 'response.incomplete' || raw.type === 'response.failed') && raw.response?.usage) {
-      this.final = openaiRaw(raw.response.usage);
-      void this.save({ final: this.final });
+    } else if ((raw.type === 'response.completed' || raw.type === 'response.incomplete') && raw.response?.usage) {
+      // A finished response (incomplete: stopped at its output cap). response.failed, even with usage, is not.
+      this.complete(openaiRaw(raw.response.usage));
     }
+  }
+
+  private complete(final: Usage) {
+    this.final = final;
+    this.stage = 'complete';
+    void this.save({ final, stage: this.stage });
   }
 
   /** Whether the provider reported the request's final usage (a stream that ended without it was cut off). */
@@ -304,13 +317,24 @@ export class Meter {
     when the database write fails; the caller retries later. */
 export async function settleStored(store: CallStore, data: Data): Promise<'settled' | 'none'> {
   const call = await store.get<Call>('call');
-  if (!call) return 'none';
+  if (!call) {
+    // Killed between its intent and its record: if its hold committed, it is billed in full.
+    const intent = await store.get<Intent>('intent');
+    if (intent) {
+      const [row] = await data.db.select({ hold: creditLedger.holdNanoUsd }).from(creditLedger).where(and(eq(creditLedger.idempotencyKey, intent.key), eq(creditLedger.kind, 'hold')));
+      if (row) await writeSpend(data, { ...intent, holdNano: row.hold, outputCap: 0, dispatchedAt: 0 }, { source: 'hold', usage: ZERO, nanoUsd: row.hold, fresh: 0, estimated: true });
+    }
+    await store.deleteAlarm();
+    await store.deleteAll();
+    return 'none';
+  }
   const model = modelById(call.model)!;
   const [stage, final, sdk] = await Promise.all([store.get<Stage>('stage'), store.get<Usage>('final'), store.get<Usage>('sdk')]);
   let settlement: Settlement;
-  if (final) {
-    // Reported: the SDK's converted usage when it came (the converters the tests check), else the raw report. A
-    // spend never passes its hold (so a period never passes its grant); one that would is logged.
+  if (stage === 'complete' && final) {
+    // Complete: the SDK's converted usage when it came (the converters the tests check), else the raw report. The
+    // hold bounds the input by its bytes and the output by its cap, so the report can't pass it; a spend that
+    // would is still held to it (a period never passes its grant) and logged.
     const usage = sdk ?? final;
     const price = cost(model, usage);
     if (price.nanoUsd > call.holdNano) console.error('aero spend over its hold', call.key, price.nanoUsd, call.holdNano);
