@@ -18,7 +18,7 @@ pub mod native_window;
 
 use crate::kit::Recipes;
 use crate::native_control::{BuildSnapshot, ControlSpec, Kind, NativeControl};
-use crate::wave::{DistortionWave, ReducedMotion, WaveRect, WaveState};
+use crate::wave::{WaveRect, WaveState};
 use crate::welcome_view::WelcomeView;
 use cue::smooth;
 pub use cue::{CueSheet, Phase};
@@ -27,6 +27,7 @@ use pm_design::{
     Elevation, Tokens,
     motion::{Animated, Spring, UNIT_PRECISION},
 };
+use pm_wave::bezier_ease;
 use std::{rc::Rc, time::Instant};
 
 /// A sound cue (`cue::Sound::id`) reached.
@@ -495,103 +496,83 @@ impl Stage {
             )
             .into_any_element()
     }
-    /// The wave on the window's rectangle: the intro under it becomes the
-    /// window, rising out of the mark's light; the stage around it holds.
+    /// Transition from the Powermove wordmark into the Welcome window using
+    /// the app's exact built-in panel generation effect (`Filter::DotAurora` +
+    /// `Filter::DotMatrix` driven by `pm_design::dots`).
     fn wave_scene(
         &mut self,
         t: f64,
         area: Size<Pixels>,
         scale: f32,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hold = self.sheet.hold;
+        let motion = self.motion();
         let rect = self.window_rect(area);
         if !self.prepared {
             self.prepared = true;
-            let reduced = !self.motion();
-            // The wave starts from the wordmark's rectangle in the window.
-            let (wl, wt, ww, wh) = intro::wordmark_rect(area);
-            let source = WaveRect {
-                x: f64::from(wl) - f64::from(rect.origin.x),
-                y: f64::from(wt) - f64::from(rect.origin.y),
-                w: f64::from(ww),
-                h: f64::from(wh),
-            };
-            self.wave.update(cx, |w, _| {
-                w.clear();
-                let _ = w.set_source(source);
-                // The stage's own setting (the person's, or a capture's).
-                let motion = if reduced {
-                    ReducedMotion::Always
-                } else {
-                    ReducedMotion::System
-                };
-                w.set_reduced_motion(motion, window);
-                w.prepare_now();
-            });
             if let Some(card) = &self.card {
                 card.update(cx, |c, cx| c.set_snapshot(true, cx));
             }
         }
-        let run = if self.motion() {
-            self.sheet.wave_seconds
+        let run = if motion {
+            (self.sheet.length() - self.sheet.window).max(0.01)
         } else {
             REDUCED_WAVE
         };
-        let p = (t - self.sheet.window) / run;
-        if p > 0. {
-            let _ = self.wave.update(cx, |w, _| w.seek(p.min(1. - 1e-4)));
-        }
-        let under = div()
-            .relative()
-            .w(rect.size.width)
-            .h(rect.size.height)
-            .overflow_hidden()
-            .child(
-                div()
-                    .absolute()
-                    .left(-rect.origin.x)
-                    .top(-rect.origin.y)
-                    .w(area.width)
-                    .h(area.height)
-                    .child(self.intro(hold, area, scale)),
-            );
+        let elapsed = (t - self.sheet.window).max(0.) as f32;
+        let u = (f64::from(elapsed) / run).clamp(0., 1.);
         let radius = self.window_radius();
-        let to = self.window(rect, 0.);
-        let shadow = smooth((p - 0.2) / 0.3) as f32;
-        // The intro around the window's rectangle only: inside it the wave
-        // draws its own picture of it (its light would otherwise add twice).
-        let mut stage = div().relative().size_full();
-        let (x0, y0) = (rect.origin.x, rect.origin.y);
-        let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-        for (l, t, w, h) in [
-            (px(0.), px(0.), area.width, y0),
-            (px(0.), y1, area.width, area.height - y1),
-            (px(0.), y0, x0, rect.size.height),
-            (x1, y0, area.width - x1, rect.size.height),
-        ] {
+
+        // 1. Wordmark dissolves cleanly as the panel-generation dot matrix wakes.
+        let word_out = if motion {
+            bezier_ease([0.40, 0.0, 0.20, 1.0], (u / 0.28).clamp(0., 1.))
+        } else {
+            u
+        };
+        let word_alpha = (1. - word_out).clamp(0., 1.) as f32;
+
+        // 2. Exact panel generation lifecycle (matching `generated_panel.rs`):
+        //    - `DotAurora` wakes across the rounded panel ground (`opening: 0 -> 1`)
+        //      and fades out cleanly as `resolve` reaches `1.0`.
+        //    - `DotMatrix` refines the Welcome window across 4 fixed-size dot
+        //      generations (`detail: 0 -> 4`), then resolves seamlessly to crisp (`resolve: 0 -> 1`).
+        let (frame_alpha, shadow, aurora_opening, aurora_fade, dot_detail, dot_resolve) = if motion {
+            let enter = smooth((u / 0.16).clamp(0., 1.)) as f32;
+            let sh = smooth(((u - 0.10) / 0.45).clamp(0., 1.)) as f32;
+            let opening = ((u / 0.34).clamp(0., 1.)) as f32;
+            let detail_age = ((u - 0.06).max(0.) / 0.58).clamp(0., 1.) as f32
+                * pm_design::dots::REFINE_SECONDS;
+            let resolve_age = ((u - 0.54).max(0.) / 0.42).clamp(0., 1.) as f32
+                * pm_design::dots::RESOLVE_SECONDS;
+            let detail = pm_design::dots::detail(detail_age);
+            let resolve = pm_design::dots::resolve(resolve_age);
+            let a_fade = (enter * (1. - resolve)).clamp(0., 1.);
+            (enter, sh, opening, a_fade, detail, resolve)
+        } else {
+            let a = smooth(u) as f32;
+            (a, a, 1., 0., 4., 1.)
+        };
+
+        let mut stage = div()
+            .relative()
+            .size_full()
+            .overflow_hidden();
+
+        // Crisp Powermove wordmark fading cleanly out before the dot-matrix window resolves.
+        if word_alpha > 0.005 {
             stage = stage.child(
                 div()
                     .absolute()
-                    .left(l)
-                    .top(t)
-                    .w(w)
-                    .h(h)
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .absolute()
-                            .left(-l)
-                            .top(-t)
-                            .w(area.width)
-                            .h(area.height)
-                            .child(self.intro(hold, area, scale)),
-                    ),
+                    .inset_0()
+                    .opacity(word_alpha)
+                    .child(intro::words(hold, &self.sheet, area, &self.tokens, scale, motion)),
             );
         }
-        if shadow > 0. {
-            // The window's shadow comes in under the wave's last light.
+
+        // Raised window shadow rising smoothly underneath the Welcome window.
+        if shadow > 0.005 {
             stage = stage.child(
                 div()
                     .absolute()
@@ -603,21 +584,85 @@ impl Stage {
                     .map(|d| faded_shadow(d.elevated(&self.tokens, Elevation::Raised), shadow)),
             );
         }
-        stage
-            .child(
-                div()
+
+        // Welcome window materializing through Powermove's exact panel-generation filters:
+        // dark obsidian panel ground + drifting `DotAurora` + `DotMatrix` on the
+        // foreground UI contents (so the dark background stays pure obsidian and the
+        // typography, button, and editor preview form out of progressive dots!).
+        if frame_alpha > 0.005 {
+            let c = &self.tokens.colors;
+            let mut win = div()
+                .absolute()
+                .left(rect.origin.x)
+                .top(rect.origin.y)
+                .w(rect.size.width)
+                .h(rect.size.height)
+                .corner(&self.tokens, radius)
+                .border_1()
+                .border_color(rgba((c.text << 8) | 0x16))
+                .overflow_hidden()
+                .opacity(frame_alpha)
+                .bg(rgb(crate::scale().colors.welcome_ground));
+
+            // Right orange field & full stage ground fade in cleanly as dots resolve.
+            if dot_resolve > 0.005 {
+                win = win.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .opacity(dot_resolve)
+                        .child(crate::welcome_view::stage_ground()),
+                );
+            }
+
+            // 1) App's exact `DotAurora` drifting 3pt dot curtain on the obsidian panel ground.
+            if aurora_fade > 0.005 {
+                win = win.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .overflow_hidden()
+                        .filter(vec![Filter::DotAurora {
+                            age: elapsed,
+                            opening: aurora_opening,
+                            fade: aurora_fade,
+                            palette: pm_design::dots::aurora_palette(c.accent, c.text, c.muted),
+                        }]),
+                );
+            }
+
+            // 2) Welcome window foreground contents through the app's exact `DotMatrix` filter.
+            let content_alpha = if motion {
+                smooth(((u - 0.06) / 0.14).clamp(0., 1.)) as f32
+            } else {
+                1.
+            };
+            if content_alpha > 0.005 {
+                let foreground = self.contents(
+                    div()
+                        .id("stage-window-gen")
+                        .relative()
+                        .size_full(),
+                );
+                let mut content = div()
                     .absolute()
-                    .left(rect.origin.x)
-                    .top(rect.origin.y)
-                    .child(
-                        DistortionWave::new(self.wave.clone(), under)
-                            .revealed_content(to)
-                            .w(rect.size.width)
-                            .h(rect.size.height)
-                            .rounded(px(radius)),
-                    ),
-            )
-            .into_any_element()
+                    .inset_0()
+                    .opacity(content_alpha)
+                    .child(foreground);
+                if motion && dot_resolve < 1. {
+                    content = content.filter(vec![Filter::DotMatrix {
+                        detail: dot_detail,
+                        resolve: dot_resolve,
+                        accent: c.accent,
+                    }]);
+                }
+                win = win.child(content);
+            }
+
+            stage = stage.child(win);
+        }
+
+        stage.into_any_element()
     }
     fn set_snapshots(&self, on: bool, cx: &mut Context<Self>) {
         for card in self
@@ -702,8 +747,7 @@ impl Render for Stage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.now();
         self.sounds(t, cx);
-        // The shaders compile on workers from the first frame on.
-        self.wave.update(cx, |w, _| w.warm(window));
+        // Compile the stage light pass on a worker from the first frame on.
         self.light.warm(window);
         let area = window.bounds().size;
         let scale = window.scale_factor();

@@ -2266,33 +2266,42 @@ pub(crate) fn note_workspace_request(on: bool) {
 pub fn take_workspace_request() -> bool {
     WORKSPACE_REQUEST.with(|r| r.replace(false))
 }
-thread_local! {
-    static CHIME: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSound>>> =
-        const { RefCell::new(None) };
-}
+static CHIME_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The original scene's sound, once, with the animation. Reduce Motion is silent.
+/// Plays on a background thread so CoreAudio initialization never stalls the
+/// intro's animation frames on the main UI thread.
 fn play_chime() {
     use objc2::{AnyThread, MainThreadMarker};
     use objc2_app_kit::{NSSound, NSWorkspace};
     use objc2_foundation::NSData;
+    use std::sync::atomic::Ordering;
     const SOUND: &[u8] = include_bytes!("../assets/onboarding-chime.wav");
     if MainThreadMarker::new().is_none()
         || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     {
         return;
     }
-    let sound = NSSound::initWithData(NSSound::alloc(), &NSData::with_bytes(SOUND));
-    if let Some(sound) = sound {
-        sound.play();
-        CHIME.with(|slot| *slot.borrow_mut() = Some(sound));
-    }
+    let id = CHIME_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = std::thread::Builder::new()
+        .name("onboarding-chime".into())
+        .spawn(move || {
+            let sound = NSSound::initWithData(NSSound::alloc(), &NSData::with_bytes(SOUND));
+            let Some(sound) = sound else { return };
+            if CHIME_GEN.load(Ordering::SeqCst) != id {
+                return;
+            }
+            sound.play();
+            while sound.isPlaying() {
+                if CHIME_GEN.load(Ordering::SeqCst) != id {
+                    sound.stop();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
 }
 fn stop_chime() {
-    CHIME.with(|slot| {
-        if let Some(sound) = slot.borrow_mut().take() {
-            sound.stop();
-        }
-    });
+    CHIME_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 #[cfg(test)]
 #[path = "first_run_tests.rs"]

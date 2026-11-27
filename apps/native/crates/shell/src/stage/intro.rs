@@ -305,21 +305,21 @@ pub fn light_at(t: f64, s: &CueSheet, motion: bool, size: (f32, f32), density: f
     // White-hot during the zoomed-in playhead crown, cooling cleanly into
     // luminous orange right as it becomes the roaming agent cursor.
     let cool = smooth(((t - 2.55) / 0.78).clamp(0., 1.));
-    // Wide studio floor pool stays quiet while the cursor roams freely, then
-    // rises warmly beneath the wordmark once the playhead docks onto the rail.
-    let dock_pool = smooth(((t - 4.82) / 0.85).clamp(0., 1.));
+    // Only the cursor glows — and only at first: its warm bloom fades cleanly
+    // to 0 before the playhead docks into the wordmark, and there is no wide
+    // ambient floor pool under the wordmark.
+    let cursor_glow_out = 1. - smooth(((t - 4.35) / 0.55).clamp(0., 1.));
     let head_a = vector_head_alpha(t, s, motion);
     let (exposure, bloom, pool) = if motion {
         let launch_flare = smooth(((t - 2.40) / 0.42).clamp(0., 1.))
             * (1. - smooth(((t - 2.90) / 0.60).clamp(0., 1.)));
         (
             1. + 26. * (1. - cool),
-            creep * (0.44 + 0.52 * launch_flare - 0.08 * dock_pool),
-            creep * (0.18 + 0.82 * dock_pool),
+            creep * (0.42 + 0.50 * launch_flare) * cursor_glow_out,
+            0.,
         )
     } else {
-        let up = smooth((t - s.credit.2.at) / 1.2);
-        (1., 0.36 * up, up)
+        (1., 0., 0.)
     };
     let soft = if motion {
         HOT_SOFTNESS * m.unit * h * (1. - cool)
@@ -695,7 +695,8 @@ mod tests {
         assert!((end.x - rest.x).abs() < 1e-9);
         let end_light = super::light_at(6.5, &s, true, (1440., 900.), 2.);
         assert_eq!(end_light.mark, 0.);
-        assert!(end_light.bloom > 0.2);
+        assert_eq!(end_light.bloom, 0.);
+        assert_eq!(end_light.pool, 0.);
     }
 
     /// The light pass on the GPU, read back: a lit, opaque orange mark with
