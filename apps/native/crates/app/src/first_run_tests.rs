@@ -1739,3 +1739,114 @@ fn the_agent_step_shows_the_whole_plan_card_in_the_welcome_window() {
         );
     });
 }
+
+/// The account step offers the sign-in sheet's Continue with Google under
+/// the email; only while the email shows.
+#[test]
+fn the_account_step_offers_continue_with_google() {
+    let (_temp, mut flow) = on_account();
+    let ids = |frame: &Frame| {
+        frame
+            .buttons
+            .iter()
+            .map(|b| b.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let email = flow.frame();
+    assert_eq!(ids(&email), ["continue", "not_now", "google"]);
+    let google = email.buttons.iter().find(|b| b.id == "google").unwrap();
+    assert_eq!(google.label, "Continue with Google");
+    assert!(google.enabled, "no address needed");
+    // While the code goes out, and on the code: no Google.
+    flow.action("field:email:ana@example.com");
+    flow.action("continue");
+    let google = |flow: &Flow| flow.frame().buttons.into_iter().find(|b| b.id == "google");
+    assert!(!google(&flow).unwrap().enabled);
+    assert_eq!(flow.action("google"), vec![], "the code is on its way");
+    flow.message(Message::CodeSent(Ok(())));
+    assert_eq!(ids(&flow.frame()), ["continue", "not_now"]);
+}
+
+/// Continue with Google: the step waits on the browser in the sheet's
+/// words, and the return link signs in as a checked code does ("You’re
+/// in", then the agent step).
+#[test]
+fn google_waits_on_the_browser_then_signs_in() {
+    let (_temp, mut flow) = on_account();
+    flow.action("field:email:typed@example.com");
+    assert_eq!(flow.action("google"), vec![Effect::Google]);
+    let waiting = flow.frame();
+    titled(&waiting, "Continue in your browser");
+    assert_eq!(waiting.line, "Finish with Google, then come back here.");
+    assert_eq!(sign_in(&waiting).stage, SignInStage::Browser);
+    assert!(waiting.error.is_none());
+    assert!(!waiting.buttons.iter().any(|b| b.id == "google"));
+    // Continue stays where it is, unpressable; Return and a press do nothing.
+    assert_eq!(waiting.default_action(), None);
+    assert_eq!(flow.action("continue"), vec![]);
+    assert_eq!(flow.action("google"), vec![]);
+    titled(&flow.frame(), "Continue in your browser");
+    let effects = flow.message(Message::Google(Ok("ana@gmail.com".into())));
+    assert_eq!(effects, vec![Effect::After(SIGNED_IN_PAUSE, "signed_in")]);
+    let done = flow.frame();
+    titled(&done, "You’re in");
+    assert_eq!(done.line, "Signed in as ana@gmail.com.");
+    flow.action("signed_in");
+    titled(&flow.frame(), "Choose your agent");
+    flow.action("back");
+    let signed = flow.frame();
+    titled(&signed, "Your Powermove account");
+    assert_eq!(signed.line, "Signed in as ana@gmail.com.");
+    assert!(!signed.buttons.iter().any(|b| b.id == "google"));
+}
+
+/// A failed Google sign-in comes back to the email with the sheet's
+/// sentence on the error line; Google can be tried again.
+#[test]
+fn a_google_failure_says_so_on_the_email() {
+    let (_temp, mut flow) = on_account();
+    flow.action("google");
+    let message = "Couldn’t sign in with Google. Try again.";
+    assert_eq!(flow.message(Message::Google(Err(message.into()))), vec![]);
+    let email = flow.frame();
+    titled(&email, "Create your account");
+    assert_eq!(sign_in(&email).stage, SignInStage::Email);
+    assert_eq!(email.error.as_deref(), Some(message));
+    assert_eq!(flow.action("google"), vec![Effect::Google]);
+    assert!(flow.frame().error.is_none());
+}
+
+/// Back (or Escape) leaves the browser for the email, as typed, and lets
+/// Google go; a late return finds nothing waiting. Not now lets it go too
+/// and moves on.
+#[test]
+fn back_from_the_browser_cancels_google() {
+    for back in ["back", "escape"] {
+        let (_temp, mut flow) = on_account();
+        flow.action("field:email:ana@example.com");
+        flow.action("google");
+        assert_eq!(flow.action(back), vec![Effect::CancelGoogle], "{back}");
+        let email = flow.frame();
+        titled(&email, "Create your account");
+        assert_eq!(sign_in(&email).email, "ana@example.com");
+        assert_eq!(
+            flow.message(Message::Google(Ok("ana@gmail.com".into()))),
+            vec![],
+            "{back}"
+        );
+        titled(&flow.frame(), "Create your account");
+        // Back again leaves the step, as ever.
+        flow.action("back");
+        titled(&flow.frame(), "Choose your timeline");
+    }
+    let (_temp, mut flow) = on_account();
+    flow.action("google");
+    assert_eq!(flow.action("not_now"), vec![Effect::CancelGoogle]);
+    titled(&flow.frame(), "Choose your agent");
+    assert_eq!(
+        flow.message(Message::Google(Ok("ana@gmail.com".into()))),
+        vec![]
+    );
+    flow.action("back");
+    titled(&flow.frame(), "Create your account");
+}

@@ -1489,6 +1489,9 @@ pub(crate) fn sign_in_with_google(
     if !random(&mut verifier) || !random(&mut state) {
         return Err(copy::auth_error(AuthError::Browser, "Google", ""));
     }
+    if !cx.has_global::<Cloud>() {
+        return Err(copy::auth_error(AuthError::Browser, "Google", ""));
+    }
     let cloud = cx.global_mut::<Cloud>();
     let origin = cloud.origin;
     let Some(url) = cloud.browser.begin(origin, verifier, state, now_ms()) else {

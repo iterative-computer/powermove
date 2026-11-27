@@ -176,7 +176,8 @@ impl WelcomeView {
             control.set_busy(busy);
             match size {
                 Size::Primary | Size::Wide if self.sheet => control.wide(wt().sheet_inner()),
-                Size::Primary if self.stage => control.prominent(wt().primary_width),
+                // Continue with Google under the email: Continue's size.
+                Size::Primary | Size::Wide if self.stage => control.prominent(wt().primary_width),
                 Size::Pill => control.small(),
                 _ => {}
             }
@@ -1007,10 +1008,30 @@ impl WelcomeView {
         if let Some(note) = &frame.note {
             controls = controls.child(
                 div()
+                    .debug_selector(|| "welcome-note".into())
                     .text_size(px(ts().sm))
                     .text_color(rgb(c.secondary))
                     .text_center()
                     .child(note.clone()),
+            );
+        }
+        // The account step's other way in, the sign-in sheet's Continue with
+        // Google, under the email and its note: nothing above it moves.
+        if let Some(button) = frame.buttons.iter().find(|b| b.id == "google") {
+            let control = if crate::text::available(window) {
+                self.native_control(button, Size::Wide, window, cx)
+                    .into_any_element()
+            } else {
+                self.button(button, window, cx)
+            };
+            controls = controls.child(
+                div()
+                    .id("welcome-google")
+                    .debug_selector(|| "welcome-google-row".into())
+                    .h(px(wt().primary_height))
+                    .flex()
+                    .justify_center()
+                    .child(control),
             );
         }
         if let Some(details) = &frame.details {
@@ -1108,7 +1129,7 @@ impl WelcomeView {
         let mut links: Vec<(String, String)> = frame
             .buttons
             .iter()
-            .filter(|b| Some(&b.id) != primary.map(|p| &p.id))
+            .filter(|b| Some(&b.id) != primary.map(|p| &p.id) && b.id != "google")
             .map(|b| (b.id.clone(), b.label.clone()))
             .collect();
         if frame.back.is_some() {
