@@ -1,16 +1,19 @@
 import { expect, test } from 'bun:test';
-import { eq } from 'drizzle-orm';
+import { ne } from 'drizzle-orm';
 import { withData } from './db';
-import { billing, frames, fxReduce, stack, subscribe, type Stack } from './billing-helpers';
+import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger } from '../src/db/schema';
 import { consume } from '../src/abuse';
-import { CREDIT_MICRO_USD, MODELS, cost, modelById } from '../src/aero/catalogue';
+import { MODELS, modelById } from '../src/aero/catalogue';
+import { CREDIT_NANO_USD, PRICING, PRICING_JSON, cost } from './pricing';
+import { parsePricing } from '../src/aero/pricing';
+import { meteredOf } from '../src/aero/meter';
 
 const TOOLS = [{ type: 'function', function: { name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } }];
 const SYSTEM = { role: 'system', content: 'You are Aero, the agent in Powermove.' };
 const chat = (s: Stack, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
   s.request('/v2/aero/chat/completions', { json: { stream: true, stream_options: { include_usage: true }, ...body } }, { ...s.user.headers, ...headers });
-const spends = async (s: Stack, data: Parameters<Parameters<typeof withData>[0]>[0]) => data.db.select().from(creditLedger).where(eq(creditLedger.kind, 'spend'));
+const spends = async (s: Stack, data: Parameters<Parameters<typeof withData>[0]>[0]) => data.db.select().from(creditLedger).where(ne(creditLedger.kind, 'grant'));
 
 test('the catalogue: v1 shape, provider ids, efforts, one default', async () =>
   withData(async (data) => {
@@ -25,18 +28,29 @@ test('the catalogue: v1 shape, provider ids, efforts, one default', async () =>
     } finally { await s.stop(); }
   }));
 
-test('credits are ceil(cost_usd * 200), cached input at the cached rate', () => {
+test('costs are exact nano-USD at the catalogue rates: no rounding, cached input at the cached rate, the long tier above 272k', () => {
   const sol = modelById('openai/gpt-6.2-sol')!;
-  expect(CREDIT_MICRO_USD).toBe(5_000);
-  // 1M fresh input at $1.75 = $1.75 = 350 credits.
-  expect(cost(sol, { input: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0 })).toEqual({ microUsd: 1_750_000, credits: 350 });
-  // The same input fully cached costs a tenth.
-  expect(cost(sol, { input: 1_000_000, cacheRead: 1_000_000, cacheWrite: 0, output: 0 }).credits).toBe(35);
-  // Anything above zero is at least one credit.
-  expect(cost(sol, { input: 1, cacheRead: 0, cacheWrite: 0, output: 0 }).credits).toBe(1);
+  const usage = (input: number, more: Partial<Parameters<typeof cost>[1]> = {}) => ({ input, cacheRead: 0, cacheWrite: 0, cacheWriteLong: 0, output: 0, ...more });
+  // The fixture's credit unit is fake (production's is the secret): 1 credit = $0.001.
+  expect(CREDIT_NANO_USD).toBe(1_000_000);
+  // 200k fresh input at $2/M = $0.40.
+  expect(cost(sol, usage(200_000)).nanoUsd).toBe(400_000_000);
+  // The same input fully cached costs a twentieth ($0.10/M).
+  expect(cost(sol, usage(200_000, { cacheRead: 200_000 })).nanoUsd).toBe(20_000_000);
+  // One token is two thousandths of a cent, never a whole credit.
+  expect(cost(sol, usage(1)).nanoUsd).toBe(2_000);
+  // At 272,000 input the base tier; one more and the whole request is at the long tier ($4/M in, $15/M out).
+  expect(cost(sol, usage(272_000, { output: 1000 })).nanoUsd).toBe(272_000 * 2_000 + 1000 * 10_000);
+  expect(cost(sol, usage(272_001, { output: 1000 })).nanoUsd).toBe(272_001 * 4_000 + 1000 * 15_000);
+  // Cached tokens count toward the threshold.
+  expect(cost(sol, usage(300_000, { cacheRead: 290_000 })).nanoUsd).toBe(10_000 * 4_000 + 290_000 * 200);
   const opus = modelById('anthropic/claude-opus-5-5')!;
-  expect(cost(opus, { input: 1_000_000, cacheRead: 0, cacheWrite: 1_000_000, output: 0 }).credits).toBe(1250);
-  for (const model of MODELS) expect(model.price.cachedInput).toBeLessThan(model.price.input);
+  // 1M cache write at $5/M = $5 (5,000 fixture credits); at the 1-hour TTL $8/M.
+  expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000 })).nanoUsd).toBe(5000 * CREDIT_NANO_USD);
+  expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000, cacheWriteLong: 1_000_000 })).nanoUsd).toBe(8_000_000_000);
+  // The AI SDK's usage reaches cost() whole: reasoning is inside output, the long-TTL writes come from the raw usage.
+  expect(meteredOf({ inputTokens: 10, inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 2, cacheWriteTokens: 4 }, outputTokens: 7, outputTokenDetails: { textTokens: 2, reasoningTokens: 5 }, totalTokens: 17, raw: { cache_creation: { ephemeral_1h_input_tokens: 3 } } }))
+    .toEqual({ input: 10, cacheRead: 2, cacheWrite: 4, cacheWriteLong: 3, output: 7, reasoning: 5 });
 });
 
 test('402 at zero credits: Free accounts and spent plans', async () =>
@@ -47,7 +61,7 @@ test('402 at zero credits: Free accounts and spent plans', async () =>
       expect(r.status).toBe(402);
       expect(await r.json() as unknown).toEqual({ error: { code: 'credits_exhausted' } });
       await subscribe(s);
-      await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: 'request:all', credits: 1000, model: 'openai/gpt-6.2-sol' });
+      await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: 'request:all', credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD, model: 'openai/gpt-6.2-sol', ...await periodOf(data, s.user.id) });
       r = await chat(s, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: 'hi' }] });
       expect(r.status).toBe(402);
       expect(s.ai.requests).toHaveLength(0);
@@ -59,7 +73,7 @@ test('bad requests answer codes, never text; the rate limit answers 429', async 
     const s = await stack(data);
     try {
       await subscribe(s);
-      for (const body of [{ model: 'openai/gpt-6.2-sol', messages: [] }, { model: 'nope/model', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', reasoning_effort: 'max', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] }] }]) {
+      for (const body of [{ model: 'openai/gpt-6.2-sol', messages: [] }, { model: 'nope/model', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', reasoning_effort: 'max', messages: [{ role: 'user', content: 'x' }] }, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] }] }, { model: 'anthropic/claude-opus-5-5', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:application/pdf;base64,JVBERi0xLjQK' } }] }] }]) {
         const r = await chat(s, body);
         expect(r.status).toBe(400);
         const json = await r.json() as any;
@@ -102,12 +116,19 @@ for (const model of ['openai/gpt-6.2-sol', 'anthropic/claude-opus-5-5']) {
         const row = rows[0]!;
         expect(row.idempotencyKey).toBe(`request:${s.user.id}:req-tool-turn-1`);
         expect(row.estimated).toBe(false);
+        expect(row.kind).toBe('spend');
+        expect(row.usageSource).toBe('reported');
         expect(row.inputTokens).toBe(last.usage.prompt_tokens);
         expect(row.outputTokens).toBe(last.usage.completion_tokens);
+        expect(row.reasoningTokens).toBe(last.usage.completion_tokens_details.reasoning_tokens);
         expect(row.cachedInputTokens).toBe(last.usage.prompt_tokens_details.cached_tokens);
-        expect(row.credits).toBe(cost(modelById(model)!, { input: row.inputTokens, cacheRead: row.cachedInputTokens, cacheWrite: row.cacheWriteTokens, output: row.outputTokens }).credits);
-        expect(row.credits).toBeGreaterThan(0);
-        expect((await billing(s)).credits).toEqual({ included: 1000, used: row.credits, remaining: 1000 - row.credits });
+        expect(row.freshInputTokens).toBe(row.inputTokens - row.cachedInputTokens - row.cacheWriteTokens);
+        expect(row.costNanoUsd).toBe(cost(modelById(model)!, { input: row.inputTokens, cacheRead: row.cachedInputTokens, cacheWrite: row.cacheWriteTokens, cacheWriteLong: 0, output: row.outputTokens }).nanoUsd);
+        expect(row.costNanoUsd).toBeGreaterThan(0);
+        expect(row.costNanoUsd).toBeLessThanOrEqual(row.holdNanoUsd);
+        expect(row.priceVersion).toBe(PRICING.version);
+        const used = Math.ceil(row.costNanoUsd / CREDIT_NANO_USD);
+        expect((await billing(s)).credits).toEqual({ included: 1000, used, remaining: 1000 - used });
 
         // The tool turn goes back with the replayed reasoning; the provider sees its own continuity data again.
         const call = reply.tools[0]!;
@@ -179,11 +200,12 @@ test('a replayed request id is refused and meters nothing twice', async () =>
     } finally { await s.stop(); }
   }));
 
-test('a client that aborts mid-stream still gets exactly one ledger row, and the provider call stops', async () =>
+test('a client that aborts mid-stream: the provider stream is read to its end and its reported usage billed, once', async () =>
   withData(async (data) => {
     const s = await stack(data);
     try {
       await subscribe(s);
+      s.ai.queue.push({ start: { input_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 2_000, output_tokens: 1 }, delta: { output_tokens: 700 } });
       const r = await chat(s, { model: 'anthropic/claude-opus-5-5', messages: [{ role: 'user', content: 'Write a lot [slow]' }] }, { 'X-Powermove-Request-Id': 'req-aborted-0001' });
       expect(r.status).toBe(200);
       const reader = r.body!.getReader();
@@ -192,13 +214,27 @@ test('a client that aborts mid-stream still gets exactly one ledger row, and the
       while (!seen.includes('word3')) seen += decoder.decode((await reader.read()).value);
       await reader.cancel();
       let rows = await spends(s, data);
-      for (let i = 0; i < 50 && (rows.length !== 1 || rows[0]!.credits === 0); i++) { await new Promise(resolve => setTimeout(resolve, 20)); rows = await spends(s, data); }
+      for (let i = 0; i < 200 && rows[0]?.kind !== 'spend'; i++) { await new Promise(resolve => setTimeout(resolve, 20)); rows = await spends(s, data); }
       expect(rows).toHaveLength(1);
-      expect(rows[0]!.estimated).toBe(true);
-      expect(rows[0]!.outputTokens).toBeGreaterThan(0);
-      expect(rows[0]!.credits).toBeGreaterThan(0);
-      await new Promise(resolve => setTimeout(resolve, 300));
+      expect(rows[0]).toMatchObject({ kind: 'spend', usageSource: 'reported', estimated: false, inputTokens: 2_030, cachedInputTokens: 2_000, outputTokens: 700 });
+      // $4/M fresh, $0.20/M cache read, $20/M output.
+      expect(rows[0]!.costNanoUsd).toBe(30 * 4_000 + 2_000 * 200 + 700 * 20_000);
+      expect(s.ai.aborted).toBe(0);
+      await new Promise(resolve => setTimeout(resolve, 100));
       expect(await spends(s, data)).toHaveLength(1);
-      expect(s.ai.aborted).toBe(1);
     } finally { await s.stop(); }
   }));
+
+test('AERO_PRICING: every catalogue model priced, whole nano-USD per token, nothing else; anything else is unusable', () => {
+  expect(parsePricing(PRICING_JSON)).toEqual(PRICING);
+  for (const model of MODELS) expect(PRICING.models[model.id]).toBeDefined();
+  const bad = (change: (p: any) => void) => { const p = JSON.parse(PRICING_JSON); change(p); return parsePricing(JSON.stringify(p)); };
+  expect(parsePricing(undefined)).toBeNull();
+  expect(parsePricing('not json')).toBeNull();
+  expect(bad(p => { delete p.models['openai/gpt-6-luna']; })).toBeNull();
+  expect(bad(p => { p.models['openai/gpt-6-luna'].input = 0.0001; })).toBeNull();
+  expect(bad(p => { p.models['openai/gpt-6-luna'].input = -1; })).toBeNull();
+  expect(bad(p => { p.creditNanoUsd = 0.5; })).toBeNull();
+  expect(bad(p => { delete p.version; })).toBeNull();
+  expect(bad(p => { p.models['openai/gpt-6-luna'].typo = 1; })).toBeNull();
+});

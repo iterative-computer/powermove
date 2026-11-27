@@ -115,7 +115,7 @@ a.row:focus-visible{box-shadow:inset 0 0 0 2px var(--ink-2)}
 
 /* Account summaries use the same quiet grouped surfaces as the detail rows. */
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
-.stats a{display:flex;flex-direction:column;gap:6px;padding:16px;background:var(--bg-panel);border-radius:var(--r-lg)}
+.stats a,.stats>div{display:flex;flex-direction:column;gap:6px;padding:16px;background:var(--bg-panel);border-radius:var(--r-lg)}
 .stats b{font-size:24px;font-variant-numeric:tabular-nums;font-weight:600}
 .stats span{color:var(--tx-3);font-size:var(--fs-sm)}
 .stats a:hover{background:var(--ink-1)}
@@ -134,3 +134,13 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .user-search select{font:inherit}
 
 .user-row .copy>span{white-space:normal;overflow-wrap:anywhere}
+
+/* Aero & Billing: stat tiles above their token rows, a ceiling meter, a quiet daily bar chart. */
+.stats+.group{margin-top:8px}
+.meter{width:160px;height:6px;border-radius:var(--r-sm);background:var(--ink-1);overflow:hidden}
+.meter i{display:block;height:100%;background:var(--accent)}
+.chart{padding:var(--row-pad)}
+.bars{height:120px;display:flex;align-items:flex-end;gap:3px}
+.bar{flex:1;height:100%;display:flex;align-items:flex-end}
+.bar i{display:block;width:100%;min-height:1px;border-radius:2px 2px 0 0;background:var(--accent)}
+.axis{display:flex;justify-content:space-between;margin-top:8px;color:var(--tx-3);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}

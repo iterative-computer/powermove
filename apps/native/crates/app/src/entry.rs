@@ -116,6 +116,49 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/cloud-code/<email>` sends a sign-in code, and
+        // `review/cloud-code/<email>/<code>` checks it: the sign-in sheet's
+        // two Continue steps (`cloud::send_code`, `cloud::verify_code`), for
+        // a background review that can't type into the sheet.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/cloud-code/") {
+            let decode = |s: &str| {
+                url::form_urlencoded::parse(format!("x={s}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default()
+            };
+            match rest.split_once('/') {
+                Some((email, code)) => {
+                    crate::cloud::verify_code(decode(email), decode(code), cx, |result, _| {
+                        eprintln!("review: verify code: {:?}", result.map(|_| ()));
+                    })
+                }
+                None => crate::cloud::send_code(decode(rest), cx, |result, _| {
+                    eprintln!("review: send code: {result:?}");
+                }),
+            }
+            continue;
+        }
+        // `review/account-menu/<label>`: Home's account menu item, as its
+        // NSMenu callback runs it (no menu item is pressed).
+        #[cfg(debug_assertions)]
+        if let Some(label) = raw.strip_prefix("powermove://review/account-menu/") {
+            let label = url::form_urlencoded::parse(format!("x={label}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let editors = editors(cx);
+            let library = editors
+                .iter()
+                .find(|e| e.read(cx).home_visible)
+                .or(editors.first())
+                .and_then(|e| e.read(cx).library.clone());
+            if let Some(library) = library {
+                library.update(cx, |v, cx| v.review_account_menu(&label, cx));
+            }
+            continue;
+        }
         #[cfg(debug_assertions)]
         if let Some(rest) = raw.strip_prefix("powermove://review/library-row/") {
             review_library_row(rest, cx);
@@ -368,7 +411,7 @@ pub fn register(controller: &Entity<Controller>, window: AnyWindowHandle, cx: &m
         entries.ready = true;
         cx.defer(|cx| {
             let packaged = crate::platform::bundle_id().as_deref()
-                == Some(pm_update_policy::update_distribution::PRODUCTION_ID);
+                == Some(crate::updates::PRODUCTION_ID);
             let _ = EntryQueue::register(packaged, false, &mut Hook { cx });
             drain(cx);
         });

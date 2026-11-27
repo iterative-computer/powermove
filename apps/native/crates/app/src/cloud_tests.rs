@@ -711,3 +711,606 @@ fn agent_apps_get_powermove_added_and_removed_in_their_own_settings_only() {
     assert!(!again.fresh);
     assert_eq!(again.answer, Answer::Added);
 }
+
+/// Signs in at the fixture registry with an emailed code; the sealed session.
+fn fixture_session(origin: &'static str) -> Vec<u8> {
+    let vault = Memory::default();
+    let profile = tempfile::tempdir().unwrap();
+    let mut host = Http::new(origin, Box::new(vault.clone()), profile.path().to_owned());
+    let mut run = |work| {
+        CloudTask::new(Flight::default().start(), origin, work)
+            .unwrap()
+            .run(&mut host)
+            .result
+            .unwrap()
+    };
+    run(CloudWork::SendEmail {
+        email: "person@example.com".into(),
+    });
+    run(CloudWork::VerifyEmail {
+        email: "person@example.com".into(),
+        code: Secret::new(CODE.into()),
+    });
+    vault.read().unwrap().unwrap()
+}
+
+/// Runs the app's tasks until `done` holds of it (the account worker is a
+/// real thread; the app polls it on timers).
+fn settle(cx: &mut gpui::TestAppContext, done: impl Fn(&gpui::App) -> bool) {
+    for _ in 0..600 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+        if cx.update(|cx| done(cx)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the account never settled");
+}
+fn signed_in(cx: &gpui::App) -> bool {
+    crate::cloud::fact(cx)["signedIn"] == true
+}
+/// What Aero runs on: the session the account's worker holds now.
+fn aero_session(cx: &mut gpui::TestAppContext) -> bool {
+    cx.update(|cx| crate::cloud::aero_account(cx))
+        .and_then(|account| account.session())
+        .is_some()
+}
+
+/// The owner's Sandbox on a local stack: the session `PM_CLOUD_SESSION`
+/// gave at launch. Sign Out (Home's menu and Settings both run
+/// `cloud::sign_out`) leaves the app signed out everywhere (the account
+/// fact Home and Settings read, Aero's session), tells the registry, and the
+/// env session never comes back in this process.
+#[gpui::test]
+fn sign_out_drops_the_env_session_for_the_life_of_the_process(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture).into_boxed_str());
+    let sealed = fixture_session(origin);
+    let token = serde_json::from_slice::<serde_json::Value>(&sealed).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The worker's host, as `init` makes it for `PM_CLOUD_SESSION`.
+    let env = crate::cloud::local_session_from(origin, Some(token)).expect("a local stack");
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, Box::new(crate::cloud::Memory(Some(env))), path),
+            cx,
+        )
+    });
+    settle(cx, signed_in);
+    assert!(aero_session(cx));
+    assert_eq!(
+        cx.update(|cx| crate::cloud::fact(cx))["email"],
+        "person@example.com"
+    );
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        !signed_in(cx) && crate::cloud::fact(cx)["busy"] == false
+    });
+    let fact = cx.update(|cx| crate::cloud::fact(cx));
+    assert_eq!(fact["identity"], serde_json::Value::Null);
+    assert_eq!(fact["email"], serde_json::Value::Null);
+    assert_eq!(fact["billing"], serde_json::Value::Null);
+    assert!(!aero_session(cx), "Aero still had the env session");
+    // The registry was told: the old token no longer works there.
+    let mut old = Http::new(
+        origin,
+        Box::new(Memory(Arc::new(Mutex::new(Some(sealed))))),
+        profile.path().to_owned(),
+    );
+    assert!(matches!(
+        pm_services::surfaces::agent_auth::CloudHost::refresh_account(&mut old),
+        Ok(None)
+    ));
+    // Still signed out after the account is read again.
+    cx.update(crate::cloud::refresh_billing);
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| signed_in(cx)));
+    assert!(!aero_session(cx));
+}
+
+/// A release build's own sign-in, in the Keychain (here a fake that never
+/// touches the login Keychain): Sign Out deletes it, the app is signed out
+/// everywhere, and a relaunch over the same Keychain finds nothing.
+#[gpui::test]
+fn sign_out_deletes_a_keychain_session(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin: &'static str = Box::leak(serve_with(0, fixture).into_boxed_str());
+    let sealed = fixture_session(origin);
+    let items = Items::default();
+    let key = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    items.map.lock().unwrap().insert(key.clone(), sealed);
+    let keychain = {
+        let items = items.clone();
+        move || {
+            Box::new(crate::cloud::Keychain::with_items(
+                key.0.clone(),
+                key.1.clone(),
+                None,
+                Box::new(items.clone()),
+            ))
+        }
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    let vault = keychain.clone();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, vault(), path),
+            cx,
+        )
+    });
+    settle(cx, signed_in);
+    assert!(aero_session(cx));
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        !signed_in(cx) && crate::cloud::fact(cx)["busy"] == false
+    });
+    assert!(!aero_session(cx));
+    assert!(
+        items.map.lock().unwrap().is_empty(),
+        "the Keychain item stayed"
+    );
+    let relaunched = Http::new(origin, keychain(), profile.path().to_owned());
+    assert!(!relaunched.signed_in());
+}
+
+// ---- Human verification (v1 client.test.ts) ----
+
+/// One request as the scripted registry saw it.
+#[derive(Clone, Debug)]
+struct Seen {
+    path: String,
+    human: Option<String>,
+    bearer: bool,
+}
+type Script = dyn Fn(&str, Option<&str>, usize) -> (u16, String) + Send + Sync;
+/// A registry on this Mac that answers each request from `script` (path,
+/// the X-Powermove-Human header, how many times that path was asked) and
+/// records what it was sent.
+fn scripted(script: Arc<Script>) -> (&'static str, Arc<Mutex<Vec<Seen>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin: &'static str = Box::leak(
+        format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port()).into_boxed_str(),
+    );
+    let seen = Arc::new(Mutex::new(Vec::<Seen>::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+            let (mut length, mut human, mut bearer) = (0usize, None, false);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                let (name, value) = header.split_once(':').unwrap_or((&header, ""));
+                match name.to_ascii_lowercase().as_str() {
+                    "content-length" => length = value.trim().parse().unwrap_or(0),
+                    "x-powermove-human" => human = Some(value.trim().to_owned()),
+                    "authorization" => bearer = true,
+                    _ => {}
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let count = {
+                let mut log = log.lock().unwrap();
+                log.push(Seen {
+                    path: path.clone(),
+                    human: human.clone(),
+                    bearer,
+                });
+                log.iter().filter(|s| s.path == path).count()
+            };
+            let (status, body) = script(&path, human.as_deref(), count);
+            let mut stream = stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (origin, seen)
+}
+const CHALLENGE: &str = r#"{"error":"human_verification_required","ticket":"signed-ticket","scope":"email_send:alice"}"#;
+fn send_email(host: &mut Http, origin: &'static str) -> pm_services::Result<CloudReply> {
+    CloudTask::new(
+        Flight::default().start(),
+        origin,
+        CloudWork::SendEmail {
+            email: "alice@example.com".into(),
+        },
+    )
+    .unwrap()
+    .run(host)
+    .result
+}
+fn browser(host: Http, opened: &Arc<Mutex<Vec<String>>>) -> Http {
+    let opened = opened.clone();
+    host.with_browser(
+        move |url| {
+            opened.lock().unwrap().push(url.to_owned());
+            true
+        },
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(5),
+    )
+}
+
+/// A protected route's 403 opens the check with the ticket only, waits for
+/// its result, retries once with the clearance, and the clearance is kept
+/// under the profile for the next request; it never goes to another origin.
+#[test]
+fn a_human_check_opens_the_page_retries_once_and_keeps_the_clearance() {
+    let (origin, seen) = scripted(Arc::new(|path, human, count| match path {
+        "/v1/auth/email/send" if human == Some("clr") => (200, r#"{"ok":true}"#.into()),
+        "/v1/auth/email/send" => (403, CHALLENGE.into()),
+        "/v1/human/result" if count < 2 => (204, String::new()),
+        "/v1/human/result" => (200, r#"{"clearance":"clr"}"#.into()),
+        _ => (404, "{}".into()),
+    }));
+    let profile = tempfile::tempdir().unwrap();
+    let opened = Arc::new(Mutex::new(vec![]));
+    let mut host = browser(
+        Http::new(
+            origin,
+            Box::new(Memory::default()),
+            profile.path().to_owned(),
+        ),
+        &opened,
+    );
+    assert!(matches!(
+        send_email(&mut host, origin),
+        Ok(CloudReply::Sent)
+    ));
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [format!("{origin}/v1/human?ticket=signed-ticket")]
+    );
+    let paths: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| (s.path.clone(), s.human.clone()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ("/v1/auth/email/send".to_owned(), None),
+            ("/v1/human/result".to_owned(), None),
+            ("/v1/human/result".to_owned(), None),
+            ("/v1/auth/email/send".to_owned(), Some("clr".to_owned())),
+        ]
+    );
+    assert!(
+        seen.lock().unwrap().iter().all(|s| !s.bearer),
+        "no session to the check"
+    );
+    // The next one reuses the clearance it kept: no page, no wait.
+    assert!(matches!(
+        send_email(&mut host, origin),
+        Ok(CloudReply::Sent)
+    ));
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    assert!(
+        profile
+            .path()
+            .join("cloud/human")
+            .read_dir()
+            .unwrap()
+            .count()
+            == 1
+    );
+    // Another origin, same profile: it is never sent there.
+    let (other, other_seen) = scripted(Arc::new(|_, _, _| (403, CHALLENGE.into())));
+    let mut elsewhere = Http::new(
+        other,
+        Box::new(Memory::default()),
+        profile.path().to_owned(),
+    )
+    .with_browser(
+        |_| false,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(1),
+    );
+    assert_eq!(
+        send_email(&mut elsewhere, other).unwrap_err().to_string(),
+        "api:human_unverified"
+    );
+    assert!(other_seen.lock().unwrap().iter().all(|s| s.human.is_none()));
+}
+
+/// A clearance the registry rejects is not retried in a loop: one check,
+/// two requests, and the kept clearance is dropped.
+#[test]
+fn a_rejected_clearance_is_not_retried_in_a_loop() {
+    let (origin, seen) = scripted(Arc::new(|path, _, _| match path {
+        "/v1/human/result" => (200, r#"{"clearance":"invalid"}"#.into()),
+        _ => (403, CHALLENGE.into()),
+    }));
+    let profile = tempfile::tempdir().unwrap();
+    let opened = Arc::new(Mutex::new(vec![]));
+    let mut host = browser(
+        Http::new(
+            origin,
+            Box::new(Memory::default()),
+            profile.path().to_owned(),
+        ),
+        &opened,
+    );
+    assert_eq!(
+        send_email(&mut host, origin).unwrap_err().to_string(),
+        "api:human_verification_required"
+    );
+    let sends = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.path == "/v1/auth/email/send")
+        .count();
+    assert_eq!(sends, 2);
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    assert_eq!(
+        profile
+            .path()
+            .join("cloud/human")
+            .read_dir()
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+/// The sheet's Cancel stops the wait at once, and the gate says it is over.
+#[test]
+fn cancel_stops_waiting_for_the_browser_check() {
+    let (origin, _) = scripted(Arc::new(|path, _, _| match path {
+        "/v1/human/result" => (204, String::new()),
+        _ => (403, CHALLENGE.into()),
+    }));
+    let profile = tempfile::tempdir().unwrap();
+    let gate = Arc::new(crate::cloud_human::HumanGate::default());
+    let mut host = Http::new(
+        origin,
+        Box::new(Memory::default()),
+        profile.path().to_owned(),
+    )
+    .with_gate(gate.clone())
+    .with_browser(
+        |_| true,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_secs(60),
+    );
+    let canceller = gate.clone();
+    std::thread::spawn(move || {
+        while !canceller.verifying() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        canceller.cancel();
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(
+        send_email(&mut host, origin).unwrap_err().to_string(),
+        "api:human_cancelled"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!gate.verifying());
+}
+
+#[test]
+fn a_clearance_is_kept_until_its_own_expiry() {
+    use base64::Engine as _;
+    let profile = tempfile::tempdir().unwrap();
+    let store = crate::cloud_human::Clearances::new(profile.path());
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(br#"{"kind":"clearance","expires":5000000}"#);
+    let clearance = format!("{payload}.sig");
+    store.put("http://a", "email_send:x", &clearance, 1_000_000);
+    assert_eq!(
+        store.get("http://a", "email_send:x", 1_000_000).as_deref(),
+        Some(clearance.as_str())
+    );
+    assert_eq!(store.get("http://b", "email_send:x", 1_000_000), None);
+    assert_eq!(
+        store.get("http://a", "email_send:x", 4_990_000),
+        None,
+        "under a minute left"
+    );
+    store.forget("http://a", "email_send:x");
+    assert_eq!(store.get("http://a", "email_send:x", 1_000_000), None);
+}
+
+/// One click, one Checkout: clicks while the request is in flight, and
+/// after the page is open in the browser, make no second Checkout (the open
+/// page is opened again).
+#[gpui::test]
+fn a_click_starts_exactly_one_checkout(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, seen) = scripted(Arc::new(|path, _, _| {
+        match path {
+        "/v1/me" => (200, r#"{"user":{"id":"u","email":"person@example.com"},"publisher":{"handle":"person"},"settings":{"rememberInstalls":true}}"#.into()),
+        "/v2/billing" => (200, r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,"credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#.into()),
+        "/v2/billing/checkout" => (200, r#"{"url":"http://127.0.0.1:9/v2/dev/checkout?s=1"}"#.into()),
+        _ => (404, "{}".into()),
+    }
+    }));
+    let sealed = serde_json::json!({"origin":origin,"token":"session","expiresAt":"2099-01-01T00:00:00.000Z"})
+        .to_string()
+        .into_bytes();
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, Box::new(crate::cloud::Memory(Some(sealed))), path),
+            cx,
+        )
+    });
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["state"] == "ready"
+    });
+    let checkouts = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.path == "/v2/billing/checkout")
+            .count()
+    };
+    // Two clicks in a row: the second finds the first in flight.
+    cx.update(crate::cloud::subscribe_offered);
+    cx.update(crate::cloud::subscribe_offered);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["waiting"] == "checkout"
+    });
+    assert_eq!(checkouts(), 1);
+    // A click later, while Checkout is open in the browser: the same page.
+    cx.update(crate::cloud::subscribe_offered);
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(checkouts(), 1);
+}
+
+/// A registry whose session can be ended mid-test: while `dead`, every
+/// authenticated route answers 401.
+fn ending_registry() -> (
+    &'static str,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<Mutex<Vec<Seen>>>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dead = Arc::new(AtomicBool::new(false));
+    let flag = dead.clone();
+    let (origin, seen) = scripted(Arc::new(move |path, _, _| {
+        if flag.load(Ordering::Relaxed) && path != "/v1/auth/email/send" {
+            return (401, r#"{"error":"unauthorized"}"#.into());
+        }
+        match path {
+            "/v1/me" => (200, r#"{"user":{"id":"u","email":"test@test.com"},"publisher":{"handle":"person"},"settings":{"rememberInstalls":true}}"#.into()),
+            "/v2/billing" => (200, r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,"credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#.into()),
+            "/v1/auth/sign-out" => (200, "{}".into()),
+            _ => (404, "{}".into()),
+        }
+    }));
+    (origin, dead, seen)
+}
+fn start(cx: &mut gpui::TestAppContext, origin: &'static str, items: &Items) -> tempfile::TempDir {
+    let sealed = serde_json::json!({"origin":origin.trim_end_matches('/'),"token":"session","expiresAt":"2099-01-01T00:00:00.000Z"});
+    let key = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    items
+        .map
+        .lock()
+        .unwrap()
+        .insert(key.clone(), sealed.to_string().into_bytes());
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    let items = items.clone();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || {
+                let vault = crate::cloud::Keychain::with_items(key.0, key.1, None, Box::new(items));
+                Http::new(origin, Box::new(vault), path)
+            },
+            cx,
+        )
+    });
+    profile
+}
+fn signed_out_with_notice(cx: &gpui::App) -> bool {
+    let fact = crate::cloud::fact(cx);
+    fact["signedIn"] == false && fact["identity"].is_null() && fact["sessionEnded"] == true
+}
+
+/// The session ended on the server (its database reset): the launch's
+/// account read gets 401, and the app is signed out everywhere with the one
+/// notice, the stored session forgotten, never the cached account.
+#[gpui::test]
+fn a_session_refused_at_launch_signs_out_everywhere(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, signed_out_with_notice);
+    assert!(
+        items.map.lock().unwrap().is_empty(),
+        "the session stayed stored"
+    );
+    assert!(!aero_session(cx));
+}
+
+/// Signed in, then the server refuses the session on any later call
+/// (billing here, or Aero): signed out everywhere with the notice; signing
+/// in again would clear it. Sign Out when the server answers 401 to the
+/// sign-out itself still signs out, with no notice.
+#[gpui::test]
+fn a_session_refused_later_signs_out_everywhere(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["state"] == "ready"
+    });
+    assert_eq!(cx.update(|cx| crate::cloud::fact(cx))["signedIn"], true);
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    cx.update(crate::cloud::refresh_billing);
+    settle(cx, signed_out_with_notice);
+    assert!(items.map.lock().unwrap().is_empty());
+}
+
+/// Aero hears 401 for its bearer: the account forgets the session too.
+#[gpui::test]
+fn aero_refused_ends_the_session_for_the_whole_app(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, _, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| crate::cloud::fact(cx)["signedIn"] == true);
+    let account = cx.update(|cx| crate::cloud::aero_account(cx)).unwrap();
+    account.ended();
+    settle(cx, signed_out_with_notice);
+}
+
+/// Sign Out while the server answers 401 to everything (the sign-out call
+/// too): signed out, the session forgotten, and no "session ended" notice.
+#[gpui::test]
+fn sign_out_against_a_refusing_server_still_signs_out(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| crate::cloud::fact(cx)["signedIn"] == true);
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["signedIn"] == false && crate::cloud::fact(cx)["busy"] == false
+    });
+    assert_eq!(
+        cx.update(|cx| crate::cloud::fact(cx))["sessionEnded"],
+        false
+    );
+    assert!(items.map.lock().unwrap().is_empty());
+}

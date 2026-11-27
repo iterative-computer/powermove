@@ -170,7 +170,7 @@ release, publication, or production updater was changed.
 
 ## Design review follow-up
 
-The governing review is [na-cloud-services](design/reviews/na-cloud-services.md).
+The governing review is na-cloud-services.
 This lane supplies data contracts only; shell rendering remains with its owner.
 
 | Review item | Implementation / selecting rule |
@@ -250,4 +250,4 @@ name supply and notice; Finder action wiring. Each is owned outside this lane.
 macOS must verify those menus, localized dates, update-sheet typography/accent/
 links, font family submenus/Weight rows, recovery notice and Finder selection.
 No UI was drawn, no visual value was chosen, and no DESIGN-TODO(opus) placeholder
-was needed. Opus review is still required for the eventual visual output.
+was needed. design review is still required for the eventual visual output.

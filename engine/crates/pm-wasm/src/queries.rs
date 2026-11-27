@@ -1,7 +1,7 @@
 //! Layer queries beyond the kernel's synchronous surface: the remaining
 //! evaluation answers the parity corpus records (`docs/engine/corpus.md`,
 //! "Evaluation dumps"), so `pm-cli parity eval --wasm` can compare every
-//! dumped value through this module (docs/engine/phase1-gate.md).
+//! dumped value through this module.
 //!
 //! | Op | Legacy call |
 //! |---|---|

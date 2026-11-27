@@ -665,7 +665,7 @@ export {
   SegmentedControl as Segmented,
   DisclosureGroup as Disclosure,
 };
-// Resolved in docs/native/design/reviews/na-cloud-uikit.md: the colour picker is
+// Design decision: the colour picker is
 // specified in panels/inspector.md §7 (host-provided popover); Toggle and Checkbox
 // sit at the leading edge of the value column; tree indentation follows the
 // system outline default until pm-design adds metrics.tree_indent (follow-up F2).

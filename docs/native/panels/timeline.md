@@ -155,7 +155,7 @@ layer** window/track-packing case. Fixture data is generated and synthetic.
 | Return caption/unsupported-command errors and explicit host requests instead of fabricated success | N1 correctness; N4/N6 no silently missing behavior |
 | Keep the shipped timeline and compatibility closure untouched | N4/N6 retained extensions; prune rule: consumers still remain |
 | Isolated Linux manifest and lock remain inside this crate; shared workspace lock untouched | Lane ownership; same production Rust sources/dependencies, no macOS runtime claim |
-| No visual constants, styling, component hierarchy, new copy or hit geometry in the model | Opus design ownership; approved `docs/native/design/language.md` and `pm-design` remain authoritative |
+| No visual constants, styling, component hierarchy, new copy or hit geometry in the model | design ownership; approved `docs/native/design/language.md` and `pm-design` remain authoritative |
 
 ## Verification and handoff
 
@@ -215,4 +215,4 @@ and undergo design review. Geometry, hit targets, wheel-to-time conversion,
 graph pan/zoom mapping, drag activation thresholds, focus/field placement and
 error/notice presentation remain neutral semantic inputs/outputs here. No
 visual output was produced; all later visual output remains provisional until
-Opus review.
+design review.

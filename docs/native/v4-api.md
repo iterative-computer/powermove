@@ -442,7 +442,7 @@ update below. Linux timings do not approve the signed V8/GPUI/physical macOS gat
 ## Historical package-13 result (Linux, 2026-11-01)
 
 The following numbers predate the pre-freeze fix pass. Current evidence and
-freeze recommendation are in [v4-eval.md](v4-eval.md).
+freeze recommendation are in v4-eval.md.
 
 - Rust 1.96.1: **35 tests passed** using the locked standalone manifest; clippy
   with `--all-targets -- -D warnings` and rustfmt check passed.

@@ -4,26 +4,38 @@ import { makeEnv } from './env';
 import { seedSession } from './helpers';
 import { FAKE_SECRET_KEY, FAKE_WEBHOOK_SECRET, startFakeStripe, type FakeStripe } from '../scripts/fake-stripe';
 import { startAiSimulator, type Simulator } from '../scripts/ai-simulator';
+import { FakeCalls } from './calls';
+import { desc, eq } from 'drizzle-orm';
+import { subscriptions } from '../src/db/schema';
 
 export interface Stack {
   app: ReturnType<typeof createApp>;
   env: CloudflareBindings;
   stripe: FakeStripe;
   ai: Simulator;
+  /** The AERO_CALLS Durable Objects. */
+  calls: FakeCalls;
   user: Awaited<ReturnType<typeof seedSession>>;
   request(path: string, init?: RequestInit & { json?: unknown }, headers?: Record<string, string>): Promise<Response>;
   stop(): Promise<void>;
 }
 
-/** The Worker on PGlite, with the fake Stripe delivering its webhooks straight to it and the AI simulator behind the AI SDK. */
-export async function stack(data: Data, email = 'jude@example.com'): Promise<Stack> {
+/** The Worker on PGlite, with the fake Stripe delivering its webhooks straight to it, the AI simulator behind the AI
+    SDK, and the Aero calls' Durable Objects in process. `callData` is the connection the call objects get (a test
+    can make it fail). */
+export async function stack(data: Data, email = 'jude@example.com', options: { callData?: (env: CloudflareBindings) => Data } = {}): Promise<Stack> {
   const app = createApp({ data: () => data });
   let deliver: (payload: string, signature: string) => Promise<number> = async () => 0;
   const stripe = startFakeStripe({ seedPrices: true, deliver: (payload, signature) => deliver(payload, signature) });
   const ai = startAiSimulator();
-  const env: CloudflareBindings = {
+  let env: CloudflareBindings;
+  const calls = new FakeCalls(() => env, options.callData ?? (() => data));
+  env = {
     ...makeEnv(data),
+    AERO_CALLS: calls as unknown as DurableObjectNamespace,
     STRIPE_SECRET_KEY: FAKE_SECRET_KEY, STRIPE_WEBHOOK_SECRET: FAKE_WEBHOOK_SECRET, STRIPE_API_BASE: stripe.url,
+    // The exact price ids, as production configures them (the Worker never resolves a plan by lookup key).
+    STRIPE_PRICE_AEROLITE: priceId(stripe, 'powermove_aerolite_monthly'), STRIPE_PRICE_AERO: priceId(stripe, 'powermove_aero_monthly'),
     OPENAI_API_KEY: 'simulator', ANTHROPIC_API_KEY: 'simulator',
     AERO_OPENAI_BASE_URL: `${ai.url}/openai/v1`, AERO_ANTHROPIC_BASE_URL: `${ai.url}/anthropic/v1`,
   };
@@ -33,8 +45,11 @@ export async function stack(data: Data, email = 'jude@example.com'): Promise<Sta
     const { json, ...rest } = init;
     return app.request(path, { ...rest, ...(json !== undefined && { method: rest.method ?? 'POST', body: JSON.stringify(json) }), headers: { 'content-type': 'application/json', ...headers, ...(rest.headers as Record<string, string>) } }, env);
   };
-  return { app, env, stripe, ai, user, request, stop: async () => { await stripe.stop(); await ai.stop(); } };
+  return { app, env, stripe, ai, calls, user, request, stop: async () => { await stripe.stop(); await ai.stop(); } };
 }
+
+/** The fake's price id for a lookup key. */
+export const priceId = (stripe: FakeStripe, lookupKey: string) => [...stripe.state.prices.values()].find(price => price.lookup_key === lookupKey)!.id as string;
 
 /** Subscribes the stack's user through Checkout and the fake's Pay button. */
 export async function subscribe(s: Stack, plan: 'aerolite' | 'aero' = 'aerolite') {
@@ -125,4 +140,10 @@ export function fxReduce(stream: Array<Record<string, any> | '[DONE]'>) {
   if (finish !== 'length' && (finish === 'tool_calls') !== (tools.length > 0)) fail('finish_reason disagrees with tool calls');
   for (const tool of tools) { if (!/^[A-Za-z0-9_-]{1,128}$/.test(tool.name)) fail('tool name'); JSON.parse(tool.arguments); }
   return { id, model, finish, content, reasoning, details, tools, usage };
+}
+
+/** The user's current billing period, as the subscription says. */
+export async function periodOf(data: Data, userId: string) {
+  const [sub] = await data.db.select().from(subscriptions).where(eq(subscriptions.userId, userId)).orderBy(desc(subscriptions.currentPeriodStart)).limit(1);
+  return { periodStart: sub!.currentPeriodStart, periodEnd: sub!.currentPeriodEnd };
 }

@@ -42,8 +42,7 @@
 //! (copy on write, `Arc::make_mut`). The interactive engine keeps one mirror
 //! per session, its presenter another, and every snapshot job a third at its
 //! revision; for a 180 MB document (1.2 million keyframes) these used to be
-//! full copies of about 1.8 GB each (docs/engine/host-processes.md, "Large
-//! documents"). A tree that is never cloned (pm-wasm) never copies.
+//! full copies of about 1.8 GB each. A tree that is never cloned (pm-wasm) never copies.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};

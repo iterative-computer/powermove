@@ -44,12 +44,16 @@ pub struct ThumbnailSource {
 }
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
-/// A menu opened from one of Home's buttons (ours, never NSMenu).
-const ACCOUNT_MENU: [(&str, &str); 3] = [
-    ("Your Library", "store"),
-    ("Account Settings…", "settings"),
-    ("Sign Out", "cloudSignOut"),
+/// The account row's menu: label and command (None, a separator). A
+/// command with a menu-bar key shows it (Account Settings…, ⌘,).
+const ACCOUNT_MENU: [Option<(&str, &str)>; 4] = [
+    Some(("Your Library", "store")),
+    Some(("Account Settings…", "settings")),
+    None,
+    Some(("Sign Out", "cloudSignOut")),
 ];
+/// A menu opened from one of Home's buttons: always the system's (NSMenu),
+/// hanging from its button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Menu {
     Sort,
@@ -131,9 +135,8 @@ pub struct ProjectLibrary {
     gallery_native: Vec<Entity<NativeControl>>,
     /// The open button menu, and where its button was last painted.
     menu: Option<Menu>,
-    menu_trigger_focus: Option<FocusHandle>,
-    /// The open menu's rows: which one the pointer or the keyboard has lit.
-    pick: pm_shell::transient::Picker,
+    /// The sidebar's Aero offer was closed (for this launch).
+    offer_closed: bool,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
     row_anchors: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The project whose "more" menu is open.
@@ -254,8 +257,7 @@ impl ProjectLibrary {
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
-            menu_trigger_focus: None,
-            pick: Default::default(),
+            offer_closed: false,
             anchors: Rc::default(),
             row_anchors: Rc::default(),
             menu_row: None,
@@ -581,43 +583,11 @@ impl ProjectLibrary {
                 }),
         );
     }
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let columns = match self.layout {
             Layout::Grid => self.columns.max(1) as isize,
             Layout::List => 1,
         };
-        // An open menu has the keyboard: arrows move its highlight, Return
-        // chooses the lit row, a letter lights the first row it starts.
-        if self.menu.is_some() {
-            let key = event.keystroke.key.as_str();
-            match key {
-                "escape" => {
-                    self.menu = None;
-                    if let Some(trigger) = self.menu_trigger_focus.take() {
-                        trigger.focus(window, cx);
-                    }
-                }
-                "enter" | "space" if self.menu_trigger_focus.as_ref()
-                    .is_some_and(|trigger| trigger.is_focused(window)) => return,
-                "enter" | "space" => {
-                    if let Some(row) = self.pick.lit() {
-                        self.choose(row, cx);
-                    }
-                }
-                "up" | "down" | "home" | "end" => {
-                    self.focus.focus(window, cx);
-                    self.pick.navigate(key);
-                }
-                _ => {
-                    if let Some(typed) = &event.keystroke.key_char {
-                        self.pick.type_ahead(typed);
-                    }
-                }
-            }
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
         match event.keystroke.key.as_str() {
             "f" if event.keystroke.modifiers.platform => {
                 if let Some(field) = &self.search {
@@ -701,6 +671,15 @@ impl ProjectLibrary {
 /// (the NSMenu callback's body) without pressing a menu item.
 #[cfg(debug_assertions)]
 impl ProjectLibrary {
+    /// The account menu's item `label`, as its NSMenu callback runs it.
+    pub fn review_account_menu(&mut self, label: &str, cx: &mut Context<Self>) {
+        let index = ACCOUNT_MENU
+            .iter()
+            .position(|item| item.is_some_and(|(l, _)| l == label));
+        if let Some(index) = index {
+            self.choose(Menu::Account, index, cx);
+        }
+    }
     pub fn review_row_menu(&mut self, name: &str, label: &str, cx: &mut Context<Self>) {
         let Some(row) = self.controller.rows.iter().find(|r| r.name == name) else {
             return;
@@ -873,21 +852,135 @@ impl ProjectLibrary {
         kit.nav_row(id, symbol, label, count, selected)
             .debug_selector(|| id.into())
     }
-    /// Opens or closes a button menu; it enters on the `Enter` spring.
-    fn toggle_menu(&mut self, menu: Menu, window: &Window, cx: &mut Context<Self>) {
-        self.menu = (self.menu != Some(menu)).then_some(menu);
-        self.menu_trigger_focus = self.menu.and_then(|_| window.focused(cx));
-        // Nothing is lit as it opens.
-        self.pick = pm_shell::transient::Picker {
-            choices: self.menu.map(|menu| self.rows_of(menu)).unwrap_or_default(),
-            open: self.menu.is_some(),
-            ..Default::default()
+    /// The sidebar's foot on Free, above the account: Aero and the plan the
+    /// backend offers, its button straight to Checkout, closable for this
+    /// launch. Nothing when signed out (the Sign In row), on a plan, or
+    /// before the plans are read.
+    fn aero_offer(&self, kit: &Kit, account: &Value, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let billing = &account["billing"];
+        let plan = billing["plans"][0]["name"].as_str()?;
+        if self.offer_closed
+            || account["signedIn"] != true
+            || billing["state"] != "ready"
+            || billing["subscribed"] != false
+        {
+            return None;
+        }
+        let t = &kit.t;
+        let c = &t.colors;
+        let pad = t.space.md;
+        // Concentric with its button: the card's corner is the button's
+        // plus the padding between them.
+        let corner = t.metrics.control_radius + pad;
+        Some(
+            div()
+                .id("home-aero-offer")
+                .debug_selector(|| "home-aero-offer".into())
+                .role(Role::Group)
+                .aria_label(format!("Aero, your editing agent. Get {plan}."))
+                .relative()
+                .mx(px(t.space.xs))
+                .mb(px(t.space.sm))
+                .p(px(pad))
+                .flex()
+                .flex_col()
+                .gap(px(t.space.xs))
+                // A quiet accent light on the sidebar's material, its edge
+                // a hairline of the same light.
+                .rounded(px(corner))
+                .bg(ink(c.accent, t.translucency.hover))
+                .border_1()
+                .border_color(ink(c.accent, t.translucency.selected))
+                .child(
+                    div()
+                        .text_role(t, Text::Label)
+                        .text_color(rgb(c.text))
+                        .child("Aero"),
+                )
+                .child(
+                    div()
+                        .pr(px(t.metrics.hit))
+                        .text_role(t, Text::Caption)
+                        .text_color(rgb(c.secondary))
+                        .child("Your editing agent, with inference included."),
+                )
+                .child(
+                    kit.button(
+                        "home-aero-offer-get",
+                        format!("Get {plan}"),
+                        Button::Primary,
+                        None,
+                        None,
+                    )
+                    .mt(px(t.space.xs))
+                    .w_full()
+                    .on_click(cx.listener(|_, _, _, cx| crate::cloud::subscribe_offered(cx))),
+                )
+                .child(
+                    // Not now: closed for this launch, in the corner.
+                    div()
+                        .absolute()
+                        .top(px(t.space.xs))
+                        .right(px(t.space.xs))
+                        .child(
+                            kit.icon_button("home-aero-offer-close", "xmark", "Not now", false)
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    v.offer_closed = true;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+    /// Opens a button's menu: the system's, hanging from the button (the
+    /// account row's above it, at the sidebar's foot).
+    fn open_menu(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
+        let control = match menu {
+            Menu::Row => self
+                .menu_row
+                .as_ref()
+                .and_then(|id| self.row_anchors.borrow().get(id).copied()),
+            _ => self.anchors.borrow().get(&menu).copied(),
         };
-        self.motion
-            .values
-            .borrow_mut()
-            .insert(kit::key("home-menu"), pm_design::motion::Animated::unit(0.));
+        let Some(control) = control else {
+            return;
+        };
+        let place = match menu {
+            Menu::Account => crate::v4_native::Place::Above(control),
+            Menu::Sort | Menu::Row => crate::v4_native::Place::Below(control),
+        };
+        let options: Vec<Value> = match menu {
+            Menu::Sort => [Sort::Recent, Sort::Name]
+                .into_iter()
+                .map(|sort| json!({"label": sort.label(), "checked": sort == self.controller.query.sort}))
+                .collect(),
+            Menu::Account => ACCOUNT_MENU
+                .iter()
+                .map(|item| match item {
+                    Some((label, command)) => json!({"label": label, "id": command}),
+                    None => json!({"separator": true}),
+                })
+                .collect(),
+            Menu::Row => self
+                .row_actions()
+                .into_iter()
+                .map(|action| json!({"label": action.label()}))
+                .collect(),
+        };
+        self.menu = Some(menu);
         cx.notify();
+        let this = cx.entity();
+        crate::v4_native::menu_at(window, &options, place, cx, move |index, cx| {
+            this.update(cx, |v, cx| {
+                if let Some(index) = index {
+                    v.choose(menu, index, cx);
+                }
+                v.menu = None;
+                v.menu_row = None;
+                cx.notify();
+            });
+        });
     }
     /// A header action: an icon alone, no fill at rest, a wash under the
     /// pointer, a deeper one while pressed; its name and shortcut in the tip.
@@ -901,28 +994,6 @@ impl ProjectLibrary {
         kit.icon_button(id, symbol, tip, false)
             .aria_label(label)
             .debug_selector(move || id.into())
-    }
-    /// The rows of a button menu.
-    fn rows_of(&self, menu: Menu) -> Vec<pm_shell::transient::Choice> {
-        use pm_shell::transient::Choice;
-        match menu {
-            Menu::Sort => [Sort::Recent, Sort::Name]
-                .into_iter()
-                .map(|sort| {
-                    Choice::new(sort.label(), sort.key())
-                        .checked(sort == self.controller.query.sort)
-                })
-                .collect(),
-            Menu::Account => ACCOUNT_MENU
-                .iter()
-                .map(|(label, command)| Choice::new(*label, *command))
-                .collect(),
-            Menu::Row => self
-                .row_actions()
-                .into_iter()
-                .map(|action| Choice::new(action.label(), action.label()))
-                .collect(),
-        }
     }
     /// What the open "more" menu offers: the row's right-click actions,
     /// less Open for the project this window already shows.
@@ -941,112 +1012,28 @@ impl ProjectLibrary {
             .filter(|action| !(here && matches!(action, MenuAction::Open)))
             .collect()
     }
-    /// Runs a row of the open menu and closes it.
-    fn choose(&mut self, row: usize, cx: &mut Context<Self>) {
-        match self.menu.take() {
-            Some(Menu::Sort) => {
-                if let Some(sort) = [Sort::Recent, Sort::Name].get(row) {
+    /// Runs the item at `index` of `menu`.
+    fn choose(&mut self, menu: Menu, index: usize, cx: &mut Context<Self>) {
+        match menu {
+            Menu::Sort => {
+                if let Some(sort) = [Sort::Recent, Sort::Name].get(index) {
                     self.set_sort(*sort, cx);
                 }
             }
-            Some(Menu::Account) => {
-                if let Some((_, command)) = ACCOUNT_MENU.get(row) {
+            Menu::Account => {
+                if let Some(Some((_, command))) = ACCOUNT_MENU.get(index) {
                     (self.sink)(Outbound::Command(command), cx);
                 }
             }
-            Some(Menu::Row) => {
-                let action = self.row_actions().get(row).copied();
-                if let (Some(id), Some(action)) = (self.menu_row.take(), action) {
+            Menu::Row => {
+                let action = self.row_actions().get(index).copied();
+                if let (Some(id), Some(action)) = (self.menu_row.clone(), action) {
                     let _ = self.controller.select(&id);
                     let _ = self.controller.menu(&id, action);
                     self.pump(cx);
                 }
             }
-            None => {}
         }
-        cx.notify();
-    }
-    /// The open button menu: our popover (rows light only under the pointer),
-    /// hanging from its button, closed by a click elsewhere or Escape.
-    fn menu_overlay(&self, kit: &Kit, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.menu?;
-        let anchors = self.anchors.borrow();
-        let rows = self.row_anchors.borrow();
-        let anchor = if menu == Menu::Row {
-            rows.get(self.menu_row.as_ref()?).copied()?
-        } else {
-            anchors.get(&menu).copied()?
-        };
-        let other_triggers = anchors.values().chain(rows.values()).copied()
-            .filter(|bounds| *bounds != anchor).collect();
-        let t = &kit.t;
-        let shown = kit
-            .animate(kit::key("home-menu"), 1., Some(Preset::Enter))
-            .clamp(0., 1.);
-        let view = cx.entity().downgrade();
-        let close = move |_: &mut Window, cx: &mut App| {
-            let _ = view.update(cx, |v, cx| {
-                v.menu = None;
-                v.menu_trigger_focus = None;
-                cx.notify();
-            });
-        };
-        let rows: Vec<Stateful<Div>> = self
-            .pick
-            .choices
-            .iter()
-            .enumerate()
-            .map(|(row, choice)| {
-                kit.menu_row(
-                    format!("home-menu-{}", choice.command),
-                    choice.label.clone(),
-                    choice.checked,
-                    None,
-                )
-                // The highlight follows the pointer and leaves with it.
-                .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                    if (*hovered || v.pick.hover == Some(row))
-                        && v.pick.point(hovered.then_some(row))
-                    {
-                        cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(move |v, _, _, cx| v.choose(row, cx)))
-            })
-            .collect();
-        let lit = self.pick.lit().map(|row| row as f32 * t.metrics.row);
-        // It grows out of its button: a few points of travel with the fade.
-        let travel = (1. - shown) * t.space.sm;
-        let (corner, at) = match menu {
-            Menu::Sort | Menu::Row => (
-                Anchor::TopRight,
-                point(anchor.right(), anchor.bottom() + px(t.space.xs - travel)),
-            ),
-            Menu::Account => (
-                Anchor::BottomLeft,
-                point(anchor.left(), anchor.top() - px(t.space.xs - travel)),
-            ),
-        };
-        Some(
-            deferred(
-                anchored().anchor(corner).position(at).child(
-                    kit::dismiss_menu_on_press(
-                        kit.menu().id("home-menu"),
-                        Some(anchor),
-                        other_triggers,
-                        close,
-                    )
-                        .min_w(px(t.metrics.sidebar - 2. * t.space.md))
-                        .opacity(shown)
-                        .font_family(pm_design::TEXT_FONT)
-                        .role(Role::Menu)
-                        .child(kit.menu_light("home-menu", lit))
-                        .children(rows),
-                ),
-            )
-            .priority(1)
-            .into_any_element(),
-        )
     }
     /// A poster was written for `id`: its card reads it from the cache again.
     pub fn poster_written(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1666,16 +1653,14 @@ impl ProjectLibrary {
                         |_, _, _, _| (),
                     )
                     .absolute()
+                    .inset_0()
                     .size_full(),
                 )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |v, _, window, cx| {
                     cx.stop_propagation();
-                    if v.menu == Some(Menu::Row) && v.menu_row.as_ref() != Some(&id) {
-                        v.menu = None;
-                    }
                     v.menu_row = Some(id.clone());
-                    v.toggle_menu(Menu::Row, window, cx);
+                    v.open_menu(Menu::Row, window, cx);
                 }))
         });
         let dark = t.scheme == pm_design::Scheme::Dark;
@@ -1850,6 +1835,7 @@ impl Render for ProjectLibrary {
                 |_, _, _, _| (),
             )
             .absolute()
+            .inset_0()
             .size_full()
         };
         let sidebar = div()
@@ -1896,6 +1882,7 @@ impl Render for ProjectLibrary {
                 .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
             )
             .child(div().flex_1())
+            .children(self.aero_offer(&kit, &account, cx))
             .child(match identity {
                 Some(name) => self
                     .nav_row(
@@ -1903,16 +1890,19 @@ impl Render for ProjectLibrary {
                         "home-account",
                         ("person.crop.circle.fill", name),
                         None,
-                        false,
+                        // Held while its menu is open, as a pull-down's button is.
+                        self.menu == Some(Menu::Account),
                     )
                     .child(anchor(Menu::Account))
                     .tab_index(0)
-                    .on_click(cx.listener(|v, _, window, cx| v.toggle_menu(Menu::Account, window, cx))),
+                    .on_click(
+                        cx.listener(|v, _, window, cx| v.open_menu(Menu::Account, window, cx)),
+                    ),
                 None => self
                     .nav_row(
                         &kit,
                         "home-account",
-                        ("person.crop.circle.fill", "Sign in".into()),
+                        ("person.crop.circle.fill", "Sign In".into()),
                         None,
                         false,
                     )
@@ -2171,7 +2161,9 @@ impl Render for ProjectLibrary {
                         ))
                         .child(sort.label())
                         .child(anchor(Menu::Sort))
-                        .on_click(cx.listener(|v, _, window, cx| v.toggle_menu(Menu::Sort, window, cx))),
+                        .on_click(
+                            cx.listener(|v, _, window, cx| v.open_menu(Menu::Sort, window, cx)),
+                        ),
                     kit::key("home-sort"),
                     t.radius.md,
                 ),
@@ -2424,7 +2416,6 @@ impl Render for ProjectLibrary {
             .children(top_slots)
             .child(body)
             .children(bottom_slots);
-        let menu = self.menu_overlay(&kit, cx);
         div()
             .id("home")
             .relative()
@@ -2438,7 +2429,6 @@ impl Render for ProjectLibrary {
             .on_key_down(cx.listener(Self::on_key))
             .child(sidebar)
             .child(content)
-            .children(menu)
             .children(self.delete_toast.clone())
             .child(kit.settle())
     }

@@ -149,7 +149,7 @@ No index, no badge (language §15: track names stay).
 - **Playhead head**: 11 pt wide, `m.ruler − 4` tall, `c.accent`, radius 3 top
   / 6 bottom (shape `ph-head` in the v3 mockup), centred on the playhead x.
 - **Render bar**: 3 pt strip at the very top of the ruler (under the header
-  edge), states per [reviews/na-cloud-promedia.md](../reviews/na-cloud-promedia.md):
+  edge), states per reviews/na-cloud-promedia.md:
   `Missing`/`Stale` nothing; `Rendering` `c.muted` with moving 45° stripes
   (static 50 % `c.muted` under Reduce Motion); `Rendered` `c.success` at
   70 %; `Kept` `c.success` + 1 pt `c.text` top keyline.

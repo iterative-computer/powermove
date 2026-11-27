@@ -2,7 +2,7 @@
 
 Rows S114 N007. Grammar: [README](README.md) §1–5. Sources:
 `M/agent-notifications.ts`, `R/panels/agent/notification-preferences.ts`,
-`S/agent-notifications.ts`, `M/permissions.ts`, [os-base.md](../../os-base.md). System
+`S/agent-notifications.ts`, `M/permissions.ts`, os-base.md. System
 prompts stay system-owned: Powermove words only the usage strings and what happens
 after an answer. The Keychain outcome is N002 in [migration.md](migration.md); agent
 computer access is S010. No new tokens.
@@ -81,7 +81,7 @@ CoreText and pointer association need no authorization.
 | `NSNetworkVolumesUsageDescription` | `Powermove opens projects and media on network drives.` |
 | `NSLocalNetworkUsageDescription` | `Powermove connects to the local model server you set up.` |
 
-[os-base.md](../../os-base.md) still lists placeholder `NSCameraUsageDescription` and
+os-base.md still lists placeholder `NSCameraUsageDescription` and
 `NSMicrophoneUsageDescription` strings. Nothing shipped uses them, so they're removed.
 
 **Shared recovery pattern.** One line at the failure, in the surface that failed, then

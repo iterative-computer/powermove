@@ -2,7 +2,9 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { Data } from './db/client';
 import { abuseCounters, desktopAuth, objectLeases, objects } from './db/schema';
 import { hasReleaseReference } from './objects/references';
-import { neonData } from './db/client';
+import { dataFor } from './db/client';
+import { sweepHolds } from './billing/ledger';
+import { productionProblems } from './production';
 
 const noLease = (sha: ReturnType<typeof sql>) => sql`not exists (
   select 1 from object_leases l where l.sha = ${sha} and l.expires_at > now()
@@ -46,6 +48,7 @@ export async function sweepClaimed(data: Data, env: CloudflareBindings, shas: st
 }
 
 export async function runGc(data: Data, env: CloudflareBindings): Promise<void> {
+  await sweepHolds(data.db);
   await data.db.delete(objectLeases).where(sql`${objectLeases.expiresAt} < now()`);
   await data.db.delete(desktopAuth).where(sql`${desktopAuth.expiresAt} < now() - interval '1 hour'`);
   await data.db.delete(abuseCounters).where(sql`${abuseCounters.windowStart} < now() - interval '2 days'`);
@@ -56,6 +59,8 @@ export async function runGc(data: Data, env: CloudflareBindings): Promise<void> 
 }
 
 export async function gc(_event: ScheduledEvent, env: CloudflareBindings): Promise<void> {
-  const data = neonData(env.DATABASE_URL);
+  const problems = productionProblems(env);
+  if (problems.length) { console.error('refusing to run: production misconfigured', problems.join(',')); return; }
+  const data = dataFor(env);
   try { await runGc(data,env); } finally { await data.end(); }
 }

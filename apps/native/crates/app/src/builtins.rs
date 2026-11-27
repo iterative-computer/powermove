@@ -2819,6 +2819,9 @@ impl Controller {
             // and Settings › Storage what both folders take now.
             self.refresh_waiting_folders(cx);
             self.refresh_storage(cx);
+            // Settings › Account shows the plan and credits as they are now:
+            // an Aero turn since the last read spent some.
+            cx.defer(crate::cloud::refresh_billing);
             // Settings is a window of its own, one for the app (PM-375): an
             // open one comes forward on the page asked for; one another
             // editor hosts closes, and this editor's opens in its place.
@@ -3619,6 +3622,11 @@ impl Controller {
                     if let Some(message) = request.input.as_str() {
                         crate::v4_native::announce(&self.host.borrow().window, message);
                     }
+                    Ok(Value::Null)
+                }
+                // Aero on Free: Checkout for the plan the backend offers.
+                "agent.subscribe" => {
+                    crate::cloud::subscribe_offered(cx);
                     Ok(Value::Null)
                 }
                 "agent.settings" => {

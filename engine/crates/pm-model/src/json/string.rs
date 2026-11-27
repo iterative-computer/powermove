@@ -18,7 +18,7 @@ use core::hash::{Hash, Hasher};
 /// heap variants and the document's `NodeKind` keep their discriminants in
 /// that byte. A document node is then
 /// three words instead of four: about 8 bytes for each of a large project's
-/// millions of keyframe members (docs/engine/host-processes.md).
+/// millions of keyframe members.
 #[derive(Clone)]
 pub struct JsString(Repr);
 

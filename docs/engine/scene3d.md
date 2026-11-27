@@ -1090,7 +1090,7 @@ Other extension metadata is retained. As in today's merging `setShaderMeta`,
 success does not erase a historical `sceneError` string. This path builds no
 three.js scene and performs no extra geometry evaluation.
 
-THREED-3 is a recorded bug fix for Jude's beta list: native scenes continue
+THREED-3 is a recorded bug fix for the beta list: native scenes continue
 drawing after ordinary editing exceeds 512 objects, 16 lights, a 160-character
 display name, or 8 MB serialized scene JSON. Today's parser instead makes the
 whole composition fail. Other strict keys, ranges and scene refinements keep

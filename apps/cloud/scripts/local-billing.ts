@@ -12,6 +12,10 @@ import { Pool } from 'pg';
 import { databaseUrl, ports, stack, workerUrl } from './lib/local-env';
 import { FAKE_SECRET_KEY, FAKE_WEBHOOK_SECRET, startFakeStripe } from './fake-stripe';
 import { startAiSimulator } from './ai-simulator';
+import { readFileSync } from 'node:fs';
+// The development pricing (production's is the AERO_PRICING secret).
+const AERO_PRICING = JSON.stringify(JSON.parse(readFileSync(new URL('../test/fixtures/pricing.json', import.meta.url), 'utf8')));
+const CREDIT_NANO_USD = (JSON.parse(AERO_PRICING) as { creditNanoUsd: number }).creditNanoUsd;
 
 const cloud = resolve(import.meta.dir, '..');
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
@@ -28,6 +32,8 @@ process.stdout.write(await run(['bun', 'scripts/local-up.ts']));
 const stripe = startFakeStripe({ port: ports.stripe, webhookUrl: `${workerUrl}/v2/stripe/webhook` });
 const ai = startAiSimulator({ port: ports.ai });
 const billingVars: Record<string, string> = {
+  AERO_PRICING,
+  ENVIRONMENT: 'development',
   LOCAL_POSTGRES: '1',
   DATABASE_URL: databaseUrl,
   APP_ORIGIN: workerUrl,
@@ -39,7 +45,10 @@ const billingVars: Record<string, string> = {
   AERO_OPENAI_BASE_URL: `${ai.url}/openai/v1`,
   AERO_ANTHROPIC_BASE_URL: `${ai.url}/anthropic/v1`,
 };
-process.stdout.write(await run(['bun', 'scripts/stripe-setup.ts'], { STRIPE_SECRET_KEY: FAKE_SECRET_KEY, STRIPE_API_BASE: stripe.url }));
+const setup = await run(['bun', 'scripts/stripe-setup.ts'], { STRIPE_SECRET_KEY: FAKE_SECRET_KEY, STRIPE_API_BASE: stripe.url });
+process.stdout.write(setup);
+// The Worker takes plans only by exact price id: hand it the ids stripe-setup printed.
+for (const match of setup.matchAll(/^(STRIPE_PRICE_AEROLITE|STRIPE_PRICE_AERO)=(price_\w+)/gm)) billingVars[match[1]!] = match[2]!;
 
 // .dev.vars plus this stack's values, in a file of its own (wrangler reads one env file).
 const base = await readFile(resolve(cloud, '.dev.vars'), 'utf8');
@@ -83,9 +92,9 @@ if (mara.credits.used === 0) {
     for (const [day, credits, model] of [[0, 46, 'anthropic/claude-opus-5-5'], [1, 0, null], [2, 92, 'openai/gpt-6.2-sol'], [3, 31, 'openai/gpt-6-luna']] as const) {
       if (!model) continue;
       await pool.query(
-        `insert into credit_ledger (user_id, kind, idempotency_key, credits, model, input_tokens, output_tokens, created_at)
-         values ($1, 'spend', $2, $3, $4, $5, $6, $7) on conflict (idempotency_key) do nothing`,
-        [rows[0]!.id, `request:${rows[0]!.id}:seed-day-${day}`, credits, model, credits * 400, credits * 20, new Date(start + day * 86_400_000 + 3_600_000)],
+        `insert into credit_ledger (user_id, kind, idempotency_key, credits, period_start, period_end, model, input_tokens, fresh_input_tokens, output_tokens, cost_nano_usd, usage_source, created_at)
+         values ($1, 'spend', $2, 0, $3, $4, $5, $6, $6, $7, $8, 'reported', $9) on conflict (idempotency_key) do nothing`,
+        [rows[0]!.id, `request:${rows[0]!.id}:seed-day-${day}`, mara.period.start, mara.period.end, model, credits * 400, credits * 20, credits * CREDIT_NANO_USD, new Date(start + day * 86_400_000 + 3_600_000)],
       );
     }
   } finally { await pool.end(); }

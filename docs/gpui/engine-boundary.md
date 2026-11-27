@@ -30,7 +30,7 @@ New crate and module names below are proposals, explicitly distinguished from ex
 8. Treat browser-dependent shader/raster fallbacks as unresolved parity work.
    A TypeScript service without a browser cannot supply DOM, Canvas, or WebGL pixels.
 
-These refine [architecture.md](architecture.md), especially its process and extension sections.
+These refine architecture.md, especially its process and extension sections.
 The app must preserve behavior in the two GPUI parity inventories; the older engine
 plan's Electron transport choices and retired features are not new product requirements.
 

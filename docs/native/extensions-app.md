@@ -1,7 +1,7 @@
 # Extensions in the app
 
 Status of the running app's extension support. Measured results live in
-[extcheck-p2.md](extcheck-p2.md); the realm internals in
+extcheck-p2.md; the realm internals in
 [compat-realm.md](compat-realm.md).
 
 ## Path

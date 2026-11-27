@@ -4,6 +4,7 @@ mod agent_app_icons;
 mod credits;
 mod plans;
 mod previews;
+mod ring;
 
 use crate::{session::Controller, v4_compile::number_facts};
 use gpui::Context;
@@ -1216,10 +1217,7 @@ impl Render<'_, '_> {
                 let (_, value, _) = control_value(self.surface, node, component);
                 picker.update(value.as_u64().map(|v| v as usize), disabled(node));
             }
-            Widget::Plans(plans) => {
-                let (_, value, _) = control_value(self.surface, node, component);
-                plans.update(value.as_u64().map(|v| v as usize), disabled(node));
-            }
+            Widget::Plans(plans) => plans.update(disabled(node)),
             Widget::Meter(meter) => {
                 let m = metadata(node);
                 let count = |k: &str| m[k].as_u64().unwrap_or(0);
@@ -2182,9 +2180,7 @@ impl Render<'_, '_> {
             if let Some(cx) = self.cx.as_deref_mut() {
                 forward(rx, cx);
             }
-            let (_, value, _) =
-                control_value(self.surface, node, Some(Component::SegmentedControl));
-            plans.update(value.as_u64().map(|v| v as usize), disabled(node));
+            plans.update(disabled(node));
             return Widget::Plans(plans);
         }
         let target: Retained<PickerTarget> =

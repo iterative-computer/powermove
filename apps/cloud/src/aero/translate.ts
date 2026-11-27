@@ -4,6 +4,7 @@
 import { z } from 'zod';
 import { jsonSchema, tool, type AssistantModelMessage, type JSONValue, type ModelMessage, type SystemModelMessage, type ToolSet, type UserModelMessage } from 'ai';
 import type { AeroModel, Provider } from './catalogue';
+import { IMAGE_LIMITS, imageInfo, imageProblem } from './images';
 
 const Text = z.object({ type: z.literal('text'), text: z.string() });
 const Image = z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.string().optional() }) });
@@ -24,16 +25,32 @@ const Message = z.discriminatedUnion('role', [
   }),
   z.object({ role: z.literal('tool'), tool_call_id: z.string().min(1).max(256), content: Content }),
 ]);
+/** How deep a JSON value nests (a tool schema's depth). */
+function depth(value: unknown, limit: number, level = 0): number {
+  if (level > limit || value === null || typeof value !== 'object') return level;
+  let deepest = level;
+  for (const child of Array.isArray(value) ? value : Object.values(value)) deepest = Math.max(deepest, depth(child, limit, level + 1));
+  return deepest;
+}
+/** Bounds on what a request may carry. */
+export const LIMITS = { messages: 2_000, tools: 128, schemaBytes: 64 * 1024, toolsBytes: 512 * 1024, schemaDepth: 24 } as const;
 const FunctionTool = z.object({
   type: z.literal('function'),
-  function: z.object({ name: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), description: z.string().max(65_536).optional(), parameters: z.record(z.string(), z.unknown()).optional(), strict: z.boolean().nullable().optional() }),
+  function: z.object({
+    name: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), description: z.string().max(65_536).optional(),
+    parameters: z.record(z.string(), z.unknown()).optional()
+      .refine(schema => schema === undefined || JSON.stringify(schema).length <= LIMITS.schemaBytes, 'schema too large')
+      .refine(schema => schema === undefined || depth(schema, LIMITS.schemaDepth) <= LIMITS.schemaDepth, 'schema too deep'),
+    strict: z.boolean().nullable().optional(),
+  }),
 });
 export const ChatRequest = z.object({
   model: z.string().min(1).max(128),
-  messages: z.array(Message).min(1).max(10_000),
+  messages: z.array(Message).min(1).max(LIMITS.messages),
   stream: z.literal(true),
   stream_options: z.object({ include_usage: z.boolean().optional() }).passthrough().optional(),
-  tools: z.array(FunctionTool).max(128).optional(),
+  tools: z.array(FunctionTool).max(LIMITS.tools).optional()
+    .refine(tools => tools === undefined || JSON.stringify(tools).length <= LIMITS.toolsBytes, 'tools too large'),
   tool_choice: z.union([z.enum(['auto', 'none', 'required']), z.object({ type: z.literal('function'), function: z.object({ name: z.string() }) })]).optional(),
   parallel_tool_calls: z.boolean().optional(),
   reasoning_effort: z.string().max(16).nullable().optional(),
@@ -66,15 +83,20 @@ function text(content: z.infer<typeof Content> | null | undefined): string {
   return typeof content === 'string' ? content : content.filter(part => part.type === 'text').map(part => (part as { text: string }).text).join('\n');
 }
 
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const DATA_URL = /^data:([a-z]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i;
-function userContent(content: z.infer<typeof Content>): UserModelMessage['content'] {
+function userContent(content: z.infer<typeof Content>, images: { count: number }): UserModelMessage['content'] {
   if (typeof content === 'string') return content;
   return content.map((part) => {
     if (part.type === 'text') return { type: 'text' as const, text: part.text };
     // Only inline images: the backend never fetches a URL a client names.
     const match = DATA_URL.exec(part.image_url.url);
     if (!match) throw new UnsupportedRequest('image');
-    return { type: 'image' as const, image: match[2]!, mediaType: match[1]!.toLowerCase() };
+    // Images only: a document (a PDF, anything else) is refused, never passed on as a file.
+    if (!IMAGE_TYPES.has(match[1]!.toLowerCase())) throw new UnsupportedRequest('file');
+    // Its own header decides what it is and how big: undecodable, oversized or too many images are refused.
+    if (++images.count > IMAGE_LIMITS.count || imageProblem(match[2]!)) throw new UnsupportedRequest('image');
+    return { type: 'image' as const, image: match[2]!, mediaType: imageInfo(match[2]!)!.type };
   });
 }
 
@@ -107,6 +129,7 @@ export function prepare(request: ChatRequest, model: AeroModel, cacheKey: string
   const instructions: SystemModelMessage[] = [];
   const messages: ModelMessage[] = [];
   const toolNames = new Map<string, string>();
+  const images = { count: 0 };
   for (const message of request.messages) {
     switch (message.role) {
       case 'system':
@@ -114,7 +137,7 @@ export function prepare(request: ChatRequest, model: AeroModel, cacheKey: string
         instructions.push({ role: 'system', content: text(message.content) });
         break;
       case 'user':
-        messages.push({ role: 'user', content: userContent(message.content) });
+        messages.push({ role: 'user', content: userContent(message.content, images) });
         break;
       case 'assistant': {
         const content: Exclude<AssistantModelMessage['content'], string> = [];

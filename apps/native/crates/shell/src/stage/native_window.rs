@@ -2,10 +2,13 @@
 //! stage, a standard titled window takes its place on the same rectangle:
 //! close and minimize buttons, zoom disabled, a fixed size. It holds the same
 //! lit ground and step (`Stage::window_content`), with the step's AppKit
-//! controls in it, and stands just above the stage. Minimizing it takes the
-//! stage down with it; the stage comes back under it when it returns. It is
-//! shown once its ground has drawn, so the hand-over from the stage's drawing
-//! of the window never shows a frame without it.
+//! controls in it, and stands just above the stage while the stage's lights
+//! go down. Minimizing it then takes the stage down with it; the stage comes
+//! back under it when it returns. Once the stage has gone (`stage_left`) it
+//! is an ordinary window: normal level, its own Space, behind other apps when
+//! the person switches to them. It is shown once its ground has drawn, so the
+//! hand-over from the stage's drawing of the window never shows a frame
+//! without it.
 use super::Stage;
 use crate::welcome_view::WelcomeView;
 use gpui::{prelude::*, *};
@@ -21,8 +24,10 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use std::{ptr::NonNull, rc::Rc, time::Duration};
 
-/// Just above the stage (`NSStatusWindowLevel`, 25).
+/// Just above the stage (`NSStatusWindowLevel`, 25), while it stands.
 const LEVEL: isize = 26;
+/// `NSNormalWindowLevel`: once the stage has gone.
+const NORMAL_LEVEL: isize = 0;
 /// The hand-off: the window eases out and settles a few points
 /// (`stage::WINDOW_OUT`).
 const OUT_SECONDS: f64 = 0.32;
@@ -39,15 +44,37 @@ pub struct NativeWelcome {
     observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
 
-impl Drop for NativeWelcome {
-    fn drop(&mut self) {
-        for observer in &self.observers {
+impl NativeWelcome {
+    /// Stops following minimize with the stage.
+    fn unfollow(&mut self) {
+        for observer in self.observers.drain(..) {
             unsafe {
                 NSNotificationCenter::defaultCenter()
-                    .removeObserver(&*(Retained::as_ptr(observer) as *const AnyObject));
+                    .removeObserver(&*(Retained::as_ptr(&observer) as *const AnyObject));
             }
         }
     }
+}
+impl Drop for NativeWelcome {
+    fn drop(&mut self) {
+        self.unfollow();
+    }
+}
+
+/// The stage has gone: the window stops following it (a deminimize would
+/// otherwise order the removed stage back in) and becomes an ordinary window,
+/// at the normal level on the current Space. It is not brought forward.
+pub fn stage_left(handle: AnyWindowHandle, cx: &mut App) {
+    let Some(handle) = handle.downcast::<NativeWelcome>() else {
+        return;
+    };
+    let _ = handle.update(cx, |view, window, _| {
+        view.unfollow();
+        if let Some(ns) = ns_window(window) {
+            ns.setLevel(NORMAL_LEVEL);
+            ns.setCollectionBehavior(NSWindowCollectionBehavior::Default);
+        }
+    });
 }
 
 impl Render for NativeWelcome {

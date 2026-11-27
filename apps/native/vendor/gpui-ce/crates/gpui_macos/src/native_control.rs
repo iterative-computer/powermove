@@ -1,8 +1,8 @@
 //! AppKit control slots staged with the same frame transaction and AX ordering
 //! as native text. A slot owns no callbacks, model, focus policy or persistence.
-use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSResponder, NSView, NSWindowOrderingMode};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -93,7 +93,7 @@ impl State {
             return false;
         };
         let (bounds, clip) = (placement.bounds, placement.clip);
-        self.scroll_fade.place(&self.wrapper, Self::visible_rect(bounds, clip), clip, apply)
+        self.scroll_fade.place(&self.wrapper, Self::visible_rect(bled(bounds), clip), clip, apply)
     }
     /// The wrapper's frame, the control's frame inside it, whether the
     /// wrapper is hidden and the view it belongs in (a region's content view,
@@ -103,7 +103,9 @@ impl State {
     fn target(&self, apply: bool) -> Option<(NSRect, NSRect, bool, Option<Retained<NSView>>)> {
         let placement = self.placed()?;
         let (bounds, clip) = (placement.bounds, placement.clip);
-        let visible = Self::visible_rect(bounds, clip);
+        // Whether it shows is the control's own; the wrapper takes its bleed.
+        let own = Self::visible_rect(bounds, clip);
+        let visible = Self::visible_rect(bled(bounds), clip);
         let x = visible.origin.x;
         let y = visible.origin.y;
         let (frame, parent, outside) = match placement.region {
@@ -114,7 +116,7 @@ impl State {
             Some(region) => (
                 visible,
                 Some(crate::slot_region::content_view(&self.gpui, region, apply)?),
-                !crate::slot_region::shows(&self.gpui, region, visible),
+                !crate::slot_region::shows(&self.gpui, region, own),
             ),
         };
         let visible = visible.size;
@@ -125,8 +127,37 @@ impl State {
             ),
             bounds.size,
         );
-        Some((frame, local, outside || visible.width <= 0. || visible.height <= 0., parent))
+        let own = own.size;
+        Some((frame, local, outside || own.width <= 0. || own.height <= 0., parent))
     }
+}
+/// Powermove P-SLOT-BLEED: room around a control inside its wrapper. A
+/// Liquid Glass control (a glass push button, a large search field) draws its
+/// rim and shadow a few points outside its frame; a wrapper cut at the frame
+/// cut them off, flat along the top and bottom (worst in light mode). The
+/// wrapper still clips to the slot's region and content mask.
+const BLEED: f64 = 8.;
+define_class!(
+    /// A slot's clipping wrapper: a press in its bleed, outside the control,
+    /// reaches GPUI's view below.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMNativeControlWrapper"]
+    struct Wrapper;
+    unsafe impl NSObjectProtocol for Wrapper {}
+    impl Wrapper {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> *mut NSView {
+            let hit: *mut NSView = unsafe { msg_send![super(self), hitTest: point] };
+            if std::ptr::eq(hit, self as *const Self as *const NSView) { std::ptr::null_mut() } else { hit }
+        }
+    }
+);
+fn bled(bounds: NSRect) -> NSRect {
+    NSRect::new(
+        NSPoint::new(bounds.origin.x - BLEED, bounds.origin.y - BLEED),
+        NSSize::new(bounds.size.width + 2. * BLEED, bounds.size.height + 2. * BLEED),
+    )
 }
 thread_local! {static SLOTS:RefCell<HashMap<usize,Vec<Weak<State>>>>=RefCell::new(HashMap::new());}
 pub struct NativeControlSlot {
@@ -135,7 +166,11 @@ pub struct NativeControlSlot {
 impl NativeControlSlot {
     pub fn new(gpui: &NSView, control: Retained<NSView>) -> Self {
         let mtm = MainThreadMarker::new().expect("native controls require main");
-        let wrapper = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        let wrapper: Retained<NSView> = {
+            let this = Wrapper::alloc(mtm).set_ivars(());
+            let view: Retained<Wrapper> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            Retained::into_super(view)
+        };
         wrapper.setWantsLayer(true);
         wrapper.setHidden(true);
         // GPUI lays out from the top: between a change of the window's

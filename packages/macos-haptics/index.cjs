@@ -8,6 +8,7 @@ if (process.platform === 'darwin') {
 }
 
 module.exports = {
+  fileVersions(operation, path, contents = '') { return native?.fileVersions?.(operation, path, contents) ?? Promise.resolve(null); },
   cloneFile(source, destination) { return native?.fileOperation?.('clone', source, destination) ?? Promise.resolve(false); },
   swapFiles(source, destination) { return native?.fileOperation?.('swap', source, destination) ?? Promise.resolve(false); },
   installFile(source, destination) { return native?.fileOperation?.('install', source, destination) ?? Promise.resolve(false); },

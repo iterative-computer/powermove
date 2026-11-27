@@ -1550,7 +1550,7 @@ pub(super) fn begins_file(whole: &Path, part: &File) -> bool {
 /// itself when it could not be captured (under `path`), and a file that
 /// landed under `path` since. Empty when the version is gone.
 ///
-/// What remains (docs/native/p0-decisions.md): a program still holding a
+/// What remains: a program still holding a
 /// descriptor to the file, which writes into it in the instant between
 /// this check and the unlink, loses that write.
 pub(super) fn dispose(

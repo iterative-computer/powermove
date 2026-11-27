@@ -787,8 +787,29 @@ impl Backend {
     }
     pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
         let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
+        // A thread with no provider recorded starts on the onboarding
+        // choice, else the sign-ins, else Aero (w127).
+        let link = &self.native.agent_link;
+        let default = crate::agent_host::default_provider(
+            self.kernel
+                .state()
+                .settings
+                .get("agentProvider")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .as_deref(),
+            link.offers_aero(),
+            link.signed_in(pm_agents::Provider::Chatgpt),
+            link.signed_in(pm_agents::Provider::Claude),
+        );
         let mut state = agent.shared();
         let active = state.panel.active_id().to_owned();
+        if let Some(default) = default {
+            state
+                .panel
+                .adopt_default_provider(&active, default, link.catalog(default))
+                .map_err(|e| format!("{e:?}"))?;
+        }
         let provider = state
             .panel
             .session(&active)
@@ -2586,6 +2607,7 @@ impl Backend {
                     let mut store = KernelStore::new(self.kernel.clone(), self.application);
                     let operation = match &effect.kind {
                         EffectKind::OpenSettings => Some(("agent.settings", Value::Null)),
+                        EffectKind::Subscribe => Some(("agent.subscribe", Value::Null)),
                         EffectKind::Shell(ShellAction::Open) => Some(("agent.open", Value::Null)),
                         EffectKind::Shell(ShellAction::Close) => Some(("agent.close", Value::Null)),
                         // Escape in the docked composer: the editor takes the keyboard back.

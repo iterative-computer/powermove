@@ -14,7 +14,7 @@
 //! such projects to the current engine); `render` and `scope` exit 4 when a program
 //! only the app's WebGL fallback runner draws makes the project not
 //! headless-renderable (named per layer and definition). `parity eval` (evaluation parity,
-//! section 25; docs/engine/phase1-gate.md) keeps its own statuses, listed in
+//! section 25) keeps its own statuses, listed in
 //! `pm-cli parity eval --help`.
 
 mod angle;

@@ -66,6 +66,9 @@ impl std::fmt::Debug for Session {
 /// time it is asked for (a sign-out or another account is seen at once).
 pub trait PowermoveAccount: Send + Sync + std::fmt::Debug {
     fn session(&self) -> Option<Session>;
+    /// Powermove refused this session (401): the app forgets it, as Sign
+    /// Out does, and shows signed out everywhere.
+    fn ended(&self) {}
 }
 
 /// A calendar day (UTC): year, month, day.
@@ -133,7 +136,7 @@ pub enum Standing {
     Unreachable(String),
 }
 /// What the picker and the panel say on Free.
-pub const NEEDS_PLAN: &str = "Aero needs Aerolite or Aero.";
+pub const NEEDS_PLAN: &str = "Aero needs Aerolite.";
 
 /// The test endpoint, when `development` (a debug build with the switch on)
 /// and it names plain HTTP on 127.0.0.1 with a port, nothing else.
@@ -275,8 +278,14 @@ pub fn standing(env: &Environment) -> Standing {
     let Ok((status, body)) = get(BILLING) else {
         return unreachable();
     };
+    let ended = || {
+        if let Some(account) = env.powermove.as_ref() {
+            account.ended();
+        }
+        Standing::SignedOut
+    };
     match parse_billing(status, &body) {
-        Ok(BillingAnswer::SignedOut) => Standing::SignedOut,
+        Ok(BillingAnswer::SignedOut) => ended(),
         Ok(BillingAnswer::Missing) => {
             Standing::Unreachable("Aero isn’t available on Powermove yet.".into())
         }
@@ -288,7 +297,8 @@ pub fn standing(env: &Environment) -> Standing {
                     Standing::Unreachable("Aero couldn’t read its models from Powermove.".into())
                 }
             },
-            Ok((401 | 403, _)) => Standing::SignedOut,
+            Ok((401, _)) => ended(),
+            Ok((403, _)) => Standing::SignedOut,
             _ => unreachable(),
         },
         Err(_) => Standing::Unreachable("Aero couldn’t read your plan from Powermove.".into()),
@@ -590,8 +600,10 @@ pub fn live_in(
             if id != started {
                 return Err(CHANGED.into());
             }
-            // The backend refused this bearer: there is no other to try.
+            // The backend refused this bearer: there is no other to try,
+            // and the app forgets it.
             if rejected.is_some_and(|r| r == bearer) {
+                account.ended();
                 return Err(SIGN_IN_AGAIN.into());
             }
             let mut headers = vec![

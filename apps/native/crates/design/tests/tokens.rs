@@ -307,3 +307,25 @@ fn a_waveform_is_light_inside_the_glass() {
         }
     }
 }
+/// Two surface tones per appearance (owner, 2026-11-26): the chrome is the
+/// window colour as the ground (title bar and sidebar draw that same ground),
+/// and light content is solid paper, so Home's sheet, the editor's panels and
+/// the viewer's surround are one tone.
+#[test]
+fn two_surface_tones() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        assert_eq!(
+            t.ground(),
+            (t.colors.window, t.translucency.window),
+            "{scheme:?}"
+        );
+    }
+    let light = Tokens::new(Scheme::Light, Accessibility::default());
+    assert_eq!(light.translucency.panel, 1., "light content is solid");
+    assert_eq!(
+        light.viewer_surround(),
+        light.colors.panel,
+        "the viewer's surround is the content tone"
+    );
+}

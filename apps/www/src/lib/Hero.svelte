@@ -115,7 +115,7 @@
 
 </div>
 
-<p class="hero-description">Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask.</p>
+<p class="hero-description"><span class="strong">The video editor you customize with AI.</span> Connect Claude or Codex and ask for an extension, a restyled interface, or a new effect.</p>
 
 <div class="hero-cta">
   <a class="pill light" href={download.href}>Download for Mac</a>

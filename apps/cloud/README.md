@@ -24,10 +24,13 @@ them on the desktop.
 - `src/billing/` plans (`plans.ts`, matching the website), the credit ledger and
   billing state (`ledger.ts`), the Stripe client (`stripe.ts`) and the webhook's
   event handling (`webhook.ts`, idempotent by event id via `stripe_events`).
-- `src/aero/` the model catalogue and credit prices (`catalogue.ts`; 1 credit =
-  $0.005 of list price), Chat Completions in to AI SDK `streamText` out
+- `src/aero/` the model catalogue (`catalogue.ts`, public facts only) and what calls
+  cost (`pricing.ts`, from the `AERO_PRICING` secret), Chat Completions in to AI SDK `streamText` out
   (`translate.ts`, prompt caching for both providers), and AI SDK stream parts
-  back to Chat Completions SSE in the subset fx parses (`sse.ts`).
+  back to Chat Completions SSE in the subset fx parses (`sse.ts`). Each call runs in
+  a Durable Object of its own (`call.ts`, binding `AERO_CALLS`) that reserves, calls the
+  provider once and settles the request's credits (`meter.ts`); an uncertain settle takes the whole
+  hold, and a period never spends past its grant.
 - `src/lifecycle.ts` is the state table (visibility × moderation × tombstone
   × yank). Every read decides through it.
 - `src/objects/` presence, references (the one reachability predicate shared
@@ -122,9 +125,11 @@ Aero") and monthly prices by lookup key, once, against whatever
 live key without `--live`.
 
 Billing secrets in production are Worker secrets: `STRIPE_SECRET_KEY`,
-`STRIPE_WEBHOOK_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`; the prices are
-found by lookup key, or set `STRIPE_PRICE_AEROLITE` / `STRIPE_PRICE_AERO`.
-`STRIPE_API_BASE` and `AERO_*_BASE_URL` are honoured only on loopback hosts.
+`STRIPE_WEBHOOK_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. The Worker takes
+a plan only by its exact price id, `STRIPE_PRICE_AEROLITE` (and
+`STRIPE_PRICE_AERO`), never by lookup key or metadata; `local:billing` passes the
+ids `stripe:setup` prints. `STRIPE_API_BASE` and `AERO_*_BASE_URL` are honoured
+only on loopback hosts.
 
 ### The Store
 
@@ -229,6 +234,51 @@ Try these flows in the desktop Store:
 The Store detail page lists older versions but currently offers installation
 of the latest only, so `--update` publishes Glass Tint 1.1.0 after you install
 1.0.0.
+
+## Before every production deploy
+
+`ENVIRONMENT=production` (wrangler.jsonc) makes the Worker, its Aero call objects
+and its cron refuse to serve (503 `misconfigured`, names logged, never values)
+while any development setting is present or a required one is missing
+(`src/production.ts`). Check, in order:
+
+1. **Secrets set** (`wrangler secret put`): `AERO_PRICING` (JSON, shape in
+   `src/aero/pricing.ts`; without it Aero answers 503 `misconfigured`), `BETTER_AUTH_SECRET`,
+   `TURNSTILE_SECRET_KEY` (live, not Cloudflare's `1x0000…` test key),
+   `STRIPE_SECRET_KEY` (`sk_live_` or a live restricted `rk_live_` key),
+   `STRIPE_WEBHOOK_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `DATABASE_URL`.
+2. **Vars set** (wrangler.jsonc or `--var`): `ENVIRONMENT=production`,
+   `TURNSTILE_ENABLED=1`, a live `TURNSTILE_SITE_KEY`, `STRIPE_PRICE_AEROLITE`
+   (and `STRIPE_PRICE_AERO`) as the live price ids `stripe:setup --live`
+   printed, `AERO_GLOBAL_DAILY_USD` (default 50) and `EMAIL_DAILY_LIMIT`
+   (default 150, under the 200-message mail quota).
+   `POSTHOG_KEY` is the desktop app's public PostHog project key
+   (`apps/native/crates/telemetry`); set it with `wrangler secret put POSTHOG_KEY`
+   (kept out of the repo only because the secret scanner can't tell a public key
+   from a private one). Without it the Worker sends no PostHog events.
+3. **Unset everywhere** (secrets and vars): `DEV_LOG_OTP`, `OTP_SENDER`,
+   `GOOGLE_DISCOVERY_URL`, `LOCAL_POSTGRES`, `STRIPE_API_BASE`,
+   `AERO_OPENAI_BASE_URL`, `AERO_ANTHROPIC_BASE_URL`. `wrangler secret list`
+   must show none of them.
+4. **Bindings**: `AERO_CALLS` (Durable Object, migration `aero-calls`), the rate
+   limits `RL_UPLOAD`, `RL_AUTH`, `RL_ADMIN`, `RL_AERO`, and the cron (it also
+   sweeps expired Aero holds into full-hold spends).
+5. **Stripe dashboard** (live mode): business branding **Iterative Computer**;
+   **Stripe Tax on** with the registrations in place; the **Customer Portal**
+   limited to Aerolite (no switching to other prices, cancellation at period
+   end); a webhook endpoint `https://cloud.trypowermove.com/v2/stripe/webhook`
+   subscribed to `checkout.session.completed`, `checkout.session.expired`,
+   `customer.subscription.created|updated|deleted`, `invoice.paid`,
+   `invoice.payment_failed`, `invoice.voided`, `invoice.marked_uncollectible`,
+   `charge.refunded` and `charge.dispute.created` (the last four reverse a
+   period's credits); its signing secret is `STRIPE_WEBHOOK_SECRET`.
+6. **Spend alerts**: provider budget alerts on the OpenAI and Anthropic accounts
+   (hard limits where offered) at or under `AERO_GLOBAL_DAILY_USD` × 30; alerts
+   on the logs `aero global daily ceiling reached`, `aero spend over its hold`
+   (an account blocked for review in `aero_blocks`), `billing: duplicate
+   subscription` and `email ceiling reached`; a Stripe alert on disputes.
+7. **Migrations** applied to the production database before the Worker deploy.
 
 ## Production provisioning
 

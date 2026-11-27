@@ -2,9 +2,10 @@
 //! Closing it quits the app; quitting at any point is safe and the next launch resumes.
 use crate::welcome::{self, Frame, Progress, Severity, SignIn, SignInStage};
 use crate::{
-    kit::{Button, Kit, Recipes},
+    kit::{Button, Kit, Recipes, ink as tint},
     motion::Motion,
     native_control::{ControlSpec, Kind, NativeControl},
+    symbol::Weight,
 };
 use gpui::{prelude::*, *};
 use pm_design::{
@@ -445,6 +446,140 @@ impl WelcomeView {
         }
         card
     }
+    /// A plan to buy, as the website's pricing card: night in both
+    /// appearances with the accent's warm light rising from its foot; the
+    /// name, the price large with its period, the note, a hairline, the
+    /// check-marked features, the button; Maybe Later quietly under it.
+    fn offer_card(&self, kit: &Kit, offer: &welcome::Offer, cx: &mut Context<Self>) -> AnyElement {
+        let t = &self.tokens;
+        let c = &t.colors;
+        let night = pm_design::Colors::of(pm_design::Scheme::Dark);
+        let pad = t.space.xl;
+        let corner = t.metrics.control_radius + pad;
+        let white = |a: f32| tint(0xffffff, a);
+        let light = linear_gradient(
+            180.,
+            linear_color_stop(rgb(night.window), 0.4),
+            linear_color_stop(rgb(pm_design::mix(night.window, c.accent, 0.4)), 1.),
+        )
+        .color_space(ColorSpace::Oklab);
+        let features = offer.features.iter().map(|(title, detail)| {
+            div()
+                .flex()
+                .gap(px(t.space.sm))
+                .child(kit.symbol(
+                    "checkmark",
+                    ts().base,
+                    Weight::Semibold,
+                    pm_design::mix(c.accent, 0xffffff, 0.55),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(t.space.hair / 2.))
+                        .child(
+                            div()
+                                .text_size(px(ts().base))
+                                .text_color(white(1.))
+                                .child(title.clone()),
+                        )
+                        .children((!detail.is_empty()).then(|| {
+                            div()
+                                .text_size(px(ts().xs))
+                                .text_color(white(0.56))
+                                .child(detail.clone())
+                        })),
+                )
+        });
+        div()
+            .id("welcome-offer")
+            .debug_selector(|| "welcome-offer".into())
+            .role(Role::Group)
+            .mt(px(t.space.md))
+            .aria_label(format!(
+                "{}, {} {}. {}",
+                offer.name, offer.price, offer.period, offer.note
+            ))
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(t.space.sm))
+            .child(
+                div()
+                    .w_full()
+                    .p(px(pad))
+                    .flex()
+                    .flex_col()
+                    .gap(px(t.space.xs))
+                    .rounded(px(corner))
+                    .bg(light)
+                    .border_1()
+                    .border_color(white(0.1))
+                    .child(
+                        div()
+                            .text_size(px(ts().base))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(white(1.))
+                            .child(offer.name.clone()),
+                    )
+                    .child(
+                        // The period on the price's baseline: both rest on the
+                        // row's foot, the period lifted by the difference of
+                        // their descents.
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap(px(t.space.xs))
+                            .child(
+                                div()
+                                    .text_size(px(ts().x4l))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(white(1.))
+                                    .child(offer.price.clone()),
+                            )
+                            .child(
+                                div()
+                                    .pb(px(t.space.xs))
+                                    .text_size(px(ts().xs))
+                                    .text_color(white(0.56))
+                                    .child(offer.period.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(ts().xs))
+                            .text_color(white(0.72))
+                            .child(offer.note.clone()),
+                    )
+                    .child(
+                        kit.button(
+                            "welcome-offer-get",
+                            offer.action.clone(),
+                            Button::Primary,
+                            None,
+                            None,
+                        )
+                        .mt(px(t.space.md))
+                        .w_full()
+                        .on_click(cx.listener(|v, _, _, cx| v.act("offer:get", cx))),
+                    )
+                    .child(div().my(px(t.space.md)).h(px(1.)).w_full().bg(white(0.1)))
+                    .children(features),
+            )
+            .child(
+                kit.button(
+                    "welcome-offer-later",
+                    "Maybe Later",
+                    Button::Quiet,
+                    None,
+                    None,
+                )
+                .on_click(cx.listener(|v, _, _, cx| v.act("offer:later", cx))),
+            )
+            .into_any_element()
+    }
     /// The step's choices on the stage: one grouped list, its rows parted by
     /// hairlines inset from the leading edge. A row has its mark (one size,
     /// in a tile), its name and one quiet line, and at its end a capsule
@@ -843,6 +978,12 @@ impl WelcomeView {
         if !frame.choices.is_empty() {
             controls = controls.child(self.choice_list(window, cx));
         }
+        // A plan to buy takes the stage's other half (below): the column
+        // keeps its list, and the whole card shows beside it.
+        let offer = frame
+            .offer
+            .as_ref()
+            .map(|offer| self.offer_card(&kit, offer, cx));
         if !frame.rows.is_empty() || frame.names.is_some() {
             let mut body = div()
                 .id("welcome-body")
@@ -1019,25 +1160,59 @@ impl WelcomeView {
             .pt(px(wt().logo_top))
             .child(column);
         let [top_slots, bottom_slots] = ["welcome.top", "welcome.bottom"].map(|id| {
-            self.extension_slot.as_ref()
+            self.extension_slot
+                .as_ref()
                 .map_or_else(Vec::new, |render| render(id, &t, window, cx))
         });
+        // The other half: the step's picture; or, while a plan is offered,
+        // its whole card in the picture's place, at the column's width and
+        // centred on the column's span (the mark down to the primary).
         let right = div()
             .absolute()
             .top_0()
             .bottom_0()
             .right_0()
             .left(px(wt().half))
-            .overflow_hidden()
-            .children(frame.preview.as_deref().and_then(|id| preview(id, window)))
-            .when(!top_slots.is_empty(), |d| {
-                d.child(div().absolute().top(px(t.metrics.titlebar)).left_0().right_0()
-                    .flex().flex_col().children(top_slots))
-            })
-            .when(!bottom_slots.is_empty(), |d| {
-                d.child(div().absolute().bottom_0().left_0().right_0()
-                    .flex().flex_col().children(bottom_slots))
-            });
+            .overflow_hidden();
+        let right = match offer {
+            Some(card) => right.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(wt().logo_top))
+                    .h(px(wt().actions_top + wt().primary_height - wt().logo_top))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().w(px(wt().column)).child(card)),
+            ),
+            None => right.children(frame.preview.as_deref().and_then(|id| preview(id, window))),
+        }
+        .when(!top_slots.is_empty(), |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top(px(t.metrics.titlebar))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_col()
+                    .children(top_slots),
+            )
+        })
+        .when(!bottom_slots.is_empty(), |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_col()
+                    .children(bottom_slots),
+            )
+        });
         div()
             .id("welcome")
             .role(Role::Group)
@@ -1258,7 +1433,10 @@ impl WelcomeView {
                 let height = f32::from(bounds.size.height);
                 if (height - content.get()).abs() > 0.5 {
                     content.set(height);
-                    window.refresh();
+                    // A refresh asked for while painting is dropped: the
+                    // fit waited for the next input event. Ask for the
+                    // next frame instead.
+                    window.on_next_frame(|window, _| window.refresh());
                 }
             },
             |_, _, _, _| {},
@@ -1282,8 +1460,13 @@ impl WelcomeView {
             .items_center()
             .pt(px(wt().sheet_padding))
             .child(
+                // Its natural height, never squeezed by the window: the
+                // measure reads what the step needs, so the window can grow
+                // to it (squeezed, it read the window's own height and an
+                // error line pushed Continue out of the sheet).
                 div()
                     .relative()
+                    .flex_none()
                     .flex()
                     .flex_col()
                     .items_center()
@@ -1947,12 +2130,18 @@ impl WelcomeView {
     fn choices(&self, kit: &Kit, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
+        // A list's rows stand one inset inside it on every side, their
+        // corners concentric with its (the Settings sidebar's rule): the
+        // chosen row's raised fill and a row's hover never meet its edge.
+        let inset = t.space.xs;
+        let row_radius = t.radius.nested(m.group_radius, inset);
         let mut group = if self.frame.cards {
             div().flex().flex_row().gap(px(m.inset))
         } else {
             div()
                 .flex()
                 .flex_col()
+                .p(px(inset))
                 .rounded(px(m.group_radius))
                 .bg(rgb(c.panel))
         };
@@ -2016,9 +2205,17 @@ impl WelcomeView {
                         .child(choice.label.clone()),
                 );
             } else {
-                if selected {
-                    item = item.bg(rgb(c.raised)).elevated(t, Elevation::Raised);
-                }
+                // The text keeps its place: the list's inset comes off the
+                // row's own padding.
+                item = item
+                    .px(px(m.inset - inset))
+                    .py(px(m.inset - inset))
+                    .rounded(px(row_radius));
+                item = if selected {
+                    item.bg(rgb(c.raised)).elevated(t, Elevation::Raised)
+                } else {
+                    item.hover(|s| s.bg(tint(c.text, t.translucency.hover)))
+                };
                 item = item.child(
                     div()
                         .text_size(px(t.typography.body))
@@ -2149,6 +2346,9 @@ impl Render for WelcomeView {
         }
         if !frame.choices.is_empty() {
             content = content.child(self.choices(&kit, cx));
+        }
+        if let Some(offer) = &frame.offer {
+            content = content.child(self.offer_card(&kit, offer, cx));
         }
         // The rows and the names scroll together in the room left between the
         // header and the buttons; a fade at the bottom says there's more.

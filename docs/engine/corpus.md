@@ -11,7 +11,7 @@ The tooling lives in `engine/corpus/`; captured data never enters the repository
   provide.
 - **Capture** (`src/capture.ts`): opens every project in the built legacy app and writes
   frames, float frames and evaluation dumps at chosen times; also the
-  12 pixel-hash scenarios of `e2e/rendering-performance.spec.ts` and Jude's real project.
+  12 pixel-hash scenarios of `e2e/rendering-performance.spec.ts` and a large real project.
 - **Verify** (`src/verify.ts`): checks a capture against its manifest.
 
 Captures are written to `~/Library/Application Support/Powermove Engine Corpus/<capture-id>/`.
@@ -347,7 +347,7 @@ Effect projects still reassign effect keyframe ids on open (17 projects, recorde
 in `loaded.json`). The real project's original was not written (its hash is checked
 before and after).
 
-`perf/` under the same root holds the copies of Jude's project used for
+`perf/` under the same root holds the copies of a large real project used for
 `PM_PERF_PROJECT`, `PM_PERF_FILE`, and `PM_PLAYBACK_PROJECT` (see the e2e ledger);
 it is not a capture.
 

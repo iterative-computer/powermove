@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 3a gate: the engine-side measurements (docs/engine/phase3a-gate.md).
+# Phase 3a gate: the engine-side measurements.
 #
 #   engine/crates/pm-cli/scripts/phase3a-gate.sh [OUT] [STEP...]
 #
@@ -10,8 +10,7 @@
 # Blender, text, shaders, effects, linear blending, antialiasing, motion,
 # composite, color), the blur-energy line, native/WASM evaluation identity,
 # the 1M-vertex pick measurement, and the engine's share of canvas text
-# typing. App rows run separately under the Electron lock
-# (docs/engine/phase3a-gate.md, "Reproducing"). Logs and JSON go to OUT (default
+# typing. Logs and JSON go to OUT (default
 # /tmp/phase3a-gate), never into the repository; `status.txt` lists each
 # step's exit status. STEP names (the log names below) limit the run.
 #

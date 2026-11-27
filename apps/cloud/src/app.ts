@@ -22,12 +22,23 @@ import { billing } from './routes/billing';
 import { stripeWebhook } from './routes/stripe-webhook';
 import { aero } from './routes/aero';
 import { V2Error } from './v2-error';
+import { productionProblems } from './production';
+import { rateAuth } from './routes/session';
 export const MIN_DESKTOP_VERSION = '0.0.0';
 export function createApp(deps: {
   data: (env: CloudflareBindings) => Data;
   beforeCommit?: PublishDeps['beforeCommit'];
 }) {
   const app = new Hono<Env>();
+  app.use('*', async (c, next) => {
+    // A production Worker with development settings (or without its live keys) serves nothing at all.
+    const problems = c.env ? productionProblems(c.env) : [];
+    if (problems.length) {
+      console.error('refusing to serve: production misconfigured', problems.join(','));
+      return c.json({ error: { code: 'misconfigured' } }, 503);
+    }
+    await next();
+  });
   app.use('*', async (c, next) => {
     c.set('requestId', crypto.randomUUID());
     c.header('X-Request-Id', c.var.requestId);
@@ -64,9 +75,11 @@ export function createApp(deps: {
   });
   app.use('*', async (c, next) => {
     c.set('session', null);
-    if (c.var.data && c.req.header('Authorization')?.startsWith('Bearer ')) {
+    const authorization = c.req.header('Authorization');
+    if (c.var.data && authorization?.startsWith('Bearer ')) {
       try {
-        const result = await createAuth(c.var.data, c.env).api.getSession({ headers: c.req.raw.headers });
+        // The bearer alone: no cookie (or any other header) can stand in for it, even when the bearer is invalid.
+        const result = await createAuth(c.var.data, c.env).api.getSession({ headers: new Headers({ authorization }) });
         c.set('session', result?.session ?? null);
       } catch {
         /* invalid bearer remains anonymous */
@@ -113,7 +126,9 @@ export function createApp(deps: {
     '/v1/store',
     storeUtility,
   ).route('/v1/installs', installRoutes).route('/v2/billing', billing).route('/v2/stripe/webhook', stripeWebhook).route('/v2/aero', aero);
+  // The direct OAuth routes share the auth routes' per-IP edge limit.
   app.post('/v1/auth/sign-in/oauth2', async (c) => {
+    await rateAuth(c);
     const body = await c.req.json().catch(() => null) as { providerId?: unknown; callbackURL?: unknown } | null;
     if (body?.providerId !== 'google') return c.json({ error: 'not_found' }, 404);
     const url = new URL(c.req.url);
@@ -123,7 +138,8 @@ export function createApp(deps: {
       body: JSON.stringify({ provider: 'google', callbackURL: body.callbackURL }),
     }));
   });
-  app.get('/v1/auth/oauth2/callback/:providerId', (c) => {
+  app.get('/v1/auth/oauth2/callback/:providerId', async (c) => {
+    await rateAuth(c);
     if (c.req.param('providerId') !== 'google') return c.json({ error: 'not_found' }, 404);
     const url = new URL(c.req.url);
     url.pathname = '/v1/auth/callback/google';

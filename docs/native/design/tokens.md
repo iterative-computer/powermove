@@ -7,6 +7,14 @@ size, type value and motion value. The system they encode is
 - `colors.*` come from `Colors::of`: seven OKLCH roles per appearance, the rest
   ink over a ground at an alpha step. Derived steps (`fill`, `fill_strong`,
   `hairline`, `raised`, `faint`) follow a theme's colour patch.
+- Two surface tones per appearance. **Chrome** is `colors.window`: the title
+  bar, the sidebar and the ground around the content are one tint over the
+  behind-window blur (`translucency.window`), laid once: the title bar paints
+  nothing of its own and the sidebar column gets the same ground, not a glass
+  of its own. **Content** is `colors.panel`: Home's sheet, docked panels and
+  the viewer's surround; in light it is solid (`translucency.panel` 1), as a
+  Mac's light content areas. Wells, the viewer's picture ground and
+  selections sit inside a content surface, never a third surface beside it.
 - `space.*` and `radius.*` are the scales; the older `metrics.*` names that
   panels and themes use (`gap`, `inset`, `control_radius`, `panel_radius`, …)
   are set from them.
@@ -64,7 +72,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.labels.yellow` | Label: user colour | `#EFE0B2` | `#5C4A17` | `#EFE0B2` | `#5C4A17` |
 | `colors.media_badge` | Badge fill over media (duration, offline); always dark | `#000000` | `#000000` | `#000000` | `#000000` |
 | `colors.muted` | Captions, metadata, placeholder, units | `#66676B` | `#9C9B99` | `#57595D` | `#BDBCBB` |
-| `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1C1917` | `#FDFDFE` | `#1C1917` |
+| `colors.panel` | Content tone: every docked work surface, Home's sheet and sheet content | `#FDFDFE` | `#1C1917` | `#FDFDFE` | `#1C1917` |
 | `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#151311` | `#F5F5F7` | `#151311` |
 | `colors.raised` | Raised neutral surface: selected segment or tab, neutral button, card (derived) | `#FFFFFF` | `#373433` | `#FFFFFF` | `#373433` |
 | `colors.scope_blue` | Blue channel scope trace on the dark viewer | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` |
@@ -89,7 +97,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.welcome_field_light` | Welcome stage: the orange field, light end | `#FF7A2E` | `#FF7A2E` | `#FF7A2E` | `#FF7A2E` |
 | `colors.welcome_ground` | Welcome stage: the ground left of the window | `#131212` | `#131212` | `#131212` | `#131212` |
 | `colors.white` | Pure white: marks over the welcome field | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
-| `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
+| `colors.window` | Chrome tone: the window ground under the toolbar, sidebar and status bar, around the content | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `metrics.agent_attachment` | Square draft attachment thumbnail edge | 56 | 56 | 56 | 56 |
 | `metrics.agent_attachment_sent` | Square sent attachment thumbnail edge | 40 | 40 | 40 | 40 |
 | `metrics.agent_gap` | Space between turns in the Agent conversation | 16 | 16 | 16 | 16 |
@@ -202,7 +210,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.playhead` | Playhead line width | 1 | 1 | 1 | 1 |
 | `metrics.popover_radius` | Corner of popovers Powermove frames itself (agent popover) | 16 | 16 | 16 | 16 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
-| `metrics.property_row` | Timeline property sub-row | 22 | 22 | 22 | 22 |
+| `metrics.property_row` | Timeline property sub-row | 28 | 28 | 28 | 28 |
 | `metrics.rotation_stem` | Rotation handle stem length | 18 | 18 | 18 | 18 |
 | `metrics.row` | Inspector and list row height | 28 | 28 | 28 | 28 |
 | `metrics.ruler` | Timeline ruler height | 24 | 24 | 24 | 24 |
@@ -303,18 +311,18 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.07 | 0.08 | 0.07 |
 | `translucency.faint` | Third text step, as `text` ink | 0.42 | 0.36 | 0.42 | 0.36 |
 | `translucency.glass_menu` | Floating colour under a palette's or menu's rows on system glass | 0.84 | 0.72 | 0.84 | 0.72 |
-| `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.6 | 0.9 | 0.6 | 0.9 |
+| `translucency.glass_tint` | Window-colour tint on system glass that carries labels | 0.9 | 0.9 | 0.9 | 0.9 |
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
 | `translucency.hover` | Hover wash and soft fills, as `text` ink | 0.045 | 0.06 | 0.08 | 0.1 |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.08 | 0.07 | 0.08 | 0.07 |
 | `translucency.offline_hatch` | Media Offline hatch on timeline clips, as `danger` ink | 0.28 | 0.28 | 0.28 | 0.28 |
-| `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.7 | 0.72 | 0.7 | 0.72 |
+| `translucency.panel` | Content panel over the chrome (1 = solid: light content is solid paper) | 1 | 0.72 | 1 | 0.72 |
 | `translucency.pressed` | Pressed wash, as `text` ink | 0.1 | 0.14 | 0.16 | 0.2 |
 | `translucency.selected` | Neutral on state of a tab or segment, as `text` ink | 0.07 | 0.1 | 0.12 | 0.16 |
 | `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
 | `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
-| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.9 | 0.62 | 0.9 |
+| `translucency.window` | Chrome tint over the behind-window blur: title bar, sidebar and the ground around the content, one tone (1 = solid) | 0.9 | 0.9 | 0.9 | 0.9 |
 | `settings.account_row` | Settings account row height | 40 | 40 | 40 | 40 |
 | `settings.account_weight` | Settings account name and initial weight | 600 | 600 | 600 | 600 |
 | `settings.app_icon` | Settings › Agents app mark side | 20 | 20 | 20 | 20 |

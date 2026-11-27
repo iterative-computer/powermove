@@ -1,4 +1,11 @@
 interface CloudflareBindings {
+  /** PostHog (the desktop app's project): host and public project key. See telemetry.ts. */
+  POSTHOG_HOST?: string;
+  POSTHOG_KEY?: string;
+  /** '1' lets a non-production Worker send PostHog events. */
+  POSTHOG_LOCAL?: string;
+  /** 'production' on the deployed Worker (wrangler.jsonc); 'development' locally (.dev.vars). See production.ts. */
+  ENVIRONMENT?: string;
   DATABASE_URL: string;
   LOCAL_POSTGRES?: string;
   BETTER_AUTH_SECRET: string;
@@ -24,4 +31,14 @@ interface CloudflareBindings {
   ANTHROPIC_API_KEY?: string;
   AERO_OPENAI_BASE_URL?: string;
   AERO_ANTHROPIC_BASE_URL?: string;
+  /** One Durable Object per Aero call (src/aero/call.ts): it owns the provider stream and settles the call. */
+  AERO_CALLS?: DurableObjectNamespace;
+  /** Per-IP edge limit for Aero and billing (Workers Rate Limiting). */
+  RL_AERO?: RateLimit;
+  /** The most Aero may spend across all accounts in a UTC day, in USD (default 50). */
+  AERO_GLOBAL_DAILY_USD?: string;
+  /** What Aero costs, a secret (aero/pricing.ts has the shape). */
+  AERO_PRICING?: string;
+  /** Sign-in codes sent across all addresses in a UTC day (default 150, below the mail quota). */
+  EMAIL_DAILY_LIMIT?: string;
 }

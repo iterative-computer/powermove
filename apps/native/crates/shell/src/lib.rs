@@ -95,7 +95,7 @@ pub use native::{
     live_window_ids, opens_in_place, project_menu_entries,
     ADD, Command, ExportActivity, FlowchartRow, TaskStatus, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     capture_agent_picker, check_palette_typing, check_view3d, document_subtitle, flush_typing, history_titles, native_color, popover_frame, request_close, resize_from_top,
-    send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
+    send_menu_command, system_accent, viewer_slot, viewer_window, window_backdrop,
     zoom_limit,
 };
 

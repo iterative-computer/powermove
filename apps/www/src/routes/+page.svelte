@@ -3,8 +3,13 @@
   import Hero from '$lib/Hero.svelte';
   import Footer from '$lib/Footer.svelte';
   import Features from '$lib/Features.svelte';
+  import Faq from '$lib/Faq.svelte';
+  import Seo from '$lib/Seo.svelte';
+  import { page } from '$app/state';
+  import Pricing from '$lib/Pricing.svelte';
   import { resolveDownload } from '$lib/download.svelte';
-
+  import { HOME_FAQ } from '$lib/faq';
+  import { HOME_DESCRIPTION, HOME_TITLE, faqPage, organization, softwareApplication, website } from '$lib/site';
 
   $effect(() => { resolveDownload(); });
 
@@ -22,24 +27,12 @@
   });
 </script>
 
-<svelte:head>
-  <title>Powermove</title>
-  <meta name="description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
-  <link rel="canonical" href="https://trypowermove.com/" />
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="Powermove" />
-  <meta property="og:url" content="https://trypowermove.com/" />
-  <meta property="og:title" content="Powermove" />
-  <meta property="og:description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
-  <meta property="og:image" content="https://trypowermove.com/og.png?v=3" />
-  <meta property="og:image:width" content="1200" />
-  <meta property="og:image:height" content="630" />
-  <meta property="og:image:alt" content="Powermove, with the editor over a desert night background." />
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Powermove" />
-  <meta name="twitter:description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
-  <meta name="twitter:image" content="https://trypowermove.com/og.png?v=3" />
-</svelte:head>
+<Seo
+  title={HOME_TITLE}
+  description={HOME_DESCRIPTION}
+  path="/"
+  graph={[organization(), website(), softwareApplication(page.data.download), faqPage(HOME_FAQ, '/')]}
+/>
 
 <Header onDark />
 
@@ -47,11 +40,14 @@
   <div class="top">
     <div class="top-glow" aria-hidden="true"></div>
     <section class="hero" aria-labelledby="headline">
-      <h1 id="headline" class="sr-only">Shape your video editor</h1>
+      <h1 id="headline" class="sr-only">Powermove: the video editor you customize with AI</h1>
       <Hero />
     </section>
     <figure class="stage-window">
-      <img src="/editor-window.png" alt="The Powermove editor with media, the canvas, a Tracks timeline with video and audio clips, and properties." width="1914" height="1080" fetchpriority="high" />
+      <picture>
+        <source srcset="/editor-window.webp" type="image/webp" />
+        <img src="/editor-window.png" alt="The Powermove editor with a project called Summer in Lisbon: a graded sunset over Lisbon with the title in the viewer, a Layers timeline with captions, title keyframes, lower thirds and shots, a Grade layer’s Color Wheels, Vignette and Film Grain, and an Aero agent turn that warmed the sunset and added a glow to the title." width="1598" height="1030" fetchpriority="high" />
+      </picture>
     </figure>
   </div>
 
@@ -63,10 +59,11 @@
         <h3 id="editor-title">A real motion editor</h3>
         <p><span class="strong">Layers, keyframes, curves, and effects.</span> All on a timeline, with the agent in a panel beside them.</p>
       </div>
-      <div class="row-media"><img src="/editor-hero.png" alt="The Powermove editor in its dark theme over a desert night wallpaper: media, the agent conversation, a canvas with blur controls, the timeline, properties, and effects." width="1920" height="1280" loading="lazy" /></div>
+      <div class="row-media"><picture><source srcset="/editor-hero.webp" type="image/webp" /><img src="/editor-hero.png" alt="The Powermove editor with a project called Summer in Lisbon: a graded sunset over Lisbon with the title in the viewer, a Layers timeline with captions, title keyframes, lower thirds and shots, a Grade layer’s Color Wheels, Vignette and Film Grain, and an Aero agent turn that warmed the sunset and added a glow to the title over a dark ember gradient." width="1920" height="1280" loading="lazy" /></picture></div>
     </article>
 
     <Features />
+
 
     <article class="row" aria-labelledby="kernel-title">
       <div class="row-copy">
@@ -84,6 +81,9 @@
       </div>
     </article>
   </section>
+
+  <Pricing />
+  <Faq items={HOME_FAQ} lead="What Powermove is, and what malleable means." />
 </main>
 
 <Footer />

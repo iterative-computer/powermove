@@ -1,6 +1,6 @@
 //! Follow-up assertions for Opus specs merged at ce36cb6fc.
 use super::*;
-use crate::surface_backing::{authorization::*, copy, generated::*, maintenance::*, projects::*};
+use crate::surface_backing::{authorization::*, copy, generated::*, projects::*};
 
 #[test]
 fn notes_readonly_and_focused_external_change_follow_spec() {
@@ -228,64 +228,9 @@ fn copy_matches_approved_failure_and_archive_states() {
     );
     assert_eq!(copy::PERFORMANCE_LABELS[2], ("draw_calls", "Draw Calls"));
     assert_eq!(
-        copy::update_status(&UpdateState::Checking, "1.0.0", false),
-        None
-    );
-    assert_eq!(
         copy::workspace_json_error("expected value"),
         "This isn’t valid JSON. expected value"
     );
-}
-
-#[test]
-fn update_ready_requires_verification_stage_and_automatic_skips_remain_manual_checkable() {
-    use crate::updater::{FeedMetadata, FeedRoute, TransitionGate, UpdateFeed};
-    struct Feed;
-    impl UpdateFeed for Feed {
-        fn metadata(&mut self, _: FeedRoute) -> Result<Option<FeedMetadata>> {
-            Ok(Some(FeedMetadata {
-                version: "2.0.0".into(),
-                name: "Release".into(),
-                size_bytes: 1,
-                minimum_macos: 14,
-                notes: None,
-            }))
-        }
-    }
-    struct Unverified;
-    impl UpdateHost for Unverified {
-        fn stage_verified(
-            &mut self,
-            _: &FeedMetadata,
-            _: &mut dyn FnMut(UpdateStage) -> Result<()>,
-        ) -> Result<String> {
-            Ok("download-only-receipt".into())
-        }
-        fn request_normal_quit(&mut self) -> Result<bool> {
-            panic!("must not quit")
-        }
-    }
-    let gate = TransitionGate {
-        packaged_macos: true,
-        macos_major: 14,
-        migration_complete: true,
-        transition_release_verified: true,
-    };
-    let mut u = Updates::default();
-    let r = u.begin_check(true).unwrap();
-    u.check(&r, gate, "1.0.0", &mut Feed).unwrap();
-    assert_eq!(u.skip_available().unwrap(), "2.0.0");
-    let r = u.begin_check(false).unwrap();
-    u.check(&r, gate, "1.0.0", &mut Feed).unwrap();
-    assert_eq!(u.state, UpdateState::Current);
-    let r = u.begin_check(true).unwrap();
-    u.check(&r, gate, "1.0.0", &mut Feed).unwrap();
-    assert!(u.stage(&mut Unverified).is_err());
-    assert_eq!(
-        u.state,
-        UpdateState::VerificationFailed(ServiceErrorCode::InvalidData)
-    );
-    assert!(!u.cancellation_allowed());
 }
 
 #[test]

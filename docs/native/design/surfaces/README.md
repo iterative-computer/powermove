@@ -99,7 +99,7 @@ Both post an `NSAccessibility` announcement (`.medium`; `.high` for errors).
 ## 4. Error copy
 
 Error alerts take their message and informative text from the
-`ServiceErrorCode` table in [reviews/na-cloud-services.md](../reviews/na-cloud-services.md#re-review--2026-11-01).
+`ServiceErrorCode` table (`apps/native/crates/services/src/error.rs`).
 The last row's informative text is amended here to
 `Try again. If it keeps happening, choose Window ▸ Error Log for details.`
 (the shipped app has no Help menu entry for reporting).

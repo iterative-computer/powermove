@@ -123,5 +123,31 @@ export const Admin = {
   Grant: { Req: Req(Empty, Empty, z.object({ email: z.email() })), Res: AdminGrant },
   /** Refused for the last admin. */
   Revoke: { Req: Req(z.object({ userId: z.string().min(1) })), Res: NoContent },
-  Log: { Req: Req(Empty, z.object({ limit: z.coerce.number().int().min(1).max(200).optional() })), Res: z.object({ items: z.array(LogEntry) }) }
+  Log: { Req: Req(Empty, z.object({ limit: z.coerce.number().int().min(1).max(200).optional() })), Res: z.object({ items: z.array(LogEntry) }) },
+  /** Aero and billing at a glance: usage, money, subscriptions, the accounts that matter. Read-only. */
+  AeroOverview: { Req: Req(), Res: z.lazy(() => AeroOverview) },
+  /** Lets an account blocked for review (a spend over its hold) use Aero again. Audit-logged. */
+  AeroUnblock: { Req: Req(z.object({ userId: z.string().min(1) })), Res: NoContent },
 } as const;
+
+const Usage = z.object({
+  costUsd: z.number(), credits: z.number(), calls: z.number().int(), estimatedCalls: z.number().int(), estimatedUsd: z.number(),
+  inputTokens: z.number().int(), cachedTokens: z.number().int(), cacheWriteTokens: z.number().int(), outputTokens: z.number().int(),
+  /** Cache reads over all input tokens (0 with no input). */
+  cacheHitRatio: z.number(),
+});
+const Who = z.object({ id: z.string(), email: z.string().nullable() });
+export const AeroOverview = z.object({
+  generatedAt: IsoDate,
+  today: Usage,
+  last30: Usage,
+  models: z.array(Usage.extend({ model: z.string() })),
+  daily: z.array(z.object({ date: z.string(), costUsd: z.number(), credits: z.number(), calls: z.number().int() })),
+  subscriptions: z.object({ active: z.number().int(), mrrCents: z.number().int(), new30: z.number().int(), cancelling: z.number().int(), pastDue: z.number().int() }),
+  topAccounts: z.array(z.object({ user: Who, costUsd: z.number(), calls: z.number().int(), creditsLeft: z.number().nullable() })),
+  estimated: z.array(z.object({ user: Who, model: z.string().nullable(), costUsd: z.number(), source: z.string().nullable(), createdAt: IsoDate })),
+  blocked: z.array(z.object({ user: Who, reason: z.string(), createdAt: IsoDate })),
+  ceiling: z.object({ todayUsd: z.number(), ceilingUsd: z.number() }),
+  reversals: z.array(z.object({ user: Who, invoiceId: z.string(), reason: z.string(), createdAt: IsoDate })),
+});
+export type AeroOverview = z.infer<typeof AeroOverview>;

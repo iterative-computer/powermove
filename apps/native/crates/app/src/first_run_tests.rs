@@ -168,6 +168,38 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     assert!(onboarding_completed(&profile));
 }
 #[test]
+fn once_the_app_has_opened_no_first_run_window_shows_again() {
+    // The owner signed in, finished the steps, and Home was up; Get Aerolite
+    // opened Checkout in the browser, the app lost focus, and the billing and
+    // identity changes that followed brought the stage back on the last
+    // step's frame. Entering ends the first run for good.
+    let (_temp, home) = home();
+    let mut flow = Flow::new(plan(&home));
+    start(&mut flow);
+    for id in ["begin", "continue", "not_now", "choose:claude", "continue", "continue"] {
+        flow.action(id);
+    }
+    assert!(
+        flow.visible(),
+        "the last step shows while the library opens"
+    );
+    titled(&flow.frame(), "Opening Powermove");
+    flow.entered();
+    assert!(!flow.visible());
+    for message in [
+        Message::Powermove(Some("ana@example.com".into())),
+        Message::AeroPlan(AeroPlan::default()),
+        Message::Powermove(None),
+        Message::Account(pm_agents::Provider::Claude, Some("Signed in".into())),
+    ] {
+        flow.message(message);
+        assert!(!flow.visible());
+    }
+    flow.action("continue");
+    flow.action("back");
+    assert!(!flow.visible());
+}
+#[test]
 fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     let (_temp, home) = home();
     let mut flow = Flow::new(plan(&home));
@@ -1446,7 +1478,7 @@ fn a_wrong_or_expired_code_shakes_clears_and_says_so() {
     assert!(!s.retry);
     assert_eq!(
         wrong.error.as_deref(),
-        Some("That code didn’t match. Check it, or send a new one.")
+        Some("That code didn’t match. Try again.")
     );
     // Typing again takes the line away.
     flow.action("field:code:1");
@@ -1476,7 +1508,7 @@ fn network_errors_stay_inline_with_try_again() {
     titled(&offline, "Create your account");
     assert_eq!(
         offline.error.as_deref(),
-        Some("Couldn’t send a code. Check your connection and try again.")
+        Some("Can’t reach Powermove. Try again in a moment.")
     );
     assert!(sign_in(&offline).retry);
     assert!(!offline.busy);
@@ -1612,4 +1644,98 @@ fn aeros_connect_on_the_agent_step_is_the_powermove_account_sign_in() {
         "no agent sign-in starts"
     );
     titled(&flow.frame(), "Create your account");
+}
+
+/// Onboarding's agent step on Free, signed in, Aero chosen: the plan's whole
+/// card (name, price, note, Get Aerolite, the features, Maybe Later) shows
+/// in the welcome window at its default size, above the pinned actions,
+/// with nothing scrolled out of sight (w127: it was cut off under the
+/// price). `PM_STAGE_SHOTS=<folder>` keeps the picture.
+#[test]
+fn the_agent_step_shows_the_whole_plan_card_in_the_welcome_window() {
+    use gpui::{AppContext, HeadlessAppContext, px, size};
+    use pm_design::{Accessibility, Scheme, Tokens};
+    use pm_services::surface_backing::onboarding::Step as Onboard;
+    let choices = Choices {
+        aero: AeroPlan::from_fact(&json!({"state":"ready","subscribed":false,
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]})),
+        ..Choices::default()
+    };
+    let frame = step_frame(
+        Onboard::Agent,
+        &choices,
+        &Default::default(),
+        Some("ana@example.com"),
+        None,
+    );
+    assert!(frame.offer.is_some(), "Aero on Free offers its plan");
+    objc2::rc::autoreleasepool(|_| {
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let m = tokens.metrics;
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(
+                gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                    .with_automatic_optical_sizing(),
+            ),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let window = cx
+            .open_window(size(px(m.welcome_width), px(m.welcome_height)), |_, cx| {
+                cx.new(|cx| {
+                    let mut view = pm_shell::welcome_view::WelcomeView::new(
+                        tokens.clone(),
+                        frame,
+                        Rc::new(|_, _| {}),
+                        cx,
+                    );
+                    view.stage = true;
+                    view.clock = Some(1.);
+                    view
+                })
+            })
+            .unwrap();
+        let mut image = None;
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            image = cx.capture_screenshot(window.into()).ok();
+        }
+        if let (Some(dir), Some(image)) = (std::env::var_os("PM_STAGE_SHOTS"), image) {
+            fs::create_dir_all(&dir).unwrap();
+            image
+                .save(std::path::Path::new(&dir).join("agent-offer-stage.png"))
+                .unwrap();
+        }
+        let mut bounds = |id: &str| {
+            cx.debug_bounds(window.into(), id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+        };
+        // The list whole in the column, above the actions; the card whole
+        // in the stage's other half, inside the window.
+        let content = bounds("welcome-content");
+        let actions = bounds("welcome-actions");
+        let list = bounds("welcome-choices");
+        assert!(
+            list.top() >= content.top() - px(0.5)
+                && list.bottom() <= content.bottom() + px(0.5)
+                && list.bottom() <= actions.top(),
+            "the list {list:?} shows whole in the content {content:?}, above the actions {actions:?}"
+        );
+        // The card and Maybe Later under it: one group.
+        let offer = bounds("welcome-offer");
+        assert!(
+            offer.left() >= px(m.welcome_width / 2.)
+                && offer.right() <= px(m.welcome_width)
+                && offer.top() >= px(0.)
+                && offer.bottom() <= actions.bottom(),
+            "the offer {offer:?} shows whole in the stage's other half"
+        );
+    });
 }

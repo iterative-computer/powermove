@@ -1,25 +1,22 @@
 //! Settings' visual pickers: each option a rounded tile on a wallpaper in
 //! Powermove's dusk, with a crisp mini window inside (traffic lights, clean
-//! panes) in the appearance it shows. The selected option is ringed in the
-//! accent around the whole tile, concentric with it. Every size and colour is
-//! a token (`pm_design::Settings`, its `PickerPalette`, `Colors`).
+//! panes) in the appearance it shows. The selected option is ringed by the
+//! shared selection ring (`ring::Ring`), the plan cards' too. Every size and
+//! colour is a token (`pm_design::Settings`, its `PickerPalette`, `Colors`).
+use super::ring::{Ring, srgb};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSImage};
-use objc2_foundation::{NSArray, NSRect, NSSize};
+use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize};
 use pm_design::{Colors, Scheme, Settings, css};
 
 fn tokens(scheme: Scheme) -> Settings {
     Settings::of(scheme)
 }
 
-/// The room around the tile for its ring.
-fn margin(s: &Settings) -> f64 {
-    (s.picker_ring_gap + s.picker_ring) as f64
-}
-
+/// The tile with the ring's room around it on every side.
 pub(super) fn image_size() -> NSSize {
     let s = tokens(Scheme::Dark);
-    let m = margin(&s);
+    let m = Ring::of(&s).margin();
     NSSize::new(
         s.picker_width as f64 + 2. * m,
         s.picker_height as f64 + 2. * m,
@@ -149,8 +146,8 @@ fn wallpaper(s: &Settings, w: f64, h: f64) -> String {
 
 /// The picture of `option` in a picker of `kind` ("appearance": system,
 /// light, dark; "projects": tabs, windows), for an appearance that is
-/// `dark`; ringed when `selected`.
-pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> String {
+/// `dark`: the tile alone (the ring is drawn around it, `image`).
+pub(super) fn svg(kind: &str, option: &str, dark: bool) -> String {
     let here = if dark { Scheme::Dark } else { Scheme::Light };
     let s = tokens(here);
     let ours = Colors::of(here);
@@ -182,25 +179,8 @@ pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> Strin
         }
         _ => String::new(),
     };
-    let gap = s.picker_ring_gap as f64;
-    let ring_w = s.picker_ring as f64;
-    let ring = if selected {
-        // Concentric with the tile: its radius plus the gap to its centre line.
-        let o = gap + ring_w / 2.;
-        format!(
-            r#"<rect x="{x}" y="{x}" width="{rw}" height="{rh}" rx="{rr}" fill="none" stroke="{accent}" stroke-width="{ring_w}"/>"#,
-            x = -o,
-            rw = w + 2. * o,
-            rh = h + 2. * o,
-            rr = radius + o,
-            accent = css(ours.accent),
-        )
-    } else {
-        String::new()
-    };
-    let m = margin(&s);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{iw}" height="{ih}" viewBox="{nm} {nm} {iw} {ih}">
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">
 <defs>
 <linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1"><stop offset="0" stop-color="{s0}"/><stop offset="0.55" stop-color="{s1}"/><stop offset="1" stop-color="{s2}"/></linearGradient>
 <filter id="soft" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="{blur}"/></filter>
@@ -210,10 +190,7 @@ pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> Strin
 </defs>
 <g clip-path="url(#tile)">{paper}{body}</g>
 <rect x="0.25" y="0.25" width="{ew}" height="{eh}" rx="{radius}" fill="none" stroke="{ink}" stroke-opacity="{eo}" stroke-width="0.5"/>
-{ring}</svg>"#,
-        iw = w + 2. * m,
-        ih = h + 2. * m,
-        nm = -m,
+</svg>"#,
         s0 = css(p.sky_top),
         s1 = css(p.sky_mid),
         s2 = css(p.sky_bottom),
@@ -232,18 +209,36 @@ pub(super) fn svg(kind: &str, option: &str, selected: bool, dark: bool) -> Strin
     )
 }
 
-/// The option's picture for whichever appearance draws it: AppKit asks at
-/// draw time, so a change of appearance redraws it right.
+/// The option's picture for whichever appearance draws it, ringed when
+/// `selected`: AppKit asks at draw time, so a change of appearance redraws
+/// it right.
 pub(super) fn image(kind: &str, option: &str, selected: bool) -> Option<Retained<NSImage>> {
     let size = image_size();
-    let light = pm_shell::settings_window::svg_image(&svg(kind, option, selected, false), size)?;
-    let dark = pm_shell::settings_window::svg_image(&svg(kind, option, selected, true), size)?;
-    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+    let s = tokens(Scheme::Dark);
+    let ring = Ring::of(&s);
+    let m = ring.margin();
+    let tile = NSRect::new(
+        NSPoint::new(m, m),
+        NSSize::new(s.picker_width as f64, s.picker_height as f64),
+    );
+    let light = pm_shell::settings_window::svg_image(&svg(kind, option, false), tile.size)?;
+    let dark = pm_shell::settings_window::svg_image(&svg(kind, option, true), tile.size)?;
+    let radius = s.picker_radius as f64;
+    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
         let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
         let dark_now = NSAppearance::currentDrawingAppearance()
             .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names))
             .is_some_and(|name| &*name == names[1]);
-        (if dark_now { &dark } else { &light }).drawInRect(rect);
+        (if dark_now { &dark } else { &light }).drawInRect(tile);
+        if selected {
+            let scheme = if dark_now {
+                Scheme::Dark
+            } else {
+                Scheme::Light
+            };
+            let accent = srgb(Colors::of(scheme).accent, 1.);
+            ring.stroke(&pm_shell::scale().radius, tile, radius, &accent);
+        }
         objc2::runtime::Bool::YES
     });
     Some(NSImage::imageWithSize_flipped_drawingHandler(
@@ -266,20 +261,17 @@ mod tests {
             ("projects", "windows"),
         ] {
             for dark in [true, false] {
-                for selected in [true, false] {
-                    let svg = super::svg(kind, option, selected, dark);
-                    assert!(
-                        svg.starts_with("<svg") && svg.ends_with("</svg>"),
-                        "{kind} {option}"
+                let svg = super::svg(kind, option, dark);
+                assert!(
+                    svg.starts_with("<svg") && svg.ends_with("</svg>"),
+                    "{kind} {option}"
+                );
+                if let Some(dir) = &out {
+                    let name = format!(
+                        "{kind}-{option}-{}.svg",
+                        if dark { "dark" } else { "light" }
                     );
-                    if let Some(dir) = &out {
-                        let name = format!(
-                            "{kind}-{option}-{}-{}.svg",
-                            if dark { "dark" } else { "light" },
-                            selected as u8
-                        );
-                        std::fs::write(std::path::Path::new(dir).join(name), &svg).unwrap();
-                    }
+                    std::fs::write(std::path::Path::new(dir).join(name), &svg).unwrap();
                 }
             }
         }

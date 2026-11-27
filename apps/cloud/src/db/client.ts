@@ -28,3 +28,5 @@ export function localData(databaseUrl: string): Data {
     end: () => pool.end(),
   };
 }
+/** The Worker's connection for an environment: local Postgres in development, Neon otherwise. */
+export const dataFor = (env: CloudflareBindings): Data => env.LOCAL_POSTGRES === '1' ? localData(env.DATABASE_URL) : neonData(env.DATABASE_URL);

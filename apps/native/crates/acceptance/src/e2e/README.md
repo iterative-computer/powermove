@@ -162,5 +162,5 @@ against each property run's final neighbours, before a following operation can
 read or override animation. The former known-failure guard is an ordinary test.
 The complete main declaration retains its existing controller blocker; a
 passing curve probe does not certify the full editor workflow. See
-[the integration repairs](../../../../../../docs/native/int2-fixes.md) for the
+the integration repairs for the
 remaining current-main failures and complete verification counts.

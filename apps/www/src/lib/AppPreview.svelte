@@ -6,7 +6,7 @@
   // UI details follow the app captures in design-references/2026-09-20.
 </script>
 
-<div class="app-preview" class:bare role="img" aria-label={kind === 'agent' ? 'Close-up of the Powermove prompt box with provider, model, and reasoning controls.' : kind === 'extensions' ? 'Example extensions in Powermove Settings, with Motion tracking switched off and Audio-reactive visuals switched on.' : 'Close-up of the Powermove Export dialog showing Code and Video choices and the live animation export description.'}>
+<div class="app-preview" class:bare role="img" aria-label={kind === 'agent' ? 'Close-up of the Powermove prompt box with provider, model, and reasoning controls.' : kind === 'extensions' ? 'Example extensions in Powermove Settings, with Motion tracking switched off and Audio-reactive visuals switched on.' : 'Close-up of the Powermove Export dialog with the Video choice selected, showing format, resolution and frame rate.'}>
   {#if kind === 'agent'}
     <div class="agent-crop">
       <div class="agent" aria-hidden="true">
@@ -40,18 +40,16 @@
       <div class="export-dialog" aria-hidden="true">
         <div class="export-heading">Export</div>
         <div class="export-body">
-          <div class="export-tabs"><span class="selected">Code</span><span>Video</span><span>Images</span><span>Project</span></div>
-          <p class="export-hint">A live animation for apps and coding agents.</p>
-          <div class="export-about">
-            <div>Put your animation in an app</div>
-            <p>Export a live animation with playback controls and editable text and colors.</p>
-            <div class="export-includes"><span>JavaScript player</span><span>React component</span><span>Agent handoff</span></div>
-            <p class="delivery">One ZIP with your scene, assets and generated effects. Give it to a developer or coding agent to integrate.</p>
+          <div class="export-tabs"><span class="selected">Video</span><span>Images</span><span>Project</span></div>
+          <p class="export-hint">MP4, WebM or ProRes for delivery and editing.</p>
+          <div class="export-section">Output</div>
+          <div class="export-rows">
+            <div class="export-row"><div>Format<p>Container and codec of the exported file.</p></div><span>MP4 · H.264</span></div>
+            <div class="export-row"><div>Resolution<p>Rendered size relative to the composition.</p></div><span>Full · 1920×1080</span></div>
+            <div class="export-row"><div>Frame rate<p>Frames written per second of exported video.</p></div><span>30 fps</span></div>
           </div>
-          <div class="export-summary">Your move-web.zip</div>
-          <p class="export-details">Live animation · JavaScript player, React component, assets and agent handoff · full composition</p>
         </div>
-        <div class="export-footer"><span class="cancel">Cancel</span><span class="export-action">Export code</span></div>
+        <div class="export-footer"><span class="cancel">Cancel</span><span class="export-action">Export video</span></div>
       </div>
     </div>
   {/if}
@@ -96,13 +94,11 @@
   .export-tabs span{flex:1;text-align:center;padding:4px 2px;border-radius:5px}
   .export-tabs .selected{background:var(--ink-1);color:var(--tx)}
   .export-hint{margin:10px 14px 22px;font-size:12px;color:var(--tx-3)}
-  .export-about{padding:14px;background:var(--bg-panel);border-radius:18px;font-size:13px}
-  .export-about p{margin-top:4px;color:var(--tx-3);font-size:12px}
-  .export-includes{display:flex;flex-wrap:wrap;gap:0 6px;margin:6px 0;font-size:12px;color:var(--tx-2)}
-  .export-includes span+span::before{content:'·';margin-right:6px;color:var(--tx-4)}
-  .export-about .delivery{color:var(--tx-4)}
-  .export-summary{margin:20px 14px 0;font-size:12px;color:var(--tx-2)}
-  .export-details{margin:0 14px;font-size:12px;color:var(--tx-4)}
+  .export-section{margin:0 14px 8px;font-size:12px;color:var(--tx-3)}
+  .export-rows{padding:4px 14px;background:var(--bg-panel);border-radius:18px;font-size:13px}
+  .export-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0}
+  .export-row p{margin-top:2px;color:var(--tx-3);font-size:12px}
+  .export-row span{flex:none;padding:5px 10px;border-radius:8px;background:var(--ink-1);font-size:12px}
   .export-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--line);font-size:12px}
   .export-footer span{padding:7px 12px;border-radius:8px}
   .cancel{background:var(--ink-1)}.export-action{background:var(--accent);color:var(--on-accent)}

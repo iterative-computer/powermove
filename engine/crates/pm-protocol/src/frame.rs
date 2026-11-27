@@ -613,8 +613,8 @@ pub struct ViewerState {
     pub depth_id: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chrome_selection: Option<ChromeSelection>,
-    /// The canvas today's viewer draws this view into (decision V1,
-    /// docs/engine/bridge.md "Today's viewer canvas"). With it, the engine
+    /// The canvas today's viewer draws this view into (decision V1).
+    /// With it, the engine
     /// renders the frame at that canvas's size and scales it into its CSS
     /// box as Chromium scales today's WebGL canvas; without it, the
     /// composition is drawn at zoom × DPR × the preview resolution. Added

@@ -2,7 +2,7 @@
 
 Rows S111 S112 S113. Grammar: [README](README.md) §1–5. Sources: `M/updates.ts`,
 `R/shell/{app-updates.ts,WhatsNew.svelte,whats-new.ts}`, `M/whats-new.ts`, `M/menu.ts`.
-The update sheet from [reviews/na-cloud-services.md](../reviews/na-cloud-services.md)
+The update sheet from reviews/na-cloud-services.md
 stands; this file adds every state around it. The native update route is intentional
 and doesn't imitate Electron's. No new tokens.
 

@@ -161,6 +161,22 @@ impl AgentLink {
     pub fn typed(&self, thread: &str, text: &str) {
         *self.typed.shared() = Some((thread.into(), text.into()));
     }
+    /// Signed in to `provider` (its run can start), `None` while that is
+    /// still being checked.
+    pub fn signed_in(&self, provider: Provider) -> Option<bool> {
+        match self.connection(provider).0 {
+            "connected" => Some(true),
+            "checking" | "waiting" => None,
+            _ => Some(false),
+        }
+    }
+    /// Aero (Powermove's harness) is offered in this build.
+    pub fn offers_aero(&self) -> bool {
+        self.environment
+            .shared()
+            .as_ref()
+            .is_some_and(|env| env.aero.is_some())
+    }
     /// A run needs its runtime and a signed-in account.
     pub fn available(&self, provider: Provider) -> bool {
         self.connection(provider).0 == "connected"
@@ -470,6 +486,32 @@ fn now() -> u64 {
 pub fn now_ms() -> u64 {
     now()
 }
+/// The provider a thread with none recorded starts on: the one chosen in
+/// onboarding (the `agentProvider` setting, as v1 kept it); with none
+/// recorded, Codex or Claude Code when a sign-in to it exists, else Aero
+/// (w117). `codex`/`claude`: signed in, `None` while that is still being
+/// checked (no answer yet: `None`, the thread stays as it is). `aero`: Aero
+/// is offered in this build.
+pub fn default_provider(
+    chosen: Option<&str>,
+    aero: bool,
+    codex: Option<bool>,
+    claude: Option<bool>,
+) -> Option<Provider> {
+    let named = match chosen {
+        Some("aero") if aero => Some(Provider::Aero),
+        Some("chatgpt") => Some(Provider::Chatgpt),
+        Some("claude") => Some(Provider::Claude),
+        Some("compatible") => Some(Provider::Compatible),
+        _ => None,
+    };
+    named.or(match (codex, claude) {
+        (Some(true), _) => Some(Provider::Chatgpt),
+        (Some(false), Some(true)) => Some(Provider::Claude),
+        (Some(false), Some(false)) if aero => Some(Provider::Aero),
+        _ => None,
+    })
+}
 const UNAVAILABLE: &str = "Agent provider or native action service is unavailable";
 /// `live`: the thread has a run, which outlives its account's status.
 pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> {
@@ -478,7 +520,7 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
             "draft" | "focus" | "newThread" | "switchThread" | "deleteThread" | "disclose"
             | "removeAttachment" | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer"
             | "keepResult" | "undoResult" | "applyPlan" | "dismissPlan" | "dismissInterrupted"
-            | "openSettings",
+            | "openSettings" | "subscribe",
         ) => true,
         Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,
@@ -661,6 +703,21 @@ pub fn run_effect(
     let mut observation = (String::new(), Vec::new());
     let observation_environment = link.environment.shared().clone();
     if let EffectKind::Send {
+        attachments,
+        settings,
+        steer: false,
+        ..
+    } = &effect.kind
+        && settings.provider == Provider::Aero
+    {
+        // Aero's session sends the project and its updates itself (aero.rs)
+        // and renders frames with its look tool: the observation below would
+        // repeat them, tens of thousands of tokens, on every model call.
+        let document = kernel
+            .published(&effect.target.project)
+            .map_or(0, |p| p.snapshot.doc_id);
+        observation.0 = pm_agents::context::targets(attachments, &effect.target.project, document);
+    } else if let EffectKind::Send {
         text,
         attachments,
         steer: false,
@@ -749,8 +806,11 @@ pub fn run_effect(
                 })
                 .and_then(|launched| aero_checked(link, launched))
                 .and_then(|(environment, mut request)| {
-                    request.prompt =
-                        pm_agents::context::with_observation(&request.prompt, &observation.0, text);
+                    request.prompt = if request.provider == Provider::Aero {
+                        format!("{}{}", request.prompt, observation.0)
+                    } else {
+                        pm_agents::context::with_observation(&request.prompt, &observation.0, text)
+                    };
                     request.images.extend(observation.1.clone());
                     state.panel.host_admitted_request(
                         &effect.target.thread,
@@ -1073,12 +1133,32 @@ fn aero_queued_ok(link: &AgentLink, settings: &pm_panel_agentpanel::model::Setti
 /// or Custom model), resumed or queued, sends nothing until one is chosen.
 fn aero_checked(
     link: &AgentLink,
-    (environment, request): (Environment, Request),
+    (environment, mut request): (Environment, Request),
 ) -> Result<(Environment, Request), Error> {
-    if request.provider == Provider::Aero && !link.aero_choice_ok(request.model.as_deref()) {
+    if request.provider != Provider::Aero {
+        return Ok((environment, request));
+    }
+    // No choice (a new thread, a fresh install, a thread whose picker had not
+    // seen the catalogue yet): the catalogue's default runs. A choice is kept.
+    if request
+        .model
+        .as_deref()
+        .is_none_or(|m| m.is_empty() || m == "default")
+    {
+        request.model = default_model(&link.powermove_models());
+    }
+    if !link.aero_choice_ok(request.model.as_deref()) {
         return Err(Error::Host(pm_agents::inference::CHOOSE.into()));
     }
     Ok((environment, request))
+}
+/// The model a catalogue marks as its default, else its first.
+fn default_model(models: &[pm_agents::account::Model]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| m.default)
+        .or(models.first())
+        .map(|m| m.id.clone())
 }
 fn launch_request(
     state: &AgentState,
@@ -1428,6 +1508,78 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
 mod tests {
     use super::*;
     use serde_json::json;
+    /// w127: the composer starts on the agent chosen in onboarding; with
+    /// none chosen, on Codex or Claude Code when signed in to it, else Aero;
+    /// nothing is decided while a sign-in is still being checked.
+    #[test]
+    fn a_new_thread_starts_on_the_onboarding_choice_else_the_sign_ins_else_aero() {
+        use Provider::*;
+        let no = Some(false);
+        let yes = Some(true);
+        assert_eq!(default_provider(Some("aero"), true, yes, yes), Some(Aero));
+        assert_eq!(default_provider(Some("claude"), true, no, no), Some(Claude));
+        assert_eq!(default_provider(Some("chatgpt"), true, no, no), Some(Chatgpt));
+        assert_eq!(default_provider(None, true, no, no), Some(Aero));
+        assert_eq!(default_provider(None, true, yes, no), Some(Chatgpt));
+        assert_eq!(default_provider(None, true, no, yes), Some(Claude));
+        assert_eq!(default_provider(None, true, yes, yes), Some(Chatgpt));
+        assert_eq!(default_provider(None, true, None, no), None);
+        assert_eq!(default_provider(None, true, no, None), None);
+        // Aero not offered in this build: the choice falls to the sign-ins.
+        assert_eq!(default_provider(Some("aero"), false, no, yes), Some(Claude));
+        assert_eq!(default_provider(Some("aero"), false, no, no), None);
+        assert_eq!(default_provider(Some("unknown"), true, no, no), Some(Aero));
+    }
+    /// A thread with no provider recorded takes the default; one the person
+    /// set (or a thread already sending) keeps its own.
+    #[test]
+    fn only_a_thread_with_no_provider_recorded_takes_the_default() {
+        #[derive(Default)]
+        struct Memory(std::collections::BTreeMap<String, Value>);
+        impl pm_agents::persistence::Store for Memory {
+            fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+                Ok(self.0.get(key).cloned())
+            }
+            fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+                self.0.insert(key.into(), value.clone());
+                Ok(())
+            }
+        }
+        let mut store = Memory::default();
+        let mut panel = Panel::load(&mut store, "project", "thread", 0).unwrap();
+        let mut catalog = Catalog::default();
+        catalog.providers = vec![
+            ("aero".into(), "Aero".into()),
+            ("claude".into(), "Claude Code".into()),
+            ("chatgpt".into(), "Codex".into()),
+        ];
+        assert_eq!(
+            panel.session("thread").unwrap().settings.provider,
+            Provider::Chatgpt
+        );
+        assert!(
+            panel
+                .adopt_default_provider("thread", Provider::Aero, catalog.clone())
+                .unwrap()
+        );
+        assert_eq!(
+            panel.session("thread").unwrap().settings.provider,
+            Provider::Aero
+        );
+        // The person picks Codex: the default no longer applies.
+        panel
+            .set_provider("thread", Provider::Chatgpt, String::new(), catalog.clone())
+            .unwrap();
+        assert!(
+            !panel
+                .adopt_default_provider("thread", Provider::Aero, catalog)
+                .unwrap()
+        );
+        assert_eq!(
+            panel.session("thread").unwrap().settings.provider,
+            Provider::Chatgpt
+        );
+    }
     /// P1 (Sol, PM-750): a thread saved on an old Aero route (an OpenAI or
     /// Anthropic key's model, a Custom endpoint's) sends nothing, queued or
     /// directly, until a model from Powermove's catalogue is chosen.
@@ -1491,7 +1643,38 @@ mod tests {
             link.available(Provider::Aero)
         );
         assert!(aero_checked(&link, (Environment::default(), request(listed))).is_ok());
+        // No choice runs the catalogue's default; a choice is kept.
+        for unchosen in ["", "default"] {
+            let (_, sent) =
+                aero_checked(&link, (Environment::default(), request(unchosen))).unwrap();
+            assert_eq!(sent.model.as_deref(), Some(listed));
+        }
+        let mut none = request(listed);
+        none.model = None;
+        let (_, sent) = aero_checked(&link, (Environment::default(), none)).unwrap();
+        assert_eq!(sent.model.as_deref(), Some(listed));
         link.close();
+    }
+    /// The catalogue's `default: true` model runs when nobody chose one
+    /// (`/v2/aero/models` marks GPT-6.2 Sol), wherever it is listed.
+    #[test]
+    fn no_choice_runs_the_model_the_catalogue_marks_default() {
+        let models = pm_agents::inference::parse_models(
+            br#"{"data":[{"id":"anthropic/claude-opus-5-5"},{"id":"openai/gpt-6.2-sol","default":true},{"id":"openai/gpt-6-luna"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            default_model(&models).as_deref(),
+            Some("pm/openai/gpt-6.2-sol")
+        );
+        let unmarked =
+            pm_agents::inference::parse_models(br#"{"data":[{"id":"openai/gpt-6-luna"}]}"#)
+                .unwrap();
+        assert_eq!(
+            default_model(&unmarked).as_deref(),
+            Some("pm/openai/gpt-6-luna")
+        );
+        assert_eq!(default_model(&[]), None);
     }
     #[test]
     fn binary_attachments_and_pick_notes_reach_the_run_without_losing_bytes() {

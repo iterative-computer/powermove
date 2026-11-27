@@ -233,6 +233,12 @@ impl Radii {
     pub fn nested(&self, outer: f32, inset: f32) -> f32 {
         (outer - inset).max(self.sm)
     }
+    /// The corner of an edge standing `gap` outside a surface of radius
+    /// `inner` (a selection ring's inner edge): `nested` the other way, so
+    /// `nested(around(r, gap), gap) == r` for every `r` from `sm` up.
+    pub fn around(&self, inner: f32, gap: f32) -> f32 {
+        inner + gap
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
@@ -542,7 +548,9 @@ pub struct Metrics {
 /// Transparency makes the window and panels solid.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Translucency {
-    /// Tint over the behind-window blur, initialized from `colors.window`.
+    /// Tint over the blur. Darker than `colors.window` in dark, because the
+    /// blur lightens the ground: the composite lands near the solid window and
+    /// the panel material keeps its step above it (language §3, tonal elevation).
     pub ground: u32,
     pub window: f32,
     pub panel: f32,
@@ -689,20 +697,20 @@ impl Colors {
     /// and the accent. Every other neutral is the ink over a ground at an
     /// alpha step, raised where needed to clear its contrast floor.
     ///
-    /// Dark grounds and ink have zero chroma. Lightness steps give each
-    /// surface its elevation, from the viewer up to the floating surface.
+    /// Dark is warm stone (hue about 55°, chroma under 0.01): the grounds step
+    /// up in lightness toward the viewer's surround, so elevation is tonal.
     /// Light is a cool paper (hue 286°). The accent is Powermove orange; it
     /// marks one action or one state per view and is never a selected fill.
     pub fn of(scheme: Scheme) -> Self {
         let dark = scheme == Scheme::Dark;
         let (ink, window, panel, recess, viewer, floating) = if dark {
             (
-                oklch(0.97, 0., 0.),
-                oklch(0.147, 0., 0.),
-                oklch(0.216, 0., 0.),
-                oklch(0.188, 0., 0.),
-                oklch(0.135, 0., 0.),
-                oklch(0.268, 0., 0.),
+                oklch(0.97, 0.0013, 106.),
+                oklch(0.147, 0.004, 49.),
+                oklch(0.216, 0.006, 56.),
+                oklch(0.188, 0.005, 67.),
+                oklch(0.135, 0.003, 70.),
+                oklch(0.268, 0.006, 34.),
             )
         } else {
             (
@@ -1120,8 +1128,16 @@ impl Tokens {
             ink: Ink::new(),
             welcome: Welcome::new(),
             translucency: {
-                // The translucent shell is a heavy tint of the window colour
-                // over a behind-window blur; Reduce Transparency makes it solid.
+                // Two surface tones per appearance. Chrome (the title bar
+                // band, the sidebar's glass and the ground around the
+                // content) is one heavy tint of the window colour over the
+                // behind-window blur, the same alpha on the blur and on the
+                // glass so they land on one tone; content (Home's sheet,
+                // panels, the viewer's surround) is the panel colour. Light
+                // content is solid paper, as a Mac's light content areas: a
+                // translucent light panel picked up the desktop, a second
+                // content tone beside Home's solid sheet. Reduce
+                // Transparency makes the chrome solid too.
                 let solid = accessibility.reduce_transparency;
                 match scheme {
                     Scheme::Dark => Translucency {
@@ -1143,8 +1159,8 @@ impl Tokens {
                     },
                     Scheme::Light => Translucency {
                         ground,
-                        window: if solid { 1. } else { 0.62 },
-                        panel: if solid { 1. } else { 0.7 },
+                        window: if solid { 1. } else { 0.9 },
+                        panel: 1.,
                         edge: 0.08,
                         line: 0.08,
                         tick_minor: 0.14,
@@ -1155,7 +1171,7 @@ impl Tokens {
                         selected: 0.07,
                         pressed: 0.1,
                         faint: 0.42,
-                        glass_tint: 0.6,
+                        glass_tint: 0.9,
                         glass_menu: 0.84,
                     },
                 }
@@ -1339,6 +1355,48 @@ pub mod workspace {
     pub const DEFAULT_RIGHT: f32 = 300.;
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
+}
+
+/// One tab, wherever a strip of them shows: the window's project tabs
+/// (AppKit, in the toolbar) and a panel stack's tabs (GPUI, in its header)
+/// are the same tab. A quiet title; the showing tab a soft neutral pill;
+/// the tab under the pointer a wash of that pill; a closable tab's close
+/// button slides in at its trailing end on hover while the title's end
+/// fades out under it, so the title never moves. Height `metrics.control`.
+pub mod tab {
+    use super::Scheme;
+    /// A title stands this far inside each end of its tab.
+    pub const PAD: f32 = 14.;
+    /// Between neighbouring tabs.
+    pub const GAP: f32 = 4.;
+    /// The pill's alpha of [`ink`]: the showing tab, and the one under the
+    /// pointer at the end of its wash.
+    pub const FILL: f32 = 0.08;
+    /// The wash under the pointer on a tab that is not showing: about half
+    /// the showing tab's pill, so a hovered tab never reads as selected.
+    pub const FILL_HOVER: f32 = FILL * 0.5;
+    /// The pill in a window that is not the main one.
+    pub const FILL_INACTIVE: f32 = FILL * 0.6;
+    /// A tab carried along its strip by the pointer.
+    pub const FILL_LIFTED: f32 = FILL * 1.75;
+    /// The close button's side, its gap to the tab's trailing end, and how
+    /// far it slides in from.
+    pub const CLOSE: f32 = 16.;
+    pub const CLOSE_PAD: f32 = 8.;
+    pub const CLOSE_SLIDE: f32 = 6.;
+    /// How much of the title fades out before the close button.
+    pub const FADE: f32 = 14.;
+    /// Narrowest a long title's tab gets: enough of a name to tell tabs apart.
+    pub const MIN: f32 = 96.;
+    /// Widest a tab grows; a longer title truncates.
+    pub const MAX: f32 = 180.;
+    /// The pill's one neutral ink: black on light, white on dark.
+    pub fn ink(scheme: Scheme) -> u32 {
+        match scheme {
+            Scheme::Light => 0x000000,
+            Scheme::Dark => 0xffffff,
+        }
+    }
 }
 
 /// The desktop dock's CSS mask uses a 28 point linear ramp.

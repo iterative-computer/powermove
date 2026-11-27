@@ -2,7 +2,7 @@
 
 Row N005. Grammar: [README](README.md) §1–5. Sources: `pm-promedia::{tasks,cache,media,
 storage}`, [pro-media.md](../../pro-media.md),
-[reviews/na-cloud-promedia.md](../reviews/na-cloud-promedia.md). That review's window,
+reviews/na-cloud-promedia.md. That review's window,
 popover, kind labels and render bar stand. This file adds what it deferred and all of
 storage. No new tokens.
 

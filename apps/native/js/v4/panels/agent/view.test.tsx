@@ -155,7 +155,6 @@ test("focus order follows the thread bar, conversation and the composer's one ro
     "agent-add",
     "agent-model",
     "agent-effort",
-    "agent-access",
     "agent-send",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
@@ -180,16 +179,11 @@ test("the model's name gives way in the docked composer's one row; effort keeps 
   expect(effort.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.metadata).toBeUndefined();
-  // Every control sits inside the composer's options row, on its one surface:
-  // "+", the model chooser (the model and its effort), and the access button.
+  // Every control sits in the composer's one row, on its one surface: "+",
+  // then the model chooser (the model and its effort, one control).
   const options = byId(root, "agent-options");
-  const isDescendant = (ancestorId: number, targetId: number): boolean => {
-    const node = nodes.find((n) => n.id === ancestorId);
-    if (!node) return false;
-    return node.children.includes(targetId) || node.children.some((c) => isDescendant(c, targetId));
-  };
-  for (const id of ["agent-add", "agent-chooser", "agent-access"])
-    expect(isDescendant(options.id, byId(root, id).id)).toBe(true);
+  for (const id of ["agent-add", "agent-chooser"])
+    expect(options.children).toContain(byId(root, id).id);
   for (const id of ["agent-model", "agent-effort"])
     expect(byId(root, "agent-chooser").children).toContain(byId(root, id).id);
   expect(byId(root, "agent-composer").children).toContain(options.id);
@@ -366,7 +360,7 @@ test("provider and model share one menu; effort has its own; approvals are in +;
   };
   p.snapshot.settings.model = "gpt-6";
   p.snapshot.settings.effort = "high";
-  const picks: (string | null)[] = ["provider:claude", "model:gpt-6-mini", "low", null, "auto"];
+  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto"];
   const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
     asked.push(r.options);
@@ -382,7 +376,6 @@ test("provider and model share one menu; effort has its own; approvals are in +;
     "agent-model",
     "agent-effort",
     "agent-add",
-    "agent-access",
   ]) {
     await root.drive(byId(root, id).id, "click");
     await Promise.resolve();
@@ -396,16 +389,14 @@ test("provider and model share one menu; effort has its own; approvals are in +;
     ["Low", false],
     ["High", true],
   ]);
-  // "+": attachments only; Approvals live on the dedicated access control.
+  // "+": the attachments, then Approvals as a section of their own.
   expect(asked[3]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
     ["", "Add Files…", false],
     ["", "Select Part of the Screen", false],
-  ]);
-  expect(asked[4]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
-    ["Access Mode", "Composition only", true],
-    ["Access Mode", "Supervised", false],
-    ["Access Mode", "Auto", false],
-    ["Access Mode", "Full access", false],
+    ["Approvals", "Composition only", true],
+    ["Approvals", "Supervised", false],
+    ["Approvals", "Auto", false],
+    ["Approvals", "Full access", false],
   ]);
   expect(actions).toEqual([
     { type: "setProvider", provider: "claude" },
@@ -1505,7 +1496,7 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
       .inspect()
       .nodes.filter((n) => n.props.metadata?.symbol === "composer.chevron")
       .map((n) => n.props.metadata.turn);
-  expect(turns()).toEqual([true, false, false]);
+  expect(turns()).toEqual([true, false]);
   expect(
     requests[0]!.options.find((o) => o.value === "model:opus"),
   ).toMatchObject({ label: "Opus 5.5", detail: "1M context" });
@@ -1513,23 +1504,7 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   for (let i = 0; i < 4; i++) await Promise.resolve();
   await root.flush();
   expect(byId(root, "agent-model").props.open).toBe(false);
-  expect(turns()).toEqual([false, false, false]);
-  // Clicking the access button opens the access picker and turns its chevron.
-  await root.drive(byId(root, "agent-access").id, "click");
-  expect(byId(root, "agent-access").props.open).toBe(true);
-  expect(turns()).toEqual([false, false, true]);
-  expect(requests.at(-1)!.picker).toBe("access");
-  expect(requests.at(-1)!.options.map((o) => o.value)).toEqual([
-    "editor",
-    "supervised",
-    "auto",
-    "full",
-  ]);
-  close(null);
-  for (let i = 0; i < 4; i++) await Promise.resolve();
-  await root.flush();
-  expect(byId(root, "agent-access").props.open).toBe(false);
-  expect(turns()).toEqual([false, false, false]);
+  expect(turns()).toEqual([false, false]);
   p.snapshot.runId = "busy";
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   for (const id of ["agent-model", "agent-effort"])
@@ -2089,14 +2064,8 @@ test("with Aero the composer is one row: \"+\", the split pill (the Aero mark an
   await root.render(<AgentView publication={p} menu={async () => null} send={() => {}} />);
   expect(segmented(root)).toEqual([]);
   const options = byId(root, "agent-options");
-  const allNodes = root.inspect().nodes;
-  const hasDescendant = (ancestorId: number, targetId: number): boolean => {
-    const node = allNodes.find((n) => n.id === ancestorId);
-    if (!node) return false;
-    return node.children.includes(targetId) || node.children.some((c) => hasDescendant(c, targetId));
-  };
-  for (const id of ["agent-add", "agent-chooser", "agent-access", "agent-send"])
-    expect(hasDescendant(options.id, byId(root, id).id)).toBe(true);
+  const kids = options.children.map((id: number) => root.inspect().nodes.find((n) => n.id === id)!);
+  expect(kids.map((n: any) => n.props.id ?? null)).toEqual(["agent-add", "agent-chooser", null, "agent-send"]);
   expect(byId(root, "agent-chooser").props.metadata).toEqual({ pill: "group" });
   const inside = (id: string) => {
     const part = byId(root, id);
@@ -2188,16 +2157,45 @@ test("with Aero the model part opens the picker: the rail (Aero, Claude Code, Co
     ["Plan", "Aerolite"],
     ["Resets", "Dec 25"],
   ]);
-  // The model closed the picker and the pill reads it at once, before the
-  // kernel's publication.
+  // The model closed the picker; the pill reads it with the kernel's
+  // publication, which brings the model's own levels (never the old
+  // model's level beside the new model).
   expect(actions).toEqual([{ type: "setModel", model: "pm/anthropic/claude-opus-5.5", effort: "high" }]);
-  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.5");
   expect(byId(root, "agent-model").props.open).toBe(false);
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6 Sol");
+  p.snapshot.settings.model = "pm/anthropic/claude-opus-5.5";
+  p.snapshot.settings.effort = "medium";
+  p.snapshot.catalog.efforts = ["low", "medium"];
+  await root.render(<AgentView publication={structuredClone(p)} menu={menu} send={(a) => actions.push(a)} />);
+  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.5");
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Medium");
   // Providers… closes it for Settings › Providers.
   await root.drive(byId(root, "agent-model").id, "click");
   for (const _ of [0, 1, 2, 3]) await Promise.resolve();
   expect(asked.filter((r) => !r.refresh).map((r) => !!r.update)).toEqual([false, false]);
   expect(actions.at(-1)).toEqual({ type: "openSettings" });
+  root.dispose();
+});
+test("the pill never shows a model id: a saved model the catalogue doesn't list reads by its last listed, built-in or readable name", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.catalog = harnessCatalog([["pm/anthropic/claude-opus-5-9", "Claude Opus 5.9 Preview"]], []);
+  p.snapshot.settings.model = "pm/anthropic/claude-opus-5-9";
+  await root.render(<AgentView publication={structuredClone(p)} menu={async () => null} send={() => {}} />);
+  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.9 Preview");
+  // The catalogue is gone (signed out, a 401): the names stay.
+  for (const [model, name] of [
+    ["pm/anthropic/claude-opus-5-9", "Claude Opus 5.9 Preview"],
+    ["pm/anthropic/claude-opus-5-5", "Claude Opus 5.5"],
+    ["pm/openai/gpt-6.2-sol", "GPT-6.2 Sol"],
+    ["pm/mistral/le-chat-2-1", "Le Chat 2.1"],
+  ]) {
+    p.snapshot.catalog = harnessCatalog([], []);
+    p.snapshot.settings.model = model!;
+    await root.render(<AgentView publication={structuredClone(p)} menu={async () => null} send={() => {}} />);
+    expect(byId(root, "agent-model").props.label).toBe(`Model, ${name}`);
+  }
   root.dispose();
 });
 test("the effort part opens the reasoning menu: the model's levels in order, ✓ on the one in use; a level closes it and the pill reads it at once, never the old one", async () => {
@@ -2247,10 +2245,14 @@ test("the effort part opens the reasoning menu: the model's levels in order, ✓
   p.snapshot.settings.effort = "low";
   await render();
   expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
-  // A level the model does not offer reads as the model's default.
+  // A level the model does not offer reads as the model's default, and
+  // with no default listed, as its first level: always one it can run.
   p.snapshot.settings.effort = "minimal";
   await render();
   expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Medium");
+  p.snapshot.catalog.defaultEffort = undefined;
+  await render();
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, Low");
   root.dispose();
 });
 test("Aero's card shows no usage monitor until the backend has answered", async () => {
@@ -2317,7 +2319,7 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     [
       true,
       [
-        ["status", "Aero needs Aerolite or Aero."],
+        ["status", "Aero needs Aerolite."],
         ["action", "Subscribe…"],
       ],
     ],
@@ -2327,7 +2329,7 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     p.snapshot.catalog = harnessCatalog([]);
     p.snapshot.settings.provider = "aero";
     p.native.connection = "unavailable";
-    p.native.reason = "Aero needs Aerolite or Aero.";
+    p.native.reason = "Aero needs Aerolite.";
     p.native.aero = { usage: [], needsPlan };
     const asked: Parameters<Menu>[0][] = [];
     await root.render(
@@ -2346,6 +2348,29 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     expect(asked[0]!.options.filter((o) => o.kind !== "harness").map((o) => [o.kind, o.label])).toEqual(rows);
     root.dispose();
   }
+});
+test("Aero on Free offers Subscribe beside the model pill and in the empty panel, straight to Checkout", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([]);
+  p.snapshot.settings.provider = "aero";
+  p.native.connection = "unavailable";
+  p.native.reason = "Aero needs Aerolite.";
+  p.native.aero = { usage: [], needsPlan: true };
+  const sent: Action[] = [];
+  await root.render(<AgentView publication={p} send={(a) => sent.push(a)} />);
+  await root.drive(byId(root, "agent-subscribe").id, "click");
+  await root.drive(byId(root, "agent-welcome-subscribe").id, "click");
+  expect(sent.filter((a) => a.type === "subscribe").length).toBe(2);
+  root.dispose();
+  // On a plan, neither shows.
+  const { root: paid } = mount();
+  const q = fixture();
+  q.snapshot.settings.provider = "aero";
+  q.native.aero = { usage: [], needsPlan: false };
+  await paid.render(<AgentView publication={q} send={() => {}} />);
+  expect(paid.inspect().nodes.some((node) => node.props.id === "agent-subscribe")).toBe(false);
+  paid.dispose();
 });
 test("the pill shows Claude Code's logo, OpenAI's for Codex, and the Aero (Powermove) mark for every Aero model", async () => {
   for (const [harness, model, mark] of [

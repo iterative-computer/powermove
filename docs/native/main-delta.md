@@ -15,8 +15,8 @@ and test-only changes. Native coverage is evaluated against integration commit
 `ed5482622f41c533199a724dcb8c8738dd4dcc93`, with working-lane evidence identified
 separately. These hashes pin the audit even if either branch advances.
 
-Read together with [HANDOFF.md](HANDOFF.md), [p0-decisions.md](p0-decisions.md),
-[C-MATRIX](c-matrix.md), [D-STATE](d-state.md), [W1](w1-workflows.md),
+Read together with HANDOFF.md, p0-decisions.md,
+C-MATRIX, D-STATE, [W1](w1-workflows.md),
 [keymap](w1-keymap.md), [traces](traces.md), [surfaces](surfaces.md),
 [MCP](mcp.md), [engine service](engine-service.md) and
 [first launch](first-launch.md). Source paths below are repository-relative;
@@ -82,13 +82,13 @@ separate native cutover addition in W1, not a feature added on this main range.
 | --- | --- | --- |
 | K | Kernel/project/history: [kernel](kernel.md), `apps/native/crates/kernel/src/{commands,project_io,session.rs,persistence.rs}` | PMV readers/writer, raw unknown-field preservation, locks, transactions/history and typed edits exist. A field surviving round-trip does not prove evaluation or UI. |
 | E | Engine/media/export: [engine service](engine-service.md), [pro media](pro-media.md), [pro editing](pro-editing.md) | In-process workers, source/media/export/cache/color primitives exist. Full-project parity, physical A/V, codecs/HDR and production resources remain open. |
-| X | Extensions: [C-MATRIX](c-matrix.md), [V8](s1-v8.md), [compat](compat-realm.md), [S5](s5-compat.md), [raster](recorder.md) | Frozen helpers and additive async render wrappers exist; complete PM/backend/recorder/remote-DOM/Store comparisons remain open. No capability flag is accepted from its name alone. |
+| X | Extensions: C-MATRIX, V8, [compat](compat-realm.md), S5, [raster](recorder.md) | Frozen helpers and additive async render wrappers exist; complete PM/backend/recorder/remote-DOM/Store comparisons remain open. No capability flag is accepted from its name alone. |
 | B | Built-ins: [Inspector](panels/inspector.md), [Timeline](panels/timeline.md), [Viewer](panels/viewerchrome.md), [surfaces](surfaces.md) | Models and v4 trees exist. Nine live mounts on the built-ins lane have incomplete presentation/actions and no final Mac/Opus acceptance. |
-| S | Shell/layout/OS: [shell](shell.md), [OS base](os-base.md), [surfaces](surfaces.md), [design](design/language.md) | Workspace/session/overlay primitives and approved specs exist; app input, IME, AX, menus, focus, docking and window lifecycle need Mac proof. |
-| A | Agents/providers: [agents](agents.md), [replay](agents-replay.md), [agent panel](design/panels/agent-panel.md) | Rust provider state machines, persistence and workspace guards exist. Real providers, coordinator/tool lifecycle and strict replay identity remain open. |
+| S | Shell/layout/OS: [shell](shell.md), OS base, [surfaces](surfaces.md), [design](design/language.md) | Workspace/session/overlay primitives and approved specs exist; app input, IME, AX, menus, focus, docking and window lifecycle need Mac proof. |
+| A | Agents/providers: [agents](agents.md), replay, [agent panel](design/panels/agent-panel.md) | Rust provider state machines, persistence and workspace guards exist. Real providers, coordinator/tool lifecycle and strict replay identity remain open. |
 | M | Rust MCP/headless: [MCP](mcp.md), [CLI](cli.md) | Frozen 67 schemas; concrete bodies/adapters are distinguished from 36 pending bodies. Engine/export adapters require actual hosts. |
-| P | Profile/migration/storage/services: [D-STATE](d-state.md), [services](services.md), [first launch](first-launch.md), [migration](s6-migration.md) | Gzip/legacy readers, immutable checkpoints/media objects and archive-safe services exist. Full closure, reverse migration, real profile, signed Keychain/updater and UI remain open. |
-| D | Opus/pm-design: [tokens](design/tokens.md), [surface inventory](surfaces.md), [reviews](design/reviews/) | Existing approved specs/tokens control presentation; descriptions of Electron visuals below are source observations only. |
+| P | Profile/migration/storage/services: D-STATE, [services](services.md), [first launch](first-launch.md), migration | Gzip/legacy readers, immutable checkpoints/media objects and archive-safe services exist. Full closure, reverse migration, real profile, signed Keychain/updater and UI remain open. |
+| D | Opus/pm-design: [tokens](design/tokens.md), [surface inventory](surfaces.md), reviews | Existing approved specs/tokens control presentation; descriptions of Electron visuals below are source observations only. |
 | W | Public website/branding: `apps/www`, `assets/brand`, `packages/player` | Outside the native app implementation; preserve website consumers when pruning desktop export plumbing. |
 
 Read-only working-lane evidence: engine `7ca9048a586c824fcbfa138f4ae93285b07a7087`
@@ -480,12 +480,12 @@ application hit-testing/control/menu/field/presentation bindings, full Easing an
 motion-path tools, caption command bodies, Mac physical checks and Opus review
 remain. No coverage-column completion or whole-app acceptance promotion is
 claimed. Exact ownership boundaries, commands and required Mac verification are
-in [cloud-timeline.md](cloud-timeline.md#2026-11-05--final-integration-evidence-and-blocked-handoff).
+in cloud-timeline.md.
 ## 2026-11-05 — Inspector lane application-path evidence (partial)
 
 Reference remains `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. This append
 preserves the inventory and records partial coverage, not closed UI acceptance.
-See [cloud-inspector.md](cloud-inspector.md) for exact unowned dependencies and
+See cloud-inspector.md for exact unowned dependencies and
 Linux verification. No acceptance blocker or existing row is removed.
 
 | Row | Coverage / commit | Still required |

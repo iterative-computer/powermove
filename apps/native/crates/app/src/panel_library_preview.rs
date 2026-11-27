@@ -292,7 +292,27 @@ fn cache_stamp(bundle: &str, theme: &str, document: &[u8]) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::cache_stamp;
+    use super::{bounded, cache_stamp};
+    /// A flat cover is no picture; anything drawn on it is.
+    #[test]
+    fn a_flat_cover_is_blank() {
+        let flat = vec![250u8; 40 * 30 * 4];
+        let png = crate::mcp_services::png(&flat, 40, 30).unwrap();
+        assert!(super::blank(&png));
+        let mut drawn = flat.clone();
+        for p in drawn.chunks_exact_mut(4).take(400) {
+            p[0] = 0;
+        }
+        let png = crate::mcp_services::png(&drawn, 40, 30).unwrap();
+        assert!(!super::blank(&png));
+    }
+    /// Covers keep their panel's proportions: a tall panel stays tall.
+    #[test]
+    fn covers_scale_evenly() {
+        assert_eq!(bounded(600, 1400), (206, 480));
+        assert_eq!(bounded(1920, 720), (768, 288));
+        assert_eq!(bounded(300, 200), (300, 200));
+    }
     #[test]
     fn library_preview_cache_invalidates_on_panel_code_theme_or_document_change() {
         let first = cache_stamp("panel-v1", "dark", b"project-v1");
@@ -303,6 +323,45 @@ mod tests {
     }
 }
 
+/// Whether a cover is one flat colour almost everywhere (an empty panel's
+/// ground): 99 % of its sampled pixels within a step of its first.
+pub(super) fn blank(png: &[u8]) -> bool {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let Ok(mut reader) = decoder.read_info() else {
+        return false;
+    };
+    let Some(size) = reader.output_buffer_size() else {
+        return false;
+    };
+    let mut buffer = vec![0; size];
+    let Ok(info) = reader.next_frame(&mut buffer) else {
+        return false;
+    };
+    let channels = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        _ => return false,
+    };
+    let pixels: Vec<&[u8]> = buffer[..info.buffer_size()]
+        .chunks_exact(channels)
+        .step_by(7)
+        .collect();
+    let Some(first) = pixels.first() else {
+        return true;
+    };
+    let near = |p: &&[u8]| (0..3).all(|i| p[i].abs_diff(first[i]) <= 6);
+    pixels.iter().filter(|p| near(p)).count() * 100 >= pixels.len() * 99
+}
+/// A picture `w`×`h` scaled evenly to fit the cover raster's budget
+/// (768×480 at most): its proportions kept.
+fn bounded(w: u32, h: u32) -> (u32, u32) {
+    let scale = (768. / w.max(1) as f32).min(480. / h.max(1) as f32).min(1.);
+    (
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    )
+}
 /// Decode a WebKit snapshot to the same bounded raster budget as native covers.
 pub(super) fn fit_web(id: &str, bytes: Vec<u8>) -> Option<Vec<u8>> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -319,8 +378,8 @@ pub(super) fn fit_web(id: &str, bytes: Vec<u8>) -> Option<Vec<u8>> {
         png::ColorType::Rgb => 3,
         _ => return None,
     };
-    let (w, h) = panel_size(id);
-    let (nw, nh) = ((w.min(960.) * 0.8) as u32, (h.min(720.) * 0.8) as u32);
+    let _ = id;
+    let (nw, nh) = bounded(info.width, info.height);
     let mut rgba = Vec::with_capacity((nw * nh * 4) as usize);
     for y in 0..nh {
         for x in 0..nw {
@@ -348,8 +407,10 @@ pub(super) fn crop_drawn(
     if w == 0 || h == 0 {
         return None;
     }
-    let (cw, ch) = panel_size(id);
-    let (nw, nh) = ((cw * 0.8) as u32, (ch * 0.8) as u32);
+    let _ = id;
+    // The panel's own shape, scaled down evenly (never squeezed into
+    // another panel's proportions).
+    let (nw, nh) = bounded(w, h);
     let mut cover = Vec::with_capacity((nw * nh * 4) as usize);
     for dy in 0..nh {
         let sy = ((y + dy * h / nh) as usize) * (width as usize);

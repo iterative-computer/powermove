@@ -2,7 +2,7 @@
 
 This directory owns the Effects browsing model, v4 surface, async data-service
 adapter and Linux conformance tests. It does **not** register a replacement in the
-application shell. All visual output is provisional until Opus review. The panel
+application shell. All visual output is provisional until design review. The panel
 ID is `fxbrowser`; the title is **Effects**, following the shared panel README's
 owner decision, which supersedes the older title in effects-presets.md.
 
@@ -132,7 +132,7 @@ are not permission to edit `surface`, `js/v4/src`, the shell or designer tokens.
 | Atomic HostClient edits await actual acknowledgements before recents/success; settings are separate             | Kernel single writer; N3/N4/N7                                                     |
 | Keep unknown recent/collapse IDs, source settings and every old panel/compat provider                           | N4/N6 and prune-only-after-last-consumer                                           |
 | Worker search, bounded surface, epoch fencing and ID-based inspection                                           | N2/N7/N8: native main thread never waits on JS; no Node/Chromium in runtime        |
-| UI kit/token gaps remain neutral and explicit; no custom native-control imitation                               | Opus ownership; N1/N3 and quirk policy                                             |
+| UI kit/token gaps remain neutral and explicit; no custom native-control imitation                               | design ownership; N1/N3 and quirk policy                                             |
 | Test-only conformance executable belongs to the native workspace; only its lock entry is added                  | Orchestrator merge-ready rules 2/6; reproducible locked builds                     |
 
 ## Validation and macOS gates
@@ -162,8 +162,7 @@ cargo clippy --locked -p pm-panel-effects-conformance --all-targets --no-deps --
 
 macOS must verify the real AppKit/GPUI layout/control/drag/menu/IME/focus/VoiceOver
 integration, target/edit/Undo/settings durability, full virtual scroll/AX row
-navigation at 60k, worker/UI scheduling with no main-thread JS waits, and the Opus
-review checklist (light/dark, contrast, transparency, motion, 1×/2× hit geometry).
+navigation at 60k, worker/UI scheduling with no main-thread JS waits, and the design checklist (light/dark, contrast, transparency, motion, 1×/2× hit geometry).
 Linux snapshots are semantic conformance evidence, not those rendering gates.
 
 Linux validation after merging both required bases: **65 panel tests**, including
@@ -193,7 +192,7 @@ gates remain; no API support is inferred from an accepted metadata bag (N3/N7).
 Re-ran the 65 Effects tests/17 snapshots, all 237 v4 tests and all 95 pm-surface
 Rust tests with locked Cargo resolution. TypeScript, Prettier, browser build,
 rustfmt and strict all-target Clippy pass. Spec coverage, both DESIGN-TODOs and
-the macOS/Opus gates above are unchanged.
+the macOS and design gates above are unchanged.
 
 Also re-ran `bun run eval --wire --include-held-out`: **40 passed, 0 failed,
 0 pending**, with **10 owner fixtures explicitly production-blocked**. The frozen

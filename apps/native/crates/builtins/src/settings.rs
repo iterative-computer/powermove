@@ -365,7 +365,7 @@ impl Backend {
                 row("aero-plan", GROUP, "Aero"),
                 "settings.show-account",
                 "Choose a Plan…",
-                "Aerolite or Aero, on your Powermove account.".into(),
+                "Aerolite, on your Powermove account.".into(),
             ));
         }
         rows
@@ -1353,7 +1353,14 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
         let mut sign_in = row("sign-in", "Powermove Account", "action");
         sign_in["action"] = json!("account.sign-in");
         sign_in["actionLabel"] = json!("Sign In…");
-        sign_in["detail"] = json!("Publish and manage your extensions on the Store.");
+        // Powermove refused the session this launch: one quiet notice, in
+        // view under the row's title.
+        if cloud["sessionEnded"] == true {
+            sign_in["detail"] = json!("Your session ended. Sign in again.");
+            sign_in["reading"] = json!(true);
+        } else {
+            sign_in["detail"] = json!("Publish and manage your extensions on the Store.");
+        }
         let mut remember = row("remember", "Remember Installs on This Account", "switch");
         remember["value"] = json!(false);
         remember["disabled"] = json!(true);
@@ -1424,10 +1431,10 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
     let subscribed = billing["subscribed"] == true;
     let mut rows = vec![];
     if !subscribed {
-        let mut free = row("plan", PLAN, "Free", "status");
-        free["value"] = json!(pm_agents::inference::NEEDS_PLAN);
-        rows.push(free);
         if billing["waiting"] == "checkout" {
+            let mut free = row("plan", PLAN, "Free", "status");
+            free["value"] = json!(pm_agents::inference::NEEDS_PLAN);
+            rows.push(free);
             rows.push(action(
                 row(
                     "waiting",
@@ -1439,37 +1446,49 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
                 "Cancel",
             ));
         } else {
+            // The website's cards: Free, the plan the account is on, then
+            // each plan the backend offers (only those), with its own
+            // button to Checkout. Lines: name, price, period, note, action
+            // (`=` a quiet status), then features (`title\tdetail`).
             let plans = billing["plans"].as_array().cloned().unwrap_or_default();
             let mut choose = action(
-                row("choose", PLAN, "Choose a Plan", "plans"),
+                row("choose", PLAN, "Plans", "plans"),
                 "account.subscribe",
-                "Continue…",
+                "",
             );
-            // Each plan's card: its name, price and monthly credits, and for
-            // a plan that gives more per dollar than the smallest, how much
-            // more (the website's wording).
             let price = |p: &Value| p["priceCents"].as_u64().unwrap_or(0);
             let credits = |p: &Value| p["credits"].as_u64().unwrap_or(0);
-            let per_dollar = |p: &Value| credits(p) as f64 / price(p).max(1) as f64;
-            let base = plans.iter().map(per_dollar).fold(f64::INFINITY, f64::min);
-            choose["options"] = plans
-                .iter()
-                .map(|p| {
-                    let mut lines = vec![
-                        p["name"].as_str().unwrap_or_default().to_owned(),
-                        format!("{} a month", dollars(price(p))),
-                        format!(
-                            "{} credits a month",
-                            pm_agents::inference::grouped(credits(p))
-                        ),
-                    ];
-                    let more = ((per_dollar(p) / base - 1.) * 100.).round();
-                    if more >= 1. {
-                        lines.push(format!("{more}% more credits per dollar"));
-                    }
-                    json!({"v": p["id"], "label": lines.join("\n")})
-                })
-                .collect();
+            let free = [
+                "Free",
+                "$0",
+                "",
+                "The whole editor, with your own agent.",
+                "=Current plan",
+                "The whole editor\tEvery tool, effect and export",
+                "Extensions\tInstall from the Store, or have the agent build one",
+                "Your own agent\tBring your Claude Code or Codex subscription",
+            ];
+            let mut options = vec![json!({"v": "free", "label": free.join("\n")})];
+            options.extend(plans.iter().map(|p| {
+                let name = p["name"].as_str().unwrap_or_default();
+                let note = match p["id"].as_str() {
+                    Some("aerolite") => "Aero, our agent, with inference included.",
+                    _ => "",
+                };
+                let lines = [
+                    name.to_owned(),
+                    dollars(price(p)),
+                    "per month".to_owned(),
+                    note.to_owned(),
+                    format!("Get {name}"),
+                    format!(
+                        "{} credits a month\tInference for Aero, run by Powermove",
+                        pm_agents::inference::grouped(credits(p))
+                    ),
+                ];
+                json!({"v": p["id"], "label": lines.join("\n")})
+            }));
+            choose["options"] = json!(options);
             choose["detail"] = json!("Credits reset each month and don’t roll over.");
             if let Some(error) = billing["error"].as_str() {
                 choose["error"] = json!(error);
@@ -1818,6 +1837,10 @@ mod cloud_tests {
     #[test]
     fn powermove_account_rows_follow_the_session() {
         assert!(cloud_rows(&serde_json::Value::Null).is_empty());
+        let ended = cloud_rows(&json!({"revision":2,"signedIn":false,"sessionEnded":true}));
+        assert_eq!(ended[0]["detail"], "Your session ended. Sign in again.");
+        assert_eq!(ended[0]["reading"], true);
+        assert_eq!(ended[0]["actionLabel"], "Sign In…");
         let out = cloud_rows(&json!({"revision":2,"signedIn":false}));
         assert_eq!(out[0]["action"], "account.sign-in");
         assert_eq!(out[0]["actionLabel"], "Sign In…");
@@ -1870,24 +1893,49 @@ mod cloud_tests {
             ),
             false,
         );
-        assert_eq!(ids(&free), ["account.plan", "account.choose"]);
-        assert_eq!(free[0]["value"], "Aero needs Aerolite or Aero.");
-        assert_eq!(free[1]["control"], "plans");
-        assert_eq!(free[1]["action"], "account.subscribe");
-        assert_eq!(free[1]["actionLabel"], "Continue…");
-        assert_eq!(
-            free[1]["options"][0]["label"],
-            "Aerolite\n$9.99 a month\n1,000 credits a month"
+        // Free: the website's cards, Free and each plan the backend offers
+        // (the fixture offers Aerolite and Aero; both come through), each
+        // with its own action.
+        assert_eq!(ids(&free), ["account.choose"]);
+        assert_eq!(free[0]["control"], "plans");
+        assert_eq!(free[0]["action"], "account.subscribe");
+        let options = free[0]["options"].as_array().unwrap();
+        assert_eq!(options[0]["v"], "free");
+        assert!(
+            options[0]["label"]
+                .as_str()
+                .unwrap()
+                .contains("\n=Current plan\n")
         );
         assert_eq!(
-            free[1]["options"][1]["label"],
-            "Aero\n$19.99 a month\n2,500 credits a month\n25% more credits per dollar"
+            options[1]["label"],
+            "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\n\
+             Get Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove"
+        );
+        assert_eq!(options.len(), 3);
+        // Only the plans the backend lists: Aerolite alone, no Aero anywhere.
+        let only = billing_rows(
+            &ready(json!({"subscribed":false,"plan":null,"upgrade":null,
+                "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]})),
+            false,
+        );
+        let labels: Vec<&str> = only[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels.len(), 2);
+        assert!(
+            labels.iter().all(|l| !l.contains("Get Aero\n")),
+            "{labels:?}"
         );
         // Waiting for Checkout: a quiet line with Cancel instead.
         let waiting = billing_rows(
             &ready(json!({"subscribed":false,"plan":null,"waiting":"checkout"})),
             false,
         );
+        assert_eq!(waiting[0]["value"], "Aero needs Aerolite.");
         assert_eq!(waiting[1]["label"], "Waiting for checkout in your browser…");
         assert_eq!(waiting[1]["action"], "account.checkout-cancel");
         // Aerolite mid-period: the plan, Manage Billing…, the meter and the days.

@@ -240,16 +240,14 @@ pub struct StoreWindow {
     tx: async_channel::Sender<Reply>,
     /// A Library card's open "…" menu (v1.2.0's card menu), each card's
     /// button where it was drawn, and the row the pointer lights.
-    card_menu: Option<CardMenu>,
-    card_menu_trigger_focus: Option<FocusHandle>,
+    pub(crate) card_menu: Option<CardMenu>,
     card_anchors: CardAnchors,
-    card_lit: Option<usize>,
     /// Each installed card's real NSSwitch, by extension id.
     switches: HashMap<String, Entity<NativeControl>>,
 }
 /// The Library card whose "…" menu is open.
 #[derive(Clone, Debug, PartialEq)]
-struct CardMenu {
+pub(crate) struct CardMenu {
     id: String,
     name: String,
     repo: Option<String>,
@@ -322,9 +320,7 @@ impl StoreWindow {
             library_generation: 0,
             tx,
             card_menu: None,
-            card_menu_trigger_focus: None,
             card_anchors: Default::default(),
-            card_lit: None,
             switches: Default::default(),
         };
         window.load_shelves();
@@ -1119,19 +1115,11 @@ impl StoreWindow {
             .filter_map(Listing::from_value)
             .collect()
     }
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.key == "f" && event.keystroke.modifiers.platform {
             if let Some(field) = &self.search {
                 field.read(cx).focus();
             }
-            return;
-        }
-        if event.keystroke.key == "escape" && self.card_menu.take().is_some() {
-            if let Some(trigger) = self.card_menu_trigger_focus.take() {
-                trigger.focus(window, cx);
-            }
-            cx.stop_propagation();
-            cx.notify();
             return;
         }
         if event.keystroke.key == "escape" {
@@ -2083,13 +2071,6 @@ impl StoreWindow {
         let folder = entry.source.get("hostRecord")?.get("folder")?;
         folder.as_str().map(PathBuf::from)
     }
-    #[cfg(test)]
-    pub fn card_menu_rows(&self) -> Vec<String> {
-        self.card_menu
-            .as_ref()
-            .map(|m| self.card_rows(m).into_iter().map(|r| r.0).collect())
-            .unwrap_or_default()
-    }
     /// The rows of a card's "…" menu, v1.2.0's: On or Off when the corner
     /// holds another action, Check for Updates for a Store extension, Show in
     /// Finder, then Uninstall… on its own.
@@ -2165,6 +2146,7 @@ impl StoreWindow {
                     |_, _, _, _| (),
                 )
                 .absolute()
+                .inset_0()
                 .size_full(),
             )
             .debug_selector(move || selector.clone())
@@ -2172,14 +2154,7 @@ impl StoreWindow {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |v, _, window, cx| {
                 cx.stop_propagation();
-                v.card_menu = if v.card_menu.as_ref() == Some(&menu) {
-                    None
-                } else {
-                    Some(menu.clone())
-                };
-                v.card_menu_trigger_focus = v.card_menu.as_ref().and_then(|_| window.focused(cx));
-                v.card_lit = None;
-                cx.notify();
+                v.open_card_menu(menu.clone(), window, cx);
             }));
         div()
             .flex()
@@ -2189,97 +2164,63 @@ impl StoreWindow {
             .child(more)
             .into_any_element()
     }
-    /// Runs a row of the open card menu and closes it.
-    fn card_choose(&mut self, row: usize, window: &Window, cx: &mut Context<Self>) {
-        let Some(menu) = self.card_menu.take() else {
+    /// A card's "…" menu: the system's, hanging from its button, Uninstall…
+    /// after a separator.
+    fn open_card_menu(&mut self, menu: CardMenu, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(control) = self.card_anchors.borrow().get(&menu.id).copied() else {
             return;
         };
-        match self.card_rows(&menu).get(row).map(|r| r.1) {
-            Some(CardAct::Turn(on)) => self.turn(&menu.id, on, cx),
-            Some(CardAct::CheckForUpdates) => {
+        let rows = self.card_rows(&menu);
+        let mut options = vec![];
+        let mut acts = vec![];
+        for (i, (label, act)) in rows.into_iter().enumerate() {
+            if act == CardAct::Uninstall && i > 0 {
+                options.push(json!({"separator": true}));
+                acts.push(None);
+            }
+            options.push(json!({"label": label}));
+            acts.push(Some(act));
+        }
+        self.card_menu = Some(menu.clone());
+        cx.notify();
+        let (this, handle) = (cx.entity(), window.window_handle());
+        let place = crate::v4_native::Place::Below(control);
+        crate::v4_native::menu_at(window, &options, place, cx, move |index, cx| {
+            let act = index.and_then(|i| acts.get(i).copied().flatten());
+            let _ = handle.update(cx, |_, window, cx| {
+                this.update(cx, |v, cx| {
+                    v.card_menu = None;
+                    if let Some(act) = act {
+                        v.card_choose(menu, act, window, cx);
+                    }
+                    cx.notify();
+                })
+            });
+        });
+    }
+    /// Runs a card menu's item.
+    fn card_choose(
+        &mut self,
+        menu: CardMenu,
+        act: CardAct,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        match act {
+            CardAct::Turn(on) => self.turn(&menu.id, on, cx),
+            CardAct::CheckForUpdates => {
                 if self.busy.is_none() {
                     self.message = None;
                     self.load_library();
                 }
             }
-            Some(CardAct::ShowInFinder) => {
+            CardAct::ShowInFinder => {
                 if let Some(folder) = self.folder(&menu.id) {
                     crate::platform::reveal(&folder);
                 }
             }
-            Some(CardAct::Uninstall) => {
-                self.confirm_uninstall(menu.id, menu.name, menu.repo, window, cx)
-            }
-            None => {}
+            CardAct::Uninstall => self.confirm_uninstall(menu.id, menu.name, menu.repo, window, cx),
         }
-        cx.notify();
-    }
-    /// The open card menu: our popover hanging from its "…" button, closed
-    /// by a click elsewhere or Escape.
-    fn card_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.card_menu.clone()?;
-        let anchor = self.card_anchors.borrow().get(&menu.id).copied()?;
-        let kit = self.kit();
-        let t = &self.tokens;
-        let rows = self.card_rows(&menu);
-        let separator = rows.iter().position(|r| r.1 == CardAct::Uninstall).filter(|i| *i > 0);
-        let other_triggers = self.card_anchors.borrow().iter()
-            .filter(|(id, _)| **id != menu.id)
-            .map(|(_, bounds)| *bounds)
-            .collect();
-        let view = cx.entity().downgrade();
-        let close = move |_: &mut Window, cx: &mut App| {
-            let _ = view.update(cx, |v, cx| {
-                v.card_menu = None;
-                v.card_menu_trigger_focus = None;
-                cx.notify();
-            });
-        };
-        let mut items: Vec<AnyElement> = Vec::new();
-        for (row, (label, _)) in rows.iter().enumerate() {
-            if Some(row) == separator {
-                items.push(kit.separator().my(px(t.space.xs)).into_any_element());
-            }
-            items.push(
-                kit.menu_row(format!("store-card-menu-{row}"), label.clone(), None, None)
-                    .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                        let lit = hovered.then_some(row);
-                        if v.card_lit != lit && (*hovered || v.card_lit == Some(row)) {
-                            v.card_lit = lit;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |v, _, window, cx| v.card_choose(row, window, cx)))
-                    .into_any_element(),
-            );
-        }
-        // The light rides the rows; past the separator, its height too.
-        let gap = 1. + 2. * t.space.xs;
-        let lit = self.card_lit.map(|row| {
-            row as f32 * t.metrics.row + if separator.is_some_and(|s| row >= s) { gap } else { 0. }
-        });
-        Some(
-            deferred(
-                anchored()
-                    .anchor(Anchor::TopRight)
-                    .position(point(anchor.right(), anchor.bottom() + px(t.space.xs)))
-                    .child(
-                        pm_shell::kit::dismiss_menu_on_press(
-                            kit.menu().id("store-card-menu"),
-                            Some(anchor),
-                            other_triggers,
-                            close,
-                        )
-                            .min_w(px(t.metrics.sidebar - 2. * t.space.md))
-                            .font_family(pm_design::TEXT_FONT)
-                            .role(Role::Menu)
-                            .child(kit.menu_light("store-card-menu", lit))
-                            .children(items),
-                    ),
-            )
-            .priority(1)
-            .into_any_element(),
-        )
     }
     /// Library (S077): what needs you, what the Store installed here and
     /// what was made here, each a section of cards.
@@ -3114,7 +3055,6 @@ impl Render for StoreWindow {
             .child(body)
             .children(bottom_slots)
             .child(self.kit().settle())
-            .children(self.card_menu_overlay(cx))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
     }

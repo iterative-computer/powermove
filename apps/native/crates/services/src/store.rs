@@ -321,10 +321,14 @@ impl<T: StoreTransport> StoreClient<T> {
         Ok(response.items)
     }
 }
-/// Development builds may read a fixture Store on this Mac over plain HTTP
-/// (`http://127.0.0.1:<port>/`); release builds take HTTPS only.
+/// Development builds, and the Sandbox built for a local cloud stack
+/// (`dev-cloud-origin`), may reach a Store or account registry on this Mac
+/// over plain HTTP (`http://127.0.0.1:<port>/`); shipped releases take HTTPS
+/// only.
 pub(crate) fn dev_loopback(origin: &Url) -> bool {
-    cfg!(debug_assertions) && origin.scheme() == "http" && origin.host_str() == Some("127.0.0.1")
+    (cfg!(debug_assertions) || cfg!(feature = "dev-cloud-origin"))
+        && origin.scheme() == "http"
+        && origin.host_str() == Some("127.0.0.1")
 }
 /// The registry's publisher handle grammar (`^[a-z0-9][a-z0-9-]{1,38}$`).
 pub fn valid_handle(value: &str) -> bool {

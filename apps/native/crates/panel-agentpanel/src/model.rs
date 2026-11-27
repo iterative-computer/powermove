@@ -92,6 +92,10 @@ pub struct Session {
     toolbar_notice: Option<bool>,
     settings_dirty: bool,
     access_dirty: bool,
+    /// The thread's record names no provider (a new thread, or one never
+    /// set): the host's default provider applies until the person picks one
+    /// (`adopt_default_provider`).
+    provider_unset: bool,
     /// The person accepted Full access for this thread in this session (its
     /// consent card). Never saved: a restored or new thread asks again. A
     /// run gets computer authority only with it (`launch`'s `Authority`).
@@ -188,6 +192,7 @@ impl Session {
             last_run: v["lastRunId"].as_str().map(str::to_owned),
             settings_dirty: false,
             access_dirty: false,
+            provider_unset: v["provider"].as_str().is_none(),
             computer_consent: false,
             settings: Settings::from_record(v),
             catalog: Catalog::default(),
@@ -407,6 +412,8 @@ pub enum EffectKind {
     SelectProvider(String),
     NewThread,
     OpenSettings,
+    /// Checkout for Aero's plan, in the browser.
+    Subscribe,
     ChooseFiles,
     Shell(ShellAction),
     ConfirmArchive,
@@ -1994,11 +2001,42 @@ impl Panel {
             return Err(Error::Invalid("provider model"));
         }
         s.settings_dirty = true;
+        s.provider_unset = false;
         s.settings.provider = provider;
         s.settings.model = model;
         s.settings.effort.clear();
         s.catalog = catalog;
         Ok(())
+    }
+    /// A thread whose record names no provider takes the host's default
+    /// (the onboarding choice, else the sign-ins: `pm_builtins`'s
+    /// `default_provider`), its default model, unsaved: the person's own
+    /// pick, a send or any settings change saves a provider. True when it
+    /// changed the thread.
+    pub fn adopt_default_provider(
+        &mut self,
+        id: &str,
+        provider: Provider,
+        catalog: Catalog,
+    ) -> Result<bool> {
+        let s = self
+            .sessions
+            .get_mut(id)
+            .ok_or_else(|| Error::UnknownId(id.into()))?;
+        if !s.provider_unset
+            || s.settings_dirty
+            || s.run.is_some()
+            || s.applying
+            || s.settings.provider == provider
+            || !catalog.providers.iter().any(|(p, _)| p == provider.name())
+        {
+            return Ok(false);
+        }
+        s.settings.provider = provider;
+        s.settings.model.clear();
+        s.settings.effort.clear();
+        s.catalog = catalog;
+        Ok(true)
     }
     pub fn set_model(&mut self, id: &str, model: String, effort: String) -> Result<()> {
         let s = self
@@ -2404,6 +2442,11 @@ impl Panel {
     pub fn host_settings(&mut self, thread: &str) -> Result<Effect> {
         let target = self.target(thread)?;
         Ok(self.effect(target, EffectKind::OpenSettings))
+    }
+    /// Aero on Free: Checkout for the plan the account can buy.
+    pub fn host_subscribe(&mut self, thread: &str) -> Result<Effect> {
+        let target = self.target(thread)?;
+        Ok(self.effect(target, EffectKind::Subscribe))
     }
     pub fn host_action(&mut self, thread: &str, action: ShellAction) -> Result<Effect> {
         let target = self.target(thread)?;

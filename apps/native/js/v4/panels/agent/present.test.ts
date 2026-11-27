@@ -7,6 +7,7 @@ import {
   inline,
   markdown,
   presentError,
+  modelDisplayName,
   slashCopy,
   workDuration,
   threadName,
@@ -262,4 +263,15 @@ test("thread nesting is stable for missing parents and cycles", () => {
     "b",
   ]);
   expect(threadPath(threads, "a").map((t) => t.id)).toEqual(["b", "a"]);
+});
+
+test("model ids read as names, never with a pm/ or provider prefix", () => {
+  expect(modelDisplayName("pm/anthropic/claude-opus-5-5")).toBe("Claude Opus 5.5");
+  expect(modelDisplayName("pm/anthropic/claude-opus-5.5")).toBe("Claude Opus 5.5");
+  expect(modelDisplayName("pm/openai/gpt-6.2-sol")).toBe("GPT-6.2 Sol");
+  expect(modelDisplayName("pm/openai/gpt-7-terra")).toBe("GPT-7 Terra");
+  expect(modelDisplayName("pm/google/gemini-4-ultra")).toBe("Gemini 4 Ultra");
+  expect(modelDisplayName("llama3")).toBe("llama3");
+  const error = presentError("model pm/anthropic/claude-opus-5-5 is not available on your plan");
+  expect(error.message.includes("pm/")).toBe(false);
 });

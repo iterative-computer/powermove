@@ -275,7 +275,12 @@ mod macos {
         let field_view: Retained<NSView> = field.clone().into_super().into_super();
         let slot = NativeControlSlot::new(&gpui, field_view);
         let shown = |slot: &NativeControlSlot| {
-            let w = slot.wrapper();
+            // The control, inside its wrapper's bleed (P-SLOT-BLEED).
+            let w = slot
+                .wrapper()
+                .subviews()
+                .firstObject()
+                .expect("the control");
             let r = w.convertRect_toView(w.bounds(), Some(&gpui));
             (r.origin.x, gpui.bounds().size.height - r.origin.y - r.size.height)
         };
@@ -398,7 +403,12 @@ mod macos {
         };
         let slot = NativeControlSlot::new(&gpui, button);
         let shown = |slot: &NativeControlSlot| {
-            let w = slot.wrapper();
+            // The control, inside its wrapper's bleed (P-SLOT-BLEED).
+            let w = slot
+                .wrapper()
+                .subviews()
+                .firstObject()
+                .expect("the control");
             let r = w.convertRect_toView(w.bounds(), Some(&gpui));
             (r.origin.x, gpui.bounds().size.height - r.origin.y - r.size.height)
         };
@@ -481,7 +491,11 @@ mod macos {
         let slot = NativeControlSlot::new(&gpui, button);
         let clip = rect(0., 0., 400., 300.);
         let top = |slot: &NativeControlSlot| {
-            let w = slot.wrapper();
+            let w = slot
+                .wrapper()
+                .subviews()
+                .firstObject()
+                .expect("the control");
             let r = w.convertRect_toView(w.bounds(), Some(&gpui));
             gpui.bounds().size.height - r.origin.y - r.size.height
         };
@@ -540,7 +554,12 @@ mod macos {
         };
         // Where a slot shows, in GPUI's top-down window points.
         let shown = |slot: &NativeControlSlot| {
-            let w = slot.wrapper();
+            // The control, inside its wrapper's bleed (P-SLOT-BLEED).
+            let w = slot
+                .wrapper()
+                .subviews()
+                .firstObject()
+                .expect("the control");
             let r = w.convertRect_toView(w.bounds(), Some(&gpui));
             let h = gpui.bounds().size.height;
             (r.origin.x, h - r.origin.y - r.size.height)
@@ -890,7 +909,19 @@ mod macos {
         assert!(probe::place(&gpui));
         assert!(!slot.wrapper().isHidden());
         assert!(unsafe { slot.wrapper().superview() }.is_some_and(|v| v == content));
-        assert_eq!(slot.wrapper().frame(), rect(10., 256., 80., 24.));
+        // The wrapper keeps 8 pt around the control for a glass rim and
+        // shadow (P-SLOT-BLEED); the control stands at its bounds inside it.
+        assert_eq!(slot.wrapper().frame(), rect(2., 248., 96., 40.));
+        let control = slot
+            .wrapper()
+            .subviews()
+            .firstObject()
+            .expect("the control");
+        assert_eq!(control.frame(), rect(8., 8., 80., 24.));
+        // A press in the bleed, outside the control, is GPUI's (a point in
+        // the content view's coordinates); one on the control is the control's.
+        assert!(slot.wrapper().hitTest(NSPoint::new(4., 250.)).is_none());
+        assert!(slot.wrapper().hitTest(NSPoint::new(50., 268.)).is_some());
         // Paint D reuses a cached view: it keeps its place and nothing moves.
         slot.keep();
         probe::painted(&gpui);
@@ -904,7 +935,7 @@ mod macos {
         slot.stage(rect(10., 100., 80., 24.), clip);
         probe::painted(&gpui);
         assert!(probe::place(&gpui));
-        assert_eq!(slot.wrapper().frame(), rect(10., 176., 80., 24.));
+        assert_eq!(slot.wrapper().frame(), rect(2., 168., 96., 40.));
         // Paint E leaves it out: the present hides it.
         probe::painted(&gpui);
         assert!(probe::pending(&gpui));

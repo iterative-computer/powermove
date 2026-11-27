@@ -5,7 +5,7 @@ The build spec is `docs/native/design/panels/timeline.md`, with the shared panel
 rules and Owner decisions in `docs/native/design/panels/README.md`. Model behavior
 comes from `pm-panel-timeline` and the tagged W1 contracts. No shipped provider,
 compatibility edition, user data, extension contract or existing panel is removed.
-All visual output still requires Opus review.
+All visual output still requires design review.
 
 ## Entry and model/data boundary
 
@@ -65,7 +65,7 @@ a transport-only change. This is not a native paint/latency/scroller certificati
 | §4 Interactions       | Model-backed control actions; forwarding of modifiers, pointer cancellation, wheel, structured drag/drop, keyboard and range events; no optimistic edits                             | Physical pointer capture, hit testing, live drag/trim/key/graph/stagger gestures, menus/sheets, clipboard/import execution, tab services  |
 | §5 Keyboard/focus     | Header order, one track-area Tab stop, non-tabbable row controls, conditional controls; raw key/repeat/modifier forwarding; Rust resolver after shell admission                      | Real shell arbitration and field ownership, row focus/reveal/rename navigation, Control-Tab exit, native tab roving and splitter behavior |
 | §6 VoiceOver          | Real AccessKit assertions for group/outline/row labels, selected state, disabled values, units and spoken time; exact five announcement strings                                      | AXRowCount/virtual navigation, key Delete/Press, native slider/tab roles, `.medium` announcements and macOS window graft                  |
-| §7 Appearance         | pm-design token references only; validator accepts all 16 scheme/accessibility combinations                                                                                          | Real native painting, contrast/opacity/Reduce Motion behavior, screenshots and Opus acceptance                                            |
+| §7 Appearance         | pm-design token references only; validator accepts all 16 scheme/accessibility combinations                                                                                          | Real native painting, contrast/opacity/Reduce Motion behavior, screenshots and design acceptance                                            |
 | §8 Copy               | Spec copy and native schema/user labels; no new product error messages                                                                                                               | T6 close-tab action label needs design copy                                                                                               |
 | §9 Don't              | No accent row/clip fills, per-axis graph hues, 3D column, letter badges, new shortcut registrations, or retirement of existing consumers                                             | All unimplemented visuals remain explicit placeholders                                                                                    |
 
@@ -99,7 +99,7 @@ metadata, rather than certify the completed spec or physical appearance.
 ## DESIGN-TODO(opus) and API gaps
 
 T1–T5 mark neutral placeholders for already-decided design awaiting kit/host
-support. They do **not** ask Opus to redesign those controls. T6 is missing copy.
+support. They do **not** ask design to redesign those controls. T6 is missing copy.
 
 1. **T1 — glyph/control slots.** The kit has no SF/custom symbol slot or native
    push-button component. Required symbols stay inspectable metadata; no emoji,
@@ -126,7 +126,7 @@ support. They do **not** ask Opus to redesign those controls. T6 is missing copy
    readout stays a single semantic row; no two-field redesign or fake binding.
 6. **T6 — close-tab VoiceOver copy.** §6 supplies the composition's tab name but
    not its separate close control's spoken label. Current neutral label is the
-   composition name; Opus must supply the distinct action copy.
+   composition name; design must supply the distinct action copy.
 
 Outside owned paths: application panel registration, native binding/presentation
 services, UI-kit additions, native layout/painting/menus/fields/geometry/AX and
@@ -176,7 +176,7 @@ large windows, transport-only row stability and a browser bundle mounted/driven
 without Node, Chromium, window or global document. Rust adapter tests exercise
 the real kernel; the existing timeline behavior suite remains intact.
 
-macOS still must verify actual layout/painting at 1×/2×, Opus review captures,
+macOS still must verify actual layout/painting at 1×/2×, design review captures,
 keyboard/Full Keyboard Access/VoiceOver and window AX integration, native text
 services/IME, menus/sheets/popovers, live gesture capture/cancel/Undo, clip/key/
 graph timing, media/transport/render bar behavior, logical scrollers/60k latency,
@@ -271,7 +271,7 @@ Decisions and selecting rules:
 DESIGN-TODO(opus): the native `marker` and `keyframe.hold` paths, and Rendering
 stripe pitch/period, need the approved art/cadence. They remain named paint
 requests; no substitute art or animation constants were chosen here. All
-visual output remains provisional pending Opus review.
+visual output remains provisional pending design review.
 
 Run from `apps/native`:
 

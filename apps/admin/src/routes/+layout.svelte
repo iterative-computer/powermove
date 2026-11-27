@@ -8,6 +8,7 @@
   const NAV = [
     { href: '/users', label: 'Users' },
     { href: '/extensions', label: 'Extensions' },
+    { href: '/aero', label: 'Aero & Billing' },
     { href: '/admins', label: 'Admins' },
     { href: '/log', label: 'Moderation log' },
   ];

@@ -5,7 +5,9 @@
    - a hosted Checkout page with a Pay button, and a Portal page (cancel at period end, resume, switch plan);
    - signed webhooks (`Stripe-Signature: t=…,v1=…`) posted to the Worker, in the current API's object shapes;
    - development controls: POST /_fake/subscriptions/:id/renew (a new period starts now, its invoice is paid),
-     /fail-renewal (the renewal payment fails), /end (a subscription set to cancel at period end ends).
+     /fail-renewal (the renewal payment fails), /end (a subscription set to cancel at period end ends);
+   - payments: every paid invoice has a payment intent and a charge (invoice payments list them), refunds
+     (charge.refunded), and controls for a dispute (charge.dispute.created), a voided or uncollectible invoice.
 
    bun scripts/fake-stripe.ts [--port 12111] [--webhook http://localhost:8787/v2/stripe/webhook]
    Worker env: STRIPE_API_BASE=http://localhost:12111 STRIPE_SECRET_KEY=sk_test_fake STRIPE_WEBHOOK_SECRET=whsec_fake */
@@ -18,7 +20,7 @@ export interface FakeStripe {
   url: string;
   /** Every webhook delivered, with the Worker's status. */
   deliveries: Array<{ type: string; id: string; status: number }>;
-  state: { customers: Map<string, Obj>; prices: Map<string, Obj>; products: Map<string, Obj>; sessions: Map<string, Obj>; subscriptions: Map<string, Obj>; invoices: Map<string, Obj>; events: Obj[] };
+  state: { customers: Map<string, Obj>; prices: Map<string, Obj>; products: Map<string, Obj>; sessions: Map<string, Obj>; subscriptions: Map<string, Obj>; invoices: Map<string, Obj>; charges: Map<string, Obj>; events: Obj[] };
   /** Completes a Checkout Session as if the Pay button was pressed. Returns the success URL. */
   pay(sessionId: string, backdateDays?: number): Promise<string>;
   renew(subscriptionId: string): Promise<void>;
@@ -27,6 +29,15 @@ export interface FakeStripe {
   setCancelAtPeriodEnd(subscriptionId: string, value: boolean): Promise<void>;
   switchPlan(subscriptionId: string, lookupKey: string): Promise<void>;
   end(subscriptionId: string): Promise<void>;
+  /** Refunds an invoice's payment (as the Dashboard or the API would). */
+  refund(invoiceId: string): Promise<void>;
+  /** The customer's bank disputes an invoice's payment. */
+  dispute(invoiceId: string): Promise<void>;
+  /** An open invoice voided, or marked uncollectible. */
+  voidInvoice(invoiceId: string): Promise<void>;
+  markUncollectible(invoiceId: string): Promise<void>;
+  /** Sends an event of any shape, signed (a test's own event). */
+  emit(type: string, object: Obj): Promise<void>;
   /** Sends an already-delivered event again (a Stripe retry). */
   redeliver(eventId: string): Promise<number>;
   stop(): Promise<void>;
@@ -83,7 +94,7 @@ async function sign(secret: string, payload: string, timestamp = now()): Promise
 
 export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
   const secret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
-  const state: FakeStripe['state'] = { customers: new Map(), prices: new Map(), products: new Map(), sessions: new Map(), subscriptions: new Map(), invoices: new Map(), events: [] };
+  const state: FakeStripe['state'] = { customers: new Map(), prices: new Map(), products: new Map(), sessions: new Map(), subscriptions: new Map(), invoices: new Map(), charges: new Map(), events: [] };
   const deliveries: FakeStripe['deliveries'] = [];
   let base = '';
 
@@ -132,8 +143,14 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
       id: id('in'), object: 'invoice', customer: sub.customer, billing_reason: reason, status, currency: 'usd',
       amount_due: amount, amount_paid: status === 'paid' ? amount : 0, created: now(), livemode: false,
       parent: { type: 'subscription_details', subscription_details: { subscription: sub.id, metadata: sub.metadata } },
-      lines: { object: 'list', has_more: false, data: [{ id: id('il'), object: 'line_item', amount, currency: 'usd', period, pricing: { type: 'price_details', price_details: { price: item.price.id, product: item.price.product } } }] },
-    };
+      lines: { object: 'list', has_more: false, data: [{ id: id('il'), object: 'line_item', amount, currency: 'usd', period, pricing: { type: 'price_details', price_details: { price: item.price.id, product: item.price.product } }, parent: { type: 'subscription_item_details', subscription_item_details: { subscription: sub.id, subscription_item: item.id, proration: false } } }] },
+    } as Obj;
+    if (status === 'paid') {
+      const charge = { id: id('ch'), object: 'charge', amount, amount_refunded: 0, currency: 'usd', customer: sub.customer, payment_intent: id('pi'), paid: true, refunded: false, disputed: false, livemode: false, created: now() };
+      state.charges.set(charge.id, charge);
+      invoice.payment_intent = charge.payment_intent;
+      invoice.charge = charge.id;
+    }
     state.invoices.set(invoice.id, invoice);
     return invoice;
   }
@@ -204,6 +221,29 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
     await emit('customer.subscription.updated', sub);
     // An upgrade is invoiced now (Stripe's default proration); a downgrade leaves a credit for the next invoice.
     if (upgrade) await emit('invoice.paid', invoiceFor(sub, 'subscription_update', { start: item.current_period_start, end: item.current_period_end }, prorated, 'paid'));
+  }
+
+  const chargeOf = (invoiceId: string) => {
+    const invoice = state.invoices.get(invoiceId);
+    const charge = invoice?.charge && state.charges.get(invoice.charge);
+    if (!charge) throw new Error('no payment for that invoice');
+    return charge;
+  };
+  async function refundCharge(charge: Obj) {
+    Object.assign(charge, { refunded: true, amount_refunded: charge.amount });
+    await emit('charge.refunded', charge);
+  }
+  async function refund(invoiceId: string) { await refundCharge(chargeOf(invoiceId)); }
+  async function dispute(invoiceId: string) {
+    const charge = chargeOf(invoiceId);
+    charge.disputed = true;
+    await emit('charge.dispute.created', { id: id('dp'), object: 'dispute', amount: charge.amount, charge: charge.id, payment_intent: charge.payment_intent, status: 'needs_response', reason: 'fraudulent', livemode: false, created: now() });
+  }
+  async function closeInvoice(invoiceId: string, status: 'void' | 'uncollectible') {
+    const invoice = state.invoices.get(invoiceId);
+    if (!invoice) throw new Error('no such invoice');
+    invoice.status = status;
+    await emit(status === 'void' ? 'invoice.voided' : 'invoice.marked_uncollectible', invoice);
   }
 
   async function end(subscriptionId: string) {
@@ -293,6 +333,38 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
         const data = [...state.prices.values()].filter(price => price.active && (keys.length === 0 || keys.includes(price.lookup_key)));
         return Response.json(list(data, path));
       }
+      if ((match = path.match(/^\/v1\/subscriptions\/(sub_\w+)$/)) && method === 'DELETE') {
+        const sub = state.subscriptions.get(match[1]!);
+        if (!sub) return error(404, 'no such subscription');
+        Object.assign(sub, { status: 'canceled', canceled_at: now() });
+        await emit('customer.subscription.deleted', sub);
+        return Response.json(sub);
+      }
+      if ((match = path.match(/^\/v1\/charges\/(ch_\w+)$/)) && method === 'GET') {
+        const charge = state.charges.get(match[1]!);
+        return charge ? Response.json(charge) : error(404, 'no such charge');
+      }
+      if (path === '/v1/invoices' && method === 'GET') {
+        const subscription = url.searchParams.get('subscription'), status = url.searchParams.get('status');
+        const data = [...state.invoices.values()].filter(invoice => (!subscription || invoice.parent?.subscription_details?.subscription === subscription) && (!status || invoice.status === status));
+        return Response.json(list(data, path));
+      }
+      if (path === '/v1/invoice_payments' && method === 'GET') {
+        const intent = url.searchParams.get('payment[payment_intent]'), invoiceFilter = url.searchParams.get('invoice');
+        const data = [...state.invoices.values()].filter(invoice => invoice.payment_intent && (!intent || invoice.payment_intent === intent) && (!invoiceFilter || invoice.id === invoiceFilter))
+          .map(invoice => ({ id: id('inpay'), object: 'invoice_payment', invoice: invoice.id, status: 'paid', is_default: true, payment: { type: 'payment_intent', payment_intent: invoice.payment_intent } }));
+        return Response.json(list(data, path));
+      }
+      if (path === '/v1/refunds' && method === 'POST') {
+        const charge = [...state.charges.values()].find(entry => entry.payment_intent === form.payment_intent || entry.id === form.charge);
+        if (!charge) return error(400, 'no such payment');
+        await refundCharge(charge);
+        return Response.json({ id: id('re'), object: 'refund', amount: charge.amount, charge: charge.id, payment_intent: charge.payment_intent, status: 'succeeded' });
+      }
+      if ((match = path.match(/^\/v1\/checkout\/sessions\/(cs_\w+)$/)) && method === 'GET') {
+        const session = state.sessions.get(match[1]!);
+        return session ? Response.json(session) : error(404, 'no such session');
+      }
       if ((match = path.match(/^\/v1\/subscriptions\/(sub_\w+)$/)) && method === 'GET') {
         const sub = state.subscriptions.get(match[1]!);
         return sub ? Response.json(sub) : error(404, 'no such subscription');
@@ -306,7 +378,7 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
           metadata: form.metadata ?? {}, subscription_data: form.subscription_data, line_items: form.line_items, success_url: form.success_url, cancel_url: form.cancel_url,
           automatic_tax: { enabled: form.automatic_tax?.enabled === 'true' }, billing_address_collection: form.billing_address_collection ?? null,
           tax_id_collection: { enabled: form.tax_id_collection?.enabled === 'true' }, status: 'open', payment_status: 'unpaid', subscription: null,
-          url: `${base}/checkout/${sessionId}`, created: now(), livemode: false,
+          url: `${base}/checkout/${sessionId}`, created: now(), expires_at: now() + 86_400, livemode: false,
         };
         state.sessions.set(sessionId, session);
         return Response.json(session);
@@ -324,7 +396,8 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
   base = `http://localhost:${server.port}`;
 
   return {
-    url: base, deliveries, state, pay, renew, failRenewal, setCancelAtPeriodEnd, switchPlan, end,
+    url: base, deliveries, state, pay, renew, failRenewal, setCancelAtPeriodEnd, switchPlan, end, refund, dispute,
+    voidInvoice: (invoiceId) => closeInvoice(invoiceId, 'void'), markUncollectible: (invoiceId) => closeInvoice(invoiceId, 'uncollectible'), emit,
     redeliver: async (eventId) => { const event = state.events.find(entry => entry.id === eventId); if (!event) throw new Error('no such event'); return send(event); },
     stop: async () => { await server.stop(true); },
   };

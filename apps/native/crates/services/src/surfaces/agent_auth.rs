@@ -581,6 +581,24 @@ mod tests {
         let state = url.query_pairs().find(|(k, _)| k == "state").unwrap().1;
         format!("powermove://auth?state={state}&token=test")
     }
+    /// A local stack's `http://127.0.0.1:<port>` registry is one only in a
+    /// build that may use one (development, the `dev-cloud-origin` Sandbox);
+    /// account work on it is refused nowhere else.
+    #[test]
+    fn a_loopback_registry_only_where_the_build_may_use_one() {
+        let local = cfg!(debug_assertions) || cfg!(feature = "dev-cloud-origin");
+        let task = |origin| {
+            CloudTask::new(
+                crate::surfaces::Flight::default().start(),
+                origin,
+                CloudWork::SignOut,
+            )
+        };
+        assert_eq!(registry_origin("http://127.0.0.1:8787").is_some(), local);
+        assert_eq!(task("http://127.0.0.1:8787").is_some(), local);
+        assert!(task("https://cloud.example").is_some());
+        assert!(registry_origin("http://cloud.example").is_none());
+    }
     #[test]
     fn challenge_hashes_raw_random_bytes() {
         let (_, url) = auth();

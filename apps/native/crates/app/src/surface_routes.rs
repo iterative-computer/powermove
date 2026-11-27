@@ -373,6 +373,14 @@ impl Controller {
                     let window = v.host.borrow().window.clone();
                     v.bring_in_recent_work(window, cx);
                 }
+                // Home's Sign In row: the sign-in sheet on this window. It is
+                // the app's command, not the kernel's, and it runs after this
+                // click's window update: the sheet looks its parent up among
+                // the app's windows, which can't read the window it's inside.
+                Outbound::Command("cloudSignIn") => {
+                    let window = v.host.borrow().window.clone();
+                    cx.defer(move |cx| crate::cloud::open_sign_in(window, cx));
+                }
                 Outbound::Command(name) => v.host.borrow().send_command(name, vec![]),
                 // Ghost loading from Home: a window with no project shows the
                 // editor's ghost at once (one with a project keeps it until

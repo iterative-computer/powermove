@@ -2,17 +2,39 @@
    It streams a canned reply in each provider's own SSE format: summarized reasoning (with a signature or an encrypted
    item), text, and a call to the first tool when the request offers tools and the newest message is not a tool result.
    Usage is reported like the real APIs, cache included: the first request of a thread writes the cache (Anthropic) and
-   later ones read it (both). A user message containing "[slow]" streams slowly, for abort tests.
+   later ones read it (both). A user message containing "[slow]" streams slowly, for abort tests. Token counting
+   (Anthropic's count_tokens, OpenAI's input_tokens) answers the input the stream would bill. Tests can script the
+   next replies (`queue`): the provider's raw usage JSON to report, or a failure (an HTTP error, an error event
+   mid-stream, a stream cut off before its usage).
 
    bun scripts/ai-simulator.ts [--port 4010]
    AERO_OPENAI_BASE_URL=http://localhost:4010/openai/v1  AERO_ANTHROPIC_BASE_URL=http://localhost:4010/anthropic/v1 */
 
 export interface SimulatorRequest { provider: 'openai' | 'anthropic'; body: Record<string, any>; headers: Record<string, string> }
-export interface Simulator { url: string; requests: SimulatorRequest[]; /** Streams the client cut off before the end. */ aborted: number; stop(): Promise<void> }
+/** One scripted reply. `usage` is the provider's own usage JSON: Anthropic's `start` (message_start) and `delta`
+    (message_delta), OpenAI's `usage` (response.completed). `fail`: 'http' answers 400 before any stream, 'http500' a retryable 500; 'error'
+    streams the start and some text, then an error event; 'cut' streams the start and some text, then ends; 'failed'
+    ends an OpenAI response with response.failed carrying partial usage; 'cut-after-delta' ends an Anthropic
+    stream after its message_delta, before message_stop; 'stall' goes silent after its first text for 30 s. */
+export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'http500' | 'error' | 'cut' | 'failed' | 'cut-after-delta' | 'stall' }
+export interface Simulator {
+  url: string;
+  requests: SimulatorRequest[];
+  /** Token-count calls. */
+  counts: SimulatorRequest[];
+  /** Scales the token counts it answers (a count that under-reports, for tests). */
+  countScale: number;
+  /** Replies for the next generation requests, in order. */
+  queue: Script[];
+  /** Streams the client cut off before the end. */
+  aborted: number;
+  stop(): Promise<void>;
+}
 
 const encoder = new TextEncoder();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-const tokens = (value: unknown) => Math.max(1, Math.ceil(JSON.stringify(value ?? '').length / 4));
+/** The simulator's token count: a token per four characters of JSON. */
+export const tokens = (value: unknown) => Math.max(1, Math.ceil(JSON.stringify(value ?? '').length / 4));
 
 function lastUserText(messages: any[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -28,6 +50,8 @@ function lastUserText(messages: any[]): string {
 
 export function startAiSimulator(options: { port?: number } = {}): Simulator {
   const requests: SimulatorRequest[] = [];
+  const counts: SimulatorRequest[] = [];
+  const queue: Script[] = [];
   const seenThreads = new Set<string>();
 
   const server = Bun.serve({
@@ -41,13 +65,21 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       if (!body) return Response.json({ error: { message: 'bad json' } }, { status: 400 });
       const headers: Record<string, string> = {};
       request.headers.forEach((value, key) => { headers[key] = value; });
-      if (url.pathname === '/openai/v1/responses') {
-        requests.push({ provider: 'openai', body, headers });
-        return openai(body, request.signal);
+      if (url.pathname === '/openai/v1/responses/input_tokens') {
+        counts.push({ provider: 'openai', body, headers });
+        return Response.json({ object: 'response.input_tokens', input_tokens: Math.floor(tokens([body.instructions, body.input, body.tools]) * simulator.countScale) });
       }
-      if (url.pathname === '/anthropic/v1/messages') {
-        requests.push({ provider: 'anthropic', body, headers });
-        return anthropic(body, request.signal);
+      if (url.pathname === '/anthropic/v1/messages/count_tokens') {
+        counts.push({ provider: 'anthropic', body, headers });
+        return Response.json({ input_tokens: Math.floor(tokens([body.system, body.messages, body.tools]) * simulator.countScale) });
+      }
+      if (url.pathname === '/openai/v1/responses' || url.pathname === '/anthropic/v1/messages') {
+        const provider = url.pathname.startsWith('/openai') ? 'openai' : 'anthropic';
+        requests.push({ provider, body, headers });
+        const script = queue.shift() ?? {};
+        if (script.fail === 'http500') return Response.json({ type: 'error', error: { type: 'api_error', message: 'scripted failure' } }, { status: 500 });
+        if (script.fail === 'http') return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'scripted failure' } }, { status: 400 });
+        return provider === 'openai' ? openai(body, request.signal, script) : anthropic(body, request.signal, script);
       }
       return Response.json({ error: { message: 'not found' } }, { status: 404 });
     },
@@ -76,7 +108,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
     return new Response(body, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' } });
   }
 
-  function openai(body: Record<string, any>, signal: AbortSignal): Response {
+  function openai(body: Record<string, any>, signal: AbortSignal, script: Script): Response {
     const input: any[] = Array.isArray(body.input) ? body.input : [];
     const lastIsToolResult = input.at(-1)?.type === 'function_call_output';
     const { slow, toolName, pieces, reasoning } = plan(input, body.tools, lastIsToolResult);
@@ -107,10 +139,13 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       out('response.output_item.added', { output_index: index, item: { type: 'message', id: mid, role: 'assistant', status: 'in_progress', content: [] } });
       out('response.content_part.added', { item_id: mid, output_index: index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
       for (const delta of pieces) {
+        if (script.fail === 'stall' && delta !== pieces[0]) { for (let i = 0; i < 300 && !signal.aborted; i++) await sleep(100); return; }
         if (slow) await sleep(25);
         out('response.output_text.delta', { item_id: mid, output_index: index, content_index: 0, delta, logprobs: [] });
         outputTokens += 2;
       }
+      if (script.fail === 'cut') return;
+      if (script.fail === 'error') { send('error', { type: 'error', sequence_number: seq++, code: 'server_error', message: 'scripted failure', param: null }); return; }
       const text = pieces.join('');
       out('response.output_text.done', { item_id: mid, output_index: index, content_index: 0, text, logprobs: [] });
       out('response.content_part.done', { item_id: mid, output_index: index, content_index: 0, part: { type: 'output_text', text, annotations: [] } });
@@ -125,11 +160,12 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
         out('response.output_item.done', { output_index: index, item: { type: 'function_call', id: fid, call_id: callId, name: toolName, arguments: args, status: 'completed' } });
         outputTokens += 10;
       }
-      out('response.completed', { response: { id, object: 'response', created_at: created, model: body.model, status: 'completed', usage: { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cached }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: body.reasoning?.effort && body.reasoning.effort !== 'none' ? 12 : 0 }, total_tokens: inputTokens + outputTokens } } });
+      if (script.fail === 'failed') { out('response.failed', { response: { id, object: 'response', created_at: created, model: body.model, status: 'failed', error: { code: 'server_error', message: 'scripted failure' }, usage: { input_tokens: 3, input_tokens_details: { cached_tokens: 0 }, output_tokens: 2, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 5 } } }); return; }
+      out('response.completed', { response: { id, object: 'response', created_at: created, model: body.model, status: 'completed', usage: script.usage ?? { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cached }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: body.reasoning?.effort && body.reasoning.effort !== 'none' ? 12 : 0 }, total_tokens: inputTokens + outputTokens } } });
     });
   }
 
-  function anthropic(body: Record<string, any>, signal: AbortSignal): Response {
+  function anthropic(body: Record<string, any>, signal: AbortSignal, script: Script): Response {
     const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
     const last = messages.at(-1);
     const lastIsToolResult = Array.isArray(last?.content) && last.content.some((part: any) => part.type === 'tool_result');
@@ -144,7 +180,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
     const id = `msg_${crypto.randomUUID().replaceAll('-', '')}`;
     return stream(signal, async (send) => {
       const out = (type: string, data: Record<string, unknown>) => send(type, { type, ...data });
-      out('message_start', { message: { id, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: fresh, cache_creation_input_tokens: cacheWrite, cache_read_input_tokens: cacheRead, output_tokens: 1 } } });
+      out('message_start', { message: { id, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: script.start ?? { input_tokens: fresh, cache_creation_input_tokens: cacheWrite, cache_read_input_tokens: cacheRead, output_tokens: 1 } } });
       let index = 0;
       let outputTokens = 0;
       if (body.thinking && body.thinking.type !== 'disabled') {
@@ -157,10 +193,13 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       }
       out('content_block_start', { index, content_block: { type: 'text', text: '' } });
       for (const text of pieces) {
+        if (script.fail === 'stall' && text !== pieces[0]) { for (let i = 0; i < 300 && !signal.aborted; i++) await sleep(100); return; }
         if (slow) await sleep(25);
         out('content_block_delta', { index, delta: { type: 'text_delta', text } });
         outputTokens += 2;
       }
+      if (script.fail === 'cut') return;
+      if (script.fail === 'error') { out('error', { error: { type: 'overloaded_error', message: 'scripted failure' } }); return; }
       out('content_block_stop', { index });
       index++;
       if (toolName) {
@@ -170,12 +209,13 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
         out('content_block_stop', { index });
         outputTokens += 10;
       }
-      out('message_delta', { delta: { stop_reason: toolName ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: outputTokens } });
+      out('message_delta', { delta: { stop_reason: toolName ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: script.delta ?? { output_tokens: outputTokens } });
+      if (script.fail === 'cut-after-delta') return;
       out('message_stop', {});
     });
   }
 
-  const simulator: Simulator = { url: `http://localhost:${server.port}`, requests, aborted: 0, stop: async () => { await server.stop(true); } };
+  const simulator: Simulator = { url: `http://localhost:${server.port}`, requests, counts, queue, countScale: 1, aborted: 0, stop: async () => { await server.stop(true); } };
   return simulator;
 }
 

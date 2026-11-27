@@ -5,10 +5,10 @@ GPUI, AppKit, WebKit, V8, Node, pixels, styling or product copy. Reference:
 `v1.2.0` (`07ed5fa17ee640659cb075f9cad1af2095011d60`).
 
 Read with [kernel](../kernel.md), [W1 workflows](../w1-workflows.md) W018–021,
-[keymap](../w1-keymap.md), [C-MATRIX](../c-matrix.md),
-[D-STATE](../d-state.md), [MCP](../mcp.md), [traces](../traces.md),
+[keymap](../w1-keymap.md), C-MATRIX,
+D-STATE, [MCP](../mcp.md), [traces](../traces.md),
 [engine service](../engine-service.md), [first launch](../first-launch.md),
-[V8](../s1-v8.md), [compat](../s5-compat.md), [pro media](../pro-media.md),
+V8, compat, [pro media](../pro-media.md),
 and the existing [design language](../design/language.md).
 
 ## Authority and integration
@@ -184,7 +184,7 @@ invented: the shipped scrubbing interaction belongs to the source monitor.
 | Ready proxy and persisted metadata never imply a ready original | N3/N4; D-STATE provenance; no proxy silently promoted to original |
 | Bound pages, indexed id navigation and all-row marquee | N1 pro-scale first, N2 improvement over mounting every card, N7 headless operation |
 | Runtime/pickers/import/viewer are nonblocking traits/effects; no JS dependency | N8 main thread never waits; adopted V8/WebKit architecture stays intact |
-| Search/proxy additions expose only semantic facts and intents | Lane requirement; design authority remains Opus |
+| Search/proxy additions expose only semantic facts and intents | Lane requirement; design owns the look |
 | No existing consumers/files removed | Prune rule; this lane replaces no live consumer yet |
 
 ## Verification and remaining work
@@ -242,4 +242,4 @@ presentation, status/error/confirmation text mapping, empty/loading/offline/
 unknown-analysis treatment, row/thumbnail/waveform presentation, drag/marquee and
 focus presentation. This model supplies semantic placeholders (Unknown/None,
 ids, enums and raw values) only. Existing tokens/specs own all visuals; all future
-visual output remains provisional until Opus review.
+visual output remains provisional until design review.

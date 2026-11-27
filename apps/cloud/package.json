@@ -47,6 +47,6 @@
     "drizzle-kit": "0.31.11",
     "emulate": "^0.11.2",
     "typescript": "5.9.3",
-    "wrangler": "4.136.1"
+    "wrangler": "4.156.2"
   }
 }

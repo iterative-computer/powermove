@@ -1,0 +1,65 @@
+{
+  "version": "test fixture (fake credit unit) models.dev 2026-11-26",
+  "creditNanoUsd": 1000000,
+  "models": {
+    "openai/gpt-6.2-sol": {
+      "input": 2,
+      "cachedInput": 0.1,
+      "cacheWrite": 2.5,
+      "cacheWriteLong": 5,
+      "output": 10,
+      "long": {
+        "above": 272000,
+        "input": 4,
+        "cachedInput": 0.2,
+        "cacheWrite": 5,
+        "cacheWriteLong": 10,
+        "output": 15
+      }
+    },
+    "openai/gpt-6.2-astra": {
+      "input": 8,
+      "cachedInput": 0.4,
+      "cacheWrite": 10,
+      "cacheWriteLong": 20,
+      "output": 40,
+      "long": {
+        "above": 272000,
+        "input": 16,
+        "cachedInput": 0.8,
+        "cacheWrite": 20,
+        "cacheWriteLong": 40,
+        "output": 60
+      }
+    },
+    "openai/gpt-6-luna": {
+      "input": 0.1,
+      "cachedInput": 0.01,
+      "cacheWrite": 0.125,
+      "cacheWriteLong": 0.25,
+      "output": 0.5,
+      "long": {
+        "above": 272000,
+        "input": 0.2,
+        "cachedInput": 0.02,
+        "cacheWrite": 0.25,
+        "cacheWriteLong": 0.5,
+        "output": 0.75
+      }
+    },
+    "anthropic/claude-opus-5-5": {
+      "input": 4,
+      "cachedInput": 0.2,
+      "cacheWrite": 5,
+      "cacheWriteLong": 8,
+      "output": 20
+    },
+    "anthropic/claude-sonnet-5-5": {
+      "input": 2,
+      "cachedInput": 0.1,
+      "cacheWrite": 2.5,
+      "cacheWriteLong": 4,
+      "output": 10
+    }
+  }
+}

@@ -25,15 +25,64 @@ define_class!(
         fn choose(&self,sender:&NSMenuItem){self.ivars().selected.set(Some(sender.tag() as usize));}
     }
 );
+#[cfg(test)]
+thread_local! {
+    static SHOWN: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Tests: the items of the last system menu asked for in a headless window,
+/// each its label ("" a separator) and whether it is checked.
+#[cfg(test)]
+pub fn last_menu() -> Vec<(String, bool)> {
+    SHOWN.with(|shown| {
+        shown
+            .borrow()
+            .iter()
+            .map(|o| {
+                let label = o.get("label").and_then(Value::as_str).unwrap_or_default();
+                (
+                    label.to_owned(),
+                    o.get("checked") == Some(&Value::Bool(true)),
+                )
+            })
+            .collect()
+    })
+}
+/// Where a system menu opens: under the pointer (a right-click), or hanging
+/// from the button or row that opened it (window points), below it or above
+/// it, at least as wide as it, its leading edge on the control's.
+#[derive(Clone, Copy, Debug)]
+pub enum Place {
+    Pointer,
+    Below(gpui::Bounds<gpui::Pixels>),
+    Above(gpui::Bounds<gpui::Pixels>),
+}
 pub fn menu(
     window: &mut Window,
     options: &[Value],
     cx: &mut App,
     choose: impl FnOnce(Option<usize>, &mut App) + 'static,
 ) {
+    menu_at(window, options, Place::Pointer, cx, choose);
+}
+/// A system menu (NSMenu, Liquid Glass on macOS 26) at `place`; `choose`
+/// gets the chosen item's preorder index, or None when it closed.
+pub fn menu_at(
+    window: &mut Window,
+    options: &[Value],
+    place: Place,
+    cx: &mut App,
+    choose: impl FnOnce(Option<usize>, &mut App) + 'static,
+) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).unwrap().as_raw()
+    // A window with no AppKit view (a headless test's) shows no menu: it
+    // closes unchosen.
+    let Some(RawWindowHandle::AppKit(handle)) = HasWindowHandle::window_handle(window)
+        .ok()
+        .map(|h| h.as_raw())
     else {
+        #[cfg(test)]
+        SHOWN.with(|shown| *shown.borrow_mut() = options.to_vec());
+        cx.defer(move |cx| choose(None, cx));
         return;
     };
     let view: Retained<NSView> =
@@ -58,12 +107,46 @@ pub fn menu(
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
     append_menu(&menu, options, &target, mtm, &mut 0);
-    let point = view.convertPoint_fromView(
-        view.window()
-            .map(|w| w.mouseLocationOutsideOfEventStream())
-            .unwrap_or_default(),
-        None,
-    );
+    let point = match place {
+        Place::Pointer => view.convertPoint_fromView(
+            view.window()
+                .map(|w| w.mouseLocationOutsideOfEventStream())
+                .unwrap_or_default(),
+            None,
+        ),
+        Place::Below(control) | Place::Above(control) => {
+            let edge = |p: gpui::Pixels| f32::from(p) as f64;
+            menu.setMinimumWidth(edge(control.size.width));
+            // The system pull-down's distance from its control.
+            let gap = pm_shell::scale().space.xs as f64;
+            // The menu's top, from the window's top.
+            let top = match place {
+                Place::Above(_) => edge(control.top()) - gap - menu.size().height,
+                _ => edge(control.bottom()) + gap,
+            };
+            let y = if view.isFlipped() {
+                top
+            } else {
+                view.bounds().size.height - top
+            };
+            objc2_foundation::NSPoint::new(edge(control.left()), y)
+        }
+    };
+    // Development builds: an on-screen review's menu (opened with
+    // `review/pointer`, captured in the background) closes itself after
+    // `PM_REVIEW_MENU_SECONDS`, so it never stays up over the owner's screen.
+    #[cfg(debug_assertions)]
+    if let Some(seconds) = std::env::var("PM_REVIEW_MENU_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+    {
+        let modes = objc2_foundation::NSArray::from_slice(&[unsafe {
+            objc2_foundation::NSRunLoopCommonModes
+        }]);
+        let _: () = unsafe {
+            msg_send![&menu, performSelector: sel!(cancelTracking), withObject: std::ptr::null::<AnyObject>(), afterDelay: seconds, inModes: &*modes]
+        };
+    }
     // Menu tracking runs a nested run loop that keeps draining the main queue.
     // A deferred effect would hold the app borrowed through it, and the first
     // task that touches the app would panic; a task holds no borrow.

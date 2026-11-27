@@ -726,54 +726,42 @@ pub fn window_backdrop(w: &gpui::Window, t: &Tokens) {
     let view = backdrop(mtm, &content);
     ground(&window, &view, t);
 }
-/// A sidebar's material, `width` wide and `height` tall at the content
-/// view's leading edge: liquid glass on macOS 26 and later (clear style, a
-/// heavy tint of the window colour), the sidebar visual effect before, the
-/// solid window colour under Reduce Transparency. Its frame is
-/// `sidebar_rect`: every edge of the glass, which draws a light rim, lies
-/// outside the window or under the content sheet.
+/// A sidebar's ground, `width` wide and `height` tall at the content view's
+/// leading edge: the chrome's one tone (`Tokens::ground`), the window tint
+/// over the same behind-window blur as the ground around the content sheet,
+/// solid `window` under Reduce Transparency. The sidebar is never a tone of
+/// its own (owner, 2026-11-26): a tinted clear glass here drew a cooler,
+/// darker grey than the ground beside it in light and a third chrome tone.
+/// Its frame is `sidebar_rect`, which runs past the window's edges and under
+/// the sheet's leading corners.
 fn sidebar_material(
     mtm: MainThreadMarker,
     t: &Tokens,
     width: f32,
     height: f64,
 ) -> Retained<NSView> {
-    let [x, y, w, h] = sidebar_rect(t, width, height);
-    let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-    let view = material(mtm, frame, t, Surface::Sidebar);
-    if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
-        glass.setCornerRadius(0.);
-        glass.setStyle(NSGlassEffectViewStyle::Clear);
-        glass.setTintColor(Some(
-            &native_color(t.colors.window)
-                .colorWithAlphaComponent(t.translucency.glass_tint as f64),
+    let [x, y, w, h] = sidebar_rect(width, height);
+    let view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)),
+    );
+    view.setWantsLayer(true);
+    let (ground, alpha) = t.ground();
+    if let Some(layer) = view.layer() {
+        layer.setBackgroundColor(Some(
+            &native_color(ground)
+                .colorWithAlphaComponent(alpha as f64)
+                .CGColor(),
         ));
-    } else if let Ok(effect) = view.clone().downcast::<NSVisualEffectView>() {
-        effect.setMaterial(NSVisualEffectMaterial::Sidebar);
-        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
-        solid.setCornerRadius(0.);
-        solid.setBorderWidth(0.);
-        solid.setFillColor(&native_color(t.colors.window));
     }
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
     view
 }
-/// The sidebar material's frame in a content view `height` tall (AppKit's
-/// bottom-up points: x, y, width, height). Liquid glass draws a light rim
-/// along each of its edges; the owner saw the top one as a stray line along
-/// the window's top edge, as wide as the sidebar (2026-11-14). So the glass
-/// runs past the window's top, leading and bottom edges, where the window
-/// clips it, and on under the content sheet's leading corners, where the
-/// sheet covers it: no edge of it shows.
-pub fn sidebar_rect(t: &Tokens, width: f32, height: f64) -> [f64; 4] {
-    let beyond = f64::from(t.metrics.panel_radius);
-    [
-        -beyond,
-        -beyond,
-        f64::from(width + t.metrics.panel_radius + t.space.xs) + beyond,
-        height + beyond * 2.,
-    ]
+/// The sidebar ground's frame in a content view `height` tall (AppKit's
+/// bottom-up points: x, y, width, height): exactly the leading column the
+/// GPUI view leaves unpainted, so the chrome tint is laid once everywhere.
+fn sidebar_rect(width: f32, height: f64) -> [f64; 4] {
+    [0., 0., f64::from(width), height]
 }
 /// Gives a sheet a new content height. The first time, its top edge is put
 /// where a sheet `tallest` high stands centred in its parent (the most it
@@ -816,29 +804,6 @@ pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpu
         );
     })
     .detach();
-}
-/// A window laid out as Home is: a sidebar on the window's glass and a
-/// content sheet beside it (Settings). The GPUI window is transparent over
-/// the behind-window blur; the sidebar's material stands in the leading
-/// `width`, which the view leaves unpainted.
-pub fn sidebar_frame(w: &gpui::Window, t: &Tokens, width: f32) {
-    let mtm = MainThreadMarker::new().unwrap();
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
-    else {
-        return;
-    };
-    let gpui: Retained<NSView> =
-        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
-    let (Some(window), Some(content)) =
-        (gpui.window(), gpui.window().and_then(|w| w.contentView()))
-    else {
-        return;
-    };
-    appearance(&window, t);
-    let blur = backdrop(mtm, &content);
-    ground(&window, &blur, t);
-    let side = sidebar_material(mtm, t, width, content.bounds().size.height);
-    content.addSubview_positioned_relativeTo(&side, NSWindowOrderingMode::Below, Some(&gpui));
 }
 /// Frames a borderless GPUI window as a popover: `Surface::Popover` material
 /// (glass on macOS 26, a visual-effect popover before, solid `floating`
@@ -2047,10 +2012,10 @@ impl TabView {
             }
             let ink = if dark { 1. } else { 0. };
             let alpha = match (lifted.get(), active) {
-                (true, _) => TAB_FILL * 1.75,
-                (false, true) => TAB_FILL,
-                (false, false) => TAB_FILL * 0.6,
-            };
+                (true, _) => pm_design::tab::FILL_LIFTED,
+                (false, true) => pm_design::tab::FILL,
+                (false, false) => pm_design::tab::FILL_INACTIVE,
+            } as f64;
             NSColor::colorWithSRGBRed_green_blue_alpha(ink, ink, ink, alpha).setFill();
             shape().fill();
         }
@@ -2934,32 +2899,31 @@ fn move_tab(window: &NSWindow, by: isize) {
         route(tab.windowNumber(), "persistSession".into());
     }
 }
+/// The tab spec shared with panel stacks (`pm_design::tab`), in AppKit's units.
 /// Widest a project tab grows; its title truncates in the middle.
-const TAB_MAX: f64 = 180.;
+const TAB_MAX: f64 = pm_design::tab::MAX as f64;
 /// How far above or below the strip a dragged tab tears off into a window.
 const TAB_TEAR: f64 = 36.;
 /// How far down from a window's top edge its tab strip takes a dropped tab:
 /// the toolbar's height.
 const STRIP_REACH: f64 = 52.;
 /// Narrowest a long title's tab gets: enough of a name to tell projects apart.
-const TAB_MIN: f64 = 96.;
+const TAB_MIN: f64 = pm_design::tab::MIN as f64;
 /// Between the strip's cells.
-const TAB_GAP: f64 = 4.;
-/// A cell's corner, and the alpha of the one neutral ink that fills the
-/// showing project's cell and the cell under the pointer.
+const TAB_GAP: f64 = pm_design::tab::GAP as f64;
+/// A cell's corner, concentric with the toolbar's glass.
 const TAB_RADIUS: f64 = 8.;
-const TAB_FILL: f64 = 0.08;
 /// A title stands this far inside each end of its tab.
-const TAB_PAD: f64 = 14.;
+const TAB_PAD: f64 = pm_design::tab::PAD as f64;
 /// An edited project's dot before its title, and the space after the dot.
 const TAB_DOT: f64 = 6.;
 const TAB_DOT_GAP: f64 = 6.;
 /// The close button: its side, how far it stands from the tab's trailing
 /// end, how far it slides in, and how much of the title fades out before it.
-const TAB_CLOSE: f64 = 16.;
-const TAB_CLOSE_PAD: f64 = 8.;
-const TAB_CLOSE_SLIDE: f64 = 6.;
-const TAB_FADE: f64 = 14.;
+const TAB_CLOSE: f64 = pm_design::tab::CLOSE as f64;
+const TAB_CLOSE_PAD: f64 = pm_design::tab::CLOSE_PAD as f64;
+const TAB_CLOSE_SLIDE: f64 = pm_design::tab::CLOSE_SLIDE as f64;
+const TAB_FADE: f64 = pm_design::tab::FADE as f64;
 /// Where the strip starts before the toolbar has laid it out (after the
 /// window buttons), the tools' width before they exist, and the clear space
 /// kept between the strip and the tools.
@@ -5366,8 +5330,9 @@ impl Host {
                         let mut h = host.borrow_mut();
                         // The chooser keeps its keys (⌘1…⌘9, the arrows,
                         // Return, Escape) from the editor's keymap; typing
-                        // goes on to its search field.
-                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.owns_event(e)) {
+                        // goes on to its search field. Escape is its from
+                        // any window: it closes the chooser, not the panel.
+                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.takes(e, &key)) {
                             let chooser_key = key.starts_with("cmd+")
                                 || matches!(key.as_str(), "escape" | "up" | "down" | "enter");
                             if chooser_key && chooser.key(&key) {
@@ -6901,12 +6866,9 @@ impl Host {
             self.tokens.metrics.sidebar
         }
     }
-    /// Home's sidebar is real system material in a column under the GPUI
-    /// view, which leaves that column unpainted: liquid glass on macOS 26 and
-    /// later, the sidebar visual effect before, the solid window colour under
-    /// Reduce Transparency. The glass carries a light tint of the window
-    /// colour (`translucency.glass_tint`), so labels drawn on it keep their
-    /// contrast whatever is behind the window.
+    /// Home's sidebar column, which the GPUI view leaves unpainted, gets the
+    /// chrome's ground (`sidebar_material`): one tone with the title bar and
+    /// the ground around the sheet.
     fn sync_sidebar(&self) {
         let mut slot = self.sidebar.borrow_mut();
         if !self.aside() {
@@ -13498,22 +13460,12 @@ fn stray_responder(responder: &NSResponder) -> bool {
 
 #[cfg(test)]
 mod sidebar_rect_tests {
-    use pm_design::{Accessibility, Scheme, Tokens};
-    /// No edge of the sidebar's glass (each drawn with a light rim) shows:
-    /// top, leading and bottom lie outside the window, the trailing one under
-    /// the content sheet, which starts at the sidebar's width.
+    /// The sidebar's ground covers exactly the column the GPUI view leaves
+    /// unpainted: no overlap with the painted ground (a darker double tint),
+    /// no gap (the bare blur).
     #[test]
-    fn the_sidebar_glass_has_no_edge_inside_the_window() {
-        let t = Tokens::new(Scheme::Dark, Accessibility::default());
-        let (width, height) = (t.metrics.sidebar, 900.);
-        let [x, y, w, h] = super::sidebar_rect(&t, width, height);
-        assert!(x < 0., "leading edge outside: {x}");
-        assert!(y < 0., "bottom edge outside: {y}");
-        assert!(y + h > height, "top edge outside: {}", y + h);
-        assert!(
-            x + w > f64::from(width + t.metrics.panel_radius),
-            "trailing edge under the sheet's corner"
-        );
+    fn the_sidebar_ground_is_exactly_the_unpainted_column() {
+        assert_eq!(super::sidebar_rect(224., 900.), [0., 0., 224., 900.]);
     }
 }
 

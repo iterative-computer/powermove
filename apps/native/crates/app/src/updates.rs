@@ -1,42 +1,44 @@
-//! Powermove ▸ Check for Updates… (S111) and What's New (S112), over pm-services
-//! `updater` (feed admission) and `surface_backing::maintenance` (state).
+//! Powermove ▸ Check for Updates… through Sparkle 2, and What's New (S112).
 //!
-//! The feed and the What's New marker are read and written off the main
-//! thread; the sheets are native alerts with the notes in a scrolling text view.
-//! A build routes to a feed only through `TransitionGate`: shipped builds wait
-//! for the release lane's verified transition receipt and stay Gated until
-//! then. Development builds read a local fixture, `<profile>/update-feed.json`
-//! (as `cage-report.json` turns on the cage report), and never touch the network.
-//! Nothing here downloads or installs: staging belongs to the release
-//! updater, so Install Update reports that the update couldn't be downloaded.
+//! A release bundle carries `Contents/Frameworks/Sparkle.framework` and, in its
+//! Info.plist, the appcast (`SUFeedURL`) and the EdDSA key that signs every
+//! archive (`SUPublicEDKey`). The framework is loaded at the first editor window
+//! and Sparkle owns the rest: scheduled checks, the update window with its
+//! notes, download, EdDSA and code-signature verification, and replacement on
+//! quit or relaunch through the app's normal quit (dirty projects still ask).
+//!
+//! Only a shipping build on a shipping bundle id may start Sparkle against a
+//! public HTTPS feed. Development builds, lane and profile launches start it only
+//! against a loopback feed (a local proof), so they never contact the real feed.
+//! What's New reads its release notes from the development fixture
+//! `<profile>/update-feed.json` and never touches the network.
 use crate::alert::{Alert, Button};
 use gpui::*;
 use objc2::{
-    MainThreadMarker, MainThreadOnly, Message, msg_send, rc::Retained, runtime::AnyObject,
+    MainThreadMarker, MainThreadOnly, Message, msg_send,
+    rc::Retained,
+    runtime::{AnyClass, AnyObject, Bool},
 };
 use objc2_app_kit::{NSAlert, NSColor, NSFont, NSScrollView, NSTextView, NSWindow};
-use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{NSBundle, NSPoint, NSRange, NSRect, NSSize, NSString};
 use pm_services::{
     Result as ServiceResult, ServiceErrorCode,
     storage::ServiceStorage,
-    surface_backing::maintenance::{
-        Release, ReleaseClaim, ReleaseHost, UpdateHost, UpdateStage, UpdateState, Updates, WhatsNew,
-    },
-    updater::{FeedMetadata, FeedRoute, TransitionGate, UpdateFeed},
+    surface_backing::maintenance::{Release, ReleaseClaim, ReleaseHost, WhatsNew},
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-const SKIPPED: &str = "app.updates.skipped";
 const SEEN: &str = "app.whats-new.seen";
 const FIXTURE: &str = "update-feed.json";
 pub const RELEASES_PAGE: &str = "https://github.com/iterative-computer/powermove/releases";
+/// The shipped app's identity: V1 and V2 stable share it, so V1's Squirrel.Mac
+/// updater swaps V2 in place (packaging/package.py `IDS["cutover"]`).
+pub const PRODUCTION_ID: &str = "com.zellzoi.powermove";
 
-/// What a feed source holds: the offered build and the release history.
+/// What the development fixture holds: the release history for What's New.
 #[derive(Clone, Default, Deserialize)]
 pub struct Feed {
-    #[serde(default)]
-    pub latest: Option<FeedMetadata>,
     /// GitHub release objects (`tag_name`, `name`, `body`, `published_at`, …).
     #[serde(default)]
     pub releases: Vec<serde_json::Value>,
@@ -56,39 +58,21 @@ impl Feed {
             .collect()
     }
 }
-struct Fetched(Option<FeedMetadata>);
-impl UpdateFeed for Fetched {
-    fn metadata(&mut self, _: FeedRoute) -> ServiceResult<Option<FeedMetadata>> {
-        Ok(self.0.take())
-    }
-}
 
 /// The development fixture, when this is a development build that has one.
 fn fixture(profile: &Path) -> Option<PathBuf> {
     let path = profile.join(FIXTURE);
     (cfg!(debug_assertions) && path.is_file()).then_some(path)
 }
-fn gate(fixture: bool) -> TransitionGate {
-    TransitionGate {
-        packaged_macos: fixture,
-        macos_major: macos_major(),
-        migration_complete: true,
-        // Shipped builds: set by the release updater's verified receipt.
-        transition_release_verified: fixture,
-    }
-}
-fn macos_major() -> u32 {
-    objc2_foundation::NSProcessInfo::processInfo()
-        .operatingSystemVersion()
-        .majorVersion as u32
-}
 /// The running app's version: the bundle's, else the crate's.
 pub fn current_version() -> String {
-    objc2_foundation::NSBundle::mainBundle()
-        .objectForInfoDictionaryKey(&NSString::from_str("CFBundleShortVersionString"))
+    info_string("CFBundleShortVersionString").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into())
+}
+fn info_string(key: &str) -> Option<String> {
+    NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&NSString::from_str(key))
         .and_then(|v| v.downcast::<NSString>().ok())
         .map(|v| v.to_string())
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").into())
 }
 fn read_feed(path: &Path) -> std::result::Result<Feed, ServiceErrorCode> {
     let bytes = std::fs::read(path).map_err(|_| ServiceErrorCode::Unavailable)?;
@@ -100,187 +84,107 @@ fn storage(profile: &Path) -> ServiceResult<ServiceStorage> {
 
 #[derive(Default)]
 struct State {
-    updates: Updates,
     whats_new: WhatsNew,
-    loaded: bool,
 }
 impl Global for State {}
 
-fn say(window: &NSWindow, message: &str, informative: &str, critical: bool) {
+/// Whether this build may start Sparkle against `feed`. A public feed needs an
+/// HTTPS URL, a shipping build (no debug assertions, no profile or lane
+/// launch) and a shipping bundle id; a loopback feed (a local proof) is the
+/// only one a development or lane build may use, and never on a shipping id.
+pub(crate) fn feed_allowed(feed: &str, has_key: bool, bundle: &str, shipping: bool) -> bool {
+    let Ok(url) = url::Url::parse(feed) else {
+        return false;
+    };
+    let shipping_id = bundle == PRODUCTION_ID || bundle == pm_first_launch::BETA_BUNDLE_ID;
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    if !has_key || url.username() != "" || url.password().is_some() {
+        return false;
+    }
+    if loopback {
+        return matches!(url.scheme(), "http" | "https") && !shipping_id;
+    }
+    url.scheme() == "https" && shipping && shipping_id
+}
+/// A development, lane or profile launch: never a person's own app.
+fn development_launch() -> bool {
+    cfg!(debug_assertions)
+        || std::env::args().any(|a| a == "--profile")
+        || ["PM_NATIVE_PROFILE", "PM_NATIVE_REQUIRE_PROFILE", "PM_NATIVE_NO_ORIGINAL"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+}
+
+/// Sparkle's standard controller, once loaded; main thread only.
+struct Sparkle(Option<Retained<AnyObject>>);
+impl Global for Sparkle {}
+
+/// Loads the bundled Sparkle and starts its updater (scheduled checks run as
+/// the Info.plist says). Without a framework, feed or key, or when this build
+/// may not use the feed, nothing loads and Check for Updates says so.
+fn start_sparkle(cx: &mut App) {
+    if cx.has_global::<Sparkle>() {
+        return;
+    }
+    let controller = sparkle_controller();
+    cx.set_global(Sparkle(controller));
+}
+fn sparkle_controller() -> Option<Retained<AnyObject>> {
+    let feed = info_string("SUFeedURL")?;
+    let has_key = info_string("SUPublicEDKey").is_some_and(|k| !k.trim().is_empty());
+    let bundle = crate::platform::bundle_id().unwrap_or_default();
+    if !feed_allowed(&feed, has_key, &bundle, !development_launch()) {
+        eprintln!("powermove: updates are off in this build (feed not allowed here)");
+        return None;
+    }
+    let frameworks = NSBundle::mainBundle().privateFrameworksPath()?;
+    let path = PathBuf::from(frameworks.to_string()).join("Sparkle.framework");
+    let framework = NSBundle::bundleWithPath(&NSString::from_str(path.to_str()?))?;
+    // SAFETY: loads the bundle's own signed Sparkle.framework (its code runs here).
+    if !unsafe { framework.load() } {
+        eprintln!("powermove: Sparkle.framework did not load; updates are off");
+        return None;
+    }
+    let class = AnyClass::get(c"SPUStandardUpdaterController")?;
+    // SAFETY: Sparkle 2's public initializer; delegates are optional (nil).
+    unsafe {
+        let none = std::ptr::null::<AnyObject>();
+        let object: *mut AnyObject = msg_send![class, alloc];
+        let object: *mut AnyObject = msg_send![
+            object,
+            initWithStartingUpdater: Bool::YES,
+            updaterDelegate: none,
+            userDriverDelegate: none
+        ];
+        Retained::from_raw(object)
+    }
+}
+
+fn say(window: &NSWindow, message: &str, informative: &str) {
     let alert = Alert::new(message, informative, vec![Button::new("OK", ()).default()]);
-    let alert = if critical { alert.critical() } else { alert };
     let _ = alert.sheet(window);
 }
 
-/// Powermove ▸ Check for Updates…
-pub fn check_now(profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) {
-    let state = cx.default_global::<State>();
-    if matches!(state.updates.state, UpdateState::Ready { .. }) {
-        return say(
+/// Powermove ▸ Check for Updates…: Sparkle's own check, window and notes.
+pub fn check_now(_profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) {
+    start_sparkle(cx);
+    match cx.try_global::<Sparkle>().and_then(|s| s.0.clone()) {
+        // SAFETY: SPUStandardUpdaterController's IBAction; sender may be nil.
+        Some(controller) => unsafe {
+            let _: () = msg_send![&*controller, checkForUpdates: std::ptr::null::<AnyObject>()];
+        },
+        None => say(
             &window,
-            "An update is ready.",
-            "Quit Powermove normally to install it. Your session will be saved before quitting.",
-            false,
-        );
-    }
-    let request = match state.updates.begin_check(true) {
-        Ok(request) => request,
-        Err(_) => {
-            return say(
-                &window,
-                "An update is already in progress.",
-                "Powermove will let you know when it’s ready.",
-                false,
-            );
-        }
-    };
-    let load = !std::mem::replace(&mut state.loaded, true);
-    let source = fixture(&profile);
-    let work = cx.background_executor().spawn(async move {
-        let skipped = load
-            .then(|| storage(&profile).ok()?.setting(SKIPPED).ok().flatten())
-            .flatten()
-            .and_then(|v| v.as_str().map(str::to_owned));
-        let feed = source.as_deref().map(read_feed);
-        (skipped, feed)
-    });
-    cx.spawn(async move |cx| {
-        let (skipped, feed) = work.await;
-        cx.update(|cx| {
-            let state = cx.global_mut::<State>();
-            if skipped.is_some() {
-                state.updates.skipped_version = skipped;
-            }
-            let fixture = feed.is_some();
-            let current = current_version();
-            let result = match feed {
-                Some(Err(code)) => Err(code),
-                Some(Ok(feed)) => state
-                    .updates
-                    .check(&request, gate(fixture), &current, &mut Fetched(feed.latest))
-                    .map_err(|e| e.code),
-                None => state
-                    .updates
-                    .check(&request, gate(false), &current, &mut Fetched(None))
-                    .map_err(|e| e.code),
-            };
-            let state = state.updates.state.clone();
-            show(result.err(), state, &current, &window, cx);
-        });
-    })
-    .detach();
-}
-
-fn show(
-    failure: Option<ServiceErrorCode>,
-    state: UpdateState,
-    current: &str,
-    window: &NSWindow,
-    cx: &mut App,
-) {
-    match (failure, state) {
-        (Some(ServiceErrorCode::Offline), _) => say(
-            window,
-            "Couldn’t check for updates.",
-            "Check your internet connection, then try again.",
-            false,
-        ),
-        (Some(_), _) => say(
-            window,
-            "Couldn’t check for updates.",
-            "Try again later. You can keep using Powermove.",
-            false,
-        ),
-        (None, UpdateState::Gated) => say(
-            window,
             "Couldn’t check for updates.",
             "This build of Powermove doesn’t update itself.",
-            false,
-        ),
-        (None, UpdateState::Available(metadata)) => offer(metadata, current, window, cx),
-        _ => say(
-            window,
-            "Powermove is up to date.",
-            &format!("You’re running {current}."),
-            false,
         ),
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Choice {
-    Install,
-    Later,
-    Skip,
-}
-/// The update sheet: notes scroll in the reading style; Install Update is
-/// the default and Skip This Version sits at the leading edge.
-fn offer(metadata: FeedMetadata, current: &str, window: &NSWindow, cx: &mut App) {
-    let t = pm_shell::tokens();
-    let notes = metadata
-        .notes
-        .clone()
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| "Fixes and improvements.".into());
-    let alert = Alert::new(
-        "A New Version of Powermove Is Available",
-        format!("{} is now available. You have {current}.", metadata.name),
-        vec![
-            Button::new("Install Update", Choice::Install).default(),
-            Button::new("Remind Me Later", Choice::Later).cancel(),
-            Button::new("Skip This Version", Choice::Skip),
-        ],
-    );
-    let accessory = notes_view(&[(None, None, notes)], &t, t.metrics.sheet_width);
-    let rx = alert.sheet_with(window, |native| set_accessory(native, &accessory));
-    let window = window.retain();
-    cx.spawn(async move |cx| {
-        let choice = rx.recv().await.ok().flatten();
-        cx.update(|cx| {
-            let updates = &mut cx.global_mut::<State>().updates;
-            match choice {
-                Some(Choice::Install) => {
-                    let staged = updates.stage(&mut NoStaging);
-                    if staged.is_err() {
-                        say(
-                            &window,
-                            "Couldn’t download the update.",
-                            "Try again later. You can keep using Powermove.",
-                            false,
-                        );
-                    }
-                }
-                Some(Choice::Skip) => {
-                    if let Ok(version) = updates.skip_available() {
-                        persist(SKIPPED, serde_json::json!(version), cx);
-                    }
-                }
-                _ => {
-                    let _ = updates.remind_later();
-                }
-            }
-        });
-    })
-    .detach();
-}
-/// No updater can stage a download in this build (release lane): honest
-/// failure, nothing fetched.
-struct NoStaging;
-impl UpdateHost for NoStaging {
-    fn stage_verified(
-        &mut self,
-        _: &FeedMetadata,
-        _: &mut dyn FnMut(UpdateStage) -> ServiceResult<()>,
-    ) -> ServiceResult<String> {
-        Err(pm_services::ServiceError::message(
-            ServiceErrorCode::Unavailable,
-            "no update staging in this build",
-        ))
-    }
-    fn request_normal_quit(&mut self) -> ServiceResult<bool> {
-        Ok(false)
-    }
-}
 fn persist(key: &'static str, value: serde_json::Value, cx: &mut App) {
     let Some(profile) = cx.try_global::<Profile>().map(|p| p.0.clone()) else {
         return;
@@ -304,6 +208,7 @@ pub fn after_launch(profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) 
         return;
     }
     cx.set_global(Profile(profile.clone()));
+    start_sparkle(cx);
     let source = fixture(&profile);
     let work = cx.background_executor().spawn(async move {
         let seen = storage(&profile)
@@ -551,15 +456,36 @@ mod tests {
     #[test]
     fn fixture_feeds_read_github_release_objects() {
         let feed: Feed = serde_json::from_str(
-            r#"{"latest":{"version":"9.0.0","name":"Powermove 9","size_bytes":1,"minimum_macos":14,"notes":"- Faster"},
-                "releases":[{"tag_name":"v9.0.0","name":"Powermove 9","body":"- Faster"},
+            r#"{"releases":[{"tag_name":"v9.0.0","name":"Powermove 9","body":"- Faster"},
                             {"tag_name":"v8.9.0-beta.1","prerelease":true},{"name":"no tag"}]}"#,
         )
         .unwrap();
         let releases = feed.releases();
         assert_eq!(releases.len(), 2);
         assert!(releases[1].prerelease);
-        assert_eq!(feed.latest.unwrap().name, "Powermove 9");
+    }
+    #[test]
+    fn only_a_shipping_build_on_a_shipping_id_may_use_a_public_feed() {
+        use super::{PRODUCTION_ID, feed_allowed};
+        let beta = pm_first_launch::BETA_BUNDLE_ID;
+        let public = "https://github.com/iterative-computer/powermove/releases/latest/download/appcast.xml";
+        assert!(feed_allowed(public, true, PRODUCTION_ID, true));
+        assert!(feed_allowed(public, true, beta, true));
+        // Development, lane and profile launches never contact the real feed.
+        assert!(!feed_allowed(public, true, PRODUCTION_ID, false));
+        assert!(!feed_allowed(public, true, "com.powermove.native.dev", true));
+        assert!(!feed_allowed(public, true, "com.powermove.native.dev.w122-release", false));
+        // No key, plain HTTP, credentials or nonsense: never.
+        assert!(!feed_allowed(public, false, PRODUCTION_ID, true));
+        assert!(!feed_allowed("http://example.com/appcast.xml", true, PRODUCTION_ID, true));
+        assert!(!feed_allowed("https://u:p@example.com/appcast.xml", true, PRODUCTION_ID, true));
+        assert!(!feed_allowed("appcast.xml", true, PRODUCTION_ID, true));
+        // A loopback feed is a local proof: development ids only.
+        let local = "http://127.0.0.1:8765/appcast.xml";
+        assert!(feed_allowed(local, true, "com.powermove.native.dev.w122-release", false));
+        assert!(feed_allowed("http://[::1]:8765/appcast.xml", true, "com.powermove.native.dev", false));
+        assert!(!feed_allowed(local, true, PRODUCTION_ID, true));
+        assert!(!feed_allowed("http://localhost.example.com/appcast.xml", true, "com.powermove.native.dev", false));
     }
     #[test]
     fn whats_new_waits_for_notes_and_marks_a_fresh_install_seen() {
