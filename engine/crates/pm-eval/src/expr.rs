@@ -15,7 +15,7 @@ use pm_model::{JsString, Node, NodeKind};
 use crate::address;
 use crate::comp::Comp;
 use crate::easing::SpringTables;
-use crate::js_sem::{self, JsResult, JsValue};
+use crate::js_sem::{JsResult, JsValue};
 use crate::keyframes;
 use crate::motion_path::PathTiming;
 use crate::node::{self, Got};
@@ -170,28 +170,7 @@ impl ExprContext<'_> {
 impl<'a> ExprContext<'a> {
     /// `comp.layers?.find(item => item.id === layerId)`.
     fn find_layer(&self, layer_id: &JsString) -> Result<Option<&'a Node>, String> {
-        let layers = match self.comp.get(b"layers") {
-            Got::Node(n) => n,
-            _ => return Ok(None),
-        };
-        let NodeKind::Array(items) = layers.kind() else {
-            return Err("comp.layers?.find is not a function".into());
-        };
-        let id = JsValue::String(layer_id.clone());
-        for item in items.iter() {
-            if node::is_nullish(Some(item)) {
-                let base = if matches!(item.kind(), NodeKind::Null) {
-                    "null"
-                } else {
-                    "undefined"
-                };
-                return Err(format!("Cannot read properties of {base} (reading 'id')"));
-            }
-            if js_sem::strict_eq(&node::get(item, b"id").to_js(), &id) {
-                return Ok(Some(item));
-            }
-        }
-        Ok(None)
+        self.comp.find_layer_by_id(layer_id)
     }
 
     /// The expression helper `sample(layerId, channel, localTime)` (`anim.ts`):

@@ -1638,6 +1638,18 @@ impl Engine {
         }
         observed
     }
+    /// Playing frames stay interruptible at media waits and frame checkpoints
+    /// without slicing GPU encoding into synchronous `device.poll(Wait)`
+    /// round-trips on every draw/effect transition.
+    pub(crate) fn set_playback_interrupt(
+        &mut self,
+        interrupt: Option<pm_render::media::Interrupt>,
+    ) {
+        self.renderer.set_interrupt(interrupt.clone());
+        self.frame_interrupt = interrupt;
+        self.renderer.set_slices(None);
+    }
+
     /// Viewer work yields to newer input at media waits and draw/effect
     /// boundaries. Keep small scenes in one submission for draw reuse.
     pub(crate) fn set_frame_interrupt(

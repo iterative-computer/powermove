@@ -582,53 +582,61 @@ impl<'d> Scope<'_, 'd> {
         if self.view_camera.is_some() {
             return Ok(None);
         }
+        let key = time.to_bits();
+        if let Some((last, dof)) = self.active_camera_dof
+            && last == key
+        {
+            return Ok(dof);
+        }
         let mut cam_layer = None;
         for layer in self.layers() {
-            let projection = camera_data(layer).and_then(|node| node.get("projection"));
-            if Role3d::of(layer) == Some(Role3d::Camera)
-                && (node::is_str(projection, "perspective")
+            if Role3d::of(layer) == Some(Role3d::Camera) {
+                let projection = camera_data(layer).and_then(|node| node.get("projection"));
+                if (node::is_str(projection, "perspective")
                     || node::is_str(projection, "orthographic"))
-                && self.active(layer, time)?
-            {
-                cam_layer = Some(layer);
-                break;
+                    && self.active(layer, time)?
+                {
+                    cam_layer = Some(layer);
+                    break;
+                }
             }
         }
-        let Some(layer) = cam_layer else {
-            return Ok(None);
-        };
-        let Some(node) = camera_data(layer) else {
-            return Ok(None);
-        };
-        if node::is_str(node.get("projection"), "orthographic") {
-            return Ok(None);
-        }
-        let mut channel = |key: &str, fallback: f64| -> JsResult<f64> {
-            let Some(prop) = node.get("p").and_then(|p| p.get(key)) else {
-                return Ok(fallback);
+        let dof = if let Some(layer) = cam_layer
+            && let Some(node) = camera_data(layer)
+            && !node::is_str(node.get("projection"), "orthographic")
+        {
+            let mut channel = |key: &str, fallback: f64| -> JsResult<f64> {
+                let Some(prop) = node.get("p").and_then(|p| p.get(key)) else {
+                    return Ok(fallback);
+                };
+                let n = self
+                    .channel_p(layer, Some(prop), time, &format!("camera.{key}"))?
+                    .to_number();
+                Ok(if n.is_finite() { n } else { fallback })
             };
-            let n = self
-                .channel_p(layer, Some(prop), time, &format!("camera.{key}"))?
-                .to_number();
-            Ok(if n.is_finite() { n } else { fallback })
-        };
-        let mut blur = channel("blur", 0.0)?;
-        if !(blur > 0.0) {
-            let f_stop = channel("fStop", 0.0)?;
-            if f_stop > 0.0 {
-                blur = (90.0 / f_stop).clamp(1.0, 100.0);
+            let mut blur = channel("blur", 0.0)?;
+            if !(blur > 0.0) {
+                let f_stop = channel("fStop", 0.0)?;
+                if f_stop > 0.0 {
+                    blur = (90.0 / f_stop).clamp(1.0, 100.0);
+                }
             }
-        }
-        if !(blur > 0.0) {
-            return Ok(None);
-        }
-        let mut focus = channel("focusDistance", 0.0)?;
-        if !(focus > 0.05) {
-            let cam = self.camera_3d(layer, time)?;
-            let d: [f64; 3] = std::array::from_fn(|i| cam.target[i] - cam.position[i]);
-            focus = js_hypot(&d).max(0.5);
-        }
-        Ok(Some((focus.max(0.05), blur.clamp(0.0, 100.0))))
+            if blur > 0.0 {
+                let mut focus = channel("focusDistance", 0.0)?;
+                if !(focus > 0.05) {
+                    let cam = self.camera_3d(layer, time)?;
+                    let d: [f64; 3] = std::array::from_fn(|i| cam.target[i] - cam.position[i]);
+                    focus = js_hypot(&d).max(0.5);
+                }
+                Some((focus.max(0.05), blur.clamp(0.0, 100.0)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.active_camera_dof = Some((key, dof));
+        Ok(dof)
     }
 
     /// The first enabled Camera in stack order, as in the Studio renderer.
@@ -643,13 +651,15 @@ impl<'d> Scope<'_, 'd> {
         for layer in self.layers() {
             // Studio's saved camera schema always names its projection.
             // Legacy camera-shaped extensions keep the original plane matrix.
-            let projection = camera_data(layer).and_then(|node| node.get("projection"));
-            if Role3d::of(layer) == Some(Role3d::Camera)
-                && (node::is_str(projection, "perspective") || node::is_str(projection, "orthographic"))
-                && self.active(layer, time)?
-            {
-                camera = Some(self.camera_3d(layer, time)?);
-                break;
+            if Role3d::of(layer) == Some(Role3d::Camera) {
+                let projection = camera_data(layer).and_then(|node| node.get("projection"));
+                if (node::is_str(projection, "perspective")
+                    || node::is_str(projection, "orthographic"))
+                    && self.active(layer, time)?
+                {
+                    camera = Some(self.camera_3d(layer, time)?);
+                    break;
+                }
             }
         }
         self.active_camera = Some((key, camera));

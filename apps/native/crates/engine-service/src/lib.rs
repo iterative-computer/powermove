@@ -4430,14 +4430,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             render::Readback::None
                         };
                         let interrupt = (superseded.clone(), armed);
-                        engine.set_frame_interrupt(&scene, Some(interrupt.clone()));
+                        if spec.moment == Moment::Playing {
+                            engine.set_playback_interrupt(Some(interrupt.clone()));
+                        } else {
+                            engine.set_frame_interrupt(&scene, Some(interrupt.clone()));
+                        }
                         if matches!(spec.moment, Moment::Playing | Moment::Scrub) && !spec.exact {
                             MATERIAL_PLAYBACK.replace(Some(interrupt));
                         }
                         let frame =
                             engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
                         MATERIAL_PLAYBACK.replace(None);
-                        engine.set_frame_interrupt(&scene, None);
+                        if spec.moment == Moment::Playing {
+                            engine.set_playback_interrupt(None);
+                        } else {
+                            engine.set_frame_interrupt(&scene, None);
+                        }
                         frame
                     })
             };

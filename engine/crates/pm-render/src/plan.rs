@@ -337,6 +337,9 @@ pub struct Build<'r> {
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
     passes: Vec<((usize, usize), std::sync::Arc<PassFacts>)>,
+    /// Whether any layer in `(layers_ptr, layers_len)` at `time` requires
+    /// rendering at composition density (`needs_composition_density`).
+    composition_density: Vec<((usize, usize, u64), bool)>,
     /// The session's compatibility rasters (`crate::compat`): layers a
     /// producer draws, and what the frame still needs from it.
     compat: Option<&'r dyn crate::compat::CompatRasters>,
@@ -670,6 +673,7 @@ pub(crate) fn build_reusing<'r>(
         read_ahead: options.read_ahead,
         keep_empty_groups: options.keep_empty_groups,
         passes: Vec::new(),
+        composition_density: Vec::new(),
         compat,
         compat_missing: Vec::new(),
         compat_probe_only: options.compat_probe_only,
@@ -853,17 +857,31 @@ pub(crate) fn comp_pass<'d>(
         && ((scale.0 - 1.0).abs() > 1e-9 || (scale.1 - 1.0).abs() > 1e-9)
         && let Some(host) = b.effects
     {
-        let mut needs = false;
-        for &layer in &all {
-            match host.needs_composition_density(scope, layer, time, b.final_output) {
-                Ok(true) => {
-                    needs = true;
-                    break;
+        let layers_slice = scope.comp.layers();
+        let density_key = (
+            layers_slice.as_ptr() as usize,
+            layers_slice.len(),
+            time.to_bits(),
+        );
+        let needs = if let Some(&(_, cached)) =
+            b.composition_density.iter().find(|(k, _)| *k == density_key)
+        {
+            cached
+        } else {
+            let mut found = false;
+            for &layer in &all {
+                match host.needs_composition_density(scope, layer, time, b.final_output) {
+                    Ok(true) => {
+                        found = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {}
                 }
-                Ok(false) => {}
-                Err(_) => {}
             }
-        }
+            b.composition_density.push((density_key, found));
+            found
+        };
         if needs {
             let (cw, ch) = scope.comp_size();
             let side = |c: f64, w: u32, s: f64| {
