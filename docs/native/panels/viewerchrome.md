@@ -4,7 +4,7 @@ Wave 4 head start, based on `feat/native-engine` at `ff42d751f` and the shipped
 `v1.2.0` (`07ed5fa17ee640659cb075f9cad1af2095011d60`). Package:
 `apps/native/crates/panel-viewerchrome` (`pm-panel-viewerchrome`). **Model only;
 no visual output, no claim of application cutover or complete viewer parity.**
-All future visual output remains provisional until Opus design review.
+All future visual output remains provisional until design review.
 
 ## Kernel and host boundary
 
@@ -121,7 +121,7 @@ apart from cloning the selected-ID snapshot and explicit overlay collections.
 | Failed/unavailable source replacement keeps current preview; observations are epoch fenced | N2 strictly better; N4 preserves working state |
 | Preserve opaque fields and all old providers; delete nothing | N4/N6 and prune-only-after-last-consumer |
 | Expose native scroll intent instead of emulating Chromium wheel metadata | N3 plus the quirk policy: preserve authored navigation, not browser detection |
-| No safe-area ratios, guide editing defaults, UI geometry/copy/fade values chosen | Opus ownership; N1/N3; neutral semantic placeholders |
+| No safe-area ratios, guide editing defaults, UI geometry/copy/fade values chosen | design ownership; N1/N3; neutral semantic placeholders |
 | Keep exact delegated command IDs and dynamic contributions | N6 callback/override contract; C-MATRIX E closure |
 | Model-only agent IDs do not claim a frozen MCP body or v1–3 live-object facade | N6/N7 honest contract boundaries |
 
@@ -197,4 +197,4 @@ macOS still must verify native wheel/magnify/button/focus/IME routing, source de
 and seek/playback acceptance, real dynamic extension menus/3D services, audio
 continuity through quality changes, geometry/overlay alignment at display scale,
 EDR and retained-frame/crop behaviour, lifecycle/selection fencing in the app,
-MCP/v4 adapters and the Opus visual review. Linux tests are not those proofs.
+MCP/v4 adapters and the design review. Linux tests are not those proofs.

@@ -513,7 +513,7 @@ closer than the previous draw. No colour or geometry tolerance is widened.
 | Audio reaches the encoders as f32 (24-bit PCM keeps 24 bits; AAC from f32) | a 16-bit WAV (×32767/32768, `Math.round`) before `pcm_s24le`/AAC | the f32 mix; 16-bit PCM keeps its TPDF dither | every MOV/MP4 export with audio |
 | Integer PCM decodes with one scale both sides of zero (AES17, 1/32768) | 1/32767 above zero, 1/32768 below (a 3e-5 gain asymmetry) | symmetric | every 8- and 16-bit PCM source |
 | ProRes frame headers carry the frame-rate code (SMPTE RDD 36 `frame_rate_code`) | 0, unspecified | the movie's code (2 at 24 fps), as VideoToolbox writes it from the session's expected frame rate; aspect ratio stays unspecified in both | every ProRes export; `engine-delivery.spec.ts` |
-| WebM segment duration is the longest track's end (Matroska `Duration`) | 25/24 s for a 1 s project (one frame long) | 1.007 s: the Opus track ends its 312-sample pre-skip (6.5 ms) after the video; within one frame of the project length, as Chromium reads it | every WebM export; `engine-delivery.spec.ts` |
+| WebM segment duration is the longest track's end (Matroska `Duration`) | 25/24 s for a 1 s project (one frame long) | 1.007 s: the designtrack ends its 312-sample pre-skip (6.5 ms) after the video; within one frame of the project length, as Chromium reads it | every WebM export; `engine-delivery.spec.ts` |
 
 ## E-track H.273 logarithmic readings and native still admission
 

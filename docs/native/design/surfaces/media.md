@@ -2,7 +2,7 @@
 
 Rows S006 S007 S024 S038 S039 S040. Grammar: [README](README.md) §1–4.
 Builds on [panels/media-browser.md](../panels/media-browser.md) (statuses,
-overlays, menus) and [reviews/na-cloud-promedia.md](../reviews/na-cloud-promedia.md)
+overlays, menus) and reviews/na-cloud-promedia.md
 (Background Tasks). Nothing here changes those; it fills their gaps.
 
 ## S006 Relink mismatch and proxy-only media

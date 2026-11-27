@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Section 2's determinism bar for lossless outputs (docs/engine/phase3a-gate.md,
-# "Determinism: lossless outputs"): `pm-cli render --format png16` of the first
+# Section 2's determinism bar for lossless outputs: `pm-cli render --format png16` of the first
 # second of nine corpus projects, twice each into separate folders, then a
 # byte comparison of every file. Media come from the capture's project record
 # (fixture paths are repository-relative).

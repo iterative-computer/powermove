@@ -196,6 +196,6 @@ model tests cannot certify any of these. Do not claim extension or visual parity
 **DESIGN-TODO(opus):** the future native surface, field/control composition,
 section arrangement, focus/selection/disabled/error presentation, expression
 editor, pickers/popovers, drag feedback, accessibility copy and scroll-anchor
-mapping need existing design tokens/specs or Opus decisions. No placeholder
+mapping need existing design tokens/specs or design decisions. No placeholder
 visuals, colours, sizing, layout, new user-facing strings or interactions are
-invented here. All future visual output remains provisional until Opus review.
+invented here. All future visual output remains provisional until design review.

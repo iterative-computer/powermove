@@ -5,7 +5,7 @@ Existing users update and are done. `apps/native/crates/first-launch`
 runs that flow behind the Welcome window (`shell/src/welcome_view.rs`). The source
 profile and user projects are read-only inputs.
 
-The [beta3 preparation](beta2-readiness.md#beta3-implementation-preparation) adds
+The beta3 preparation adds
 verified main flat-file/source-link migration and isolated checkpoint recovery.
 `recovery::restore_checkpoint` copies a verified checkpoint into a new private
 directory only; it never replaces the original profile or reverses native work.

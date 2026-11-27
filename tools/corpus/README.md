@@ -1,6 +1,6 @@
 # Native corpus P1 runner
 
-**Cloud follow-up:** portable compiler/selection reductions are validated. Native glow/shadow pixel/export and default-path rotation qualification remain pending on Mac. See the [dated handoff](../../docs/native/handoff/corpus-p1.md#2026-11-04--cloud-corpus2-synthetic-reductions) for exact one-command folder rerun and limits. P1 remains open.
+**Cloud follow-up:** portable compiler/selection reductions are validated. Native glow/shadow pixel/export and default-path rotation qualification remain pending on Mac. See the dated handoff for exact one-command folder rerun and limits. P1 remains open.
 
 Run on the owner's Mac, never in CI with real data. Sources are read-only.
 

@@ -246,7 +246,7 @@ capture roles. Missing owner inputs/catalog failure never remove the expected
 44 owner, 10 local and 4 Store cases. Reports distinguish expected/observed/
 unavailable; extra observed cases and population drift stay visible. A smaller
 or absent population cannot close the gate. See
-[the handoff](../../docs/native/handoff/extcheck-p2.md) for exact Mac commands,
+the handoff for exact Mac commands,
 observed test instability and unfinished implementation work.
 
 The owner decision merged at `711f44ba0` moves behavior parity to `main` at

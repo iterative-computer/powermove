@@ -4,7 +4,7 @@
 It renders DOM panels for the V8-owned v1–3 realm. Extension logic, synchronous
 service objects, recorder canvases and authoritative project state belong to the
 V8/kernel/engine lanes. This follows orchestrator decision 5 in
-[p0-decisions.md](p0-decisions.md), superseding the older WebKit-owned realm.
+p0-decisions.md, superseding the older WebKit-owned realm.
 No spike, shell or vendor source is changed by this crate.
 
 ## Placement decision and rule

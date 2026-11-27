@@ -50,7 +50,7 @@ facade extraction additionally includes the pinned `sandbox/shim-api.ts`,
 `shared/sandbox-rpc.ts` and legacy easing runtime. Only their relative import
 paths are adapted. Its asynchronous API remains separate from `CompatRealm`;
 the native confined helper/core integration and its remaining capture/resource
-limits are documented in [the P2 evidence](extcheck-p2.md).
+limits are documented in the P2 evidence.
 
 The extension-check embedder compiles seven unchanged frozen shared controls
 with one physical Svelte runtime. `connectControlState` publishes authoritative

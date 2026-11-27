@@ -146,7 +146,7 @@ test('the hard cap: under parallel requests, failures, evictions and lost settle
       while (await s.calls.runAlarms() > 0) { /* until every call has settled */ }
       const rows = await data.db.select().from(creditLedger).where(eq(creditLedger.userId, s.user.id));
       const requests = rows.filter(row => row.kind !== 'grant');
-      // What the provider billed: a reported call its usage at list price (which the hold covers); any other call at
+      // What the provider billed: a reported call its usage at the catalogue rates (which the hold covers); any other call at
       // most its hold, which is what it was charged.
       const calls = requests.filter(row => row.idempotencyKey !== keyOf(s, 'spent'));
       let upstream = 1000 * CREDIT_NANO_USD - 80_000_000;

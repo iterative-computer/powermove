@@ -4,7 +4,7 @@ Rows S099 S100 S101 S102. Grammar: [README](README.md) §1–5. Sources:
 `R/panels/WorkspacesPanel.svelte`, `R/legacy/core/workspace.ts`,
 `R/legacy/ui/library.ts`, `R/library/LibraryScreen.svelte`,
 `R/panels/GeneratedPanel.svelte`. Workspace vocabulary is settled in
-[reviews/na-shell2.md](../reviews/na-shell2.md) (*Workspace*, never *Layout*).
+reviews/na-shell2.md (*Workspace*, never *Layout*).
 S012 owns the delete alert. No new tokens.
 
 The word **Library** is taken: `File ▸ Project Library` is S017. v1.2.0's panel and

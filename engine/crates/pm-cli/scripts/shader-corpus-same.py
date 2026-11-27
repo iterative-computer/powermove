@@ -2,7 +2,7 @@
 """Whether two shader gate corpora (`corpus.json` from
 engine/crates/pm-render/tools/shaders/collect.ts) hold the same cases: the
 Phase 3a gate recollects the corpus at its tip and keeps the shaders lane's
-WebGL references only if no case changed (docs/engine/phase3a-gate.md).
+WebGL references only if no case changed.
 
     python3 engine/crates/pm-cli/scripts/shader-corpus-same.py <corpus A> <corpus B>
 

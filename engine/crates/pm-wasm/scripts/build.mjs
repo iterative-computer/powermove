@@ -5,7 +5,7 @@
 
    Runs `cargo build --release --target wasm32-unknown-unknown -p
    pm-wasm-module` (the cdylib over pm-wasm, so the release profile's thin
-   LTO applies: docs/engine/release-build.md) with the pinned toolchain
+   LTO applies) with the pinned toolchain
    (engine/env.sh), drops the custom sections
    (DWARF line tables, names) that the release profile keeps for native
    builds, and writes the module to engine/target/pm-wasm/pm_wasm.wasm

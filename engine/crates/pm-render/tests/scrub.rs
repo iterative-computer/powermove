@@ -191,7 +191,7 @@ fn the_frame_cache_follows_the_lease_share() {
 /// The cost of drawing one decoded UHD frame into a 1080p viewer frame
 /// (import, normalization, the source pass, compositing, GPU wait), with
 /// the frames already decoded: what a drag through cached frames pays per
-/// refresh. `PM_SCRUB_CLIP` names a long-GOP UHD clip (docs/engine/tracer.md).
+/// refresh. `PM_SCRUB_CLIP` names a long-GOP UHD clip.
 #[test]
 #[ignore]
 fn drawing_cached_uhd_frames() {

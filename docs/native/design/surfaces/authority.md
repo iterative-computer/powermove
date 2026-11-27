@@ -2,7 +2,7 @@
 
 Rows S010 S011 S012. Grammar: [README](README.md) §1–4. Consistent with
 [panels/agent-panel.md](../panels/agent-panel.md) (inline approvals, Access
-picker) and [reviews/na-cloud-storehost.md](../reviews/na-cloud-storehost.md)
+picker) and reviews/na-cloud-storehost.md
 (Full Access alert, permission sheet). Authority prompts are **never**
 remembered silently, never default to granting, and never appear without a
 user action or agent request behind them.

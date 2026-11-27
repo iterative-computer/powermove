@@ -3900,7 +3900,7 @@ contributions and then workspace contributions. Stylesheet `!important` still
 beats normal inline values. A later normal `:root` theme rule does not beat an
 earlier `:root[data-theme="dark"]` rule. Radius and colour aliases remain live
 expressions; derived accent hover moves toward white, as in both shipped palettes.
-Per [design review](design/reviews/na-cloud-editions.md), floating surfaces
+Per design review, floating surfaces
 always use `colors.floating`, including the tagged app root rule that formerly
 aliased them to the panel. Compat documents occupy solid panels/sheets, so
 `--bg-window` uses opaque `colors.window` in all eight editions; AppKit owns
@@ -4055,7 +4055,7 @@ private installed-corpus conformance. The generator never reads an installation.
 are not specified in the review. Current stable ids remain the neutral names;
 no display-name copy has been invented. The fully specified per-edition
 contrast checks are implemented. All visual output remains provisional until
-Opus reviews real macOS evidence.
+Design reviews real macOS evidence.
 
 **Still required outside these owned paths:** wire kernel-resolved native token
 and appearance snapshots into worker generation and production remote-DOM

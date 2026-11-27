@@ -13,7 +13,7 @@ builds deterministic proxies for it, shows which of them track wall-clock, and
 locks them in: once a number is exact and repeatable it can be driven down and
 never allowed back up.
 
-Everything here is measured on Jude's MacBook Pro (M4 Max, 128 GB, macOS 27,
+Everything here is measured on the reference MacBook Pro (M4 Max, 128 GB, macOS 27,
 120 Hz panel), with other lanes building and running Electron at the same time;
 every measurement records its load.
 

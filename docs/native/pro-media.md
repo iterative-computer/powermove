@@ -310,7 +310,7 @@ old modal still has consumers and is not removed. No new visual surface is built
 The shell still owns toolbar visibility/aggregate progress, project grouping,
 popover/window controls, Retry routing and completion-row lifecycle. Verify these
 and live VoiceOver, Reduce Motion and render patterns on macOS using pm-design
-and the review, with Opus review before treating any visual result as final.
+and the review, with design review before treating any visual result as final.
 
 ## Pro media integration, slice 2: real worker encodes
 

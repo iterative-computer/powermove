@@ -3,7 +3,7 @@
 2026-11-01. Panel `layer-effects`, title `Effect Controls`. Build specification:
 `docs/native/design/panels/effect-controls.md`, shared panel README (including
 Owner decisions), inspector row grammar, and `docs/native/ui-kit.md`.
-**Headless implementation; native application activation and Opus visual review
+**Headless implementation; native application activation and design review
 remain open. All visual output is provisional.** This is not a panel cutover or
 complete VoiceOver/visual acceptance claim.
 
@@ -77,7 +77,7 @@ and the Project/Effect Controls tab placement.
 | §4 Interactions | Actual-model selection, nested retention/outside clear, checkbox, reset/remove, add/menu intents, copy/paste, reorder/drop, diamond and animation removal; parameters preserve exact values and original handles | Native menus, controls, custom parameter widgets/pickers and complete expression UI (G1/G5/G6) |
 | §5 Keyboard/focus | Up/Down/Shift, focused-effect Option arrows, copy/paste/delete, disclosure, Space, Return and Escape handlers; one list Tab stop, separate parameter stops; offscreen focus/reveal request | Native before-global routing, actual traversal/restore and first-entry focus design (G2, T1) |
 | §6 VoiceOver | Real AccessKit assertions: panel/list/row roles, selected state, checkbox state, numeric value/units, names; full AX tree stored in every golden | AXRowCount/multiselect/custom actions, keyframe spoken-state mapping, native announcements and virtual navigation (G4) |
-| §7 Appearance | pm-design token references; contrast header edges; reduced-motion declaration | Complete native token recipes/motion and Opus review (G3/G5) |
+| §7 Appearance | pm-design token references; contrast header edges; reduced-motion declaration | Complete native token recipes/motion and design review (G3/G5) |
 | §8 Copy | Exact specified copy; browser reference says `Effects` under the Owner decision; no web export added | Missing-error/announcement cases require T2/T3 |
 | §9 Don't | No nested value column, switch, disclosure-on-selection, effects-in-Properties, source deletion or replacement of existing consumers | Native rendering still must prove this visually |
 
@@ -201,8 +201,7 @@ On macOS verify GPUI/AppKit recipes, system push buttons/checkboxes/NSMenu,
 1×/2× geometry and one value column, all pointer/focus/drag states and
 cross-panel drops, native controls/IME/clipboard and picker commit/cancel,
 VoiceOver count/actions/announcements/virtual navigation, accessibility settings,
-60k scroll/reveal cost, actor durability and no UI-thread JS waits. Obtain Opus
-review screenshots/keyboard/VoiceOver evidence and sign-off before activation.
+60k scroll/reveal cost, actor durability and no UI-thread JS waits. Obtain design screenshots/keyboard/VoiceOver evidence and sign-off before activation.
 
 ### Linux result and merge baseline — 2026-11-01
 
@@ -242,6 +241,6 @@ state projection; G5/G6 need the missing system-control, drag/hover and inherite
 widget/picker/expression recipes. G1 is application activation/binding integration,
 not a request to change the frozen envelope. Preserve the existing contract and
 request additive support rather than changing crates/surface or js/v4/src
-(N3/N7/N8, ownership and the recorded API freeze). T1–T5 and the macOS/Opus gates
+(N3/N7/N8, ownership and the recorded API freeze). T1–T5 and the macOS and design gates
 remain unchanged; the upstream 40/40 headless eval does not certify this panel's
 native rendering or application activation.
