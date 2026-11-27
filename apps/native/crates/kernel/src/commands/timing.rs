@@ -550,13 +550,22 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
             continue;
         }
         let layer = cx.layer_node(&loc)?.to_value();
-        let from = values::num(&layer, "from").unwrap_or(0.0);
-        let dur = values::num(&layer, "dur").unwrap_or(0.0);
-        let (from, dur) = if values::text(&layer, "type") == Some("group") && dur <= 0. {
+        let stored_from = values::num(&layer, "from").unwrap_or(0.0);
+        let stored_dur = values::num(&layer, "dur").unwrap_or(0.0);
+        let out_of_stored = stored_dur <= 0.
+            || (start && time >= stored_from + stored_dur)
+            || (!start && time <= stored_from);
+        let (from, dur) = if values::text(&layer, "type") == Some("group") && out_of_stored {
             let comp = loc.comp_id.as_deref();
-            span(&cx.layers(comp), &layer, cx.duration(comp))
+            member_span(&cx.layers(comp), &layer).unwrap_or_else(|| {
+                if stored_dur > 0. {
+                    (stored_from, stored_dur)
+                } else {
+                    (0.0, cx.duration(comp))
+                }
+            })
         } else {
-            (from, dur)
+            (stored_from, stored_dur)
         };
         targets.push((loc, layer, from, dur));
     }
@@ -581,7 +590,8 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
             let longest = media_limit(cx, &layer).unwrap_or(f64::INFINITY);
             let duration = Value::Number((time - from).min(longest).max(1.0 / fps));
             if values::text(&layer, "type") == Some("group")
-                && values::num(&layer, "dur").unwrap_or(0.) <= 0.
+                && (values::num(&layer, "dur").unwrap_or(0.) <= 0.
+                    || values::num(&layer, "from").unwrap_or(0.) != from)
             {
                 let mut next = cut_head(&layer, layer.clone(), from);
                 values::obj(&mut next).insert("dur", duration);
@@ -636,14 +646,8 @@ fn slip(cx: &mut Cx<'_>, layer_id: &str, source_in: f64) -> Result<(), CommandEr
     cx.set(path, values::property(Value::Number(source_in)))
 }
 
-/// `groupSpan(group)`: its non-group members' extent.
-fn span(layers: &[Value], layer: &Value, comp_dur: f64) -> (f64, f64) {
-    if values::text(layer, "type") != Some("group") {
-        return (
-            values::num(layer, "from").unwrap_or(f64::NAN),
-            values::num(layer, "dur").unwrap_or(f64::NAN),
-        );
-    }
+/// Extent of a group's non-group descendants, or `None` when the group is empty.
+fn member_span(layers: &[Value], layer: &Value) -> Option<(f64, f64)> {
     let one: HashSet<&str> = values::text(layer, "id").into_iter().collect();
     let ids = layers::expand_groups(layers, &one);
     let children: Vec<&Value> = ids
@@ -652,7 +656,7 @@ fn span(layers: &[Value], layer: &Value, comp_dur: f64) -> (f64, f64) {
         .filter(|l| values::text(l, "type") != Some("group"))
         .collect();
     if children.is_empty() {
-        return (0.0, comp_dur);
+        return None;
     }
     let from = children
         .iter()
@@ -662,7 +666,7 @@ fn span(layers: &[Value], layer: &Value, comp_dur: f64) -> (f64, f64) {
         .iter()
         .map(|l| values::num(l, "from").unwrap_or(0.0) + values::num(l, "dur").unwrap_or(0.0))
         .fold(f64::NEG_INFINITY, f64::max);
-    (from, end - from)
+    Some((from, end - from))
 }
 
 fn crosses((from, dur): (f64, f64), t: f64) -> bool {

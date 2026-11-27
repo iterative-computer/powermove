@@ -1910,7 +1910,7 @@ impl Drag {
                 for id in ids {
                     let l = self.start.layer(id).unwrap();
                     let (start, duration) = self.start.strip_span(l);
-                    let from = if self.snap.lock.is_some() {
+                    let moved = if self.snap.lock.is_some() {
                         start + clamp(delta)
                     } else {
                         let rounded = frame(start + sample.time_delta, self.start.fps);
@@ -1919,6 +1919,11 @@ impl Drag {
                         } else {
                             rounded
                         }
+                    };
+                    let from = if l.kind == "group" && l.duration > 0. {
+                        l.from + (moved - start)
+                    } else {
+                        moved
                     };
                     out.push(
                         LayerCommand::Set {
@@ -1991,9 +1996,10 @@ impl Drag {
                     if is_in && time >= end {
                         continue;
                     }
-                    // An untimed group's In/Out comes from its original
-                    // members. Materialize those spans before trimming any member.
-                    if l.kind == "group" && l.duration == 0. {
+                    // A group's In/Out comes from its original members. Run
+                    // group trims before trimming any member so their starting
+                    // span matches `self.start.strip_span`.
+                    if l.kind == "group" {
                         legacy_groups.push((time, vec![id.clone()]));
                         continue;
                     }

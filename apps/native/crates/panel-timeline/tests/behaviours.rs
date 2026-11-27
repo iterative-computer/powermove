@@ -3192,17 +3192,26 @@ fn strip_trim_previews_group_and_legacy_members_locally_until_one_commit() {
                         let frame = c.layer_preview().unwrap();
                         assert!(frame.trimmed);
                         let shown = TimelineIndex::from_snapshot(&frame.snapshot);
-                        let wanted = |from, dur| {
-                            if trim_in {
-                                (from + delta, dur - delta)
-                            } else {
-                                (from, dur + delta)
-                            }
+                        let wanted_leaf = if trim_in {
+                            (leaf_from + delta, leaf_duration - delta)
+                        } else {
+                            (leaf_from, leaf_duration + delta)
                         };
-                        for (id, expected) in [
-                            ("g", wanted(group_from, group_duration)),
-                            ("leaf", wanted(leaf_from, leaf_duration)),
-                        ] {
+                        // `g`'s dynamic strip span is the union of all its
+                        // descendants (including `locked` at 1..9); trimming
+                        // `late`/`leaf` (ends at 8) by +0.5/+0.8 stays inside
+                        // `locked`'s 1..9 extent.
+                        let expected_group = (
+                            group_from.min(if trim_in { group_from + delta } else { group_from }),
+                            (group_from + group_duration)
+                                .max(if trim_in {
+                                    group_from + group_duration
+                                } else {
+                                    8. + delta
+                                })
+                                - group_from,
+                        );
+                        for (id, expected) in [("g", expected_group), ("leaf", wanted_leaf)] {
                             let actual = span(&shown, id);
                             assert!((actual.0 - expected.0).abs() < 1e-9, "{id}: {actual:?}");
                             assert!((actual.1 - expected.1).abs() < 1e-9, "{id}: {actual:?}");
@@ -3272,7 +3281,8 @@ fn group_trim_drag_batches_matching_edges_and_preserves_offsets() {
             trims,
             [
                 (strings(&["g"]), 11.),
-                (strings(&["n", "leaf", "late"]), 10.),
+                (strings(&["n"]), 10.),
+                (strings(&["leaf", "late"]), 10.),
                 (strings(&["early"]), 4.),
             ]
         );
@@ -3300,7 +3310,7 @@ fn group_trim_drag_batches_matching_edges_and_preserves_offsets() {
         block_on(c.drag(sample(0.5))).unwrap();
         assert_eq!(
             trim_spans(&c, &ids),
-            [(1.5, 7.5), (2.5, 5.5), (3.5, 4.5), (1., 8.)]
+            [(1.5, 7.5), (3.5, 4.5), (3.5, 4.5), (1., 8.)]
         );
         let group = c.model.index.layer("g").unwrap();
         assert_eq!(group.from + key_time(&c, "gk"), 5.);
@@ -3351,7 +3361,10 @@ fn group_strip_uses_its_trimmed_edge_for_hit_testing_in_both_modes() {
             .unwrap()
             .prepare(viewport, &tokens)
             .unwrap();
-        for (id, end) in [("g", 7.), ("n", 7.), ("empty", 12.)] {
+        // `locked` inside `g` stays at 1..9 so `g`'s dynamic member span ends
+        // at 9., while `n` (only unlocked `leaf`) trims to 7. and `empty` keeps
+        // its own 10..12 span.
+        for (id, end) in [("g", 9.), ("n", 7.), ("empty", 12.)] {
             let strip = frame
                 .ops
                 .iter()
@@ -5398,28 +5411,34 @@ fn group_strips_track_live_edits_even_when_a_child_stays_put() {
                     } else {
                         scene = build(&c);
                     }
-                    assert_eq!(span(&scene), (0., 8.));
+                    // When `locked` stays at 1..9, moving unlocked members by
+                    // -1s spans min(0, 1)..max(7, 9) = 0..9; when unlocked,
+                    // every member moves to 0..8.
+                    assert_eq!(span(&scene), if locked { (0., 9.) } else { (0., 8.) });
                     block_on(c.drag(sample(2.))).unwrap();
                     if let Some(preview) = c.layer_preview() {
                         scene.preview_times(&c.model, &preview.starts);
                     } else {
                         scene = build(&c);
                     }
-                    assert_eq!(span(&scene), (3., 8.));
+                    // When `locked` stays at 1..9, unlocked members move to
+                    // 3..10, so the dynamic union is 1..10; when unlocked,
+                    // every member moves to 3..11.
+                    assert_eq!(span(&scene), if locked { (1., 9.) } else { (3., 8.) });
                     block_on(c.finish_drag(true)).unwrap();
-                    assert_eq!(span(&build(&c)), (3., 8.));
+                    assert_eq!(span(&build(&c)), if locked { (1., 9.) } else { (3., 8.) });
                     assert_eq!(trim_spans(&c, &["locked"])[0].0, if locked { 1. } else { 3. });
                     undo(&mut c);
 
                     block_on(c.begin_drag(DragKind::TrimIn { ids: strings(&["g"]) })).unwrap();
                     block_on(c.drag(sample(0.5))).unwrap();
-                    assert_eq!(span(&build(&c)), (1.5, 7.5));
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1.5, 7.5) });
                     block_on(c.finish_drag(true)).unwrap();
                     undo(&mut c);
 
                     block_on(c.begin_drag(DragKind::TrimOut { ids: strings(&["g"]) })).unwrap();
                     block_on(c.drag(sample(-2.))).unwrap();
-                    assert_eq!(span(&build(&c)), (1., 6.));
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1., 6.) });
                     block_on(c.finish_drag(true)).unwrap();
                     undo(&mut c);
 
@@ -5427,13 +5446,88 @@ fn group_strips_track_live_edits_even_when_a_child_stays_put() {
                     // 6, early ends at 2).
                     select(&mut c, &["g"]);
                     command(&mut c, "trimOut", 7.);
-                    assert_eq!(span(&build(&c)), (1., 6.));
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1., 6.) });
                     undo(&mut c);
                     command(&mut c, "trimIn", 1.5);
-                    assert_eq!(span(&build(&c)), (1.5, 7.5));
+                    assert_eq!(span(&build(&c)), if locked { (1., 8.) } else { (1.5, 7.5) });
                 }
             }
         }
+    }
+}
+
+#[test]
+fn group_strip_hugs_members_dynamically_for_saved_groups_and_live_child_drags() {
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let viewport = Viewport {
+        width: 1600.,
+        height: 800.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 20.,
+        layer_column: 200.,
+    };
+    // Saved group with legacy full-comp from=0, dur=103 wrapping layers at 31..35
+    // and an opacity keyframe at comp time 32s (0 + 32).
+    let fixture = parse(
+        r#"{"id":"P","compId":"C","fps":30,"dur":103,"layers":[
+            {"id":"g","type":"group","name":"Group","on":true,"from":0,"dur":103,"collapsed":false,
+             "p":{"opacity":{"v":100,"kf":[{"i":"gk","t":32,"v":50}]}}},
+            {"id":"a","type":"shape","name":"A","on":true,"group":"g","from":31,"dur":2,"p":{}},
+            {"id":"b","type":"shape","name":"B","on":true,"group":"g","from":33,"dur":2,"p":{}}
+        ]}"#,
+    )
+    .unwrap();
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let (_a, mut c) = client_with(fixture.clone());
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        let clip_span = |scene: &Scene, id: &str| {
+            let clip = scene
+                .prepare(viewport, &tokens)
+                .unwrap()
+                .clip_nodes()
+                .into_iter()
+                .find(|clip| clip.id == id)
+                .unwrap();
+            (clip.from, clip.duration)
+        };
+        let mut scene = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        assert_eq!(clip_span(&scene, "g"), (31., 4.), "{mode:?}");
+
+        // Dragging a child expands the parent group bar live during preview and after commit.
+        let child_drag = DragKind::Layers {
+            ids: strings(&["b"]),
+        };
+        if mode == TimelineMode::Layers {
+            c.begin_preview_drag(child_drag).unwrap();
+        } else {
+            block_on(c.begin_drag(child_drag)).unwrap();
+        }
+        block_on(c.drag(sample(3.))).unwrap();
+        if let Some(preview) = c.layer_preview() {
+            scene.preview_times(&c.model, &preview.starts);
+        } else {
+            scene = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        }
+        assert_eq!(clip_span(&scene, "g"), (31., 7.), "{mode:?}");
+        block_on(c.finish_drag(true)).unwrap();
+        let after = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        assert_eq!(clip_span(&after, "g"), (31., 7.), "{mode:?}");
+        undo(&mut c);
+
+        // Dragging the saved full-comp group shifts its strip AND its own keyframe by exact delta
+        // without jumping `from` by +31s.
+        let group_drag = DragKind::Layers {
+            ids: strings(&["g"]),
+        };
+        block_on(c.begin_drag(group_drag)).unwrap();
+        block_on(c.drag(sample(2.))).unwrap();
+        block_on(c.finish_drag(true)).unwrap();
+        let after = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap();
+        assert_eq!(clip_span(&after, "g"), (33., 4.), "{mode:?}");
+        let g = c.model.index.layer("g").unwrap();
+        assert_eq!(g.from + key_time(&c, "gk"), 34., "{mode:?}");
     }
 }
 

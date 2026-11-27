@@ -130,12 +130,11 @@ pub fn layout_focused(
                 .map(|k| units[*k].end)
                 .reduce(f64::max)
                 .unwrap_or(index.duration);
-            // Reserve the group strip and the members' lanes across both spans.
-            let (from, end) = if l.duration > 0. {
-                if kids.is_empty() {
+            let (from, end) = if kids.is_empty() {
+                if l.duration > 0. {
                     (l.from, l.from + l.duration)
                 } else {
-                    (from.min(l.from), end.max(l.from + l.duration))
+                    (0., index.duration)
                 }
             } else {
                 (from, end)

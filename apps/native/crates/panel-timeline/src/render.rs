@@ -561,7 +561,10 @@ impl Scene {
                     .map_or(0., |&(_, offset)| offset);
             if let Some(&i) = self.positions.get(&indexed.row_id) {
                 let row = &mut rows[i];
-                let moving = matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
+                let is_non_empty_group =
+                    indexed.kind == "group" && model.index.group_has_children(layer);
+                let moving = !is_non_empty_group
+                    && matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
                 if (delta != 0. || moving)
                     && let RowContent::Layer { clip, summary } =
                         &mut std::sync::Arc::make_mut(row).content
@@ -575,7 +578,9 @@ impl Scene {
                             band.end += delta;
                         }
                     }
-                    if let Some(clip) = clip {
+                    if !is_non_empty_group
+                        && let Some(clip) = clip
+                    {
                         clip.from = from;
                     }
                     for key in std::sync::Arc::make_mut(summary) {
@@ -605,6 +610,91 @@ impl Scene {
                     row.id.clone(),
                     keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
                 );
+            }
+        }
+        // Recompute live strip extents for any group whose descendants moved.
+        let mut affected_groups: HashSet<usize> = HashSet::new();
+        for id in offsets.keys().chain(self.time_preview.keys()) {
+            let Some(mut cur) = model.index.layer_ordinal(id) else {
+                continue;
+            };
+            if model.index.layers[cur].kind == "group" {
+                affected_groups.insert(cur);
+            }
+            let mut visited = 0usize;
+            while let Some(parent_id) = model.index.layers[cur].group.as_deref() {
+                let Some(parent) = model.index.layer_ordinal(parent_id) else {
+                    break;
+                };
+                if parent == cur || visited >= model.index.layers.len() {
+                    break;
+                }
+                visited += 1;
+                if model.index.layers[parent].kind == "group" {
+                    affected_groups.insert(parent);
+                }
+                cur = parent;
+            }
+        }
+        if !affected_groups.is_empty() {
+            fn extent_of(
+                index: &crate::TimelineIndex,
+                offsets: &HashMap<String, (f64, f64)>,
+                ordinal: usize,
+                memo: &mut HashMap<usize, Option<(f64, f64)>>,
+                visiting: &mut HashSet<usize>,
+            ) -> Option<(f64, f64)> {
+                if let Some(&cached) = memo.get(&ordinal) {
+                    return cached;
+                }
+                if !visiting.insert(ordinal) {
+                    return None;
+                }
+                let layer = &index.layers[ordinal];
+                let result = if layer.kind != "group" {
+                    let from = offsets.get(&layer.id).map_or(layer.from, |&(f, _)| f);
+                    Some((from, from + layer.duration))
+                } else {
+                    let mut bounds: Option<(f64, f64)> = None;
+                    for &child in index.child_ordinals(ordinal) {
+                        if let Some((a, b)) = extent_of(index, offsets, child, memo, visiting) {
+                            bounds = Some(match bounds {
+                                Some((lo, hi)) => (lo.min(a), hi.max(b)),
+                                None => (a, b),
+                            });
+                        }
+                    }
+                    bounds
+                };
+                visiting.remove(&ordinal);
+                memo.insert(ordinal, result);
+                result
+            }
+            let mut memo = HashMap::new();
+            let mut visiting = HashSet::new();
+            for ordinal in affected_groups {
+                let indexed = &model.index.layers[ordinal];
+                let Some(&row_index) = self.positions.get(&indexed.row_id) else {
+                    continue;
+                };
+                if let Some((start, end)) =
+                    extent_of(&model.index, &offsets, ordinal, &mut memo, &mut visiting)
+                {
+                    let duration = (end - start).max(0.);
+                    let changed = matches!(
+                        &rows[row_index].content,
+                        RowContent::Layer { clip: Some(clip), .. }
+                            if clip.from != start || clip.duration != duration
+                    );
+                    if changed
+                        && let RowContent::Layer {
+                            clip: Some(clip), ..
+                        } = &mut std::sync::Arc::make_mut(&mut rows[row_index]).content
+                    {
+                        clip.from = start;
+                        clip.duration = duration;
+                    }
+                }
             }
         }
         self.time_preview = offsets;

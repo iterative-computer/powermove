@@ -409,6 +409,10 @@ fn large_group_trim_samples_locally() {
     let mut client = TimelineClient::new(kernel, "drag", Caller::native()).unwrap();
     let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
     let base = client.kernel.published("drag").unwrap();
+    let (base_from, base_dur) = client
+        .model
+        .index
+        .strip_span(client.model.index.layer("g0").unwrap());
     for (label, kind) in [
         (
             "large group trim in",
@@ -446,7 +450,7 @@ fn large_group_trim_samples_locally() {
             else {
                 panic!("previewed group has no strip");
             };
-            assert!(clip.from > 0.125 || clip.duration > 20.);
+            assert!(clip.from > base_from || clip.duration > base_dur);
             durations.push(start.elapsed().as_secs_f64() * 1e3);
         }
         stats(label, &mut durations);

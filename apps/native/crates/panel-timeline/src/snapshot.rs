@@ -492,16 +492,15 @@ impl TimelineIndex {
     }
 
     fn index_timing(&mut self) {
-        for layer in &self.layers {
-            self.layer_time_bounds.0 = self.layer_time_bounds.0.min(layer.from);
-            self.layer_time_bounds.1 = self.layer_time_bounds.1.max(layer.from + layer.duration);
-        }
-        if self
-            .layers
-            .iter()
-            .any(|layer| layer.kind == "group" && layer.duration == 0.)
-        {
+        if self.layers.iter().any(|layer| layer.kind == "group") {
             self.group_extents = Arc::new(self.group_extents());
+        } else {
+            self.group_extents = Default::default();
+        }
+        for layer in &self.layers {
+            let (from, duration) = self.strip_span(layer);
+            self.layer_time_bounds.0 = self.layer_time_bounds.0.min(from);
+            self.layer_time_bounds.1 = self.layer_time_bounds.1.max(from + duration);
         }
     }
 
@@ -1104,14 +1103,24 @@ impl TimelineIndex {
         bounds
     }
 
-    /// Imported groups without saved timing display the extent of their members.
+    /// Groups display the union of their non-group descendants' timing; empty
+    /// groups fall back to their stored timing (or the whole composition).
     pub fn strip_span(&self, layer: &Layer) -> (f64, f64) {
-        if layer.kind != "group" || layer.duration > 0. {
+        if layer.kind != "group" {
             return (layer.from, layer.duration);
         }
-        self.by_id.get(&layer.id)
+        if let Some((start, end)) = self
+            .by_id
+            .get(&layer.id)
             .and_then(|&i| self.group_extents.get(i).copied().flatten())
-            .map_or((0., self.duration), |(start, end)| (start, end - start))
+        {
+            return (start, (end - start).max(0.));
+        }
+        if layer.duration > 0. {
+            (layer.from, layer.duration)
+        } else {
+            (0., self.duration)
+        }
     }
     pub fn expanded_ids(&self, roots: &[String]) -> Vec<String> {
         let mut seen = HashSet::new();

@@ -2348,6 +2348,37 @@ fn group_3d_layers_auto_enables_3d_and_centers_depth_pivot() {
 }
 
 #[test]
+fn group_initializes_from_and_dur_to_member_span() {
+    let mut s = store_with(|p| {
+        p.as_object_mut()
+            .unwrap()
+            .insert("dur", Value::Number(103.0));
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"a","type":"shape","name":"A","from":31.0,"dur":2.5,"on":true,"p":{},"d":{}},
+                    {"id":"b","type":"shape","name":"B","from":32.0,"dur":3.0,"on":true,"p":{},"d":{}}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+    run(
+        &mut s,
+        GroupCommand::Group {
+            layer_ids: vec!["a".into(), "b".into()],
+            group_id: "g".into(),
+            name: Some("Shots".into()),
+            time: 32.0,
+        },
+    );
+    let g = layer(&s, "g");
+    assert_eq!(num(&g, &["from"]), 31.0);
+    assert_eq!(num(&g, &["dur"]), 4.0);
+}
+
+#[test]
 fn enabling_3d_on_group_with_3d_children_centers_z_pivot() {
     let mut s = store_with(|p| {
         p.as_object_mut().unwrap().insert(
