@@ -71,6 +71,27 @@
       "when": 1795683287734,
       "tag": "0009_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795749590366,
+      "tag": "0010_aero_holds",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795749605422,
+      "tag": "0011_backfill_nano_usd",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795749611436,
+      "tag": "0012_drop_micro_usd",
+      "breakpoints": true
     }
   ]
 }

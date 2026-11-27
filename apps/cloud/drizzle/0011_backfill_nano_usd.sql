@@ -1,0 +1,2 @@
+-- Custom SQL migration file, put your code below! ---- Spends metered before nano-USD keep what they cost (a micro-USD is a thousand nano-USD); their split of fresh input is derived.
+UPDATE "credit_ledger" SET "cost_nano_usd" = "cost_micro_usd" * 1000, "fresh_input_tokens" = greatest("input_tokens" - "cached_input_tokens" - "cache_write_tokens", 0), "usage_source" = CASE WHEN "estimated" THEN 'estimate' ELSE 'reported' END WHERE "kind" = 'spend';

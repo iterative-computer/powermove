@@ -1,0 +1,1 @@
+ALTER TABLE "credit_ledger" DROP COLUMN "cost_micro_usd";
