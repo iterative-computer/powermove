@@ -15,6 +15,7 @@ import { endpointFor, languageModel } from './providers';
 import { ChatRequest, UnsupportedRequest, prepare } from './translate';
 import { ChunkEncoder } from './sse';
 import { V2Error } from '../v2-error';
+import { productionProblems } from '../production';
 
 /** What the Worker hands the object: the client's request, already validated, and who it is for. */
 export interface CallStart { request: unknown; userId: string; requestId: string; key: string; cacheKey: string }
@@ -35,6 +36,7 @@ export class AeroCall {
   constructor(private readonly ctx: CallState, private readonly env: CloudflareBindings, private readonly data: (env: CloudflareBindings) => Data = dataFor) {}
 
   async fetch(request: Request): Promise<Response> {
+    if (productionProblems(this.env).length) return refuse(new V2Error(503, 'misconfigured'));
     if (this.owner) return refuse(new V2Error(409, 'duplicate_request'));
     const owner = { token: crypto.randomUUID(), abort: new AbortController() };
     this.owner = owner;

@@ -4,6 +4,7 @@ import { abuseCounters, desktopAuth, objectLeases, objects } from './db/schema';
 import { hasReleaseReference } from './objects/references';
 import { dataFor } from './db/client';
 import { sweepHolds } from './billing/ledger';
+import { productionProblems } from './production';
 
 const noLease = (sha: ReturnType<typeof sql>) => sql`not exists (
   select 1 from object_leases l where l.sha = ${sha} and l.expires_at > now()
@@ -58,6 +59,8 @@ export async function runGc(data: Data, env: CloudflareBindings): Promise<void> 
 }
 
 export async function gc(_event: ScheduledEvent, env: CloudflareBindings): Promise<void> {
+  const problems = productionProblems(env);
+  if (problems.length) { console.error('refusing to run: production misconfigured', problems.join(',')); return; }
   const data = dataFor(env);
   try { await runGc(data,env); } finally { await data.end(); }
 }

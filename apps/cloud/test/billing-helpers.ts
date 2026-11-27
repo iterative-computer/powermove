@@ -34,6 +34,8 @@ export async function stack(data: Data, email = 'jude@example.com', options: { c
     ...makeEnv(data),
     AERO_CALLS: calls as unknown as DurableObjectNamespace,
     STRIPE_SECRET_KEY: FAKE_SECRET_KEY, STRIPE_WEBHOOK_SECRET: FAKE_WEBHOOK_SECRET, STRIPE_API_BASE: stripe.url,
+    // The exact price ids, as production configures them (the Worker never resolves a plan by lookup key).
+    STRIPE_PRICE_AEROLITE: priceId(stripe, 'powermove_aerolite_monthly'), STRIPE_PRICE_AERO: priceId(stripe, 'powermove_aero_monthly'),
     OPENAI_API_KEY: 'simulator', ANTHROPIC_API_KEY: 'simulator',
     AERO_OPENAI_BASE_URL: `${ai.url}/openai/v1`, AERO_ANTHROPIC_BASE_URL: `${ai.url}/anthropic/v1`,
   };
@@ -45,6 +47,9 @@ export async function stack(data: Data, email = 'jude@example.com', options: { c
   };
   return { app, env, stripe, ai, calls, user, request, stop: async () => { await stripe.stop(); await ai.stop(); } };
 }
+
+/** The fake's price id for a lookup key. */
+export const priceId = (stripe: FakeStripe, lookupKey: string) => [...stripe.state.prices.values()].find(price => price.lookup_key === lookupKey)!.id as string;
 
 /** Subscribes the stack's user through Checkout and the fake's Pay button. */
 export async function subscribe(s: Stack, plan: 'aerolite' | 'aero' = 'aerolite') {

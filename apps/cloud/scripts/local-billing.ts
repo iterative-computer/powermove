@@ -29,6 +29,7 @@ process.stdout.write(await run(['bun', 'scripts/local-up.ts']));
 const stripe = startFakeStripe({ port: ports.stripe, webhookUrl: `${workerUrl}/v2/stripe/webhook` });
 const ai = startAiSimulator({ port: ports.ai });
 const billingVars: Record<string, string> = {
+  ENVIRONMENT: 'development',
   LOCAL_POSTGRES: '1',
   DATABASE_URL: databaseUrl,
   APP_ORIGIN: workerUrl,
@@ -40,7 +41,10 @@ const billingVars: Record<string, string> = {
   AERO_OPENAI_BASE_URL: `${ai.url}/openai/v1`,
   AERO_ANTHROPIC_BASE_URL: `${ai.url}/anthropic/v1`,
 };
-process.stdout.write(await run(['bun', 'scripts/stripe-setup.ts'], { STRIPE_SECRET_KEY: FAKE_SECRET_KEY, STRIPE_API_BASE: stripe.url }));
+const setup = await run(['bun', 'scripts/stripe-setup.ts'], { STRIPE_SECRET_KEY: FAKE_SECRET_KEY, STRIPE_API_BASE: stripe.url });
+process.stdout.write(setup);
+// The Worker takes plans only by exact price id: hand it the ids stripe-setup printed.
+for (const match of setup.matchAll(/^(STRIPE_PRICE_AEROLITE|STRIPE_PRICE_AERO)=(price_\w+)/gm)) billingVars[match[1]!] = match[2]!;
 
 // .dev.vars plus this stack's values, in a file of its own (wrangler reads one env file).
 const base = await readFile(resolve(cloud, '.dev.vars'), 'utf8');

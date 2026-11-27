@@ -22,12 +22,22 @@ import { billing } from './routes/billing';
 import { stripeWebhook } from './routes/stripe-webhook';
 import { aero } from './routes/aero';
 import { V2Error } from './v2-error';
+import { productionProblems } from './production';
 export const MIN_DESKTOP_VERSION = '0.0.0';
 export function createApp(deps: {
   data: (env: CloudflareBindings) => Data;
   beforeCommit?: PublishDeps['beforeCommit'];
 }) {
   const app = new Hono<Env>();
+  app.use('*', async (c, next) => {
+    // A production Worker with development settings (or without its live keys) serves nothing at all.
+    const problems = c.env ? productionProblems(c.env) : [];
+    if (problems.length) {
+      console.error('refusing to serve: production misconfigured', problems.join(','));
+      return c.json({ error: { code: 'misconfigured' } }, 503);
+    }
+    await next();
+  });
   app.use('*', async (c, next) => {
     c.set('requestId', crypto.randomUUID());
     c.header('X-Request-Id', c.var.requestId);
@@ -64,9 +74,11 @@ export function createApp(deps: {
   });
   app.use('*', async (c, next) => {
     c.set('session', null);
-    if (c.var.data && c.req.header('Authorization')?.startsWith('Bearer ')) {
+    const authorization = c.req.header('Authorization');
+    if (c.var.data && authorization?.startsWith('Bearer ')) {
       try {
-        const result = await createAuth(c.var.data, c.env).api.getSession({ headers: c.req.raw.headers });
+        // The bearer alone: no cookie (or any other header) can stand in for it, even when the bearer is invalid.
+        const result = await createAuth(c.var.data, c.env).api.getSession({ headers: new Headers({ authorization }) });
         c.set('session', result?.session ?? null);
       } catch {
         /* invalid bearer remains anonymous */

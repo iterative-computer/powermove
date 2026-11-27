@@ -1,10 +1,10 @@
 import { Hono, type Context } from 'hono';
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type Stripe from 'stripe';
 import type { Env } from '../env';
 import { user } from '../db/auth-schema';
-import { stripeCustomers } from '../db/schema';
-import { billingState, currentSubscription, publicStatus } from '../billing/ledger';
+import { checkoutSessions, stripeCustomers } from '../db/schema';
+import { billingState, currentSubscription, lockBalance, publicStatus } from '../billing/ledger';
 import { type Plan, isForSale, planById } from '../billing/plans';
 import { stripeClient } from '../billing/stripe';
 import { consume } from '../abuse';
@@ -39,13 +39,11 @@ async function customerFor(c: Context<Env>, stripe: Stripe, userId: string): Pro
   return winner!.stripeCustomerId;
 }
 
-async function priceFor(c: Context<Env>, stripe: Stripe, plan: Plan): Promise<string> {
+/** The plan's price: the exact configured price id, never a lookup. */
+function priceFor(c: Context<Env>, plan: Plan): string {
   const configured = c.env[plan.envPrice];
-  if (configured) return configured;
-  const prices = await stripe.prices.list({ lookup_keys: [plan.lookupKey], active: true, limit: 1 });
-  const price = prices.data[0];
-  if (!price) throw new V2Error(503, 'billing_unavailable');
-  return price.id;
+  if (!configured) throw new V2Error(503, 'billing_unavailable');
+  return configured;
 }
 
 export const billing = new Hono<Env>()
@@ -65,22 +63,31 @@ export const billing = new Hono<Env>()
     const plan = planById(body.plan);
     const stripe = stripeClient(c.env);
     const customer = await customerFor(c, stripe, userId);
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      customer,
-      client_reference_id: userId,
-      line_items: [{ price: await priceFor(c, stripe, plan), quantity: 1 }],
-      automatic_tax: { enabled: true },
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true },
-      customer_update: { address: 'auto', name: 'auto' },
-      metadata: { userId, plan: plan.id },
-      subscription_data: { metadata: { userId, plan: plan.id } },
-      success_url: returnUrl(c, 'success'),
-      cancel_url: returnUrl(c, 'cancel'),
+    const price = priceFor(c, plan);
+    // One open Checkout per account: under the account's lock, an unexpired session is handed back again instead
+    // of a second one (two paid Checkouts would be two subscriptions).
+    const url = await c.var.data.tx(async (tx) => {
+      await lockBalance(tx, userId);
+      const [open] = await tx.select().from(checkoutSessions).where(and(eq(checkoutSessions.userId, userId), sql`${checkoutSessions.expiresAt} > now() + interval '5 minutes'`)).limit(1);
+      if (open) return open.url;
+      const session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        customer,
+        line_items: [{ price, quantity: 1 }],
+        automatic_tax: { enabled: true },
+        billing_address_collection: 'required',
+        tax_id_collection: { enabled: true },
+        customer_update: { address: 'auto', name: 'auto' },
+        success_url: returnUrl(c, 'success'),
+        cancel_url: returnUrl(c, 'cancel'),
+      }, { idempotencyKey: `checkout:${userId}:${crypto.randomUUID()}` });
+      if (!session.url) throw new V2Error(502, 'billing_unavailable');
+      const expiresAt = new Date((session.expires_at ?? Math.floor(Date.now() / 1000) + 86_400) * 1000);
+      await tx.insert(checkoutSessions).values({ userId, sessionId: session.id, url: session.url, expiresAt })
+        .onConflictDoUpdate({ target: checkoutSessions.userId, set: { sessionId: session.id, url: session.url, expiresAt, createdAt: new Date() } });
+      return session.url;
     });
-    if (!session.url) throw new V2Error(502, 'billing_unavailable');
-    return c.json({ url: session.url });
+    return c.json({ url });
   })
   .post('/portal', async (c) => {
     const userId = signedIn(c);

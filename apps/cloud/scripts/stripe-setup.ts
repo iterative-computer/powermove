@@ -1,6 +1,6 @@
 /* Creates the Powermove products and monthly prices in Stripe, once: a price is found by its lookup key and
    created only when missing, so re-running changes nothing. Prints the price ids for STRIPE_PRICE_AEROLITE and
-   STRIPE_PRICE_AERO (the Worker also finds them by lookup key without those).
+   STRIPE_PRICE_AERO, which the Worker needs (it takes a plan only by its exact price id).
 
    STRIPE_SECRET_KEY=sk_test_… bun run stripe:setup            (a test-mode account)
    STRIPE_SECRET_KEY=… STRIPE_API_BASE=http://localhost:12111 bun run stripe:setup   (the local fake)

@@ -45,7 +45,9 @@ test('checkout to active: the webhooks grant the period’s 1,000 credits; a sec
       expect(session.automatic_tax).toEqual({ enabled: true });
       expect(session.billing_address_collection).toBe('required');
       expect(session.tax_id_collection).toEqual({ enabled: true });
-      expect(session.client_reference_id).toBe(s.user.id);
+      // Ownership is the Worker's own customer mapping: nothing in the session claims an account.
+      expect(session.client_reference_id).toBeNull();
+      expect(session.metadata).toEqual({});
       expect(session.success_url).toBe('https://cloud.trypowermove.com/v2/billing/return?status=success');
       expect(session.cancel_url).toBe('https://cloud.trypowermove.com/v2/billing/return?status=cancel');
       expect(success).toBe(session.success_url);
@@ -118,7 +120,7 @@ test('a renewal resets credits to the plan’s grant; nothing rolls over', async
     } finally { await s.stop(); }
   }));
 
-test('an upgrade tops the period up to the new plan; a failed renewal is past_due with no new credits', async () =>
+test('only the configured Aerolite line grants (a switch to Aero, not sold, adds nothing); a failed renewal is past_due and cannot spend', async () =>
   withData(async (data) => {
     const s = await stack(data);
     try {
@@ -126,7 +128,7 @@ test('an upgrade tops the period up to the new plan; a failed renewal is past_du
       await s.stripe.switchPlan(subscriptionId, 'powermove_aero_monthly');
       let state = await billing(s);
       expect(state.plan.id).toBe('aero');
-      expect(state.credits.included).toBe(2500);
+      expect(state.credits.included).toBe(1000);
       await new Promise(resolve => setTimeout(resolve, 1100));
       await s.stripe.failRenewal(subscriptionId);
       state = await billing(s);
