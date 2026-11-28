@@ -1,6 +1,6 @@
 mod support;
 use pm_first_launch::{
-    Event, Outcome, SHADER_CACHE, State, Step, resume_with_secret_consent, run,
+    Event, Outcome, SHADER_CACHE, State, Step, TELEMETRY_OUTBOX, TELEMETRY_PREFS, resume_with_secret_consent, run,
     secrets::{SecretAccess, SecretStep},
 };
 use pm_kernel::{
@@ -689,6 +689,25 @@ fn the_engines_shader_cache_written_before_the_gate_still_counts_as_fresh() {
     fs::create_dir_all(config.native_profile.join("notes")).unwrap();
     let error = run(&config, |_| Ok(())).unwrap_err();
     assert!(format!("{error:#}").contains("not a fresh native beta profile"));
+}
+
+/// Release builds start telemetry before the gate; its sharing choice and
+/// outbox are app-owned (2.0.1 refused every Powermove 1 user's first launch).
+#[test]
+fn telemetry_files_written_before_the_gate_still_count_as_fresh() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    fs::create_dir_all(config.native_profile.join(TELEMETRY_OUTBOX)).unwrap();
+    fs::write(config.native_profile.join(TELEMETRY_OUTBOX).join("batch-1.json"), b"[]").unwrap();
+    fs::write(config.native_profile.join(TELEMETRY_PREFS), b"{}").unwrap();
+    run(&config, |_| Ok(())).unwrap();
+    assert_eq!(
+        LibraryStore::open(&config.native_profile)
+            .projects()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

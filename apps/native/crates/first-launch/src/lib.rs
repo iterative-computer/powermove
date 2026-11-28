@@ -376,6 +376,9 @@ fn checked_paths(config: &Config) -> Result<(PathBuf, PathBuf)> {
 }
 /// The engine's compiled-shader cache folder in the native profile.
 pub const SHADER_CACHE: &str = "shader-cache";
+/// Telemetry's sharing choice and its offline outbox in the native profile.
+pub const TELEMETRY_PREFS: &str = "telemetry.json";
+pub const TELEMETRY_OUTBOX: &str = "telemetry-outbox";
 fn fresh_destination(native: &Path) -> Result<()> {
     if native.exists() && !native.join("migration.json").exists() {
         // A kill may occur after creating the process lock or temporary state
@@ -386,6 +389,14 @@ fn fresh_destination(native: &Path) -> Result<()> {
         for entry in fs::read_dir(native)? {
             let entry = entry?;
             if entry.file_name() == SHADER_CACHE && entry.file_type()?.is_dir() {
+                continue;
+            }
+            // Telemetry starts before this gate in release builds and keeps its
+            // sharing choice and outbox here: app-owned, never work. Refusing
+            // them refused every Powermove 1 user's first launch of 2.0.1.
+            if entry.file_name() == TELEMETRY_PREFS && entry.file_type()?.is_file()
+                || entry.file_name() == TELEMETRY_OUTBOX && entry.file_type()?.is_dir()
+            {
                 continue;
             }
             ensure!(
