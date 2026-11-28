@@ -28,6 +28,7 @@ core-graphics = "0.24"
 image = { version = "0.25", default-features = false, features = ["png"] }
 unicode-segmentation = "1"
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-graphics = "0.3"
 gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["test-support"] }
 gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["test-support"] }
 gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
@@ -38,6 +39,10 @@ name = "child_windows"
 harness = false
 [[test]]
 name = "settings_chrome"
+harness = false
+
+[[test]]
+name = "settings_scroll"
 harness = false
 [[test]]
 name = "child_windows_gpui"

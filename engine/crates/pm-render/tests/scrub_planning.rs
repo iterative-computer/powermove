@@ -228,3 +228,120 @@ fn animated_plane_reuses_vector_density_and_culls_offscreen_content() {
         vector_key(&final_second.content)
     );
 }
+
+#[test]
+fn moving_camera_reuses_static_plane_draws_with_cold_pixel_parity() {
+    let mut group = doc::layer("group", "group", json!({}), 128., 128., 3.);
+    group["threeD"] = json!(true);
+    let make = |id, kind, offset: f64, z: f64, from: f64| {
+        let mut layer = doc::layer(
+            id,
+            kind,
+            json!({"shape":"rect","w":36,"h":28,"color":"#4086ff"}),
+            offset,
+            0.,
+            2.,
+        );
+        layer["group"] = json!("group");
+        layer["threeD"] = json!(true);
+        layer["from"] = json!(from);
+        doc::set(&mut layer, "position.z", json!(z));
+        layer
+    };
+    let doc = doc::load(&doc::project(
+        256,
+        256,
+        3.,
+        doc::no_fill(),
+        vec![
+            group,
+            make("solid", "solid", 0., 0., 0.),
+            make("shape", "shape", 8., 25., 0.),
+            make("cut", "solid", 18., -25., 0.5),
+        ],
+    ));
+    let mut reused = Renderer::headless().unwrap();
+    reused.set_draw_reuse(true);
+    let mut cold = Renderer::headless().unwrap();
+    let mut camera = pm_eval::space3d::default_camera_25d(256., 256.);
+    let request = playback();
+    let assets = MapResolver::default();
+    for time in [0., 0.2, 0.6, 0.8] {
+        camera.position[0] = time;
+        reused.set_plane_camera(Some(camera));
+        cold.set_plane_camera(Some(camera));
+        let with = reused
+            .plan(&doc, "Ptest-root", ticks(time), &request, &assets)
+            .unwrap();
+        let without = cold
+            .plan(&doc, "Ptest-root", ticks(time), &request, &assets)
+            .unwrap();
+        assert_eq!(with, without, "plan at {time}");
+        let pixels = |renderer: &mut Renderer| {
+            let frame = renderer
+                .render(&doc, "Ptest-root", ticks(time), &request, &assets)
+                .unwrap();
+            assert!(frame.failures.is_empty());
+            renderer
+                .read_rgba(&frame)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>()
+        };
+        assert!(pixels(&mut reused) == pixels(&mut cold), "render at {time}");
+    }
+    assert!(
+        reused.draw_reuse_stats().reused >= 8,
+        "{:?}",
+        reused.draw_reuse_stats()
+    );
+}
+
+#[test]
+fn expired_boundary_in_a_3d_pass_keeps_its_order_without_building_a_group() {
+    let mut group = doc::layer("group", "group", json!({}), 128., 128., 3.);
+    doc::set(&mut group, "opacity", json!(50));
+    let mut expired = doc::layer(
+        "expired",
+        "solid",
+        json!({"w":32,"h":32,"color":"#fff"}),
+        0.,
+        0.,
+        0.25,
+    );
+    expired["group"] = json!("group");
+    let mut plane = doc::layer(
+        "plane",
+        "solid",
+        json!({"w":32,"h":32,"color":"#fff"}),
+        128.,
+        128.,
+        3.,
+    );
+    plane["threeD"] = json!(true);
+    let doc = doc::load(&doc::project(
+        256,
+        256,
+        3.,
+        doc::no_fill(),
+        vec![group, expired, plane],
+    ));
+    let mut renderer = Renderer::headless().unwrap();
+    let mut settled = playback();
+    settled.output_kind = OutputKind::Final;
+    let counters = Counters::begin();
+    let (plan, failures) = renderer
+        .plan(
+            &doc,
+            "Ptest-root",
+            ticks(1.),
+            &settled,
+            &MapResolver::default(),
+        )
+        .unwrap();
+    assert!(failures.is_empty());
+    assert_eq!(plan.draws.len(), 1);
+    assert_eq!(plan.draws[0].layer, "plane");
+    assert_eq!(counters.finish().get(Counter::CompPasses), 1);
+}

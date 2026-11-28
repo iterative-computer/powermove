@@ -645,8 +645,8 @@ fn hot_display_return_defers_eviction_but_the_next_fit_enforces_the_lease() {
     drop(cold);
     assert_eq!(
         svc.usage().sessions,
-        0,
-        "a cold return gets no deferred slot and its normal fit can evict the hot decoder"
+        1,
+        "the cold return drops its own slot and preserves the active decoder"
     );
     let mut session = svc
         .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))

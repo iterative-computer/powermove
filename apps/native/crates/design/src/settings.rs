@@ -61,6 +61,51 @@ pub struct PickerPalette {
     pub tile_edge: f32,
 }
 
+impl TilePalette {
+    /// The tile's palette for Settings section `id`: the shared material,
+    /// painted in each section's colour with a crisp white glyph in both
+    /// appearances. Unknown ids (e.g. `terminal`, `window`) keep the neutral
+    /// appearance tile.
+    pub fn for_section(id: &str, dark: bool) -> Self {
+        let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+        let mut t = Settings::of(scheme).tile;
+        let tint = match id {
+            "general" => Some((0x9a9aa4, 0x5a5a64)),       // slate graphite
+            "project" => Some((0x7a82f7, 0x4a3fd6)),       // royal indigo
+            "media" => Some((0x52b8ff, 0x1673ec)),         // azure
+            "shortcuts" => Some((0x30cfd0, 0x0a8794)),     // teal cyan
+            "storage" => Some((0xbaa68c, 0x7d6b52)),       // warm stone
+            "providers" => Some((0xf7c63f, 0xd9930a)),     // gold
+            "agents" => Some((0xff8438, 0xe2460a)),        // Powermove orange
+            "transcription" => Some((0xff6f7e, 0xdc2f55)), // coral rose
+            "extensions" => Some((0xc47af4, 0x8a3ed8)),    // vivid purple
+            "privacy" => Some((0x3fd88c, 0x12a05a)),       // emerald
+            "about" => Some((0x86a3c4, 0x4d6c93)),         // steel blue
+            _ => None,
+        };
+        let deepen = |colour: u32, by: f32| {
+            let ch = |shift: u32| (((colour >> shift) & 0xff) as f32 * (1. - by)).round() as u32;
+            (ch(16) << 16) | (ch(8) << 8) | ch(0)
+        };
+        if let Some((top, bottom)) = tint {
+            let by = if dark { 0.1 } else { 0. };
+            t.body_top = deepen(top, by);
+            t.body_bottom = deepen(bottom, by + if dark { 0.06 } else { 0. });
+            t.edge = if dark { 0xffffff } else { 0x000000 };
+            t.edge_top = if dark { 0.38 } else { 0.08 };
+            t.edge_bottom = if dark { 0.05 } else { 0.2 };
+            t.light = 0xffffff;
+            t.light_opacity = if dark { 0.22 } else { 0.38 };
+            t.glyph_top = 0xffffff;
+            t.glyph_bottom = 0xf0f0f4;
+            t.press = 0x000000;
+            t.press_opacity = if dark { 0.45 } else { 0.32 };
+            t.shadow_opacity = if dark { 0.6 } else { 0.28 };
+        }
+        t
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// The window: its width (fixed), its least and first heights, the

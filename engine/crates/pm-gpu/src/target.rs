@@ -140,6 +140,7 @@ struct KeyUse {
     misses: u64,
     outstanding: usize,
     peak: usize,
+    previous_peak: usize,
 }
 
 type Fence = std::sync::Arc<std::sync::atomic::AtomicBool>;
@@ -206,27 +207,31 @@ impl TargetPool {
         self.playback_budget > 0
     }
 
+    /// The pool's assigned playback share, when playback retention is active.
+    pub fn playback_budget(&self) -> Option<u64> {
+        self.playback_retention().then_some(self.playback_budget)
+    }
+
     fn retention_budget(&self) -> u64 {
         if !self.playback_retention() {
             return self.free_budget;
         }
-        let retired = self
-            .retired
-            .iter()
-            .filter(|(_, done)| !complete(done))
-            .map(|(bytes, _)| *bytes)
-            .sum::<u64>();
+        // A discarded target's submitted commands still own its storage.
+        // Count that in usage, but keep the reusable working set: trimming
+        // it to compensate would force those same allocations next frame.
         let checked_out = self
             .retained
             .iter()
             .filter(|(texture, _)| !self.free.iter().any(|(_, t, _)| &t.texture == *texture))
             .map(|(_, (bytes, _))| *bytes)
             .sum::<u64>();
-        self.playback_budget.saturating_sub(retired + checked_out)
+        self.playback_budget.saturating_sub(checked_out)
     }
 
     pub const FREE_BUDGET: u64 = 48 << 20;
     const MAX_IDLE_FRAMES: u64 = 30;
+    // Auto resolution may alternate working sizes across several frames.
+    const RECENT_PLAYBACK_FRAMES: u64 = 8;
     /// Idle targets kept at most, at any time.
     const MAX_FREE: usize = 128;
 
@@ -275,8 +280,14 @@ impl TargetPool {
         {
             let usage = self.usage.entry(key).or_default();
             if usage.frames == 0 || usage.frame != self.frame {
+                usage.previous_peak = if self.frame.wrapping_sub(usage.frame) <= 1 {
+                    usage.peak
+                } else {
+                    0
+                };
                 usage.frame = self.frame;
                 usage.frames += 1;
+                usage.peak = 0;
                 usage.outstanding = 0;
             }
             usage.takes += 1;
@@ -425,22 +436,31 @@ impl TargetPool {
     /// Frees the idle targets unused longest until at most `budget` bytes
     /// and [`Self::MAX_FREE`] targets are idle.
     fn evict_over(&mut self, budget: u64) {
-        // Retaining one more old generation can lower the remaining budget.
-        while self.free_bytes > budget.min(self.retention_budget_or_unbounded(budget))
-            || self.free.len() > Self::MAX_FREE
-        {
+        let playback = self.playback_retention();
+        let budget = budget.min(self.retention_budget_or_unbounded(budget));
+        while self.free_bytes > budget || self.free.len() > Self::MAX_FREE {
             let oldest = self
                 .free
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, (key, _, at))| {
-                    let heat = self
-                        .playback_retention()
+                .min_by_key(|(_, (key, target, at))| {
+                    let heat = playback
                         .then(|| self.usage.get(key))
                         .flatten()
-                        .filter(|use_| use_.frames >= 2 && self.frame.wrapping_sub(use_.frame) <= 1)
-                        .map_or((0, 0), |use_| (use_.peak.min(4), use_.takes));
-                    (heat, *at)
+                        .filter(|use_| use_.frames >= 2)
+                        .map_or((0, 0, 0), |use_| {
+                            let age = self.frame.wrapping_sub(use_.frame);
+                            let recency = Self::RECENT_PLAYBACK_FRAMES.saturating_sub(age);
+                            if recency == 0 {
+                                (0, 0, 0)
+                            } else {
+                                (recency, use_.peak.max(use_.previous_peak).min(4), use_.takes)
+                            }
+                        });
+                    // With the same reuse history, evict the cheaper
+                    // allocation first. A small excess need not discard a
+                    // full-frame scratch texture.
+                    (heat, *at, if playback { target.bytes() } else { 0 })
                 })
                 .map(|(index, _)| index)
                 .expect("over budget");
@@ -658,6 +678,26 @@ mod tests {
     }
 
     #[test]
+    fn playback_keeps_the_larger_of_equally_reused_targets() {
+        let gpu = crate::device::Gpu::new("playback target eviction cost").unwrap();
+        let mut pool = TargetPool::new();
+        pool.set_playback_budget(half_bytes(64) + half_bytes(65));
+        for _ in 0..2 {
+            pool.begin_frame();
+            let small = pool.take_working(&gpu.device, 64, 64, Precision::Float16);
+            let large = pool.take_working(&gpu.device, 65, 65, Precision::Float16);
+            gpu.queue.submit([]);
+            pool.end_submitted_frame(&gpu.queue, [large, small]);
+        }
+
+        pool.set_playback_budget(half_bytes(65));
+        assert_eq!(pool.idle(), 1);
+        let large = pool.take_working(&gpu.device, 65, 65, Precision::Float16);
+        assert_eq!(pool.created(), 2);
+        pool.give(large);
+    }
+
+    #[test]
     fn playback_keeps_a_working_set_larger_than_the_ordinary_free_budget() {
         let gpu = crate::device::Gpu::new("large playback working set").unwrap();
         let mut pool = TargetPool::new();
@@ -678,6 +718,33 @@ mod tests {
         }
         pool.set_playback_budget(0);
         assert!(pool.bytes() <= TargetPool::FREE_BUDGET);
+    }
+
+    #[test]
+    fn retired_playback_targets_do_not_shrink_the_reusable_working_set() {
+        let gpu = crate::device::Gpu::new("queue-ordered target reuse").unwrap();
+        let mut pool = TargetPool::new();
+        let bytes = 1920 * 1080 * 8;
+        let take =
+            |pool: &mut TargetPool| pool.take_working(&gpu.device, 1920, 1080, Precision::Float16);
+        pool.set_playback_budget(5 * bytes);
+        pool.begin_frame();
+        let targets = (0..5).map(|_| take(&mut pool)).collect::<Vec<_>>();
+        gpu.queue.submit([]);
+        pool.end_submitted_frame(&gpu.queue, targets);
+        let stale = take(&mut pool);
+        pool.release(stale);
+        assert_eq!(pool.retired_bytes(), bytes);
+        pool.set_playback_budget(4 * bytes);
+        assert_eq!(pool.idle(), 4);
+
+        pool.begin_frame();
+        let targets = (0..4).map(|_| take(&mut pool)).collect::<Vec<_>>();
+        assert_eq!(pool.created(), 5);
+        assert_eq!(pool.eviction_bytes, 0);
+        gpu.queue.submit([]);
+        pool.end_submitted_frame(&gpu.queue, targets);
+        assert_eq!(pool.idle(), 4);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // Source conversion (plan sections 9 and 13): a decoded frame or image,
-// already normalized by pm-gpu's decode-in pass, to premultiplied working
+// with raw progressive YUV or normalized planes, to premultiplied working
 // values at the source's size.
 //
 // - Y′CbCr: siting-aware chroma upsampling, exact at co-sited samples
@@ -20,7 +20,8 @@
 // with the working storage format.
 
 struct Params {
-    // kind (0 RGB, 1 Y′CbCr, 2 packed RGB), transfer, working (0 Standard, 1 linear), alpha plan.
+    // kind (0 RGB, 1 normalized Y′CbCr, 2 packed RGB, 3 biplanar, 4 planar),
+    // transfer, working (0 Standard, 1 linear), alpha plan.
     a: vec4<u32>,
     // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
     b: vec4<u32>,
@@ -45,6 +46,8 @@ struct Params {
     // the method (1, BT.2390 per channel, the default), y its Highlight
     // Desaturation.
     tone: vec4<f32>,
+    codes: vec4<f32>,
+    chroma_divisor: vec4<f32>,
 };
 
 @group(0) @binding(0) var luma: texture_2d<f32>;
@@ -52,10 +55,20 @@ struct Params {
 @group(0) @binding(2) var<uniform> P: Params;
 @group(0) @binding(3) var out: texture_storage_2d<OUT_FORMAT, write>;
 
+@group(0) @binding(4) var cr_plane: texture_2d<f32>;
+
 fn chroma_at(i: i32, j: i32) -> vec2<f32> {
     let w = i32(P.c.x);
     let h = i32(P.c.y);
-    return textureLoad(chroma, vec2<i32>(clamp(i, 0, w - 1), clamp(j, 0, h - 1)), 0).rg;
+    let xy = vec2<i32>(clamp(i, 0, w - 1), clamp(j, 0, h - 1));
+    var c = textureLoad(chroma, xy, 0).rg;
+    if (P.a.x >= 3u) {
+        if (P.a.x == 4u) {
+            c.y = textureLoad(cr_plane, xy, 0).r;
+        }
+        c = (round(c * P.codes.x) - vec2<f32>(P.codes.w)) / P.chroma_divisor.x;
+    }
+    return c;
 }
 
 fn catmull_rom(t: f32) -> vec4<f32> {
@@ -247,8 +260,11 @@ fn bt2020_cl_rgb(ycc: vec3<f32>) -> vec3<f32> {
 // One source pixel in the source's own RGB(A) encoding: YCbCr through its
 // matrix, normalized integer codes restored.
 fn decoded(p: vec2<u32>) -> vec4<f32> {
-    let v = textureLoad(luma, vec2<i32>(p), 0);
-    if (P.a.x == 1u) {
+    var v = textureLoad(luma, vec2<i32>(p), 0);
+    if (P.a.x >= 3u) {
+        v.r = (round(v.r * P.codes.x) - P.codes.y) / P.codes.z;
+    }
+    if (P.a.x == 1u || P.a.x >= 3u) {
         let cbcr = chroma_sample(p.x, p.y);
         let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
         if (P.hdr.y == 1.0) { return vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
@@ -286,6 +302,118 @@ fn working(stored: vec4<f32>) -> vec4<f32> {
     }
 }
 
+// The two luma phases of a 4:2:0 pair, averaged on the chroma grid.
+fn pair_x(tap: i32) -> f32 {
+    let i = u32(tap + 2);
+    if (P.b.z == 1u) {
+        let cosited = array<f32, 5>(0, 0, 6, 2, 0);
+        let centered = array<f32, 5>(0, 1, 6, 1, 0);
+        return select(cosited[i], centered[i], P.origin.x != 0.0) * 0.125;
+    }
+    let cosited = array<f32, 5>(0, -8, 200, 72, -8);
+    let centered = array<f32, 5>(-3, 20, 222, 20, -3);
+    return select(cosited[i], centered[i], P.origin.x != 0.0) / 256.0;
+}
+
+fn pair_y(tap: i32) -> f32 {
+    // At the left/top, center, and right/bottom origins respectively,
+    // the center tap is always 3/4; only the two outer taps change.
+    return vec3<f32>(P.origin.y * 0.25, 0.75, (1.0 - P.origin.y) * 0.25)[u32(tap + 1)];
+}
+
+fn average_x(tap: i32, span: u32) -> f32 {
+    if (span == 2u) { return pair_x(tap); }
+    var w = 0.0;
+    if (tap <= 2) { w = pair_x(tap); }
+    if (tap >= -1) { w += pair_x(tap - 1); }
+    return w * 0.5;
+}
+
+fn average_y(tap: i32, span: u32) -> f32 {
+    if (span == 2u) { return pair_y(tap); }
+    var w = 0.0;
+    if (tap <= 1) { w = pair_y(tap); }
+    if (tap >= 0) { w += pair_y(tap - 1); }
+    return w * 0.5;
+}
+
+// With an identity working transform and opaque input, both the code range
+// and the YCbCr matrix are linear over a box average. Filter each chroma
+// tap once instead of reconstructing chroma and RGB for every luma sample.
+fn dyadic_yuv(p: vec2<u32>, span: u32) -> vec4<f32> {
+    var y_code = 0.0;
+    for (var y = 0u; y < span; y++) {
+        for (var x = 0u; x < span; x++) {
+            let code = textureLoad(luma, vec2<i32>(p * span + vec2<u32>(x, y)), 0).r;
+            y_code += round(code * P.codes.x);
+        }
+    }
+    let base = vec2<i32>(p * (span / 2u));
+    var cbcr = vec2<f32>(0.0);
+    let extra = i32(span / 2u) - 1;
+    for (var y = -1; y <= 1 + extra; y++) {
+        let wy = average_y(y, span);
+        if (wy != 0.0) {
+            var row = vec2<f32>(0.0);
+            for (var x = -2; x <= 2 + extra; x++) {
+                let wx = average_x(x, span);
+                if (wx != 0.0) {
+                    row += chroma_at(base.x + x, base.y + y) * wx;
+                }
+            }
+            cbcr += row * wy;
+        }
+    }
+    let y = (y_code / f32(span * span) - P.codes.y) / P.codes.z;
+    let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
+    return vec4<f32>(m * vec3<f32>(y, cbcr), 1.0);
+}
+
+fn fast_420() -> bool {
+    return OUT_BITS != 32u && P.a.x >= 3u && P.a.y == 0u && P.a.z == 0u && P.a.w == 0u
+        && (P.c.z & 2u) == 0u && P.c.w == 0u && P.hdr.y == 0.0
+        && P.b.x == 2u && P.b.y == 2u && (P.b.z == 1u || P.b.z == 2u) && P.b.w == 1u;
+}
+
+fn area_average(p: vec2<u32>, input_dims: vec2<u32>, dims: vec2<u32>) -> vec4<f32> {
+    // A preview destination smaller than the source: the area average of
+    // the source pixels under each destination pixel (partial pixels at
+    // the footprint's edges weighted by their overlap), so detail finer
+    // than the destination averages out instead of aliasing into moire.
+    // Each sample is averaged as premultiplied working colour, as the
+    // exact frame's own filtering later averages it.
+    let scale = vec2<f32>(input_dims) / vec2<f32>(dims);
+    let lo = vec2<f32>(p) * scale;
+    let hi = lo + scale;
+    let p0 = vec2<u32>(floor(lo));
+    let p1 = min(vec2<u32>(ceil(hi)) - vec2<u32>(1u), input_dims - vec2<u32>(1u));
+    var sum = vec4<f32>(0.0);
+    for (var y = p0.y; y <= p1.y; y++) {
+        let wy = min(f32(y + 1u), hi.y) - max(f32(y), lo.y);
+        for (var x = p0.x; x <= p1.x; x++) {
+            let wt = (min(f32(x + 1u), hi.x) - max(f32(x), lo.x)) * wy;
+            sum += working(decoded(vec2<u32>(x, y))) * wt;
+        }
+    }
+    return sum / (scale.x * scale.y);
+}
+
+fn half_boundary(v: f32, epsilon: f32) -> bool {
+    return quantizeToF16(v - epsilon) != quantizeToF16(v + epsilon);
+}
+
+fn storage_boundary(rgb: vec3<f32>) -> bool {
+    // The reassociated f32 arithmetic can straddle a storage boundary
+    // despite the filters having the same real-valued result. In that
+    // narrow interval use the original order of operations.
+    let epsilon = 0.000002;
+    if (OUT_BITS == 16u) {
+        return half_boundary(rgb.r, epsilon) || half_boundary(rgb.g, epsilon) || half_boundary(rgb.b, epsilon);
+    }
+    let codes = fract(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0);
+    return any(abs(codes - vec3<f32>(0.5)) <= vec3<f32>(255.0 * epsilon));
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(out);
@@ -298,27 +426,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (all(input_dims == dims)) {
         // The exact path: the source pixel itself.
         w = working(decoded(id.xy));
-    } else if (all(input_dims >= dims)) {
-        // A preview destination smaller than the source: the area average of
-        // the source pixels under each destination pixel (partial pixels at
-        // the footprint's edges weighted by their overlap), so detail finer
-        // than the destination averages out instead of aliasing into moire.
-        // Each sample is averaged as premultiplied working colour, as the
-        // exact frame's own filtering later averages it.
-        let scale = vec2<f32>(input_dims) / vec2<f32>(dims);
-        let lo = vec2<f32>(id.xy) * scale;
-        let hi = lo + scale;
-        let p0 = vec2<u32>(floor(lo));
-        let p1 = min(vec2<u32>(ceil(hi)) - vec2<u32>(1u), input_dims - vec2<u32>(1u));
-        var sum = vec4<f32>(0.0);
-        for (var y = p0.y; y <= p1.y; y++) {
-            let wy = min(f32(y + 1u), hi.y) - max(f32(y), lo.y);
-            for (var x = p0.x; x <= p1.x; x++) {
-                let wt = (min(f32(x + 1u), hi.x) - max(f32(x), lo.x)) * wy;
-                sum += working(decoded(vec2<u32>(x, y))) * wt;
-            }
+    } else if (fast_420() && (all(input_dims == dims * 2u) || all(input_dims == dims * 4u))) {
+        w = dyadic_yuv(id.xy, input_dims.x / dims.x);
+        if (storage_boundary(w.rgb)) {
+            w = area_average(id.xy, input_dims, dims);
         }
-        w = sum / (scale.x * scale.y);
+    } else if (all(input_dims >= dims)) {
+        w = area_average(id.xy, input_dims, dims);
     } else {
         // A side larger than the source (preview sizing never upscales):
         // bilinear at the destination's pixel centres.

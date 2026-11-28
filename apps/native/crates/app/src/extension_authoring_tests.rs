@@ -64,7 +64,7 @@ fn the_shipped_sample_and_a_v3_extension_pass_and_broken_code_reports_why() {
         &[("index.tsx", "export const nothing = 1;")],
     );
     let error = check(&root.join("broken"), &broken).unwrap_err();
-    assert!(error.contains("exports view() or mount(env)"), "{error}");
+    assert!(error.contains("exports view(), mount(env), or activate(ctx)"), "{error}");
     // A compile error names the file, line and column, as main's did.
     fs::write(
         root.join("broken/index.tsx"),
@@ -87,10 +87,9 @@ fn the_shipped_sample_and_a_v3_extension_pass_and_broken_code_reports_why() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Every built-in panel ships its source; a fork of each compiles with the
-/// native compiler and draws its panel in a real panel isolate.
+/// Each replaceable built-in ships source that compiles in a panel isolate.
 #[test]
-fn every_built_in_forks_compiles_and_mounts_in_place_of_the_built_in() {
+fn supported_built_ins_fork_and_compile_but_settings_is_protected() {
     let profile = scratch("pm-authoring-forks");
     let host = AppExtensions::new(profile.clone());
     let stage = profile.join("stage");
@@ -100,6 +99,21 @@ fn every_built_in_forks_compiles_and_mounts_in_place_of_the_built_in() {
             builtins.join(panel).join("manifest.json").exists(),
             "{panel}"
         );
+        if panel == "settings" {
+            assert!(pm_builtins::is_protected_surface(panel));
+            assert!(fork(&host, panel, None, &stage).is_err());
+            let manifest = json!({
+                "id": "synthetic-settings-fork",
+                "name": "Synthetic Settings Fork",
+                "version": "1.0.0",
+                "apiVersion": 4,
+                "entry": "index.tsx",
+                "replaces": ["settings"],
+            });
+            assert!(host.manifest(&manifest).is_err());
+            assert_eq!(replaced_panel(&manifest), None);
+            continue;
+        }
         let forked = fork(&host, panel, None, &stage).unwrap();
         let dir = PathBuf::from(forked["dir"].as_str().unwrap());
         let raw: Value =
@@ -231,8 +245,9 @@ fn an_agent_adds_a_panel_a_timeline_column_and_a_viewer_overlay_then_one_is_undo
     );
     let panel = PathBuf::from(forked["dir"].as_str().unwrap()).join("panel.tsx");
     let source = fs::read_to_string(&panel).unwrap();
-    let row = "<Layer\n            row={row}\n            send={send}\n            single={single}\n            lit={row.selected && focused}\n          />";
-    assert!(source.contains(row));
+    let row_start = source.find("<Layer\n").expect("timeline layer row");
+    let row_end = row_start + source[row_start..].find("/>").expect("end of layer row") + 2;
+    let row = &source[row_start..row_end];
     fs::write(
         &panel,
         source.replacen(

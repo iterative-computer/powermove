@@ -14,7 +14,8 @@
 use super::ring::srgb;
 use super::{font, regular, space, st, text_size};
 use objc2::{
-    DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::NSObject,
+    AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained,
+    runtime::NSObject,
 };
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityGroupRole, NSAppearanceCustomization, NSAppearanceNameAqua,
@@ -24,11 +25,12 @@ use objc2_app_kit::{
     NSStringNSExtendedStringDrawing, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{
-    NSAlignmentOptions, NSArray, NSDictionary, NSEdgeInsets, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString,
+    NSAlignmentOptions, NSArray, NSAttributedString, NSDictionary, NSEdgeInsets, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString,
 };
 use pm_design::{Colors, Ink, Scheme};
 use serde_json::{Value, json};
+use std::{cell::OnceCell, rc::Rc};
 
 fn attributes(
     font: &NSFont,
@@ -41,9 +43,9 @@ fn attributes(
         &[font.as_ref(), ink.as_ref()],
     )
 }
-/// Inside a card, the same on every side.
+/// Inside a card, the same on every side (matches Settings' section rhythm).
 fn padding() -> f64 {
-    space().xl as f64
+    st().section_gap as f64
 }
 /// The cards' width as laid out: the page's column (the window less its
 /// sidebar and the page's insets, at most `settings.column`), less the
@@ -160,8 +162,9 @@ fn wrapped(text: &str, font: &NSFont, width: f64) -> f64 {
     let attrs = attributes(font, &NSColor::labelColor());
     let rect = unsafe {
         NSString::from_str(text).boundingRectWithSize_options_attributes_context(
-            NSSize::new(width, f64::MAX),
-            NSStringDrawingOptions::UsesLineFragmentOrigin,
+            NSSize::new(width.max(1.), f64::MAX),
+            NSStringDrawingOptions::UsesLineFragmentOrigin
+                | NSStringDrawingOptions::UsesFontLeading,
             Some(&attrs),
             None,
         )
@@ -223,6 +226,8 @@ fn layout(ty: &Type, plan: &Plan, width: f64) -> Layout {
 
 pub(super) struct CardState {
     plan: Plan,
+    all_plans: Rc<Vec<Plan>>,
+    height: OnceCell<Retained<objc2_app_kit::NSLayoutConstraint>>,
     radius: f64,
 }
 
@@ -240,14 +245,30 @@ define_class!(
             true
         }
         /// The action's button stands where the card's layout puts it, at the
-        /// card's own width.
+        /// card's own width, and the card's height tracks its real laid-out
+        /// width so wrapped feature lines never crowd the bottom edge.
         #[unsafe(method(layout))]
         fn lay_out(&self) {
             let _: () = unsafe { msg_send![super(self), layout] };
             let bounds = self.bounds();
             let p = padding();
             let width = bounds.size.width - 2. * p;
-            let y = layout(&Type::new(), &self.ivars().plan, width).action;
+            if width <= 1. {
+                return;
+            }
+            let ty = Type::new();
+            let needed = self
+                .ivars()
+                .all_plans
+                .iter()
+                .map(|plan| layout(&ty, plan, width).height)
+                .fold(0., f64::max);
+            if let Some(constraint) = self.ivars().height.get()
+                && (constraint.constant() - needed).abs() > 0.5
+            {
+                constraint.setConstant(needed);
+            }
+            let y = layout(&ty, &self.ivars().plan, width).action;
             for view in self.subviews().iter() {
                 view.setFrame(NSRect::new(
                     NSPoint::new(p, y),
@@ -288,6 +309,7 @@ fn lines(text: &str, font: &NSFont, ink: &NSColor, at: NSPoint, width: f64, heig
         string.drawWithRect_options_attributes_context(
             NSRect::new(at, NSSize::new(width.max(0.), height)),
             NSStringDrawingOptions::UsesLineFragmentOrigin
+                | NSStringDrawingOptions::UsesFontLeading
                 | NSStringDrawingOptions::TruncatesLastVisibleLine,
             Some(&attrs),
             None,
@@ -315,26 +337,16 @@ fn check(at: NSPoint, side: f64, ink: &NSColor) {
 fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
     let ty = Type::new();
     let here = Colors::of(if dark { Scheme::Dark } else { Scheme::Light });
-    // The offered plan is dark in both appearances (the site's Aerolite).
-    let ink = if plan.offered() {
-        Colors::of(Scheme::Dark)
-    } else {
-        here.clone()
-    };
     let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, r, r);
     if plan.offered() {
-        // Night with the site's warm light rising from the foot: the ground
-        // into the accent, then a soft pool of it at the bottom centre.
-        let base = srgb(ink.window, 1.);
-        let warm = srgb(here.accent, 1.);
-        let blend = |f: f64| {
-            base.blendedColorWithFraction_ofColor(f, &warm)
-                .unwrap_or(base.clone())
-        };
-        let stops =
-            NSArray::from_retained_slice(&[base.clone(), blend(0.06), blend(0.22), blend(0.40)]);
-        let locations = [0., 0.4, 0.78, 1.];
-        // SAFETY: four locations for four colours, in the device's sRGB.
+        // Paper Powermove Aerolite: Night Zenith (#061322) with Sky-Blue
+        // aurora glow (#0284C7 / #38BDF8) and crisp sky-blue rim.
+        let night = srgb(pm_shell::brand::AEROLITE_NIGHT, 1.);
+        let deep = srgb(pm_shell::brand::AEROLITE_DEEP, 1.);
+        let sky = srgb(pm_shell::brand::AEROLITE_SKY, 1.);
+        let stops = NSArray::from_retained_slice(&[deep.clone(), night.clone(), night.clone()]);
+        let locations = [0., 0.46, 1.];
+        // SAFETY: three locations for three colours, in the device's sRGB.
         if let Some(fade) = unsafe {
             NSGradient::initWithColors_atLocations_colorSpace(
                 gradient(),
@@ -343,40 +355,38 @@ fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
                 &objc2_app_kit::NSColorSpace::sRGBColorSpace(),
             )
         } {
-            // The view is flipped: 90° runs top to bottom.
             fade.drawInBezierPath_angle(&shape, 90.);
         }
         if let Some(pool) = NSGradient::initWithStartingColor_endingColor(
             gradient(),
-            &warm.colorWithAlphaComponent(0.55),
-            &warm.colorWithAlphaComponent(0.),
+            &sky.colorWithAlphaComponent(0.24),
+            &sky.colorWithAlphaComponent(0.),
         ) {
             objc2_app_kit::NSGraphicsContext::saveGraphicsState_class();
             shape.addClip();
             let centre = NSPoint::new(
-                card.origin.x + card.size.width / 2.,
-                card.origin.y + card.size.height * 1.08,
+                card.origin.x + card.size.width * 0.5,
+                card.origin.y + card.size.height * 0.04,
             );
             pool.drawFromCenter_radius_toCenter_radius_options(
                 centre,
                 0.,
                 centre,
-                card.size.width * 0.62,
+                card.size.width * 0.72,
                 objc2_app_kit::NSGradientDrawingOptions::empty(),
             );
             objc2_app_kit::NSGraphicsContext::restoreGraphicsState_class();
         }
-        // A light top edge, as the site's inset highlight.
-        srgb(0xffffff, 0.1).setStroke();
+        srgb(pm_shell::brand::AEROLITE_SKY, 0.28).setStroke();
         let edge = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
             NSRect::new(
-                NSPoint::new(card.origin.x + 0.25, card.origin.y + 0.25),
-                NSSize::new(card.size.width - 0.5, card.size.height - 0.5),
+                NSPoint::new(card.origin.x + 0.5, card.origin.y + 0.5),
+                NSSize::new(card.size.width - 1.0, card.size.height - 1.0),
             ),
-            r - 0.25,
-            r - 0.25,
+            r - 0.5,
+            r - 0.5,
         );
-        edge.setLineWidth(0.5);
+        edge.setLineWidth(1.0);
         edge.stroke();
     } else {
         srgb(here.text, Ink::new().well as f64).setFill();
@@ -392,12 +402,12 @@ fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
         srgb(here.text, 1.)
     };
     let secondary = if white {
-        light(0.72)
+        srgb(pm_shell::brand::AEROLITE_TINT, 0.78)
     } else {
         srgb(here.secondary, 1.)
     };
     let quiet = if white {
-        light(0.56)
+        srgb(pm_shell::brand::AEROLITE_TINT, 0.60)
     } else {
         srgb(here.muted, 1.)
     };
@@ -405,13 +415,24 @@ fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
     let (x, width) = (card.origin.x + p, card.size.width - 2. * p);
     let at = layout(&ty, plan, width);
     let top = card.origin.y;
-    line(
-        &plan.name,
-        &ty.name,
-        &label,
-        NSPoint::new(x, top + p - top_trim(&ty)),
-        width,
-    );
+    if white
+        && let Some((wm, wm_w)) = pm_shell::brand::aerolite_wordmark_ns(20.)
+    {
+        let fit_w = wm_w.min(width);
+        let fit_h = 20. * (fit_w / wm_w.max(1.));
+        wm.drawInRect(NSRect::new(
+            NSPoint::new(x, top + p - top_trim(&ty) - (fit_h - line_height(&ty.name)) * 0.45),
+            NSSize::new(fit_w, fit_h),
+        ));
+    } else {
+        line(
+            &plan.name,
+            &ty.name,
+            &label,
+            NSPoint::new(x, top + p - top_trim(&ty)),
+            width,
+        );
+    }
     let price_width = line(
         &plan.price,
         &ty.price,
@@ -441,7 +462,7 @@ fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
         line(status, &ty.note, &quiet, NSPoint::new(x, y), width);
     }
     if white {
-        light(0.1)
+        srgb(pm_shell::brand::AEROLITE_LIGHT, 0.16)
     } else {
         NSColor::separatorColor()
     }
@@ -454,9 +475,7 @@ fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
     let text_x = x + side + space().sm as f64;
     let text = width - (text_x - x);
     let mark = if white {
-        srgb(here.accent, 1.)
-            .blendedColorWithFraction_ofColor(0.55, &light(1.))
-            .unwrap_or(light(1.))
+        srgb(pm_shell::brand::AEROLITE_SKY, 1.)
     } else {
         secondary.clone()
     };
@@ -518,10 +537,12 @@ impl Plans {
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setDistribution(NSStackViewDistribution::FillEqually);
         stack.setSpacing(space().lg as f64);
+        // Top separates from the Plans subtitle; bottom + row_padding (6 + 6 = 12)
+        // matches row_inset (12) on the left and right edges of the group card.
         stack.setEdgeInsets(NSEdgeInsets {
-            top: space().sm as f64,
+            top: space().md as f64,
             left: 0.,
-            bottom: space().hair as f64,
+            bottom: space().sm as f64,
             right: 0.,
         });
         stack.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -530,7 +551,9 @@ impl Plans {
         let target: Retained<PlanTarget> =
             unsafe { msg_send![super(PlanTarget::alloc(mtm).set_ivars(Target(send))), init] };
         let plans: Vec<Plan> = options.iter().map(|o| Plan::parse(o)).collect();
-        // Every card as tall as the tallest, laid out at the column's width.
+        let all_plans = Rc::new(plans.clone());
+        // Every card as tall as the tallest, starting at the column's width
+        // and updated on `layout()` when the real laid-out width is known.
         let ty = Type::new();
         let width = card_width() - 2. * padding();
         let height = plans
@@ -546,20 +569,25 @@ impl Plans {
             };
             let card: Retained<Card> = unsafe {
                 msg_send![
-                    super(Card::alloc(mtm).set_ivars(CardState { plan, radius })),
+                    super(Card::alloc(mtm).set_ivars(CardState {
+                        plan,
+                        all_plans: all_plans.clone(),
+                        height: OnceCell::new(),
+                        radius,
+                    })),
                     init
                 ]
             };
             card.setTranslatesAutoresizingMaskIntoConstraints(false);
             card.setClipsToBounds(false);
-            card.heightAnchor()
-                .constraintEqualToConstant(height)
-                .setActive(true);
+            let height_constraint = card.heightAnchor().constraintEqualToConstant(height);
+            height_constraint.setActive(true);
+            let _ = card.ivars().height.set(height_constraint);
             card.setAccessibilityElement(false);
             card.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
             if let Some(title) = button_title {
-                // A real push button, white on the night card (the site's
-                // light pill), full width in the card's column.
+                // A real push button, Paper Powermove Aerolite Sky CTA pill
+                // with high-contrast Night Zenith label, full width in the card.
                 let button = unsafe {
                     NSButton::buttonWithTitle_target_action(
                         &NSString::from_str(&title),
@@ -570,10 +598,19 @@ impl Plans {
                 };
                 button.setBezelStyle(NSBezelStyle::Push);
                 button.setControlSize(NSControlSize::Regular);
-                // The site's light pill: the light ground as the tint
-                // (pure white reads as no tint to the system).
-                button.setBezelColor(Some(&srgb(Colors::of(Scheme::Light).window, 1.)));
-                button.setFont(Some(&font(text_size().base, regular())));
+                button.setBezelColor(Some(&srgb(pm_shell::brand::AEROLITE_SKY, 1.)));
+                let btn_attrs = attributes(
+                    &font(text_size().base, st().heading_weight),
+                    &srgb(pm_shell::brand::AEROLITE_NIGHT, 1.),
+                );
+                let attr_title = unsafe {
+                    NSAttributedString::initWithString_attributes(
+                        NSAttributedString::alloc(),
+                        &NSString::from_str(&title),
+                        Some(&btn_attrs),
+                    )
+                };
+                button.setAttributedTitle(&attr_title);
                 button.setTag(index as isize);
                 // The night card's appearance: untinted (its window not
                 // key) it is dark glass with light text, never lost.
@@ -609,7 +646,7 @@ mod tests {
     #[test]
     fn a_plan_reads_its_lines_in_order() {
         let plan = Plan::parse(
-            "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\nGet Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove",
+            "Aerolite\n$9.99\nper month\nYour editing agent, with inference included.\nGet Aerolite\n1,000 credits a month\tInference for Aerolite, run by Powermove",
         );
         assert_eq!(plan.action, Action::Button("Get Aerolite".into()));
         assert!(plan.offered());
@@ -617,7 +654,7 @@ mod tests {
             plan.features,
             [(
                 "1,000 credits a month".to_owned(),
-                "Inference for Aero, run by Powermove".to_owned()
+                "Inference for Aerolite, run by Powermove".to_owned()
             )]
         );
         let free = Plan::parse(

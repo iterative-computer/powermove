@@ -422,6 +422,25 @@ fn matching_surface(
 }
 
 impl PlaneOrder {
+    /// Indices whose world transforms contributed to the cached surfaces.
+    #[doc(hidden)]
+    pub fn world_layers(&self) -> impl Iterator<Item = usize> + '_ {
+        self.runs
+            .iter()
+            .filter(|run| {
+                run.surfaces
+                    .iter()
+                    .map(|surface| surface.members.len())
+                    .sum::<usize>()
+                    > 1
+            })
+            .flat_map(|run| {
+                run.surfaces
+                    .iter()
+                    .flat_map(|surface| surface.members.iter().copied())
+            })
+    }
+
     /// Order the same layer slice used to prepare the surfaces.
     pub fn project<'d>(
         &self,

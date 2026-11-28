@@ -39,6 +39,10 @@ impl PassFacts {
     }
 
     pub(crate) fn group_outside(&self, layer: &Node, time: f64) -> bool {
+        !can_draw_empty(layer) && self.children_outside(layer, time)
+    }
+
+    pub(crate) fn children_outside(&self, layer: &Node, time: f64) -> bool {
         let Some(id) = node::string(layer.get("id")) else {
             return false;
         };
@@ -144,11 +148,9 @@ fn group_spans(layers: &[&Node]) -> Option<HashMap<JsString, Span>> {
         if extent == Span::EMPTY {
             continue;
         }
-        let mut owner = if node::is_str(layer.get("type"), "group") {
-            node::string(layer.get("id"))
-        } else {
-            node::string(layer.get("group"))
-        };
+        // A group's own stages can create pixels for its enclosing groups
+        // even if its own children are empty.
+        let mut owner = node::string(layer.get("group"));
         while let Some(id) = owner {
             let Some(current) = spans.get_mut(id) else {
                 break;
@@ -185,8 +187,8 @@ fn inputs(layer: &Node) -> impl Iterator<Item = Option<&Node>> {
     ])
 }
 
-fn same_input(a: Option<&Node>, b: &Option<Node>) -> bool {
-    match (a.map(Node::kind), b.as_ref().map(Node::kind)) {
+fn same_input(a: Option<&Node>, b: Option<&Node>) -> bool {
+    match (a.map(Node::kind), b.map(Node::kind)) {
         (Some(pm_model::NodeKind::Object(a)), Some(pm_model::NodeKind::Object(b))) => {
             Arc::ptr_eq(a, b)
         }
@@ -202,7 +204,6 @@ struct Entry {
     comp: (JsString, bool),
     revision: u64,
     layers: Option<Node>,
-    members: Vec<([Option<Node>; FIELDS.len() + 2], Span)>,
     facts: Arc<PassFacts>,
 }
 
@@ -232,15 +233,15 @@ impl FactsCache {
             );
             let valid = entry.revision <= revision
                 && (same_layers
-                    || (entry.members.len() == all.len()
-                        && all.iter().zip(&entry.members).all(
-                            |(&layer, (old, previous_span))| {
-                                span(layer) == *previous_span
+                    || node::array(entry.layers.as_ref()).is_some_and(|previous| {
+                        previous.len() == all.len()
+                            && all.iter().zip(previous).all(|(&layer, old)| {
+                                span(layer) == span(old)
                                     && inputs(layer)
-                                        .zip(old)
-                                        .all(|(current, previous)| same_input(current, previous))
-                            },
-                        )));
+                                        .zip(inputs(old))
+                                        .all(|(a, b)| same_input(a, b))
+                            })
+                    }));
             if valid {
                 entry.revision = revision;
                 entry.layers = layers.cloned();
@@ -257,16 +258,6 @@ impl FactsCache {
             comp: key,
             revision,
             layers: layers.cloned(),
-            members: all
-                .iter()
-                .map(|l| {
-                    let mut inputs = inputs(l);
-                    (
-                        std::array::from_fn(|_| inputs.next().flatten().cloned()),
-                        span(l),
-                    )
-                })
-                .collect(),
             facts: facts.clone(),
         });
         facts

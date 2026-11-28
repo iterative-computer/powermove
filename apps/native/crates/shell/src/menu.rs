@@ -84,7 +84,7 @@ pub const DISPLAY_ONLY: [&str; 5] = ["Layer", "Timeline", "tools", "timelineTool
 /// in the menu while a sheet is up, as in other Mac apps. Every other command
 /// waits for the sheet. The Edit commands stay for the sheet's own fields
 /// (the shell drops one that no field takes).
-pub const BESIDE_SHEET: [&str; 9] = [
+pub const BESIDE_SHEET: [&str; 10] = [
     "settings",
     "newWindow",
     "nextTab",
@@ -93,6 +93,7 @@ pub const BESIDE_SHEET: [&str; 9] = [
     "panelLibrary",
     "backgroundTasks",
     "checkForUpdates",
+    "whatsNew",
     "help",
 ];
 /// Whether `command` stays in the menu while a sheet is up. The Edit
@@ -302,6 +303,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             vec![
                 Item::role("About Powermove", "orderFrontStandardAboutPanel:", ""),
                 Item::command("Check for Updates…", "checkForUpdates", ""),
+                Item::command("What’s New…", "whatsNew", ""),
                 sep(),
                 m("settings"),
                 sep(),

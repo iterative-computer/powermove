@@ -12,6 +12,215 @@
 mod support;
 
 #[cfg(target_os = "macos")]
+fn legacy_text_uses_close_camera_density(fonts: Box<dyn pm_render::text::TextFonts>) {
+    use pm_protocol::{
+        color::Precision,
+        common::{Size, Ticks},
+    };
+    use pm_render::{
+        MapResolver, OutputKind, RenderRequest, Renderer,
+        plan::{Content, Source},
+    };
+    use serde_json::json;
+    use support::doc::{layer, load, no_fill, project, set};
+
+    let mut group = layer("group", "group", json!({}), 128., 128., 2.);
+    group["threeD"] = json!(true);
+    let mut text = layer(
+        "text",
+        "text",
+        json!({
+            "text":"Close camera", "font":"Helvetica", "size":20, "color":"#FFFFFF",
+            "align":"center"
+        }),
+        0.,
+        0.,
+        2.,
+    );
+    text["group"] = json!("group");
+    text["compat"] = json!(1);
+    set(&mut text, "scale.x", json!(25));
+    set(&mut text, "scale.y", json!(25));
+    set(&mut group, "rotation.y", json!(10));
+    let doc = load(&project(256, 256, 2., no_fill(), vec![group, text]));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(fonts));
+    let mut camera = pm_eval::space3d::default_camera_25d(256., 256.);
+    camera.position[2] /= 9.;
+    renderer.set_plane_camera(Some(camera));
+    let mut request = RenderRequest::at_scale(Size::new(256, 256), 1., Precision::Float16);
+    request.output_kind = OutputKind::Final;
+    let density = |renderer: &mut Renderer, request: &RenderRequest| {
+        let (plan, failures) = renderer
+            .plan(
+                &doc,
+                "Ptest-root",
+                Ticks::ZERO,
+                request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        let draw = &plan.draws[0];
+        let Content::Placed(placed) = &draw.content else {
+            panic!("expected projective text");
+        };
+        let Content::Texture {
+            source: Source::Text(text),
+            ..
+        } = &placed.content
+        else {
+            panic!("expected a text raster");
+        };
+        // Undo the authored 25% scale to measure the actual raster density.
+        let local_width = draw.matrix[0].abs() / 0.25;
+        f64::from(text.width()) / local_width
+    };
+    let exact = density(&mut renderer, &request);
+    assert!(
+        (1.5..4.0).contains(&exact),
+        "legacy text painted at {exact}×"
+    );
+    request.output_kind = OutputKind::Preview;
+    request.viewer = true;
+    request.sampling = pm_render::sampling::Sampling::Playback;
+    let preview = density(&mut renderer, &request);
+    assert!(preview >= exact, "named camera preview fell to {preview}×");
+    println!("25%-scale legacy text paints at {exact:.3}× settled and {preview:.3}× in playback");
+}
+
+#[cfg(target_os = "macos")]
+fn moving_ancestors_keep_local_draws_bit_exact(
+    fonts: impl Fn() -> Box<dyn pm_render::text::TextFonts>,
+) {
+    use pm_model::{
+        Document,
+        json::{Value, parse},
+        patch::{Patch, PathPart},
+    };
+    use pm_protocol::{color::Precision, common::Size};
+    use pm_render::{MapResolver, RenderRequest, Renderer};
+    use serde_json::json;
+    use support::doc::{layer, no_fill, project, set};
+
+    for three_d in [false, true] {
+        let mut parent = layer("parent", "null", json!({}), 0., 0., 2.);
+        let mut group = layer("group", "group", json!({}), 60., 60., 2.);
+        parent["threeD"] = json!(three_d);
+        group["threeD"] = json!(three_d);
+        group["parent"] = json!("parent");
+        set(&mut group, "opacity", json!(73));
+        set(&mut parent, "scale.x", json!(115));
+        set(&mut parent, "scale.y", json!(115));
+        let mut layers = vec![parent, group];
+        for (id, kind, data, x) in [
+            (
+                "solid",
+                "solid",
+                json!({"w":30,"h":20,"color":"#ee3355"}),
+                8.,
+            ),
+            (
+                "shape",
+                "shape",
+                json!({"w":24,"h":20,"shape":"ellipse","color":"#22AA95"}),
+                35.,
+            ),
+            (
+                "text",
+                "text",
+                json!({"text":"Sharp","font":"Helvetica","size":18,"color":"#fff"}),
+                65.,
+            ),
+        ] {
+            let mut child = layer(id, kind, data, x, 26., 2.);
+            child["group"] = json!("group");
+            child["threeD"] = json!(three_d);
+            layers.push(child);
+        }
+        let mut document = Document::new(
+            Some(parse(&project(256, 192, 2., no_fill(), layers).to_string()).unwrap()),
+            1,
+        );
+        let mut kept = Renderer::headless().unwrap();
+        let mut fresh = Renderer::headless().unwrap();
+        kept.set_draw_reuse(true);
+        fresh.set_draw_reuse(false);
+        for renderer in [&mut kept, &mut fresh] {
+            renderer.set_text_fonts(Some(fonts()));
+        }
+        let mut request = RenderRequest::at_scale(Size::new(256, 192), 1., Precision::Float16);
+        request.viewer = true;
+        request.read_ahead = true;
+        let resolver = MapResolver::default();
+        let mut previous = None;
+        let mut local_reuse = 0;
+        for (i, (x, zoom)) in [
+            (0., 1.),
+            (8., 1.),
+            (12., 1.),
+            (16., 1.5),
+            (20., 1.5),
+            (-600., 1.5),
+            (21., 1.5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let k = |s: &str| PathPart::Key(s.into());
+            let update = |index, key, value| {
+                Patch::set(
+                    vec![k("layers"), PathPart::Index(index), k("p"), k(key), k("v")],
+                    Value::Number(value),
+                )
+            };
+            document
+                .apply(&[
+                    update(0., "position.x", x),
+                    update(1., "opacity", 73. + i as f64),
+                    update(0., "scale.x", if three_d { 115. } else { 115. * zoom }),
+                    update(0., "scale.y", if three_d { 115. } else { 115. * zoom }),
+                ])
+                .unwrap();
+            if three_d {
+                let mut camera = pm_eval::space3d::default_camera_25d(256., 192.);
+                camera.position[2] /= zoom;
+                for renderer in [&mut kept, &mut fresh] {
+                    renderer.set_plane_camera(Some(camera));
+                }
+            }
+            let time = support::ticks(i as f64 / 30.);
+            let draw = |renderer: &mut Renderer| {
+                let frame = renderer
+                    .render(&document, "Ptest-root", time, &request, &resolver)
+                    .unwrap();
+                assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+                renderer.read_rgba(&frame).unwrap()
+            };
+            let before = kept.draw_reuse_stats().reused;
+            let a = draw(&mut kept);
+            let b = draw(&mut fresh);
+            assert!(
+                a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "3D={three_d}, frame {i}"
+            );
+            assert!(
+                previous.as_ref().is_none_or(|prev| prev != &a),
+                "fixture must move"
+            );
+            previous = Some(a);
+            if i == 2 || i == 4 {
+                local_reuse += kept.draw_reuse_stats().reused - before;
+            }
+        }
+        assert!(
+            local_reuse >= 3,
+            "3D={three_d}, only {local_reuse} reused leaf draws"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn main() {
     use pm_protocol::color::Precision;
     use pm_render::text::gpu::Coverage;
@@ -19,7 +228,7 @@ fn main() {
     use serde_json::json;
     use support::doc::{ch, layer, no_fill, project};
 
-    let fonts = || {
+    let fonts = || -> Box<dyn pm_render::text::TextFonts> {
         Box::new(support::text::MainThreadFonts(
             pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
             None,
@@ -29,6 +238,8 @@ fn main() {
         frame_prefix_large_plane_groups_under_adjustment();
         return;
     }
+    legacy_text_uses_close_camera_density(fonts());
+    moving_ancestors_keep_local_draws_bit_exact(fonts);
     frame_prefix_large_plane_groups_under_adjustment();
     packed_glow_specialization_preserves_gpu_bits();
     density_replay_keeps_compat_passthrough_layers(fonts());

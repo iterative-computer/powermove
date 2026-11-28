@@ -673,7 +673,9 @@ fn mark(name: &str, points: f64, ink: u32, mtm: MainThreadMarker) -> Retained<NS
             image.imageWithSymbolConfiguration(&config).unwrap_or(image)
         });
     let view = NSImageView::imageViewWithImage(&image, mtm);
-    view.setContentTintColor(Some(&native_color(ink)));
+    if image.isTemplate() {
+        view.setContentTintColor(Some(&native_color(ink)));
+    }
     view.setAccessibilityElement(false);
     view
 }

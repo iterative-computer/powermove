@@ -84,6 +84,10 @@ pub struct SourceUniform {
     /// An HDR source's tone mapping into an SDR project: x the
     /// `pm_color::cst::TONE_MAPPING` index, y Highlight Desaturation.
     pub tone: [f32; 4],
+    /// Raw YUV normalization: sample maximum, luma offset and divisor,
+    /// chroma offset. The next vector holds the chroma divisor.
+    pub codes: [f32; 4],
+    pub chroma_divisor: [f32; 4],
 }
 
 /// The bytes of a plain `repr(C)` value.
@@ -118,17 +122,17 @@ pub struct Pipelines {
     pub id_3d: wgpu::RenderPipeline,
     /// The compositing passes (`crate::composite`).
     pub(crate) ops: crate::composite::gpu::OpPipelines,
-    draw: [LazyRenderPipeline; 3],
-    draw_bounded: [LazyRenderPipeline; 3],
-    scene: [LazyRenderPipeline; 3],
-    scene_add: [LazyRenderPipeline; 3],
-    rect: [LazyRenderPipeline; 3],
-    solid: [LazyRenderPipeline; 3],
-    draw_add: [LazyRenderPipeline; 3],
-    rect_add: [LazyRenderPipeline; 3],
-    solid_add: [LazyRenderPipeline; 3],
-    background: [LazyRenderPipeline; 3],
-    flip: [LazyRenderPipeline; 3],
+    draw: [Arc<LazyRenderPipeline>; 3],
+    draw_bounded: [Arc<LazyRenderPipeline>; 3],
+    scene: [Arc<LazyRenderPipeline>; 3],
+    scene_add: [Arc<LazyRenderPipeline>; 3],
+    rect: [Arc<LazyRenderPipeline>; 3],
+    solid: [Arc<LazyRenderPipeline>; 3],
+    draw_add: [Arc<LazyRenderPipeline>; 3],
+    rect_add: [Arc<LazyRenderPipeline>; 3],
+    solid_add: [Arc<LazyRenderPipeline>; 3],
+    background: [Arc<LazyRenderPipeline>; 3],
+    flip: [Arc<LazyRenderPipeline>; 3],
     source: [wgpu::ComputePipeline; 3],
     /// Level 2 sampling (`crate::sampling`).
     pub(crate) resample: crate::sampling::gpu::Resampler,
@@ -483,6 +487,7 @@ impl Pipelines {
                     size_of::<SourceUniform>() as u64,
                 ),
                 storage(format),
+                tex(4),
             ]
         };
         let source_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -502,27 +507,32 @@ impl Pipelines {
             (
                 wgpu::TextureFormat::Rgba16Float,
                 "rgba16float",
+                "16u",
                 &source_layout,
             ),
             (
                 wgpu::TextureFormat::Rgba32Float,
                 "rgba32float",
+                "32u",
                 &source_layout_f32,
             ),
             (
                 wgpu::TextureFormat::Rgba8Unorm,
                 "rgba8unorm",
+                "8u",
                 &source_layout_rgba8,
             ),
         ]
-        .map(|(_, name, layout)| {
+        .map(|(_, name, bits, layout)| {
             let code = format!(
                 "{}\n{}\n{}\n{}\n{}",
                 pm_color::wgsl::COLOR,
                 pm_color::tonemap::wgsl(),
                 pm_color::cst::tone_wgsl(),
                 pm_color::camera_log::wgsl(),
-                include_str!("shaders/source.wgsl").replace("OUT_FORMAT", name)
+                include_str!("shaders/source.wgsl")
+                    .replace("OUT_FORMAT", name)
+                    .replace("OUT_BITS", bits)
             );
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pm-render source"),
@@ -604,22 +614,22 @@ impl Pipelines {
             fill_layout,
             source_layout,
             linear,
-            draw,
+            draw: draw.map(Arc::new),
             direct_group_target: std::env::var_os("PM_DIRECT_GROUP_TARGET")
                 .is_none_or(|v| v != "0"),
             direct_group_draws: Default::default(),
             effect_output_bounds: std::env::var_os("PM_EFFECT_OUTPUT_BOUNDS")
                 .is_none_or(|v| v != "0"),
-            draw_bounded,
-            scene,
-            scene_add,
-            rect,
-            solid,
-            draw_add,
-            rect_add,
-            solid_add,
-            background,
-            flip,
+            draw_bounded: draw_bounded.map(Arc::new),
+            scene: scene.map(Arc::new),
+            scene_add: scene_add.map(Arc::new),
+            rect: rect.map(Arc::new),
+            solid: solid.map(Arc::new),
+            draw_add: draw_add.map(Arc::new),
+            rect_add: rect_add.map(Arc::new),
+            solid_add: solid_add.map(Arc::new),
+            background: background.map(Arc::new),
+            flip: flip.map(Arc::new),
             source,
         }
     }
@@ -705,6 +715,24 @@ impl Pipelines {
             &self.background[i],
         ] {
             pipeline.get();
+        }
+    }
+
+    /// Working-format pipelines that can first appear after a cut.
+    pub(crate) fn prewarm_variants(
+        &self,
+        format: wgpu::TextureFormat,
+    ) -> impl FnOnce() + Send + use<> {
+        let i = format_index(format);
+        let pipelines = [
+            &self.draw[i], &self.rect[i], &self.flip[i], &self.background[i],
+            &self.draw_bounded[i], &self.draw_add[i], &self.solid[i],
+            &self.solid_add[i], &self.rect_add[i], &self.scene[i], &self.scene_add[i],
+        ].map(Arc::clone);
+        move || {
+            for pipeline in pipelines {
+                pipeline.get();
+            }
         }
     }
 
@@ -897,10 +925,9 @@ mod tests {
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
         // 24 2D, 24 composite (8 ops, including 2.5D DOF), 6 resample draws
-        // and 3 mip writers over rgba16float, rgba32float and colordepth's
-        // rgba8unorm; path masks (with area coverage's clear, raster and
-        // scans) and 6 text outline/image/blur.
-        assert_eq!(times.len(), 76);
+        // and nine mip writers (four batch sizes for each float format,
+        // one for RGBA8), plus path masks and six text pipelines.
+        assert_eq!(times.len(), 82);
         assert_eq!(built(), times.len());
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");

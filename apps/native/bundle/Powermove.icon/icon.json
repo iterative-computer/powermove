@@ -3,8 +3,8 @@
     {
       "value": {
         "linear-gradient": [
-          "extended-srgb:0.17647,0.17647,0.18824,1.00000",
-          "extended-srgb:0.09020,0.09020,0.09804,1.00000"
+          "extended-srgb:0.98039,0.98039,0.98824,1.00000",
+          "extended-srgb:0.89412,0.89412,0.91373,1.00000"
         ]
       }
     },
@@ -12,8 +12,8 @@
       "appearance": "dark",
       "value": {
         "linear-gradient": [
-          "extended-srgb:0.13725,0.13725,0.14902,1.00000",
-          "extended-srgb:0.06667,0.06667,0.07451,1.00000"
+          "extended-srgb:0.15686,0.15686,0.17255,1.00000",
+          "extended-srgb:0.07059,0.07059,0.08235,1.00000"
         ]
       }
     }
@@ -22,15 +22,42 @@
     {
       "layers": [
         {
+          "hidden-specializations": [
+            {
+              "value": false
+            },
+            {
+              "appearance": "tinted",
+              "value": true
+            }
+          ],
           "image-name": "playhead-trail.svg",
           "name": "Motion trail",
           "opacity-specializations": [
             {
+              "value": 0.82
+            },
+            {
+              "appearance": "dark",
               "value": 0.96
+            }
+          ]
+        },
+        {
+          "hidden-specializations": [
+            {
+              "value": true
             },
             {
               "appearance": "tinted",
-              "value": 0.52
+              "value": false
+            }
+          ],
+          "image-name": "playhead-trail-tinted.svg",
+          "name": "Motion trail tinted",
+          "opacity-specializations": [
+            {
+              "value": 0.72
             }
           ]
         }
@@ -50,8 +77,17 @@
             {
               "value": {
                 "linear-gradient": [
-                  "extended-srgb:1.00000,0.44314,0.12549,1.00000",
-                  "extended-srgb:0.89412,0.29804,0.01569,1.00000"
+                  "extended-srgb:1.00000,0.43529,0.12157,1.00000",
+                  "extended-srgb:0.88627,0.28235,0.01176,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:1.00000,0.46667,0.15294,1.00000",
+                  "extended-srgb:0.90980,0.30980,0.02353,1.00000"
                 ]
               }
             },
@@ -70,8 +106,17 @@
             {
               "value": {
                 "linear-gradient": [
-                  "extended-srgb:1.00000,0.46275,0.14510,1.00000",
-                  "extended-srgb:0.89804,0.30588,0.01961,1.00000"
+                  "extended-srgb:1.00000,0.45490,0.14118,1.00000",
+                  "extended-srgb:0.89020,0.29020,0.01569,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "linear-gradient": [
+                  "extended-srgb:1.00000,0.48235,0.16863,1.00000",
+                  "extended-srgb:0.91373,0.31765,0.02745,1.00000"
                 ]
               }
             },

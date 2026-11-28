@@ -23,11 +23,11 @@ use std::collections::BTreeMap;
 pub(crate) use jsnum::array_index;
 pub use jsnum::{js_trim, number_to_js_string, string_to_number};
 pub use object_map::ObjectMap;
+pub(crate) use parse::parse_project_file_with_history;
 pub use parse::{
-    ParseError, Prebuilt, TreeBuilder, Unit, UnitScanner, member_order, parse, parse_bytes,
-    parse_bytes_parallel, parse_bytes_parallel_prebuilt, parse_bytes_with, parse_file_text,
-    parse_parallel,
-    parse_project_file, parse_unit_with, parse_with,
+    JsonSlice, ParseError, Prebuilt, RawHistory, TreeBuilder, Unit, UnitScanner, member_order,
+    parse, parse_bytes, parse_bytes_parallel, parse_bytes_parallel_prebuilt, parse_bytes_with,
+    parse_file_text, parse_parallel, parse_project_file, parse_unit_with, parse_with,
 };
 pub use string::JsString;
 pub use write::{to_canonical_string, write_canonical};

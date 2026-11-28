@@ -2509,6 +2509,7 @@ struct Work {
     /// Automatic's HD proxies), whatever this frame's moment reads.
     rendered_media: Arc<pm_export::render::MediaPaths>,
     spec: FrameSpec,
+    keep_playback_loop: bool,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
     camera_motion: bool,
@@ -4089,6 +4090,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 continue;
             }
             v.dirty = false;
+            let frame_ticks = v.config.rate.exact_frame_ticks().unwrap_or(0);
+            let keep_playback_loop = sample.loop_range.is_some_and(|range| {
+                range.end.get().saturating_sub(range.start.get())
+                    <= frame_ticks.saturating_mul(render::CACHED_OUTPUT_FRAMES as i64)
+            });
             work = Some(Work {
                 transient: v.transient_snapshot.is_some(),
                 id,
@@ -4117,6 +4123,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     exact: capture,
                     settled,
                 },
+                keep_playback_loop,
                 studio_preview: if capture {
                     studio::Preview::Final
                 } else if (playing || moment == Moment::Scrub || camera_motion)
@@ -4150,7 +4157,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
                 plan,
-                frame_ticks: v.config.rate.exact_frame_ticks().unwrap_or(0),
+                frame_ticks,
             });
             break;
         }
@@ -4261,6 +4268,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             setup_edition,
             rendered_media,
             spec,
+            keep_playback_loop,
             studio_preview,
             studio_view,
             camera_motion,
@@ -4438,6 +4446,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         if matches!(spec.moment, Moment::Playing | Moment::Scrub) && !spec.exact {
                             MATERIAL_PLAYBACK.replace(Some(interrupt));
                         }
+                        engine.keep_playback_loop = keep_playback_loop;
                         let frame =
                             engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
                         MATERIAL_PLAYBACK.replace(None);

@@ -1094,19 +1094,10 @@ fn a_file_upgraded_on_open_is_written_by_its_first_cmd_s() {
         .as_array_mut()
         .unwrap()
         .push(parse(r#"{"id":"M","type":"shape","name":"Model","from":0,"dur":5,"on":true,"p":{},"d":{"definition":"powermove.3d.obj-model"},"fx":[]}"#).unwrap());
-    let mut store = DocumentStore::new_untitled(p);
-    let plan = store
-        .prepare_save(
-            SaveTarget::SaveAs {
-                path: path.clone(),
-                replace: false,
-            },
-            SaveOptions::default(),
-        )
-        .unwrap();
-    let receipt = run(plan);
-    store.finish_save(receipt).unwrap();
-    drop(store);
+    // The untitled store already upgrades old layers. Write a legacy
+    // document directly so the first upgrade occurs during file open.
+    let text = format!(r#"{{"proj":{},"v":1}}"#, to_canonical_string(&p));
+    fs::write(&path, pmv4_bytes(&text)).unwrap();
     let mut store = open(&path);
     assert!(store.upgraded_on_open());
     assert!(!store.needs_save());
@@ -1121,4 +1112,149 @@ fn a_file_upgraded_on_open_is_written_by_its_first_cmd_s() {
     };
     assert_ne!(cmd_s(&mut store), SaveLayout::Unchanged);
     assert_eq!(cmd_s(&mut store), SaveLayout::Unchanged);
+}
+
+#[test]
+fn streamed_saved_history_matches_the_value_import_and_saves_unchanged() {
+    use pm_model::container::read_container_with_history;
+
+    let plain = r#"{
+        "version":1, "paths":"composition", "index":0, "futureField":{"新":"\ud800"},
+        "entries":false, "entries":[
+            {"label":"Undo \"🎞\" }", "forward":[{"path":["comps","C","layers"],"exists":true,
+                "value":[{"id":"x","name":"雪 \\ {]"}]}], "backward":[]},
+            {"label":"Redo λ", "forward":[], "backward":[{"path":["comps","C","name"],
+                "exists":true,"value":"戻る"}]}
+        ]
+    }"#;
+    let packed = to_canonical_string(&crate::history::pack(parse(plain).unwrap()));
+    assert!(packed.contains("powermove-history-dictionary"));
+    let root_relative = plain
+        .replace(r#""composition""#, r#""root""#)
+        .replace(r#""comps","C","#, "");
+    let exact = plain.replace(r#""futureField":{"新":"\ud800"}"#, r#""futureField":-0"#);
+    let bad_ref = packed.replace(r#""refs":[0]"#, r#""refs":[99]"#);
+    assert_ne!(bad_ref, packed);
+    let dir = TempDir::new("streamed");
+    for (i, raw) in [
+        Some(plain),
+        Some(&packed),
+        Some(&root_relative),
+        Some(&exact),
+        Some(&bad_ref),
+        Some(r#"{"version":1,"paths":"composition","index":-1,"entries":[]}"#),
+        Some(r#"{"version":1,"index":0,"entries":[{"label":"malformed","forward":[{}]}]}"#),
+        Some(r#"{"version":1,"entries":[],"index":4}"#),
+        Some(r#"{"futureField":{"nested":[1,2,3]}}"#),
+        Some("null"),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let history_member = raw.map_or(String::new(), |raw| format!(",\"history\":{raw}"));
+        let text = format!(
+            "{{\"proj\":{}{},\"v\":1}}",
+            to_canonical_string(&project(2, false)),
+            history_member
+        );
+        let bytes = pmv4_bytes(&text);
+
+        let (container, streamed) =
+            read_container_with_history(bytes.as_slice(), ReadOptions::default()).unwrap();
+        assert!(container.document.get("history").is_none());
+        assert_eq!(streamed.is_some(), raw.is_some());
+        if let (Some(streamed), Some(raw)) = (streamed, raw) {
+            let expected = parse(raw).unwrap();
+            let (retained, imported) =
+                crate::history::History::from_saved_json(streamed.json(), Some("C"));
+            let old = crate::history::History::from_saved(&expected, Some("C"));
+            assert_eq!(retained.value(), expected, "case {i}");
+            let value_path = crate::history::CompactJson::history(&expected);
+            assert_eq!(
+                to_canonical_string(&retained.value()),
+                to_canonical_string(&value_path.value()),
+                "case {i}"
+            );
+            if i == 3 {
+                assert!(
+                    retained
+                        .value()
+                        .get("futureField")
+                        .unwrap()
+                        .as_f64()
+                        .unwrap()
+                        .is_sign_negative()
+                );
+            }
+            match (old, imported) {
+                (Some(old), Some(imported)) => {
+                    assert!(old.saves_as(&imported), "case {i}");
+                    assert_eq!(
+                        old.snapshot().to_saved(),
+                        imported.snapshot().to_saved(),
+                        "case {i}"
+                    );
+                    assert_eq!(old.undo_label(), imported.undo_label(), "case {i}");
+                    assert_eq!(old.redo_label(), imported.redo_label(), "case {i}");
+                }
+                (None, None) => {}
+                _ => panic!("streamed history import disagrees with the old importer in case {i}"),
+            }
+        }
+
+        let input = dir.path(&format!("input-{i}.pmv"));
+        let output = dir.path(&format!("output-{i}.pmv"));
+        fs::write(&input, bytes).unwrap();
+        let mut store = DocumentStore::open(open_project(&input, OpenOptions::default()).unwrap());
+        let expected = raw.map(|raw| parse(raw).unwrap());
+        assert_eq!(
+            store.file().envelope.history.as_ref().map(|h| h.value()),
+            expected,
+            "case {i}"
+        );
+        let plan = store
+            .prepare_save(
+                SaveTarget::SaveAs {
+                    path: output.clone(),
+                    replace: false,
+                },
+                SaveOptions::default(),
+            )
+            .unwrap();
+        let receipt = run(plan);
+        store.finish_save(receipt).unwrap();
+        let saved = document(&output);
+        if let Some(expected) = &expected {
+            assert_eq!(saved.get("history"), Some(expected), "case {i}");
+        } else {
+            // The normal writer initializes a missing history as empty.
+            assert_eq!(
+                saved.get("history").and_then(|h| h.get("entries")),
+                Some(&Value::Array(vec![]))
+            );
+        }
+    }
+}
+
+fn pmv4_bytes(text: &str) -> Vec<u8> {
+    use pm_model::container::{PMV4_END_MAGIC, PMV4_MAGIC};
+    use pm_model::hash::{sha256, sha256_hex};
+
+    let mut bytes = PMV4_MAGIC.to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    let offset = bytes.len() as f64;
+    let index = format!(
+        "{{\"version\":4,\"document\":{{\"offset\":5,\"length\":{},\"sha256\":\"{}\"}},\"media\":[]}}",
+        text.len(),
+        sha256_hex(text.as_bytes())
+    );
+    bytes.extend_from_slice(index.as_bytes());
+    let mut footer = [0u8; 64];
+    footer[..8].copy_from_slice(PMV4_END_MAGIC);
+    footer[8..16].copy_from_slice(&offset.to_le_bytes());
+    footer[16..20].copy_from_slice(&(index.len() as u32).to_le_bytes());
+    footer[32..].copy_from_slice(&sha256(index.as_bytes()));
+    bytes.extend_from_slice(&footer);
+    bytes
 }

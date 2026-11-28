@@ -15,12 +15,14 @@ use pm_design::{
 use std::{rc::Rc, time::Instant};
 
 pub type OnAction = Rc<dyn Fn(&str, &mut App)>;
+pub type ExtensionSlot = Rc<dyn Fn(&str, &Tokens, &mut Window, &mut App) -> Vec<AnyElement>>;
 
 pub struct WelcomeView {
     motion: Motion<u64>,
     pub tokens: Tokens,
     pub frame: Frame,
     on_action: OnAction,
+    extension_slot: Option<ExtensionSlot>,
     focus: FocusHandle,
     opened: Instant,
     /// When the animation last started, in seconds since the view opened.
@@ -70,6 +72,11 @@ pub struct WelcomeView {
     list_scroll: ScrollHandle,
 }
 impl WelcomeView {
+    pub fn set_extension_slot(&mut self, render: ExtensionSlot, cx: &mut Context<Self>) {
+        self.extension_slot = Some(render);
+        cx.notify();
+    }
+
     fn motion(&mut self) -> &mut Motion<u64> {
         &mut self.motion
     }
@@ -79,6 +86,7 @@ impl WelcomeView {
             tokens,
             frame,
             on_action,
+            extension_slot: None,
             focus: cx.focus_handle(),
             opened: Instant::now(),
             started: 0.,
@@ -439,21 +447,27 @@ impl WelcomeView {
         }
         card
     }
-    /// A plan to buy, as the website's pricing card: night in both
-    /// appearances with the accent's warm light rising from its foot; the
-    /// name, the price large with its period, the note, a hairline, the
-    /// check-marked features, the button; Maybe Later quietly under it.
-    fn offer_card(&self, kit: &Kit, offer: &welcome::Offer, cx: &mut Context<Self>) -> AnyElement {
+    /// A plan to buy, in Powermove Aerolite's Night Zenith + Sky-Blue palette:
+    /// deep sky night with a subtle sky-blue aurora glow, the official
+    /// `Powermove Aerolite` Geist Width wordmark, large price with period,
+    /// note, Sky-Blue CTA button, hairline, and sky-checked features; Maybe
+    /// Later quietly under it.
+    fn offer_card(
+        &self,
+        kit: &Kit,
+        offer: &welcome::Offer,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = &self.tokens;
-        let c = &t.colors;
-        let night = pm_design::Colors::of(pm_design::Scheme::Dark);
         let pad = t.space.xl;
         let corner = t.metrics.control_radius + pad;
-        let white = |a: f32| tint(0xffffff, a);
+        let white = |a: f32| tint(crate::brand::WHITE, a);
+        let sky_tint = |a: f32| tint(crate::brand::AEROLITE_TINT, a);
         let light = linear_gradient(
             180.,
-            linear_color_stop(rgb(night.window), 0.4),
-            linear_color_stop(rgb(pm_design::mix(night.window, c.accent, 0.4)), 1.),
+            linear_color_stop(rgb(crate::brand::AEROLITE_DEEP), 0.),
+            linear_color_stop(rgb(crate::brand::AEROLITE_NIGHT), 0.52),
         )
         .color_space(ColorSpace::Oklab);
         let features = offer.features.iter().map(|(title, detail)| {
@@ -464,7 +478,7 @@ impl WelcomeView {
                     "checkmark",
                     ts().base,
                     Weight::Semibold,
-                    pm_design::mix(c.accent, 0xffffff, 0.55),
+                    crate::brand::AEROLITE_SKY,
                 ))
                 .child(
                     div()
@@ -480,7 +494,7 @@ impl WelcomeView {
                         .children((!detail.is_empty()).then(|| {
                             div()
                                 .text_size(px(ts().xs))
-                                .text_color(white(0.56))
+                                .text_color(sky_tint(0.60))
                                 .child(detail.clone())
                         })),
                 )
@@ -509,13 +523,11 @@ impl WelcomeView {
                     .rounded(px(corner))
                     .bg(light)
                     .border_1()
-                    .border_color(white(0.1))
+                    .border_color(tint(crate::brand::AEROLITE_SKY, 0.28))
                     .child(
                         div()
-                            .text_size(px(ts().base))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(white(1.))
-                            .child(offer.name.clone()),
+                            .mb(px(2.))
+                            .child(crate::brand::aerolite_wordmark(28., window.scale_factor())),
                     )
                     .child(
                         // The period on the price's baseline: both rest on the
@@ -536,29 +548,45 @@ impl WelcomeView {
                                 div()
                                     .pb(px(t.space.xs))
                                     .text_size(px(ts().xs))
-                                    .text_color(white(0.56))
+                                    .text_color(sky_tint(0.60))
                                     .child(offer.period.clone()),
                             ),
                     )
                     .child(
                         div()
                             .text_size(px(ts().xs))
-                            .text_color(white(0.72))
+                            .text_color(sky_tint(0.78))
                             .child(offer.note.clone()),
                     )
                     .child(
-                        kit.button(
-                            "welcome-offer-get",
-                            offer.action.clone(),
-                            Button::Primary,
-                            None,
-                            None,
-                        )
-                        .mt(px(t.space.md))
-                        .w_full()
-                        .on_click(cx.listener(|v, _, _, cx| v.act("offer:get", cx))),
+                        div()
+                            .id("welcome-offer-get")
+                            .debug_selector(|| "welcome-offer-get".into())
+                            .role(Role::Button)
+                            .aria_label(offer.action.clone())
+                            .tab_index(0)
+                            .mt(px(t.space.md))
+                            .w_full()
+                            .h(px(wt().primary_height))
+                            .rounded(px(t.metrics.control_radius))
+                            .bg(rgb(crate::brand::AEROLITE_SKY))
+                            .hover_style(|s| s.bg(rgb(crate::brand::AEROLITE_LIGHT)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(ts().base))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(crate::brand::AEROLITE_NIGHT))
+                            .child(offer.action.clone())
+                            .on_click(cx.listener(|v, _, _, cx| v.act("offer:get", cx))),
                     )
-                    .child(div().my(px(t.space.md)).h(px(1.)).w_full().bg(white(0.1)))
+                    .child(
+                        div()
+                            .my(px(t.space.md))
+                            .h(px(1.))
+                            .w_full()
+                            .bg(tint(crate::brand::AEROLITE_LIGHT, 0.16)),
+                    )
                     .children(features),
             )
             .child(
@@ -642,19 +670,34 @@ impl WelcomeView {
                 );
             }
             let mark = choice.mark.clone().map(|name| {
-                let glyph = if name == "powermove" {
-                    mark_glyph(17., c.accent).into_any_element()
+                if name == "powermove" {
+                    return div()
+                        .flex_none()
+                        .size(px(wt().icon_tile))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(crate::brand::app_icon(
+                            wt().icon_tile,
+                            true,
+                            window.scale_factor(),
+                        ));
+                }
+                // A mark in its own colour (Claude's orange); others in
+                // the text's ink.
+                let mark_ink = if name == "provider.claude" {
+                    crate::scale().colors.brand_claude
                 } else {
-                    // A mark in its own colour (Claude's orange); others in
-                    // the text's ink.
-                    let ink = if name == "provider.claude" {
-                        crate::scale().colors.brand_claude
-                    } else {
-                        c.text
-                    };
-                    crate::symbol::symbol(&name, 20., crate::symbol::Weight::Regular, ink, window)
-                        .into_any_element()
+                    c.text
                 };
+                let glyph = crate::symbol::symbol(
+                    &name,
+                    20.,
+                    crate::symbol::Weight::Regular,
+                    mark_ink,
+                    window,
+                )
+                .into_any_element();
                 div()
                     .flex_none()
                     .size(px(wt().icon_tile))
@@ -873,16 +916,14 @@ impl WelcomeView {
             window.request_animation_frame();
         }
         let spoken = frame.title.replace('\n', " ");
-        // The mark, title, line and content, from the mark's height down to
-        // where the actions start.
+        // The title, line and content, down to where the actions start.
         let mut column = div()
             .w(px(wt().column))
             .h(px((wt().actions_top - wt().actions_room) - wt().logo_top))
             .flex()
             .flex_col()
             .items_center()
-            .text_center()
-            .child(mark_glyph(26., c.accent));
+            .text_center();
         column = column
             .child(
                 div()
@@ -890,7 +931,7 @@ impl WelcomeView {
                     .debug_selector(|| "welcome-title".into())
                     .role(Role::Heading)
                     .aria_label(spoken.clone())
-                    .mt(px(24.))
+                    .mt(px(28.))
                     .text_size(px(ts().x4l))
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(relative(1.15))
@@ -976,7 +1017,7 @@ impl WelcomeView {
         let offer = frame
             .offer
             .as_ref()
-            .map(|offer| self.offer_card(&kit, offer, cx));
+            .map(|offer| self.offer_card(&kit, offer, window, cx));
         if !frame.rows.is_empty() || frame.names.is_some() {
             let mut body = div()
                 .id("welcome-body")
@@ -1172,6 +1213,11 @@ impl WelcomeView {
             // The mark at one height on every step; the step under it.
             .pt(px(wt().logo_top))
             .child(column);
+        let [top_slots, bottom_slots] = ["welcome.top", "welcome.bottom"].map(|id| {
+            self.extension_slot
+                .as_ref()
+                .map_or_else(Vec::new, |render| render(id, &t, window, cx))
+        });
         // The other half: the step's picture; or, while a plan is offered,
         // its whole card in the picture's place, at the column's width and
         // centred on the column's span (the mark down to the primary).
@@ -1196,7 +1242,31 @@ impl WelcomeView {
                     .child(div().w(px(wt().column)).child(card)),
             ),
             None => right.children(frame.preview.as_deref().and_then(|id| preview(id, window))),
-        };
+        }
+        .when(!top_slots.is_empty(), |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top(px(t.metrics.titlebar))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_col()
+                    .children(top_slots),
+            )
+        })
+        .when(!bottom_slots.is_empty(), |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_col()
+                    .children(bottom_slots),
+            )
+        });
         div()
             .id("welcome")
             .role(Role::Group)
@@ -2332,7 +2402,7 @@ impl Render for WelcomeView {
             content = content.child(self.choices(&kit, cx));
         }
         if let Some(offer) = &frame.offer {
-            content = content.child(self.offer_card(&kit, offer, cx));
+            content = content.child(self.offer_card(&kit, offer, window, cx));
         }
         // The rows and the names scroll together in the room left between the
         // header and the buttons; a fade at the bottom says there's more.
@@ -2493,7 +2563,7 @@ impl Render for WelcomeView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key));
         if let Some(time) = time {
-            root = root.child(mark_canvas(time, &t));
+            root = root.child(mark_canvas(time, &t, window.scale_factor()));
         }
         if frame.back.is_some() {
             root = root.child(
@@ -2796,112 +2866,21 @@ fn google_mark() -> Option<objc2::rc::Retained<objc2_app_kit::NSImage>> {
     }
     MARK.with(Clone::clone)
 }
-fn mark_glyph(size: f32, color: u32) -> impl IntoElement + use<> {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let mark = &welcome::MARK;
-            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-            for p in mark.iter() {
-                for k in 0..2 {
-                    lo[k] = lo[k].min(p[k]);
-                    hi[k] = hi[k].max(p[k]);
-                }
-            }
-            let scale = f64::from(size) / (hi[1] - lo[1]);
-            let width = (hi[0] - lo[0]) * scale;
-            let at = |x: f64, y: f64| {
-                point(
-                    bounds.origin.x
-                        + px(((x - lo[0]) * scale) as f32)
-                        + (bounds.size.width - px(width as f32)) / 2.,
-                    bounds.origin.y + px(((y - lo[1]) * scale) as f32),
-                )
-            };
-            let mut builder = PathBuilder::fill();
-            builder.move_to(at(mark[0][0], mark[0][1]));
-            for i in 0..mark.len() {
-                let (a, b) = (mark[i], mark[(i + 1) % mark.len()]);
-                builder.cubic_bezier_to(
-                    at(b[0], b[1]),
-                    at(a[0] + a[4], a[1] + a[5]),
-                    at(b[0] + b[2], b[1] + b[3]),
-                );
-            }
-            builder.close();
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, rgb(color));
-            }
-        },
-    )
-    .w(px(size * 1.24))
-    .h(px(size))
-}
-
-fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
-    let accent = tokens.colors.accent;
-    let ground = tokens.colors.window;
-    let mark = canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let Some(state) = welcome::mark_at(time) else {
-                return;
-            };
-            let size = [f64::from(bounds.size.width), f64::from(bounds.size.height)];
-            let (fit, origin) = welcome::fit_stage(size);
-            let point_at = |x: f64, y: f64| {
-                point(
-                    bounds.origin.x
-                        + px(((state.center[0] + x * state.scale) * fit + origin[0]) as f32),
-                    bounds.origin.y
-                        + px(((state.center[1] + y * state.scale) * fit + origin[1]) as f32),
-                )
-            };
-            let outline = |mut builder: PathBuilder| {
-                let mark = &welcome::MARK;
-                builder.move_to(point_at(mark[0][0], mark[0][1]));
-                for i in 0..mark.len() {
-                    let (a, b) = (mark[i], mark[(i + 1) % mark.len()]);
-                    builder.cubic_bezier_to(
-                        point_at(b[0], b[1]),
-                        point_at(a[0] + a[4], a[1] + a[5]),
-                        point_at(b[0] + b[2], b[1] + b[3]),
-                    );
-                }
-                builder.close();
-                builder.build()
-            };
-            let mask = ContentMask {
-                bounds,
-                ..Default::default()
-            };
-            window.with_content_mask(Some(mask), |window| {
-                const STEPS: usize = 14;
-                if state.glow > 0. {
-                    for step in (1..=STEPS).rev() {
-                        let spread = 72.876 * fit * step as f64 / STEPS as f64;
-                        if let Ok(path) = outline(PathBuilder::stroke(px(spread as f32 * 2.))) {
-                            let alpha = state.glow / STEPS as f64;
-                            let mut colour = Rgba::from(rgb(accent));
-                            colour.alpha = alpha as f32;
-                            window.paint_path(path, colour);
-                        }
-                    }
-                }
-                if let Ok(path) = outline(PathBuilder::fill()) {
-                    window.paint_path(path, rgb(ground));
-                }
-            });
-        },
-    )
-    .size_full();
+fn mark_canvas(time: f64, _tokens: &Tokens, scale: f32) -> impl IntoElement + use<> {
+    let wordmark = welcome::mark_at(time).map(|state| {
+        let height = (state.scale * 96.).clamp(32., 220.) as f32;
+        crate::brand::wordmark(height, scale)
+    });
     div()
         .debug_selector(|| "welcome-mark".into())
         .absolute()
         .top_0()
         .left_0()
         .size_full()
-        .child(mark)
+        .flex()
+        .items_center()
+        .justify_center()
+        .children(wordmark)
 }
 /// Standard titled window, centred on the active display. Closing it quits.
 pub fn open_welcome(

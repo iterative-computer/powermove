@@ -55,6 +55,8 @@ mod publication;
 mod settings;
 pub mod speech;
 mod timeline_easing;
+mod ui_surfaces;
+pub use ui_surfaces::{BUILTIN_SLOTS, is_protected_surface, is_valid_slot};
 pub mod virtualization;
 mod wakers;
 /// Opt-in panel timings (`PM_NATIVE_MAIN_TRACE=1`).
@@ -170,16 +172,6 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
 pub const VIEWER_OVERLAY: &str = "@viewer";
 /// A v4 extension's built-in panel slot publishes as `<panel>@slot:<slotId>`.
 pub const SLOT_PREFIX: &str = "@slot:";
-/// Known built-in panel slot ids extensions may contribute live UI into.
-pub const BUILTIN_SLOTS: [&str; 7] = [
-    "inspector.top",
-    "inspector.bottom",
-    "timeline.toolbar",
-    "timeline.footer",
-    "viewer.hud",
-    "agent.toolbar",
-    "assets.toolbar",
-];
 /// A `themes.activate` request: its number, panel and theme id (`None`: the
 /// built-in look).
 pub type ThemeRequest = (u64, String, Option<String>);
@@ -205,6 +197,7 @@ mod surface_transfer;
 
 struct Entry {
     generation: u64,
+    revoked: bool,
     backend: Arc<Mutex<Backend>>,
     router: HostRouter<HostDataService<data::Data>>,
     surface: Surface,
@@ -376,13 +369,18 @@ struct Broker {
     /// Built-in panel slots an extension cleared (`<panel>@slot:<slotId>`).
     slots_cleared: Mutex<Vec<String>>,
     /// Layer 1: window toolbar items (`toolbar.contribute`), by panel.
-    toolbar_items: Mutex<(u64, BTreeMap<String, Value>)>,
+    toolbar_items: ui_surfaces::Contributions,
+    toolbar_mods: ui_surfaces::Contributions,
+    toolbar_add_items: ui_surfaces::Contributions,
+    status_bar_items: ui_surfaces::Contributions,
+    status_bar_mods: ui_surfaces::Contributions,
     /// Layer 1: panel header action pills (`panelHeader.contribute`), by owner panel.
-    panel_headers: Mutex<(u64, BTreeMap<String, Value>)>,
+    panel_headers: ui_surfaces::Contributions,
+    panel_header_mods: ui_surfaces::Contributions,
     /// Layer 1: macOS menu bar items (`menuBar.contribute`), by panel.
-    menu_bar: Mutex<(u64, BTreeMap<String, Value>)>,
+    menu_bar: ui_surfaces::Contributions,
     /// Layer 2: interactive viewer tools (`tools.register`), by panel.
-    tools: Mutex<(u64, BTreeMap<String, Value>)>,
+    tools: ui_surfaces::Contributions,
     /// Layer 5: lifecycle event subscriptions (`events.on`), by panel.
     event_subs: Mutex<BTreeMap<String, std::collections::BTreeSet<String>>>,
     /// The Export sheet's checks, drained by main on every wake without the
@@ -677,7 +675,7 @@ impl Builtins {
                     Provider::Chatgpt => "ChatGPT",
                     Provider::Claude => "Claude",
                     Provider::Compatible => "your compatible provider",
-                    Provider::Aero => "Aero",
+                    Provider::Aero => "Aerolite",
                 };
                 return Err(format!(
                     "Sign in to {name} in Settings › Agents before starting a run."
@@ -1502,7 +1500,12 @@ impl Builtins {
             overlay_interactive: Default::default(),
             slots_cleared: Default::default(),
             toolbar_items: Default::default(),
+            toolbar_mods: Default::default(),
+            toolbar_add_items: Default::default(),
+            status_bar_items: Default::default(),
+            status_bar_mods: Default::default(),
             panel_headers: Default::default(),
+            panel_header_mods: Default::default(),
             menu_bar: Default::default(),
             tools: Default::default(),
             event_subs: Default::default(),
@@ -1680,7 +1683,7 @@ impl Builtins {
             }
         }
         self.broker.forget_effects(panel);
-        self.broker.entries.shared().remove(panel);
+        self.broker.remove_entry(panel);
         if panel == "export" {
             *self.broker.export_probe.shared() = None;
         }
@@ -1695,6 +1698,9 @@ impl Builtins {
     /// it: same realm identity, routes and host operations, the fork's code.
     /// Waits for the old isolate to close, so call it off the main thread.
     pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
+        if is_protected_surface(panel) {
+            return Err(Error::Invalid("Settings cannot be replaced by extensions"));
+        }
         if builtin_panel(panel).is_none_or(|p| self.broker.application && !p.application) {
             return Err(Error::Invalid("unregistered built-in"));
         }
@@ -1788,27 +1794,25 @@ impl Builtins {
     /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
     /// its writer on the isolate owner; the same id can mount again.
     pub fn unmount_extension(&self, id: &str) {
-        if let Some(realm) = self.extension_realms.shared().remove(id) {
+        let mut extensions = self.extension_realms.shared();
+        if let Some(realm) = extensions.remove(id) {
             realm.close();
         }
         self.broker.extensions.shared().remove(id);
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.forget_effects(id);
-        self.broker.entries.shared().remove(id);
+        self.broker.remove_entry(id);
         if id == "export" {
             *self.broker.export_probe.shared() = None;
         }
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
         self.broker.forget_overlay(id);
-        self.broker.forget_slots(id);
-        self.broker.forget_toolbar(id);
-        self.broker.forget_panel_headers(id);
-        self.broker.forget_menu_bar(id);
-        self.broker.forget_tools(id);
         self.broker.forget_events(id);
         self.broker.forget_timeline(id, None);
         self.broker.forget_painter(id);
+        drop(extensions);
+        (self.broker.wake)();
     }
     /// Every extension command in this window when they changed since `seen`:
     /// `(revision, [{panel, id, title, key}])`.
@@ -1846,77 +1850,41 @@ impl Builtins {
             (commands.0, list)
         })
     }
-    /// Layer 1: window toolbar items contributed by v4 extensions since `seen`.
+    /// Extension toolbar items since `seen`. Each descriptor includes its owning realm as `panel`.
     pub fn toolbar_items_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
-        let items = self.broker.toolbar_items.shared();
-        (items.0 != seen).then(|| {
-            let list = items
-                .1
-                .iter()
-                .flat_map(|(panel, list)| {
-                    list.as_array().into_iter().flatten().map(move |item| {
-                        let mut item = item.clone();
-                        item["panel"] = json!(panel);
-                        item
-                    })
-                })
-                .collect();
-            (items.0, list)
-        })
+        self.broker.toolbar_items.since(seen, "panel")
     }
-    /// Layer 1: panel header actions contributed by v4 extensions since `seen`.
+    /// Extension toolbar patches since `seen`. Each descriptor includes its owning realm as `panel`.
+    pub fn toolbar_mods_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        self.broker.toolbar_mods.since(seen, "panel")
+    }
+    /// Extension Add menu items since `seen`. Each descriptor includes its owning realm as `panel`.
+    pub fn toolbar_add_items_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        self.broker.toolbar_add_items.since(seen, "panel")
+    }
+    /// Extension status bar items since `seen`. Each descriptor includes its owning realm as `panel`.
+    pub fn status_bar_items_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        self.broker.status_bar_items.since(seen, "panel")
+    }
+    /// Extension status bar patches since `seen`. Each descriptor includes its owning realm as `panel`.
+    pub fn status_bar_mods_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        self.broker.status_bar_mods.since(seen, "panel")
+    }
+    /// Extension panel header patches since `seen`. Each descriptor includes its owning realm as `owner`.
+    pub fn panel_header_mods_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        self.broker.panel_header_mods.since(seen, "owner")
+    }
+    /// Extension panel header actions since `seen`. Each descriptor includes its owning realm as `owner`.
     pub fn panel_headers_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
-        let items = self.broker.panel_headers.shared();
-        (items.0 != seen).then(|| {
-            let list = items
-                .1
-                .iter()
-                .flat_map(|(owner, list)| {
-                    list.as_array().into_iter().flatten().map(move |item| {
-                        let mut item = item.clone();
-                        item["owner"] = json!(owner);
-                        item
-                    })
-                })
-                .collect();
-            (items.0, list)
-        })
+        self.broker.panel_headers.since(seen, "owner")
     }
-    /// Layer 1: menu bar contributions from v4 extensions since `seen`.
+    /// Extension macOS menu bar contributions since `seen`. Each descriptor includes its owning realm as `panel`.
     pub fn menu_bar_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
-        let menus = self.broker.menu_bar.shared();
-        (menus.0 != seen).then(|| {
-            let list = menus
-                .1
-                .iter()
-                .flat_map(|(panel, list)| {
-                    list.as_array().into_iter().flatten().map(move |entry| {
-                        let mut entry = entry.clone();
-                        entry["panel"] = json!(panel);
-                        entry
-                    })
-                })
-                .collect();
-            (menus.0, list)
-        })
+        self.broker.menu_bar.since(seen, "panel")
     }
-    /// Layer 2: interactive viewer tools registered by v4 extensions since `seen`.
+    /// Extension interactive viewer tools since `seen`. Each descriptor includes its owning realm as `panel`.
     pub fn tools_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
-        let tools = self.broker.tools.shared();
-        (tools.0 != seen).then(|| {
-            let list = tools
-                .1
-                .iter()
-                .flat_map(|(panel, list)| {
-                    list.as_array().into_iter().flatten().map(move |tool| {
-                        let mut tool = tool.clone();
-                        tool["panel"] = json!(panel);
-                        tool
-                    })
-                })
-                .collect();
-            (tools.0, list)
-        })
+        self.broker.tools.since(seen, "panel")
     }
     /// Whether a viewer overlay (`<panel>@viewer`) accepts pointer input.
     pub fn overlay_interactive(&self, overlay_id: &str) -> bool {
@@ -1935,6 +1903,21 @@ impl Builtins {
     pub fn run_toolbar(&self, panel: &str, id: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?
             .eval_discrete(format!("__pmBuiltin.runToolbar({})", json!(id)))
+    }
+    /// Runs a dropdown item by its published `actionKey`.
+    pub fn run_toolbar_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runToolbarMenu({})", json!(key)))
+    }
+    /// Runs a contributed Add menu item by its id.
+    pub fn run_toolbar_add_item(&self, panel: &str, id: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runToolbarAddItem({})", json!(id)))
+    }
+    /// Runs a clickable status bar item by its id.
+    pub fn run_status_bar(&self, panel: &str, id: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval_discrete(format!("__pmBuiltin.runStatusBar({})", json!(id)))
     }
     /// Runs a contributed panel header action in its extension's realm.
     pub fn run_panel_header(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
@@ -2014,6 +1997,11 @@ impl Builtins {
         location: &str,
         ctx: &Value,
     ) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        if is_protected_surface(location)
+            || ctx["panelId"].as_str().is_some_and(is_protected_surface)
+        {
+            return Vec::new();
+        }
         let script = format!("__pmBuiltin.gatherMenu({},{})", json!(location), ctx);
         self.user_realms()
             .into_iter()
@@ -3093,8 +3081,15 @@ impl EngineProxy for Broker {
     ) -> Result<Value> {
         budget.check()?;
         let panel = self.panel(generation)?;
+        if operation == "extension.activationFailed" {
+            self.revoke_generation(generation);
+            return Ok(Value::Null);
+        }
         if operation == "identity" {
             let mut entries = self.entries.shared();
+            if !self.panel(generation).is_ok_and(|id| id == panel) {
+                return Err(Error::StaleGeneration);
+            }
             if entries.contains_key(panel) {
                 return Err(Error::Invalid("duplicate panel identity"));
             }
@@ -3140,6 +3135,7 @@ impl EngineProxy for Broker {
                 panel.into(),
                 Arc::new(Mutex::new(Entry {
                     generation: generation.number,
+                    revoked: false,
                     backend,
                     router,
                     surface: Surface::default(),
@@ -3154,7 +3150,7 @@ impl EngineProxy for Broker {
         }
         let entry = self.entry(panel).ok_or(Error::StaleGeneration)?;
         let mut entry = entry.shared();
-        if entry.generation != generation.number {
+        if entry.revoked || entry.generation != generation.number {
             return Err(Error::StaleGeneration);
         }
         let entry = &mut *entry;
@@ -3344,29 +3340,27 @@ impl EngineProxy for Broker {
                 (self.wake)();
                 Ok(Value::Null)
             }
-            "toolbar.set" => {
-                let valid = input.as_array().is_some_and(|list| {
-                    list.len() <= 32
-                        && list.iter().all(|c| {
-                            c["id"]
-                                .as_str()
-                                .is_some_and(|s| (1..=128).contains(&s.len()))
-                                && c["label"]
-                                    .as_str()
-                                    .is_some_and(|s| (1..=128).contains(&s.len()))
-                        })
-                });
-                if !valid {
-                    return Err(Error::Invalid("toolbar items need an id and a label"));
-                }
-                let mut items = self.toolbar_items.shared();
-                items.0 += 1;
-                items.1.insert(panel.into(), input.clone());
-                drop(items);
+            "ui.surfaces" => Ok(ui_surfaces::surfaces()),
+            "toolbar.set" | "toolbar.modify.set" | "toolbar.addMenu.set" | "statusBar.set"
+            | "statusBar.modify.set" | "panelHeader.modify.set" => {
+                let list = ui_surfaces::validate(operation, input)?;
+                let registry = match operation {
+                    "toolbar.set" => &self.toolbar_items,
+                    "toolbar.modify.set" => &self.toolbar_mods,
+                    "toolbar.addMenu.set" => &self.toolbar_add_items,
+                    "statusBar.set" => &self.status_bar_items,
+                    "statusBar.modify.set" => &self.status_bar_mods,
+                    "panelHeader.modify.set" => &self.panel_header_mods,
+                    _ => unreachable!(),
+                };
+                registry.set(panel, list);
                 (self.wake)();
                 Ok(Value::Null)
             }
             "panelHeader.set" => {
+                for item in input.as_array().into_iter().flatten() {
+                    ui_surfaces::target(item, "panelId")?;
+                }
                 let valid = input.as_array().is_some_and(|list| {
                     list.len() <= 64
                         && list.iter().all(|c| {
@@ -3378,10 +3372,7 @@ impl EngineProxy for Broker {
                 if !valid {
                     return Err(Error::Invalid("panel header items need a panelId and id"));
                 }
-                let mut items = self.panel_headers.shared();
-                items.0 += 1;
-                items.1.insert(panel.into(), input.clone());
-                drop(items);
+                self.panel_headers.set(panel, input.as_array().unwrap().clone());
                 (self.wake)();
                 Ok(Value::Null)
             }
@@ -3398,10 +3389,7 @@ impl EngineProxy for Broker {
                 if !valid {
                     return Err(Error::Invalid("menuBar contributions need a menuName and items"));
                 }
-                let mut menus = self.menu_bar.shared();
-                menus.0 += 1;
-                menus.1.insert(panel.into(), input.clone());
-                drop(menus);
+                self.menu_bar.set(panel, input.as_array().unwrap().clone());
                 (self.wake)();
                 Ok(Value::Null)
             }
@@ -3420,18 +3408,16 @@ impl EngineProxy for Broker {
                 if !valid {
                     return Err(Error::Invalid("tools need an id and a title"));
                 }
-                let mut tools = self.tools.shared();
-                tools.0 += 1;
-                tools.1.insert(panel.into(), input.clone());
-                drop(tools);
+                self.tools.set(panel, input.as_array().unwrap().clone());
                 (self.wake)();
                 Ok(Value::Null)
             }
+            "slot.validate" => {
+                ui_surfaces::checked_slot(input)?;
+                Ok(Value::Null)
+            }
             "slot.commit" => {
-                let slot = input["slot"]
-                    .as_str()
-                    .filter(|s| BUILTIN_SLOTS.contains(s))
-                    .ok_or(Error::Invalid("unknown built-in panel slot"))?;
+                let slot = ui_surfaces::checked_slot(input)?;
                 let commit = serde_json::from_value(input["commit"].clone())
                     .map_err(|e| Error::Host(e.to_string()))?;
                 let (surface, interaction) = entry
@@ -3887,26 +3873,24 @@ impl KernelHooks for Broker {
             return;
         };
         let mut entry = entry.shared();
-        if entry.generation != generation.number {
+        if entry.revoked || entry.generation != generation.number {
             return;
         }
+        entry.revoked = true;
         let _ = entry.router.retire();
+        self.clear_ui_owner(panel, &mut entry);
         // A generation that failed (a quota, a crash) takes down what it put
         // up; a closing window's realms just end.
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+            drop(entry);
+            (self.wake)();
             return;
         }
         entry.overlay = Surface::default();
         entry.overlay_interaction = Interaction::default();
-        entry.slots.clear();
         drop(entry);
         let panel = panel.to_owned();
         self.forget_overlay(&panel);
-        self.forget_slots(&panel);
-        self.forget_toolbar(&panel);
-        self.forget_panel_headers(&panel);
-        self.forget_menu_bar(&panel);
-        self.forget_tools(&panel);
         self.forget_events(&panel);
         self.forget_timeline(&panel, Some(generation.number));
         self.forget_painter(&panel);
@@ -3920,6 +3904,14 @@ impl KernelHooks for Broker {
 impl Broker {
     fn entry(&self, panel: &str) -> Option<Arc<Mutex<Entry>>> {
         self.entries.shared().get(panel).cloned()
+    }
+    fn remove_entry(&self, panel: &str) {
+        let entry = self.entries.shared().remove(panel);
+        if let Some(entry) = entry {
+            let mut entry = entry.shared();
+            entry.revoked = true;
+            self.clear_ui_owner(panel, &mut entry);
+        }
     }
     fn all_entries(&self) -> Vec<Arc<Mutex<Entry>>> {
         self.entries.shared().values().cloned().collect()
@@ -3957,41 +3949,33 @@ impl Broker {
             cleared.push(id);
         }
     }
-    fn forget_slots(&self, panel: &str) {
-        let prefix = format!("{panel}{SLOT_PREFIX}");
-        self.publications
-            .shared()
-            .retain(|k, _| !k.starts_with(&prefix));
-        let mut cleared = self.slots_cleared.shared();
-        for slot in BUILTIN_SLOTS {
-            let id = format!("{prefix}{slot}");
-            if !cleared.contains(&id) {
-                cleared.push(id);
+    /// Called under the owning entry's lock so a retiring generation cannot
+    /// publish again while its changes are being removed.
+    fn clear_ui_owner(&self, panel: &str, entry: &mut Entry) {
+        let slots = std::mem::take(&mut entry.slots);
+        if !slots.is_empty() {
+            let mut publications = self.publications.shared();
+            let mut cleared = self.slots_cleared.shared();
+            for slot in slots.keys() {
+                let id = format!("{panel}{SLOT_PREFIX}{slot}");
+                publications.remove(&id);
+                if !cleared.contains(&id) {
+                    cleared.push(id);
+                }
             }
         }
-    }
-    fn forget_toolbar(&self, panel: &str) {
-        let mut items = self.toolbar_items.shared();
-        if items.1.remove(panel).is_some() {
-            items.0 += 1;
-        }
-    }
-    fn forget_panel_headers(&self, panel: &str) {
-        let mut items = self.panel_headers.shared();
-        if items.1.remove(panel).is_some() {
-            items.0 += 1;
-        }
-    }
-    fn forget_menu_bar(&self, panel: &str) {
-        let mut menus = self.menu_bar.shared();
-        if menus.1.remove(panel).is_some() {
-            menus.0 += 1;
-        }
-    }
-    fn forget_tools(&self, panel: &str) {
-        let mut tools = self.tools.shared();
-        if tools.1.remove(panel).is_some() {
-            tools.0 += 1;
+        for registry in [
+            &self.toolbar_items,
+            &self.toolbar_mods,
+            &self.toolbar_add_items,
+            &self.status_bar_items,
+            &self.status_bar_mods,
+            &self.panel_header_mods,
+            &self.panel_headers,
+            &self.menu_bar,
+            &self.tools,
+        ] {
+            registry.clear_owner(panel);
         }
     }
     fn forget_events(&self, panel: &str) {
@@ -4086,8 +4070,8 @@ fn timeline_patch(input: &Value) -> Value {
         }
     }
     for (key, allowed) in [
-        ("toolbarDensity", ["compact", "normal"]),
-        ("surfaceOrder", ["normal", "reversed"]),
+        ("toolbarDensity", &["compact", "normal", "comfortable"][..]),
+        ("surfaceOrder", &["normal", "reversed"][..]),
     ] {
         if let Some(v) = input[key].as_str().filter(|v| allowed.contains(v)) {
             out.insert(key.into(), json!(v));

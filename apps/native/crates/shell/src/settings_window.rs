@@ -154,6 +154,49 @@ fn is_dark(appearance: &NSAppearance) -> bool {
         .is_some_and(|name| &*name == names[1])
 }
 
+define_class!(
+    #[unsafe(super(NSScrollView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsExtensionListScroll"]
+    struct ExtensionListScroll;
+
+    impl ExtensionListScroll {
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            // The list keeps its scroll view for layout even when every row
+            // fits. In that mode the page owns the wheel.
+            if self.hasVerticalScroller() {
+                let clip = self.contentView();
+                let visible = clip.bounds();
+                let document = clip.documentRect();
+                let delta = event.scrollingDeltaY();
+                // The list document is flipped. Allow for clip-view rounding
+                // to a backing pixel when checking the edges.
+                let pixel = self.window().map_or(1., |w| 1. / w.backingScaleFactor());
+                let at_start = visible.origin.y <= document.origin.y + pixel;
+                let at_end = visible.origin.y + visible.size.height + pixel
+                    >= document.origin.y + document.size.height;
+                if !(delta > 0. && at_start || delta < 0. && at_end) {
+                    unsafe { let _: () = msg_send![super(self), scrollWheel: event]; }
+                    return;
+                }
+            }
+            if let Some(parent) = unsafe { self.nextResponder() } {
+                parent.scrollWheel(event);
+            }
+        }
+    }
+);
+
+/// The Extensions list hands wheel events to the Settings page when its
+/// rows fit or it reaches the edge of its virtualized content.
+pub fn extension_list_scroll(mtm: MainThreadMarker) -> Retained<NSScrollView> {
+    let scroll: Retained<ExtensionListScroll> = unsafe {
+        msg_send![super(ExtensionListScroll::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+    };
+    Retained::into_super(scroll)
+}
+
 /// One row of the sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Section {
@@ -1552,6 +1595,46 @@ fn look(dark: bool) -> pm_design::TilePalette {
     pm_design::Settings::of(scheme).tile
 }
 
+/// The tile's palette for section `id`: delegates to `pm-design` so all
+/// colour tokens stay centralised in `pm-design`.
+fn section_look(id: &str, dark: bool) -> pm_design::TilePalette {
+    pm_design::TilePalette::for_section(id, dark)
+}
+
+/// The real Powermove app icon (the sign-in sheet's tile), on the tile's
+/// canvas with its drop shadow.
+fn app_icon_svg(dark: bool) -> String {
+    let source = if dark {
+        include_str!("../assets/brand/app-icon-dark.svg")
+    } else {
+        include_str!("../assets/brand/app-icon-light.svg")
+    };
+    let t = look(dark);
+    let s = TILE_UNITS;
+    let m = MARGIN_UNITS;
+    let full = s + 2. * m;
+    let (iw, ih) = view_box(source).unwrap_or((1024., 1024.));
+    let body = source
+        .find("<svg")
+        .and_then(|at| source[at..].find('>').map(|end| at + end + 1))
+        .zip(source.rfind("</svg>"))
+        .filter(|(a, b)| a < b)
+        .map_or("", |(a, b)| &source[a..b]);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{full}" height="{full}" viewBox="{nm} {nm} {full} {full}">
+<defs><filter id="drop" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="{sd}" stdDeviation="{sb}" flood-color="{shc}" flood-opacity="{so}"/></filter></defs>
+<g filter="url(#drop)"><g transform="scale({kx} {ky})">{body}</g></g>
+</svg>"##,
+        nm = -m,
+        sd = t.shadow_offset,
+        sb = t.shadow_blur,
+        shc = pm_design::css(t.shadow),
+        so = t.shadow_opacity,
+        kx = s / iw,
+        ky = s / ih,
+    )
+}
+
 /// An SVG's view box size (width, height).
 fn view_box(svg: &str) -> Option<(f64, f64)> {
     let at = svg.find("viewBox=\"")? + "viewBox=\"".len();
@@ -1564,9 +1647,12 @@ fn view_box(svg: &str) -> Option<(f64, f64)> {
 }
 
 fn tile_svg(id: &str, dark: bool) -> Option<String> {
+    if id == "powermove" {
+        return Some(app_icon_svg(dark));
+    }
     let source = glyph(id)?;
     let glyph = glyph_body(source, "url(#g)");
-    let t = look(dark);
+    let t = section_look(id, dark);
     let s = TILE_UNITS;
     let m = MARGIN_UNITS;
     let full = s + 2. * m;
@@ -1758,4 +1844,48 @@ pub fn remember_section(id: &str) {
             &NSString::from_str(SECTION_KEY),
         )
     };
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+
+    const IDS: [&str; 14] = [
+        "general",
+        "project",
+        "media",
+        "shortcuts",
+        "storage",
+        "providers",
+        "agents",
+        "transcription",
+        "extensions",
+        "privacy",
+        "about",
+        "terminal",
+        "window",
+        "powermove",
+    ];
+
+    #[test]
+    fn every_tile_renders_in_both_appearances() {
+        for id in IDS {
+            for dark in [true, false] {
+                let png = tile_png(id, dark, 22., 2.).unwrap_or_else(|| panic!("{id} {dark}"));
+                assert!(png.len() > 200, "{id} {dark}");
+            }
+        }
+    }
+
+    #[test]
+    fn sections_have_distinct_colours() {
+        let ids = &IDS[..11];
+        for (i, a) in ids.iter().enumerate() {
+            let la = section_look(a, false);
+            for b in &ids[i + 1..] {
+                let lb = section_look(b, false);
+                assert_ne!((la.body_top, la.body_bottom), (lb.body_top, lb.body_bottom), "{a} {b}");
+            }
+        }
+    }
 }

@@ -159,6 +159,7 @@ mod timeline_surface;
 mod timeline_tests;
 mod transcription;
 mod updates;
+mod whats_new_sheet;
 mod v4_compile;
 mod v4_control;
 mod v4_native;

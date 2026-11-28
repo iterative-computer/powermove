@@ -135,6 +135,91 @@ pub fn corner_density(p: &Plane) -> Option<(f64, f64)> {
     Some((du, dv))
 }
 
+/// Peak sampling density over the part of a quad the target can read.
+pub(crate) fn visible_density(p: &Plane, width: u32, height: u32) -> Option<(f64, f64)> {
+    if !p.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    // Clip in quad coordinates against linear homogeneous half-spaces.
+    let mut points = [[0., 0.]; 10];
+    points[..4].copy_from_slice(&[[0., 0.], [1., 0.], [1., 1.], [0., 1.]]);
+    let mut len = 4;
+    let at =
+        |[u, v]: [f64; 2]| std::array::from_fn::<_, 3, _>(|i| p[i] * u + p[i + 3] * v + p[i + 6]);
+    for edge in 0..5 {
+        if len == 0 {
+            return None;
+        }
+        let distance = |uv| {
+            let [x, y, w] = at(uv);
+            match edge {
+                0 => w - 1e-6,
+                1 => x,
+                2 => f64::from(width) * w - x,
+                3 => y,
+                _ => f64::from(height) * w - y,
+            }
+        };
+        let old = points;
+        let mut a = old[len - 1];
+        let mut da = distance(a);
+        let mut n = 0;
+        for &b in &old[..len] {
+            let db = distance(b);
+            if (da < 0.) != (db < 0.) {
+                let t = da / (da - db);
+                points[n] = std::array::from_fn(|i| a[i] + t * (b[i] - a[i]));
+                n += 1;
+            }
+            if db >= 0. {
+                points[n] = b;
+                n += 1;
+            }
+            (a, da) = (b, db);
+        }
+        len = n;
+    }
+    if len == 0 {
+        return None;
+    }
+    let mut peak = [0.0f64; 2];
+    let mut a = at(points[len - 1]);
+    for &uv in &points[..len] {
+        let b = at(uv);
+        for (axis, maximum) in peak.iter_mut().enumerate() {
+            let i = axis * 3;
+            let numerator =
+                |[x, y, w]: [f64; 3]| [p[i] * w - x * p[i + 2], p[i + 1] * w - y * p[i + 2]];
+            let [x, y] = numerator(a);
+            let [ex, ey] = numerator(b);
+            let (dx, dy) = (ex - x, ey - y);
+            let (w, dw) = (a[2], b[2] - a[2]);
+            *maximum = maximum.max(x.hypot(y) / (w * w));
+            // Each Jacobian column's numerator is constant along its own
+            // axis and its denominator is monotonic there. A maximum lies
+            // on the boundary, where differentiating ||N||² / w⁴ gives a
+            // quadratic with these coefficients.
+            let dot = x * dx + y * dy;
+            let squared = dx * dx + dy * dy;
+            let qa = -dw * squared;
+            let qb = w * squared - 3. * dw * dot;
+            let qc = w * dot - 2. * dw * (x * x + y * y);
+            let discriminant = qb * qb - 4. * qa * qc;
+            if discriminant >= 0. {
+                let q = -0.5 * (qb + discriminant.sqrt().copysign(qb));
+                for t in [q / qa, qc / q] {
+                    if t > 0. && t < 1. {
+                        let z = w + t * dw;
+                        *maximum = maximum.max((x + t * dx).hypot(y + t * dy) / (z * z));
+                    }
+                }
+            }
+        }
+        a = b;
+    }
+    Some((peak[0], peak[1]))
+}
+
 /// The quad's corners in target pixels, `(0,0) (1,0) (1,1) (0,1)`, for
 /// overlay geometry; a corner behind the camera reports its direction's
 /// far point clipped at w = 1e-6.
@@ -161,6 +246,17 @@ mod tests {
         assert_eq!(project(&p, 0.0, 0.0), Some([-40.0, 30.0]));
         assert_eq!(project(&p, 1.0, 1.0), Some([160.0, 130.0]));
         assert_eq!(corner_density(&p), Some((200.0, 100.0)));
+    }
+
+    #[test]
+    fn visible_density_excludes_offscreen_near_plane_corners() {
+        let plane = [100., 0., 1., 0., 100., 0., -50., 0., 0.01];
+        assert!(corner_density(&plane).unwrap().0 > 500_000.);
+        let (du, dv) = visible_density(&plane, 100, 100).unwrap();
+        assert!((du - 100. * 2f64.sqrt() / 0.51).abs() < 1e-8, "{du}");
+        assert!((dv - 100. / 0.51).abs() < 1e-8, "{dv}");
+        let behind_near = [100., 0., 1., 0., 100., 0., -50., 0., -0.01];
+        assert!(visible_density(&behind_near, 100, 100).unwrap().0 < 290.);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! `JSON.parse` semantics.
 
-use core::fmt;
+use core::{fmt, ops::Range};
 
 use super::string::Wtf8Builder;
 use super::{JsString, Map, Value};
@@ -482,15 +482,117 @@ pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
 pub fn parse_project_file(bytes: &[u8]) -> Result<Value, ParseError> {
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     let text = String::from_utf8_lossy(bytes);
+    parse_project_text(&text, false).map(|(document, _)| document)
+}
+
+fn parse_project_text(
+    text: &str,
+    extract_history: bool,
+) -> Result<(Value, Option<Range<usize>>), ParseError> {
     let mut parser = Parser::new(text.as_bytes(), 0, 0);
     parser.retire_archive = true;
+    parser.extract_history = extract_history;
     parser.skip_whitespace();
     let value = parser.value(&mut ValueBuilder)?;
     parser.skip_whitespace();
     if parser.pos != parser.bytes.len() {
         return Err(parser.error("unexpected data after JSON value"));
     }
-    Ok(value)
+    Ok((value, parser.history_range))
+}
+
+/// The validated top-level history in an owned document buffer.
+pub struct RawHistory {
+    text: String,
+    range: Range<usize>,
+}
+
+impl RawHistory {
+    pub fn json(&self) -> JsonSlice<'_> {
+        JsonSlice(&self.text[self.range.clone()])
+    }
+}
+
+/// A slice of a previously validated JSON value. The shallow scans here
+/// locate children without allocating their trees or validating them again.
+#[derive(Clone, Copy)]
+pub struct JsonSlice<'a>(&'a str);
+
+impl<'a> JsonSlice<'a> {
+    pub fn as_str(self) -> &'a str {
+        self.0
+    }
+
+    pub fn parse(self) -> Value {
+        parse(self.0).expect("validated JSON slice")
+    }
+
+    pub fn members(self) -> Option<Vec<(JsString, Self)>> {
+        let mut scan = Scan {
+            bytes: self.0.as_bytes(),
+            pos: 0,
+        };
+        let mut members = Vec::new();
+        scan.members(|scan, key| {
+            let value = self.take_value(scan)?;
+            members.push((key, value));
+            Some(true)
+        })?;
+        Some(members)
+    }
+
+    pub fn items(self) -> Option<Vec<Self>> {
+        let mut scan = Scan {
+            bytes: self.0.as_bytes(),
+            pos: 0,
+        };
+        scan.eat(b'[')?;
+        let mut items = Vec::new();
+        if scan.eat(b']').is_some() {
+            return Some(items);
+        }
+        loop {
+            items.push(self.take_value(&mut scan)?);
+            if scan.eat(b']').is_some() {
+                return Some(items);
+            }
+            scan.eat(b',')?;
+        }
+    }
+
+    fn take_value(self, scan: &mut Scan<'_>) -> Option<Self> {
+        scan.whitespace();
+        let start = scan.pos;
+        scan.skip_value()?;
+        let value = self.0[start..scan.pos].trim_end_matches([' ', '\t', '\r', '\n']);
+        Some(Self(value))
+    }
+}
+
+pub(crate) fn parse_project_file_with_history(
+    bytes: Vec<u8>,
+) -> Result<(Value, Option<RawHistory>), ParseError> {
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    };
+    let content = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let base = text.len() - content.len();
+    let (mut document, range) = parse_project_text(content, true)?;
+    let Some(range) = range else {
+        return Ok((document, None));
+    };
+    let range = base + range.start..base + range.end;
+    // A bare project can have an authored property called history. Only
+    // a wrapped document treats this property as the undo/redo envelope.
+    if !document.get("proj").is_some_and(Value::is_truthy) {
+        document
+            .as_object_mut()
+            .unwrap()
+            .insert("history", JsonSlice(&text[range]).parse());
+        return Ok((document, None));
+    }
+    Ok((document, Some(RawHistory { text, range })))
 }
 
 /// `Object.keys` of the object at `path` in JSON text this module already
@@ -659,6 +761,8 @@ struct Parser<'a, O> {
     members: Vec<(JsString, O)>,
     items: Vec<O>,
     retire_archive: bool,
+    extract_history: bool,
+    history_range: Option<Range<usize>>,
     path: Vec<JsString>,
 }
 
@@ -671,6 +775,8 @@ impl<'a, O> Parser<'a, O> {
             members: Vec::new(),
             items: Vec::new(),
             retire_archive: false,
+            extract_history: false,
+            history_range: None,
             path: Vec::new(),
         }
     }
@@ -738,93 +844,131 @@ impl<'a, O> Parser<'a, O> {
     }
 
     fn object<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
-        self.enter()?;
-        self.pos += 1; // {
-        // Members are collected, then sorted once (already sorted in
-        // canonical JSON) into a map holding exactly them.
+        // Members are collected, then sorted once into a map.
         let base = self.members.len();
-        self.skip_whitespace();
-        if self.peek() == Some(b'}') {
-            self.pos += 1;
-            self.depth -= 1;
-            return Ok(b.object(&mut self.members, base));
-        }
-        loop {
-            self.skip_whitespace();
-            if self.peek() != Some(b'"') {
-                return Err(self.error("expected a property name"));
-            }
-            let key = self.string()?;
-            self.skip_whitespace();
-            if self.peek() != Some(b':') {
-                return Err(self.error("expected ':' after a property name"));
-            }
-            self.pos += 1;
-            self.skip_whitespace();
-            let project = self.retire_archive && self.depth == self.path.len() + 1
-                && (self.path.is_empty()
-                    || self.path.iter().map(|k| k.as_str()).eq([Some("proj")])
-                    || self.path.iter().map(|k| k.as_str()).eq([Some("document")])
-                    || self
+        self.object_members(|parser| {
+            let key = parser.string()?;
+            parser.property_separator()?;
+            let project = parser.retire_archive
+                && parser.depth == parser.path.len() + 1
+                && (parser.path.is_empty()
+                    || parser.path.iter().map(|k| k.as_str()).eq([Some("proj")])
+                    || parser
+                        .path
+                        .iter()
+                        .map(|k| k.as_str())
+                        .eq([Some("document")])
+                    || parser
                         .path
                         .iter()
                         .map(|k| k.as_str())
                         .eq([Some("document"), Some("proj")]));
-            if self.retire_archive && project && key.as_str() == Some("native3dHistoryArchive") {
+            if project && key.as_str() == Some("native3dHistoryArchive") {
                 let mut scan = Scan {
-                    bytes: self.bytes,
-                    pos: self.pos,
+                    bytes: parser.bytes,
+                    pos: parser.pos,
                 };
                 scan.skip_value()
-                    .ok_or_else(|| self.error("unterminated migration archive"))?;
-                self.pos = scan.pos;
+                    .ok_or_else(|| parser.error("unterminated migration archive"))?;
+                parser.pos = scan.pos;
+            } else if parser.extract_history && parser.depth == 1 && key.as_str() == Some("history")
+            {
+                let start = parser.pos;
+                parser.discard()?;
+                parser.history_range = Some(start..parser.pos);
             } else {
-                if self.retire_archive { self.path.push(key.clone()); }
-                let value = self.value(b)?;
-                if self.retire_archive { self.path.pop(); }
-                self.members.push((key, value));
-            }
-            self.skip_whitespace();
-            match self.peek() {
-                Some(b',') => self.pos += 1,
-                Some(b'}') => {
-                    self.pos += 1;
-                    break;
+                if parser.retire_archive {
+                    parser.path.push(key.clone());
                 }
-                _ => return Err(self.error("expected ',' or '}'")),
+                let value = parser.value(b)?;
+                if parser.retire_archive {
+                    parser.path.pop();
+                }
+                parser.members.push((key, value));
             }
-        }
-        self.depth -= 1;
+            Ok(())
+        })?;
         Ok(b.object(&mut self.members, base))
     }
 
     fn array<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
-        self.enter()?;
-        self.pos += 1; // [
         let base = self.items.len();
+        self.container_items(b']', "expected ',' or ']'", |parser| {
+            let item = parser.value(b)?;
+            parser.items.push(item);
+            Ok(())
+        })?;
+        Ok(b.array(self.items.drain(base..).collect()))
+    }
+
+    fn object_members(
+        &mut self,
+        mut member: impl FnMut(&mut Self) -> Result<(), ParseError>,
+    ) -> Result<(), ParseError> {
+        self.container_items(b'}', "expected ',' or '}'", |parser| {
+            if parser.peek() != Some(b'"') {
+                return Err(parser.error("expected a property name"));
+            }
+            member(parser)
+        })
+    }
+
+    fn container_items(
+        &mut self,
+        end: u8,
+        missing_separator: &'static str,
+        mut item: impl FnMut(&mut Self) -> Result<(), ParseError>,
+    ) -> Result<(), ParseError> {
+        self.enter()?;
+        self.pos += 1;
         self.skip_whitespace();
-        if self.peek() == Some(b']') {
-            self.pos += 1;
-            self.depth -= 1;
-            return Ok(b.array(Vec::new()));
-        }
-        loop {
-            self.skip_whitespace();
-            let item = self.value(b)?;
-            self.items.push(item);
-            self.skip_whitespace();
-            match self.peek() {
-                Some(b',') => self.pos += 1,
-                Some(b']') => {
-                    self.pos += 1;
-                    break;
+        if self.peek() != Some(end) {
+            loop {
+                item(self)?;
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b',') => {
+                        self.pos += 1;
+                        self.skip_whitespace();
+                    }
+                    Some(byte) if byte == end => break,
+                    _ => return Err(self.error(missing_separator)),
                 }
-                _ => return Err(self.error("expected ',' or ']'")),
             }
         }
+        self.pos += 1;
         self.depth -= 1;
-        let items = self.items.drain(base..).collect();
-        Ok(b.array(items))
+        Ok(())
+    }
+
+    fn property_separator(&mut self) -> Result<(), ParseError> {
+        self.skip_whitespace();
+        if self.peek() != Some(b':') {
+            return Err(self.error("expected ':' after a property name"));
+        }
+        self.pos += 1;
+        self.skip_whitespace();
+        Ok(())
+    }
+
+    /// Validate a value with the same grammar and depth as `value`, without
+    /// building a tree or converting its numbers and strings.
+    fn discard(&mut self) -> Result<(), ParseError> {
+        match self.peek() {
+            Some(b'{') => self.object_members(|parser| {
+                parser.string_token::<false>()?;
+                parser.property_separator()?;
+                parser.discard()
+            }),
+            Some(b'[') => self.container_items(b']', "expected ',' or ']'", Self::discard),
+            Some(b'"') => self.string_token::<false>().map(|_| ()),
+            Some(b't') => self.expect_literal(b"true"),
+            Some(b'f') => self.expect_literal(b"false"),
+            Some(b'n') => self.expect_literal(b"null"),
+            Some(b'-' | b'0'..=b'9') => self.number_token(),
+            None => Err(self.error("unexpected end of input")),
+            Some(_) => Err(self.error("unexpected token")),
+        }
     }
 
     fn hex4(&mut self) -> Result<u16, ParseError> {
@@ -844,27 +988,38 @@ impl<'a, O> Parser<'a, O> {
     }
 
     fn string(&mut self) -> Result<JsString, ParseError> {
+        Ok(self.string_token::<true>()?.expect("string requested"))
+    }
+
+    fn string_token<const BUILD: bool>(&mut self) -> Result<Option<JsString>, ParseError> {
         self.pos += 1; // opening quote
         let start = self.pos;
         // Fast path: no escapes.
         while let Some(&b) = self.bytes.get(self.pos) {
             match b {
                 b'"' => {
-                    let text = core::str::from_utf8(&self.bytes[start..self.pos])
-                        .map_err(|_| self.error("invalid UTF-8"))?;
+                    let value = if BUILD {
+                        let text = core::str::from_utf8(&self.bytes[start..self.pos])
+                            .map_err(|_| self.error("invalid UTF-8"))?;
+                        Some(JsString::from(text))
+                    } else {
+                        None
+                    };
                     self.pos += 1;
-                    return Ok(JsString::from(text));
+                    return Ok(value);
                 }
                 b'\\' => break,
                 0x00..=0x1f => return Err(self.error("bad control character in string literal")),
                 _ => self.pos += 1,
             }
         }
-        let mut builder = Wtf8Builder::with_capacity(self.pos - start + 16);
-        builder.push_str(
-            core::str::from_utf8(&self.bytes[start..self.pos])
-                .map_err(|_| self.error("invalid UTF-8"))?,
-        );
+        let mut builder = BUILD.then(|| Wtf8Builder::with_capacity(self.pos - start + 16));
+        if let Some(builder) = &mut builder {
+            builder.push_str(
+                core::str::from_utf8(&self.bytes[start..self.pos])
+                    .map_err(|_| self.error("invalid UTF-8"))?,
+            );
+        }
         loop {
             let Some(&b) = self.bytes.get(self.pos) else {
                 return Err(self.error("unterminated string"));
@@ -872,7 +1027,7 @@ impl<'a, O> Parser<'a, O> {
             match b {
                 b'"' => {
                     self.pos += 1;
-                    return Ok(builder.finish());
+                    return Ok(builder.map(Wtf8Builder::finish));
                 }
                 b'\\' => {
                     self.pos += 1;
@@ -880,22 +1035,25 @@ impl<'a, O> Parser<'a, O> {
                         return Err(self.error("unterminated string"));
                     };
                     self.pos += 1;
-                    match escape {
-                        b'"' => builder.push_char('"'),
-                        b'\\' => builder.push_char('\\'),
-                        b'/' => builder.push_char('/'),
-                        b'b' => builder.push_char('\u{8}'),
-                        b'f' => builder.push_char('\u{c}'),
-                        b'n' => builder.push_char('\n'),
-                        b'r' => builder.push_char('\r'),
-                        b't' => builder.push_char('\t'),
-                        b'u' => {
-                            let unit = self.hex4()?;
-                            builder.push_unit(unit);
-                        }
+                    let unit = match escape {
+                        b'"' | b'\\' | b'/' => u16::from(escape),
+                        b'b' => 8,
+                        b'f' => 12,
+                        b'n' => 10,
+                        b'r' => 13,
+                        b't' => 9,
+                        b'u' => self.hex4()?,
                         _ => {
                             self.pos -= 1;
                             return Err(self.error("bad escaped character"));
+                        }
+                    };
+                    if let Some(builder) = &mut builder {
+                        if escape == b'u' {
+                            builder.push_unit(unit);
+                        } else {
+                            builder
+                                .push_char(char::from_u32(u32::from(unit)).expect("ASCII escape"));
                         }
                     }
                 }
@@ -903,12 +1061,14 @@ impl<'a, O> Parser<'a, O> {
                 _ => {
                     // Copy one UTF-8 scalar (the input is valid UTF-8).
                     let len = utf8_len(b);
-                    let chunk = self
-                        .bytes
-                        .get(self.pos..self.pos + len)
-                        .and_then(|c| core::str::from_utf8(c).ok())
-                        .ok_or_else(|| self.error("invalid UTF-8"))?;
-                    builder.push_str(chunk);
+                    if let Some(builder) = &mut builder {
+                        let chunk = self
+                            .bytes
+                            .get(self.pos..self.pos + len)
+                            .and_then(|c| core::str::from_utf8(c).ok())
+                            .ok_or_else(|| self.error("invalid UTF-8"))?;
+                        builder.push_str(chunk);
+                    }
                     self.pos += len;
                 }
             }
@@ -917,6 +1077,13 @@ impl<'a, O> Parser<'a, O> {
 
     fn number(&mut self) -> Result<f64, ParseError> {
         let start = self.pos;
+        self.number_token()?;
+        let text = core::str::from_utf8(&self.bytes[start..self.pos]).expect("ASCII");
+        // Correctly rounded; out-of-range magnitudes become ±inf or ±0 as in JS.
+        text.parse().map_err(|_| self.error("bad number"))
+    }
+
+    fn number_token(&mut self) -> Result<(), ParseError> {
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
@@ -950,10 +1117,7 @@ impl<'a, O> Parser<'a, O> {
                 self.pos += 1;
             }
         }
-        let text = core::str::from_utf8(&self.bytes[start..self.pos]).expect("ASCII");
-        // Correctly rounded; out-of-range magnitudes become ±inf or ±0 as in JS.
-        let n: f64 = text.parse().map_err(|_| self.error("bad number"))?;
-        Ok(n)
+        Ok(())
     }
 }
 
@@ -969,6 +1133,76 @@ fn utf8_len(first: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_only_the_last_envelope_history() {
+        let raw =
+            r#"{"entries":[ "escaped \"quote\" and } ]", {"history":"nested"}, -0, "\ud800" ]}"#;
+        let bytes = format!(
+            "\u{feff} {{ \"history\": false, \"proj\": {{\"layers\":[{{\"history\":[1]}}]}}, \"hi\\u0073tory\" : {raw}  , \"ws\": null }}"
+        ).into_bytes();
+        let mut expected = parse_project_file(&bytes).unwrap();
+        let expected_history = expected.as_object_mut().unwrap().remove("history").unwrap();
+        let (document, history) = parse_project_file_with_history(bytes).unwrap();
+        assert_eq!(document, expected);
+        let history = history.unwrap();
+        let history = history.json();
+        assert_eq!(history.as_str(), raw);
+        assert_eq!(history.parse(), expected_history);
+        let members = history.members().unwrap();
+        let items = members[0].1.items().unwrap();
+        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items[1].parse().get("history").and_then(Value::as_str),
+            Some("nested")
+        );
+        assert!(items[2].parse().as_f64().unwrap().is_sign_negative());
+        assert_eq!(items[3].as_str(), r#""\ud800""#);
+    }
+
+    #[test]
+    fn skipped_history_preserves_json_errors_and_ordinary_documents() {
+        for text in [
+            r#"{"proj":{},"history":{"entries":[1,]}}"#,
+            r#"{"proj":{},"history":{"entries":[] ,}}"#,
+            r#"{"proj":{},"history":"invalid \q","history":null}"#,
+            r#"{"proj":{},"history":[00]}"#,
+            r#"{"proj":{},"history":[1e+]}"#,
+            r#"{"proj":{},"history":[0},"ws":{}}"#,
+            r#"{"proj":{},"history":[] ,}"#,
+            r#"{"proj":{},"history":[] } garbage"#,
+        ] {
+            let expected = parse_project_file(text.as_bytes()).unwrap_err();
+            let actual = parse_project_file_with_history(text.as_bytes().to_vec())
+                .err()
+                .unwrap();
+            assert_eq!(actual, expected, "{text}");
+        }
+        let deep = format!(
+            "{{\"proj\":{{}},\"history\":{}}}",
+            "[".repeat(MAX_DEPTH) + &"]".repeat(MAX_DEPTH)
+        );
+        assert!(parse_project_file_with_history(deep.into_bytes()).is_err());
+        for bytes in [
+            br#"{"proj":{"history":[true]}}"#.as_slice(),
+            br#"{"proj":null,"history":0}"#,
+            br#"{"name":"bare","history":[{"data":"unchanged"}]}"#,
+        ] {
+            let (document, history) = parse_project_file_with_history(bytes.to_vec()).unwrap();
+            assert_eq!(document, parse_project_file(bytes).unwrap());
+            assert!(history.is_none());
+        }
+        let bytes = b"{\"proj\":{},\"history\":\"\xff\"}";
+        let (_, history) = parse_project_file_with_history(bytes.to_vec()).unwrap();
+        assert_eq!(
+            history.unwrap().json().parse(),
+            parse_project_file(bytes)
+                .unwrap()
+                .get("history")
+                .unwrap()
+                .clone()
+        );
+    }
 
     #[test]
     fn member_order_is_object_keys_of_the_named_object() {

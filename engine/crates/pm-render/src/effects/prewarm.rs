@@ -20,8 +20,8 @@
 //! own shader cache keeps compiled functions per app bundle (wgpu exposes no
 //! binary archive on Metal).
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use pm_glsl::{Failure, Prepared};
@@ -30,13 +30,53 @@ use pm_protocol::definitions::DefinitionKind;
 
 use super::program::GpuProgram;
 
-/// Process-wide serialization for background shader prewarm workers (effects
-/// and custom GLSL shader layers across viewer and settle renderers). Keeps
-/// background compilation to at most one of the two `pm-glsl-compiler`
-/// process slots so a foreground frame always has a free slot.
-pub(crate) fn prewarm_gate() -> &'static Mutex<()> {
-    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(()))
+/// A worker queue whose pending jobs can move to the front without running
+/// duplicate jobs. The channel wakes the worker once per submitted job.
+pub(crate) struct JobQueue<T> {
+    ready: mpsc::Sender<()>,
+    jobs: Arc<Mutex<VecDeque<T>>>,
+}
+
+impl<T> JobQueue<T> {
+    pub fn new() -> (Self, mpsc::Receiver<()>, Arc<Mutex<VecDeque<T>>>) {
+        let (ready, wake) = mpsc::channel();
+        let jobs = Arc::new(Mutex::new(VecDeque::new()));
+        (
+            Self {
+                ready,
+                jobs: jobs.clone(),
+            },
+            wake,
+            jobs,
+        )
+    }
+
+    pub fn send(&self, job: T) -> bool {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if self.ready.send(()).is_err() {
+            return false;
+        }
+        jobs.push_back(job);
+        true
+    }
+
+    pub fn remove(&self, matches: impl Fn(&T) -> bool) -> Option<T> {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let index = jobs.iter().position(matches)?;
+        jobs.remove(index)
+    }
+
+    pub fn clear(&self) {
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    pub fn promote(&self, matches: impl Fn(&T) -> bool) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = jobs.iter().position(matches) {
+            let job = jobs.remove(index).expect("pending job");
+            jobs.push_front(job);
+        }
+    }
 }
 
 pub(crate) type Key = (DefinitionKind, DefinitionId);
@@ -63,12 +103,8 @@ pub(crate) struct Built {
 /// The worker and the builds in flight.
 #[derive(Default)]
 pub(crate) struct Prewarm {
-    worker: Option<(mpsc::Sender<Job>, std::sync::Mutex<mpsc::Receiver<Built>>)>,
+    worker: Option<(JobQueue<Job>, std::sync::Mutex<mpsc::Receiver<Built>>)>,
     in_flight: HashMap<Key, pm_glsl::Key>,
-    /// Queued builds and whether the worker started them. A frame that
-    /// needs a program still queued takes it back (builds it itself rather
-    /// than wait behind other builds); one already started is waited for.
-    started: Arc<std::sync::Mutex<HashMap<(Key, pm_glsl::Key), bool>>>,
     /// Builds finished off the frame thread, and their time (µs).
     pub built: u64,
     pub built_us: u64,
@@ -80,11 +116,10 @@ pub(crate) struct Prewarm {
 impl Drop for Prewarm {
     fn drop(&mut self) {
         // The worker can finish its current build, but queued work must not
-        // keep a retiring device alive. Missing claims skip those jobs.
-        self.started
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        // keep a retiring device alive.
+        if let Some((jobs, _)) = &self.worker {
+            jobs.clear();
+        }
     }
 }
 
@@ -113,29 +148,24 @@ pub(crate) fn build(
 }
 
 impl Prewarm {
-    fn worker(&mut self) -> Option<&mpsc::Sender<Job>> {
+    fn worker(&mut self) -> Option<&JobQueue<Job>> {
         if self.worker.is_none() {
-            let (jobs, rx) = mpsc::channel::<Job>();
+            let (jobs, rx, pending) = JobQueue::<Job>::new();
             let (tx, done) = mpsc::channel::<Built>();
-            let claims = self.started.clone();
             std::thread::Builder::new()
                 .name("pm-program-prewarm".into())
                 .spawn(move || {
+                    pm_glsl::compiler::background_worker();
                     // Ends when the renderer drops its sender.
-                    while let Ok(job) = rx.recv() {
-                        let _gate = prewarm_gate().lock().unwrap_or_else(|e| e.into_inner());
-                        {
-                            let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
-                            match claims.get_mut(&(job.key.clone(), job.source)) {
-                                Some(started) => *started = true,
-                                // A frame took it back.
-                                None => continue,
-                            }
-                        }
+                    while rx.recv().is_ok() {
+                        let job = pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .pop_front();
+                        let Some(job) = job else { continue };
                         let started = Instant::now();
                         let result =
                             build(&job.device, &job.prepared, job.key.1.as_str(), job.format);
-                        drop(_gate);
                         let built = Built {
                             key: job.key,
                             source: job.source,
@@ -168,31 +198,23 @@ impl Prewarm {
         let Some(jobs) = self.worker() else {
             return false;
         };
-        let jobs = jobs.clone();
-        let claim = (key.clone(), source);
-        // Publish before sending: the worker can receive immediately.
-        self.started
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(claim.clone(), false);
-        let sent = jobs
-            .send(Job {
-                key: key.clone(),
-                source,
-                prepared,
-                device: device.clone(),
-                format,
-            })
-            .is_ok();
+        let sent = jobs.send(Job {
+            key: key.clone(),
+            source,
+            prepared,
+            device: device.clone(),
+            format,
+        });
         if sent {
             self.in_flight.insert(key, source);
-        } else {
-            self.started
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&claim);
         }
         sent
+    }
+
+    pub fn promote(&self, key: &Key, source: pm_glsl::Key) {
+        if let Some((jobs, _)) = &self.worker {
+            jobs.promote(|job| &job.key == key && job.source == source);
+        }
     }
 
     pub fn in_flight(&self, key: &Key) -> bool {
@@ -202,14 +224,13 @@ impl Prewarm {
     /// Takes `key`'s build back if the worker has not started it (true: the
     /// caller builds it); false when it is being built or was never queued.
     pub fn reclaim(&mut self, key: &Key) -> bool {
-        let mut claims = self.started.lock().unwrap_or_else(|e| e.into_inner());
         let Some(source) = self.in_flight.get(key).copied() else {
             return false;
         };
-        let claim = (key.clone(), source);
-        if claims.get(&claim) == Some(&false) {
-            claims.remove(&claim);
-            drop(claims);
+        if self.worker.as_ref().is_some_and(|(jobs, _)| {
+            jobs.remove(|job| &job.key == key && job.source == source)
+                .is_some()
+        }) {
             self.in_flight.remove(key);
             return true;
         }
@@ -263,14 +284,11 @@ impl Prewarm {
     }
 
     fn settle(&mut self, built: &[Built]) {
-        let mut claims = self.started.lock().unwrap_or_else(|e| e.into_inner());
         for b in built {
             if self.in_flight.get(&b.key) == Some(&b.source) {
                 self.in_flight.remove(&b.key);
             }
-            claims.remove(&(b.key.clone(), b.source));
         }
-        drop(claims);
         self.built += built.len() as u64;
         self.built_us += built.iter().map(|b| b.us).sum::<u64>();
     }
@@ -279,48 +297,106 @@ impl Prewarm {
 /// The definitions a document's layers name: effects (`fx[].type`),
 /// transitions (`transitionIn` and `transitionOut`) and extension layers
 /// (`d.definition`), in the root composition and every `comps` entry, in
-/// document order without repeats. A hint for what to build first; what a
+/// approximate timeline order without repeats. A hint for what to build first; what a
 /// frame draws is decided by the plan.
-pub(crate) fn document_definitions(doc: &pm_model::Document) -> Vec<Key> {
+pub(crate) fn document_definitions<'a>(
+    layers: impl IntoIterator<Item = &'a pm_model::Node>,
+    effects: &super::Effects,
+) -> Vec<Key> {
     use pm_eval::node;
-    let root = doc.root();
-    let mut lists = vec![node::member(root, "layers")];
-    if let Some(comps) = node::member(root, "comps") {
-        lists.extend(
-            node::entries(comps)
-                .into_iter()
-                .map(|(_, comp)| node::member(comp.node(), "layers")),
-        );
-    }
-    let mut out: Vec<Key> = Vec::new();
-    let mut push = |kind: DefinitionKind, id: Option<&pm_model::Node>| {
-        let Some(id) = node::string(id).map(|s| s.to_string_lossy()) else {
-            return;
-        };
-        if id.is_empty() {
-            return;
+    let mut out = Vec::new();
+    let mut saved = SavedEffects::default();
+    for layer in layers {
+        for fx in node::array(layer.get("fx")).unwrap_or_default() {
+            if !matches!(
+                fx.get("on").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(false))
+            ) {
+                saved.push(effects, fx, &mut out);
+            }
         }
-        let key = (kind, DefinitionId::from(id.as_str()));
-        if !out.contains(&key) {
-            out.push(key);
-        }
-    };
-    for layer in lists.into_iter().filter_map(node::array).flatten() {
-        for fx in node::array(node::member(Some(layer), "fx")).unwrap_or_default() {
-            push(DefinitionKind::Effect, node::member(Some(fx), "type"));
-        }
-        for edge in ["transitionIn", "transitionOut"] {
-            push(
-                DefinitionKind::Transition,
-                node::member(node::member(Some(layer), edge), "type"),
-            );
-        }
-        if node::is_str(node::member(Some(layer), "type"), "extension") {
-            push(
-                DefinitionKind::Layer,
-                node::member(node::member(Some(layer), "d"), "definition"),
-            );
-        }
+        push_other_programs(layer, &mut out);
     }
     out
+}
+
+/// Resolve each authored revision once per scan. Program ids are also the
+/// ids the foreground plan uses for legacy revisions and extension overrides.
+#[derive(Default)]
+pub(crate) struct SavedEffects<'a>(HashSet<(&'a str, Option<u64>)>);
+
+impl<'a> SavedEffects<'a> {
+    pub(crate) fn push(
+        &mut self,
+        effects: &super::Effects,
+        fx: &'a pm_model::Node,
+        out: &mut Vec<Key>,
+    ) {
+        use pm_eval::node;
+        let Some(id) = node::string(fx.get("type")).and_then(|s| s.as_str()) else {
+            return;
+        };
+        let version = fx.get("version");
+        let number = if node::is_nullish(version) {
+            None
+        } else if let Some(n) = node::number(version) {
+            Some(n.to_bits())
+        } else {
+            return;
+        };
+        if self.0.insert((id, number))
+            && let Ok(key) = effects.saved_key(id, version)
+        {
+            push_program(out, DefinitionKind::Effect, &key);
+        }
+    }
+}
+
+pub(crate) fn push_other_programs(layer: &pm_model::Node, out: &mut Vec<Key>) {
+    use pm_eval::node;
+    let mut push = |kind, node| {
+        if let Some(id) = node::string(node).and_then(|id| id.as_str()) {
+            push_program(out, kind, id);
+        }
+    };
+    for edge in ["transitionIn", "transitionOut"] {
+        push(
+            DefinitionKind::Transition,
+            node::member(layer.get(edge), "type"),
+        );
+    }
+    if node::is_str(layer.get("type"), "extension") {
+        push(
+            DefinitionKind::Layer,
+            node::member(layer.get("d"), "definition"),
+        );
+    }
+}
+
+fn push_program(out: &mut Vec<Key>, kind: DefinitionKind, id: &str) {
+    let key = (kind, DefinitionId::from(id));
+    if !id.is_empty() && !out.contains(&key) {
+        out.push(key);
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::JobQueue;
+
+    #[test]
+    fn a_pending_cut_can_promote_and_reclaim_its_job() {
+        let (queue, ready, pending) = JobQueue::new();
+        for job in 0..4 {
+            assert!(queue.send(job));
+        }
+        queue.promote(|job| *job == 3);
+        queue.promote(|job| *job == 3);
+        assert_eq!(queue.remove(|job| *job == 2), Some(2));
+        for _ in 0..4 {
+            ready.recv().unwrap();
+        }
+        assert_eq!(pending.lock().unwrap().drain(..).collect::<Vec<_>>(), [3, 0, 1]);
+    }
 }

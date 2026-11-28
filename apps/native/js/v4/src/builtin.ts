@@ -18,12 +18,21 @@ export type Capability =
   | "transitions"
   | "layers"
   | "toolbar"
+  | "toolbar.modify"
+  | "toolbar.contributeAddItem"
   | "panelHeader"
+  | "panelHeader.modify"
   | "menuBar"
+  | "statusBar"
+  | "statusBar.contribute"
+  | "statusBar.modify"
+  | "ui"
+  | "ui.surfaces"
   | "tools"
   | "slots"
   | "events"
   | "workspace"
+  | "workspace.setLayout"
   | "dialogs"
   | "fs"
   | "storage"
@@ -78,6 +87,8 @@ export interface BuiltinEnv {
   timeline?: Timeline;
   /** Layer 1: contribute items to the native window toolbar. */
   toolbar?: Toolbar;
+  statusBar?: StatusBar;
+  ui?: Ui;
   /** Layer 1: contribute action buttons/pills to any panel header. */
   panelHeader?: PanelHeader;
   /** Layer 1: contribute items to the macOS menu bar. */
@@ -121,6 +132,8 @@ export interface ActivateContext {
   overlays: Overlays;
   timeline: Timeline;
   toolbar: Toolbar;
+  statusBar: StatusBar;
+  ui: Ui;
   panelHeader: PanelHeader;
   menuBar: MenuBar;
   tools: Tools;
@@ -138,6 +151,29 @@ export interface ActivateContext {
 
 // ---- Layer 1: Shell & Window Chrome Hooks ------------------------------------
 
+export type ToolbarTarget =
+  | "title"
+  | "tools"
+  | "add"
+  | "tasks"
+  | "agent"
+  | "export"
+  | "panelLibrary";
+
+export type ToolbarZone = "leading" | "center" | "after-add" | "trailing";
+
+export interface ToolbarMenuItem {
+  id?: string;
+  label: string;
+  icon?: string;
+  key?: string;
+  checked?: boolean;
+  disabled?: boolean;
+  separator?: boolean;
+  submenu?: ToolbarMenuItem[];
+  run?: () => unknown;
+}
+
 export interface ToolbarItem {
   id: string;
   label: string;
@@ -146,11 +182,76 @@ export interface ToolbarItem {
   tooltip?: string;
   active?: boolean;
   badge?: string;
+  zone?: ToolbarZone;
+  order?: number;
+  variant?: "default" | "accent" | "subtle";
+  disabled?: boolean;
+  menu?: ToolbarMenuItem[];
+  onClick?: () => unknown;
+}
+
+export interface ToolbarPatch {
+  hidden?: boolean;
+  label?: string;
+  icon?: string;
+  tooltip?: string;
+  badge?: string;
+  order?: number;
+}
+
+export interface ToolbarAddItem {
+  id: string;
+  label: string;
+  icon?: string;
+  section?: string;
+  tooltip?: string;
   onClick: () => unknown;
 }
 
 export interface Toolbar {
   contribute(item: ToolbarItem): () => void;
+  modify(target: ToolbarTarget, patch: ToolbarPatch): () => void;
+  contributeAddItem(item: ToolbarAddItem): () => void;
+}
+
+export type StatusBarSide = "left" | "center" | "right";
+export type StatusBarTarget = "state" | "offline" | "dimensions" | "workspace";
+
+export interface StatusBarItem {
+  id: string;
+  side: StatusBarSide;
+  order?: number;
+  text: string;
+  icon?: string;
+  tooltip?: string;
+  tone?: "default" | "accent" | "warning" | "danger";
+  clickable?: boolean;
+  onClick?: () => unknown;
+}
+
+export interface StatusBarPatch {
+  hidden?: boolean;
+  text?: string;
+}
+
+export interface StatusBar {
+  contribute(item: StatusBarItem): () => void;
+  modify(target: StatusBarTarget, patch: StatusBarPatch): () => void;
+}
+
+export interface UiSurfaces {
+  toolbarTargets: ToolbarTarget[];
+  toolbarZones: ToolbarZone[];
+  statusBarTargets: StatusBarTarget[];
+  statusBarSides: StatusBarSide[];
+  slots: (SlotName | "panel:<panelId>.top" | "panel:<panelId>.bottom")[];
+  contextMenus: ContextMenuLocation[];
+  replaceablePanels: string[];
+  excluded: string[];
+}
+
+export interface Ui {
+  surfaces(): UiSurfaces;
 }
 
 export interface PanelHeaderAction {
@@ -163,12 +264,20 @@ export interface PanelHeaderAction {
   onClick: () => unknown;
 }
 
+export interface PanelHeaderPatch {
+  title?: string;
+  icon?: string;
+  badge?: string;
+  hidden?: boolean;
+}
+
 export interface PanelHeader {
   /**
    * Add a trailing action button/pill to `panelId` (e.g. "timeline",
-   * "inspector", "viewer", "assets", "agent", or "*" for every panel).
+   * "inspector", "viewer", "assets", "agent", or "*" for all eligible panels).
    */
   contribute(panelId: string, action: PanelHeaderAction): () => void;
+  modify(panelId: string, patch: PanelHeaderPatch): () => void;
 }
 
 export type MenuBarItem =
@@ -232,6 +341,7 @@ export interface ToolDefinition {
   icon?: string;
   shortcut?: string;
   cursor?: string;
+  showInToolbar?: boolean;
   /** Optional overlay component rendered above the viewer while this tool is active. */
   overlay?: (props: { frame: Json; active: boolean }) => unknown;
   onActivate?: () => unknown;
@@ -250,14 +360,55 @@ export interface Tools {
 
 // ---- Layer 3: Composable Slots Inside Built-in Panels ------------------------
 
-export type SlotId =
+export type SlotName =
   | "inspector.top"
   | "inspector.bottom"
   | "timeline.toolbar"
   | "timeline.footer"
   | "viewer.hud"
   | "agent.toolbar"
-  | "assets.toolbar";
+  | "assets.toolbar"
+  | "toolbar.leading"
+  | "toolbar.center"
+  | "toolbar.trailing"
+  | "statusBar.left"
+  | "statusBar.center"
+  | "statusBar.right"
+  | "viewer.top"
+  | "viewer.bottom"
+  | "viewer.controls.left"
+  | "viewer.controls.right"
+  | "timeline.header"
+  | "timeline.top"
+  | "timeline.bottom"
+  | "inspector.header"
+  | "assets.top"
+  | "assets.bottom"
+  | "effects.top"
+  | "effects.bottom"
+  | "layerEffects.top"
+  | "layerEffects.bottom"
+  | "agent.top"
+  | "agent.bottom"
+  | "easing.top"
+  | "easing.bottom"
+  | "color.top"
+  | "color.bottom"
+  | "export.top"
+  | "export.bottom"
+  | "home.header"
+  | "home.top"
+  | "home.bottom"
+  | "panelLibrary.top"
+  | "panelLibrary.bottom"
+  | "welcome.top"
+  | "welcome.bottom"
+  | "store.top"
+  | "store.bottom"
+  | `panel:${string}.top`
+  | `panel:${string}.bottom`;
+
+export type SlotId = SlotName;
 
 export interface Slots {
   /** Render a live native UI component into a built-in panel slot without forking. */
@@ -276,7 +427,7 @@ export interface TransitionDefinition {
   id: string;
   label: string;
   group?: string;
-  params?: import("./effect-definition").EffectParam[];
+  params?: import("./effect-definition").EffectParameter[];
   frag: string;
   rawShader?: boolean;
   [key: string]: unknown;
@@ -294,7 +445,7 @@ export interface LayerDefinition {
   icon?: string;
   version?: number;
   defaults?: Record<string, Json>;
-  params?: import("./effect-definition").EffectParam[];
+  params?: import("./effect-definition").EffectParameter[];
   renderer: {
     kind: "fragment";
     fragment: string;
@@ -339,6 +490,7 @@ export interface Workspace {
   focusPanel(id: string): Promise<void>;
   togglePanel(id: string): Promise<void>;
   getLayout(): Promise<WorkspaceLayout>;
+  setLayout(layout: WorkspaceLayout | Json): Promise<void>;
   runCommand(name: string, args?: Json[]): Promise<void>;
   notify(message: string): Promise<void>;
   setTool(toolId: string): Promise<void>;
@@ -495,7 +647,7 @@ export interface Timeline {
     keyframeSize?: number;
     showLayerNumbers?: boolean;
     showTypeBadges?: boolean;
-    toolbarDensity?: "compact" | "normal";
+    toolbarDensity?: "compact" | "normal" | "comfortable";
     surfaceOrder?: "normal" | "reversed";
   }): void;
   paint(painter: (clips: Json[]) => Record<string, unknown[]>): () => void;
@@ -508,14 +660,21 @@ export interface Overlays {
   ): () => void;
 }
 
+export type ContextMenuLocation =
+  | "panel:context"
+  | "layer:context"
+  | "timeline:context"
+  | "viewer:context"
+  | "assets:context"
+  | "inspector:context"
+  | "effects:context"
+  | "home:context"
+  | "toolbar:context"
+  | "statusBar:context";
+
 export interface Menus {
   contribute(
-    location:
-      | "panel:context"
-      | "layer:context"
-      | "timeline:context"
-      | "viewer:context"
-      | "titlebar:right",
+    location: ContextMenuLocation | "titlebar:right",
     items: (
       ctx: Record<string, Json>,
     ) => MenuContribution[] | Promise<MenuContribution[]>,

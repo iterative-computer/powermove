@@ -197,6 +197,7 @@ enum Reply {
 }
 
 pub struct StoreWindow {
+    pub(crate) slot_owner: Option<WeakEntity<crate::session::Controller>>,
     motion: Motion<u64>,
     transitions: StoreMotion,
     scroll: ScrollHandle,
@@ -310,6 +311,7 @@ impl StoreWindow {
             yours: Vec::new(),
             publishing: None,
             owner: None,
+            slot_owner: None,
             busy: None,
             message: None,
             embedded: false,
@@ -3008,18 +3010,35 @@ impl Render for StoreWindow {
                 .child(self.header(label, window, cx))
                 .children(self.message_line(cx));
         }
+        let [top_slots, bottom_slots] = ["store.top", "store.bottom"]
+            .map(|id| crate::builtins::window_slot(self.slot_owner.as_ref(), id, &t, window, cx));
+        let slot_row = |slots: Vec<AnyElement>| {
+            (!slots.is_empty()).then(|| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .justify_center()
+                    .px(px(t.space.xxl))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .max_w(px(t.metrics.store_column))
+                            .children(slots),
+                    )
+            })
+        };
+        let top_slots = slot_row(top_slots);
+        let bottom_slots = slot_row(bottom_slots);
         let body = div()
             .id("store-body")
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            // A window of its own keeps the toolbar's height for its buttons.
-            // v1.2.0's page starts 48 pt down; a window of its own also
-            // keeps the toolbar's height for its buttons.
-            .pt(px(t.space.section
-                + t.space.xl
-                + if self.embedded { 0. } else { t.metrics.toolbar }))
+            // v1.2.0's page starts 48 pt down.
+            .pt(px(t.space.section + t.space.xl))
             .pb(px(t.space.section * 2.))
             .px(px(t.space.xxl))
             .child(div().flex().justify_center().child(column.child(content)));
@@ -3031,7 +3050,10 @@ impl Render for StoreWindow {
             .text_color(rgb(t.colors.text))
             .text_role(&t, Text::Body)
             .font_family(pm_design::TEXT_FONT)
+            .when(!self.embedded, |d| d.pt(px(t.metrics.toolbar)))
+            .children(top_slots)
             .child(body)
+            .children(bottom_slots)
             .child(self.kit().settle())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))

@@ -65,12 +65,22 @@ fn resolve<T>(
 pub(super) type AppIcon = fn(&str) -> Option<Retained<NSImage>>;
 
 pub(super) fn installed_app_icon(name: &str) -> Option<Retained<NSImage>> {
+    use std::{cell::RefCell, collections::HashMap};
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Option<Retained<NSImage>>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(name).cloned()) {
+        return hit;
+    }
     let workspace = NSWorkspace::sharedWorkspace();
     // This lookup is by exact app name because several clients can provide
     // an app bundle without sharing a single known bundle identifier.
     #[allow(deprecated)]
-    let path = workspace.fullPathForApplication(&NSString::from_str(&format!("{name}.app")))?;
-    bundle_icon(&path)
+    let found = workspace
+        .fullPathForApplication(&NSString::from_str(&format!("{name}.app")))
+        .and_then(|path| bundle_icon(&path));
+    CACHE.with(|c| c.borrow_mut().insert(name.to_owned(), found.clone()));
+    found
 }
 
 fn bundle_icon(path: &NSString) -> Option<Retained<NSImage>> {

@@ -220,6 +220,59 @@ fn level2_shader_layers_render_at_the_density_they_are_drawn_at() {
 }
 
 #[test]
+fn legacy_shader_uses_projected_resolution_on_a_camera_closeup() {
+    let mut r = Renderer::headless().unwrap();
+    let mut d = shader(
+        "void main(){ fragColor = vec4(iResolution / 128.0, 0.0, 1.0); }",
+        json!({}),
+    );
+    d["w"] = json!(16);
+    d["h"] = json!(16);
+    let mut l = layer("icon", "shader", d, 0., 4.);
+    l["p"]["position.x"] = ch(json!(128));
+    l["p"]["position.y"] = ch(json!(128));
+    let flat = document(256, 256, 30., vec![l.clone()]);
+    let (pixels, _) = render(&mut r, &flat, (256, 256), 0.).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .any(|p| close(p, [0.125, 0.125, 0., 1.]))
+    );
+    l["threeD"] = json!(true);
+    let closeup = document(256, 256, 30., vec![l]);
+    let mut camera = pm_eval::space3d::default_camera_25d(256., 256.);
+    camera.position[2] /= 5.;
+    r.set_plane_camera(Some(camera));
+    let (pixels, failures) = render(&mut r, &closeup, (256, 256), 0.).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .any(|p| p[0] >= 0.625 && p[1] == p[0] && p[3] == 1.)
+    );
+    let def = fragment_definition(
+        "example.closeup",
+        "void main(){ fragColor = vec4(iResolution / 128.0, 0.0, 1.0); }",
+    );
+    r.set_definitions(&set(vec![def], vec![])).unwrap();
+    let mut extension = layer(
+        "extension",
+        "extension",
+        json!({"definition":"example.closeup","w":16,"h":16}),
+        0.,
+        4.,
+    );
+    extension["threeD"] = json!(true);
+    extension["p"]["position.x"] = ch(json!(128));
+    extension["p"]["position.y"] = ch(json!(128));
+    let doc = document(256, 256, 30., vec![extension]);
+    let (pixels, failures) = render(&mut r, &doc, (256, 256), 0.).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(pixels.chunks_exact(4).any(|p| p[0] >= 0.625 && p[1] == p[0] && p[3] == 1.));
+
+}
+
+#[test]
 fn code_webgl_refuses_draws_nothing_and_is_reported() {
     let mut r = Renderer::headless().unwrap();
     let doc = document(

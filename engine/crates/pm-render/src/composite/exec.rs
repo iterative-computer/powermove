@@ -348,6 +348,38 @@ fn group_bounds(
     Ok((b[2] > b[0] && b[3] > b[1]).then_some(b))
 }
 
+/// A tightly bounded group can use a smaller target in its parent's grid.
+pub(crate) fn group_region(
+    draw: &crate::plan::Draw,
+    child: &CompPlan,
+    uv: [f64; 4],
+    alpha: f64,
+    parent: Option<Region>,
+) -> Option<Region> {
+    let full = (child.width, child.height);
+    let target = parent.unwrap_or(Region::full(full.0, full.1));
+    let b = group_bounds(draw, child, uv, alpha, 0).ok()??;
+    if !b.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let x0 = (b[0].floor() as u32).max(target.x);
+    let y0 = (b[1].floor() as u32).max(target.y);
+    let x1 = (b[2].ceil() as u32).min(target.x + target.width);
+    let y1 = (b[3].ceil() as u32).min(target.y + target.height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let crop = Region {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    }
+    .align(32, full);
+    let area = |r: Region| u64::from(r.width) * u64::from(r.height);
+    (target.contains(crop) && area(crop) * 4 <= area(target) * 3).then_some(crop)
+}
+
 /// Where a layer's effect input (its content, then its masks, which only
 /// multiply it) can be non-zero, in the texels of a target covering `rect`
 /// (x, GL row from the bottom of `rect`, width, height): the whole pixels
@@ -599,6 +631,13 @@ impl Exec<'_> {
                     .block_copy_size(None)
                     .unwrap_or(16),
             );
+        // Leave space in the playback working set for the accumulator and
+        // effect scratch. Deferring half a dozen full-size images can make
+        // the pool discard and then recreate those images on every frame.
+        let deferred_budget = self
+            .pool
+            .playback_budget()
+            .map_or(DEFERRED_BYTES, |bytes| DEFERRED_BYTES.min(bytes / 2));
         // The accumulator: the caller's target until a node writes a new one.
         // `owned`: the loop took it (`take_scoped`) and gives it back once a
         // node replaced it, as today's compositor frees an accumulator after
@@ -661,7 +700,7 @@ impl Exec<'_> {
             let deferred = self.recycle
                 && matches!(node.as_ref(), Node::Layer(n) if draws_over_the_stack(n))
                 && pending.images < DEFERRED_IMAGES
-                && DEFERRED.with(|d| d.get()) + image_bytes <= DEFERRED_BYTES;
+                && DEFERRED.with(|d| d.get()) + image_bytes <= deferred_budget;
             if !deferred {
                 self.flush_pending(
                     encoder,
@@ -786,8 +825,8 @@ impl Exec<'_> {
                         if res_owned {
                             self.release(res);
                         }
-                        // A transition's result is its own target (in
-                        // `taken`), never one of its inputs.
+                        // A transition's result becomes the accumulator.
+                        // Recycle it once the following node replaces it.
                         let (next, next_owned) = match self.run_transition(
                             encoder,
                             transition,
@@ -799,7 +838,8 @@ impl Exec<'_> {
                         ) {
                             Ok(Some(t)) => {
                                 self.release(with_layer);
-                                (t, false)
+                                let scoped = self.adopt(&t);
+                                (t, scoped)
                             }
                             Ok(None) => (with_layer, true),
                             Err(message) => {
@@ -1342,7 +1382,6 @@ impl Exec<'_> {
         let scoped = self.recycle;
         let depth = if self.pipelines.direct_group_target
             && !self.depth_id
-            && pass_region.is_none()
             && plan.view.is_none()
             && n.blend == BlendMode::Normal
             && n.alpha == 1.0
@@ -1362,7 +1401,7 @@ impl Exec<'_> {
             self.pipelines
                 .direct_group_draws
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.render_comp(encoder, child, None, &content);
+            self.render_comp(encoder, child, pass_region, &content);
             None
         } else {
             let (resolved, groups) =
@@ -1970,6 +2009,29 @@ mod tests {
                 .map(f32::to_bits)
                 .collect::<Vec<u32>>()
         };
+        let cropped_group = document(json!([]));
+        r.set_direct_group_target(false);
+        let whole_group = render(
+            &mut r,
+            &cropped_group,
+            OutputKind::Preview,
+            1.,
+            Precision::Float16,
+        );
+        r.set_direct_group_target(true);
+        let cropped = render(
+            &mut r,
+            &cropped_group,
+            OutputKind::Preview,
+            1.,
+            Precision::Float16,
+        );
+        assert!(
+            whole_group == cropped,
+            "first different group component: {:?}",
+            whole_group.iter().zip(&cropped).position(|(a, b)| a != b)
+        );
+
         // Without effects, for telling that each chain ran.
         let plain = render(
             &mut r,

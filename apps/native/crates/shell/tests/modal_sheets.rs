@@ -19,7 +19,7 @@ fn main() {
         NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-    use pm_shell::{Command, Host, integration::Integration, layout::Rect};
+    use pm_shell::{Command, ExportActivity, Host, integration::Integration, layout::Rect};
     use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
     struct Probe(Rc<RefCell<Vec<String>>>);
@@ -45,6 +45,50 @@ fn main() {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+    fn export_toolbar(host: &mut Host) {
+        let toolbar = host.window.toolbar().unwrap();
+        let item = toolbar.items().iter().find(|item| item.itemIdentifier().to_string() == "export").unwrap();
+        let idle_image = item.image().unwrap();
+        let action = item.action();
+        assert_eq!(action, Some(sel!(act:)));
+        assert_eq!(item.style(), objc2_app_kit::NSToolbarItemStyle::Prominent);
+
+        let preparing = ExportActivity { percent: None, count: 1 };
+        host.set_export_progress(Some(preparing));
+        assert_eq!(item.title().to_string(), "Exporting…");
+        let ring = item.image().unwrap();
+        assert!(ring.isTemplate());
+        assert_eq!(ring.size(), NSSize::new(16., 16.));
+
+        let rendering = ExportActivity { percent: Some(42), ..preparing };
+        host.set_export_progress(Some(rendering));
+        let progress_image = item.image().unwrap();
+        assert_ne!(Retained::as_ptr(&ring), Retained::as_ptr(&progress_image));
+        assert_eq!(item.title().to_string(), "Exporting 42%");
+        assert_eq!(item.toolTip().unwrap().to_string(), "Exporting · 42% — Click to view Export");
+
+        let original = host.tokens.clone();
+        let scheme = match original.scheme {
+            pm_design::Scheme::Dark => pm_design::Scheme::Light,
+            _ => pm_design::Scheme::Dark,
+        };
+        let mut tokens = pm_design::Tokens::new(scheme, original.accessibility);
+        tokens.colors.accent = 0xFF6633;
+        let accent = pm_shell::native_color(tokens.colors.accent);
+        host.update_tokens(tokens);
+        assert_eq!(item.backgroundTintColor().unwrap(), accent);
+        host.set_extension_toolbar_mods(&[]);
+        host.set_export_progress(Some(rendering));
+        assert_eq!(Retained::as_ptr(&item.image().unwrap()), Retained::as_ptr(&progress_image));
+        assert_eq!(item.title().to_string(), "Exporting 42%");
+        assert_eq!(item.action(), action);
+
+        host.set_export_progress(None);
+        assert_eq!(item.title().to_string(), "Export");
+        assert_eq!(item.toolTip().unwrap().to_string(), "Export");
+        assert_eq!(Retained::as_ptr(&item.image().unwrap()), Retained::as_ptr(&idle_image));
+        host.update_tokens(original);
     }
     /// The commands the menu bar offers now: every row the shell answers for
     /// (its tag is the row's place in `menu::menus`, separators counted).
@@ -133,6 +177,7 @@ fn main() {
             cx.spawn(async move |cx| {
                 let wait = |ms| cx.background_executor().timer(Duration::from_millis(ms));
                 wait(800).await;
+                export_toolbar(&mut host.borrow_mut());
                 // Nothing over the editor: the project's commands are offered
                 // (else the checks below would prove nothing).
                 let open = offered();

@@ -190,7 +190,7 @@ pub struct Effects {
     /// ([`versions::for_document`]).
     pub(crate) effect_types: crate::doc_walk::SubtreeMemo<String>,
     mips: Option<crate::sampling::gpu::Resampler>,
-    simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
+    simple: PixelPipelines,
     /// Programs built ahead of their first frame (decision PROBE-1).
     prewarm: prewarm::Prewarm,
     /// Time frames spent building programs or waiting for builds in
@@ -226,6 +226,11 @@ pub(crate) enum SimpleOp {
     /// displays in Standard.
     DecodeE,
 }
+
+type PixelPipeline = Arc<std::sync::OnceLock<wgpu::RenderPipeline>>;
+type PixelPipelines = Arc<
+    std::sync::Mutex<std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), PixelPipeline>>,
+>;
 
 const SIMPLE_WGSL: &str = "
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -616,7 +621,7 @@ impl Effects {
         }
         self.prewarm = Default::default();
         self.dummies.clear();
-        self.simple.clear();
+        self.simple = Default::default();
         true
     }
 
@@ -674,12 +679,27 @@ impl Effects {
 
     /// The pipeline of a per-pixel pass.
     pub(crate) fn simple_pipeline(
-        &mut self,
+        &self,
         device: &wgpu::Device,
         op: SimpleOp,
         format: wgpu::TextureFormat,
-    ) -> &wgpu::RenderPipeline {
-        self.simple.entry((op, format)).or_insert_with(|| {
+    ) -> wgpu::RenderPipeline {
+        Self::pixel_pipeline(&self.simple, device, op, format)
+    }
+
+    fn pixel_pipeline(
+        pipelines: &PixelPipelines,
+        device: &wgpu::Device,
+        op: SimpleOp,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let pipeline = pipelines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry((op, format))
+            .or_default()
+            .clone();
+        pipeline.get_or_init(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pm effect pixel pass"),
                 source: wgpu::ShaderSource::Wgsl(
@@ -730,7 +750,24 @@ impl Effects {
                 multiview_mask: None,
                 cache: None,
             })
-        })
+        }).clone()
+    }
+
+    pub(crate) fn prewarm_pixel_passes(
+        &self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        linear: bool,
+    ) -> impl FnOnce() + Send + use<> {
+        let pipelines = self.simple.clone();
+        let device = device.clone();
+        move || {
+            Self::pixel_pipeline(&pipelines, &device, SimpleOp::Clamp, format);
+            if linear {
+                Self::pixel_pipeline(&pipelines, &device, SimpleOp::EncodeE, format);
+                Self::pixel_pipeline(&pipelines, &device, SimpleOp::DecodeE, format);
+            }
+        }
     }
 
     /// Puts programs the worker built into their definitions (decision
@@ -768,13 +805,7 @@ impl Effects {
         format: wgpu::TextureFormat,
         first: &[(DefinitionKind, DefinitionId)],
     ) -> usize {
-        let done = self.prewarm.take();
-        self.absorb(done);
-        let mut order: Vec<(DefinitionKind, DefinitionId)> = first
-            .iter()
-            .filter(|k| self.entries.contains_key(*k))
-            .cloned()
-            .collect();
+        let mut order = first.to_vec();
         for key in self.entries.keys() {
             let user = self
                 .get(key.0, key.1.as_str())
@@ -783,9 +814,35 @@ impl Effects {
                 order.push(key.clone());
             }
         }
+        self.queue_prewarm(device, format, &order, false)
+    }
+
+    pub(crate) fn prewarm_selected(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        order: &[prewarm::Key],
+    ) -> usize {
+        self.queue_prewarm(device, format, order, true)
+    }
+
+    fn queue_prewarm(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        order: &[prewarm::Key],
+        promote: bool,
+    ) -> usize {
+        let done = self.prewarm.take();
+        self.absorb(done);
         let mut queued = 0;
-        for key in order {
-            let Some(entry) = self.entries.get(&key) else {
+        for index in 0..order.len() {
+            let key = &order[if promote {
+                order.len() - 1 - index
+            } else {
+                index
+            }];
+            let Some(entry) = self.entries.get(key) else {
                 continue;
             };
             let (Status::Ready, None, Some(prepared)) =
@@ -793,11 +850,22 @@ impl Effects {
             else {
                 continue;
             };
+            if entry
+                .retry
+                .as_ref()
+                .and_then(retry::Retry::waiting)
+                .is_some()
+            {
+                continue;
+            }
             if self
                 .prewarm
                 .queue(key.clone(), entry.key, prepared.clone(), device, format)
             {
                 queued += 1;
+            }
+            if promote {
+                self.prewarm.promote(key, entry.key);
             }
         }
         queued

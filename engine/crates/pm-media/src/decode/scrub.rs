@@ -821,10 +821,10 @@ impl Shared {
                 Ok(None) if passed_over => {
                     self.stats.lock().unwrap().passed_over += 1;
                     super::diag::bump(&super::diag::WORKER_PASSED_OVER, 1);
-                    // Waiters take a stand-in at their deadline; decoding
-                    // continues ahead from here.
                     st.exact.retain(|&e| e != n);
-                    st.ahead_from = Some(n);
+                    // A speculative frame the decoder has already passed
+                    // does not move the lookahead window past the playhead.
+                    st.ahead_from = (!matches!(job, Job::Ahead(_))).then_some(n);
                 }
                 Ok(None) => {
                     self.stats.lock().unwrap().stopped += 1;
@@ -886,11 +886,9 @@ impl Shared {
         }
     }
 
-    /// The next frame to decode ahead of the last target, a stride at a
-    /// time in the direction of motion: [`AHEAD`] steps forward within half
-    /// its part of the frame cache, or one reverse neighbourhood
-    /// ([`ViewerDecode`]'s reverse reach). The source Export worker may
-    /// warm a bounded same-GOP run after a jump; composition does not.
+    /// Next frame to decode in the direction of motion: up to [`AHEAD`]
+    /// steps forward, or one reverse neighbourhood. An Export worker may
+    /// also warm a bounded same-GOP run after a jump.
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
         let stride = st.stride;
@@ -905,23 +903,24 @@ impl Shared {
         } else if stride < 0 {
             (self.reverse_reach(st) as i64 / -stride).max(1) as usize
         } else {
-            // The playing viewer already pins its last shown frame. One
-            // frame ahead can use the worker's existing latest slot when
-            // the cache share cannot keep both the shown and next frames,
-            // but only at stride one: at a larger or alternating stride
-            // (60 fps on a 24 fps timeline steps +3, +2) the frame one
-            // stride ahead can pass the next request, and decoding it can
-            // evict the frame that request needs (w84 review P0-1).
-            // When the cache share only fits ~1 B-frame pyramid (e.g. 4K on
-            // a 16 GB machine), cap forward look-ahead to at most 1 step so
-            // decoding the next pyramid does not evict the imminent frame.
-            let free_slot = st.playing && stride == 1;
-            let base = self.cache_frames(st).max(usize::from(free_slot));
-            let total_frames = self.cache_share() / st.frame_bytes.max(1);
-            let max_ahead = if total_frames <= 6 {
-                base.min(1)
+            let active = if st.playing && self.purpose == DecodePurpose::Display {
+                self.service
+                    .active_display_share(self.source.id, self.instance)
             } else {
-                base
+                None
+            };
+            let frames = self.cache_share() / st.frame_bytes.max(1);
+            let free_slot = st.playing && stride == 1;
+            let base = (frames / 2).max(usize::from(free_slot));
+            let max_ahead = match active {
+                Some(readers) if readers > 1 && stride == 1 => {
+                    let share = self.service.cache().stats().budget / readers / st.frame_bytes.max(1);
+                    // Keep a slot for a near frame while the active workers
+                    // are decoding and the shared cache is fitted.
+                    share.saturating_sub(1).clamp(1, 3)
+                }
+                _ if frames <= 6 => base.min(1),
+                _ => base,
             };
             AHEAD.min(max_ahead)
         };

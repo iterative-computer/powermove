@@ -5,7 +5,6 @@
 //! ground (the stage's dim is a plain veil under it). The mark is a signed
 //! distance field made once from its outline, on the worker that compiles the
 //! shader; nothing is made or read back per frame.
-use crate::welcome;
 use gpui::{NativeTexture, TextureLease, Window};
 use metal::*;
 use std::sync::{Arc, mpsc};
@@ -32,7 +31,10 @@ pub struct Light {
     pub soft: f32,
     /// The body's slow colour drift (0–1).
     pub iris: f32,
-    pub pad: [f32; 2],
+    /// Clockwise rotation of the mark in radians (`0` = upright playhead;
+    /// `~2.58` = agent cursor pointing up-left).
+    pub angle: f32,
+    pub pad: f32,
     pub domain: [f32; 4],
 }
 
@@ -240,31 +242,50 @@ pub(crate) fn mark_field(w: usize, h: usize) -> Vec<f32> {
             (y - y0) / ((y1 - y0) / h as f64) - 0.5,
         )
     };
-    // The outline, flattened.
-    let m = &welcome::MARK;
+    // The sculpted Powermove playhead head from `assets/brand/wordmark.svg`,
+    // centred on (495, 334) and normalised to 112 mark units high so the Metal
+    // glow, rim light and zoom-out hug the exact top of the playhead.
+    const SCALE: f64 = 112.0 / 368.0;
+    let pt = |x: f64, y: f64| to_grid((x - 495.0) * SCALE, (y - 334.0) * SCALE);
     let mut poly = Vec::new();
-    for i in 0..m.len() {
-        let (a, b) = (m[i], m[(i + 1) % m.len()]);
-        let p = [
-            (a[0], a[1]),
-            (a[0] + a[4], a[1] + a[5]),
-            (b[0] + b[2], b[1] + b[3]),
-            (b[0], b[1]),
-        ];
-        for k in 0..48 {
-            let t = k as f64 / 48.;
-            let n = 1. - t;
-            let x = n * n * n * p[0].0
-                + 3. * n * n * t * p[1].0
-                + 3. * n * t * t * p[2].0
-                + t * t * t * p[3].0;
-            let y = n * n * n * p[0].1
-                + 3. * n * n * t * p[1].1
-                + 3. * n * t * t * p[2].1
-                + t * t * t * p[3].1;
-            poly.push(to_grid(x, y));
+    let line_to = |poly: &mut Vec<(f64, f64)>, a: (f64, f64), b: (f64, f64)| {
+        const SEG: usize = 24;
+        for k in 0..SEG {
+            let t = k as f64 / SEG as f64;
+            poly.push(pt(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
         }
-    }
+    };
+    let cubic_to = |poly: &mut Vec<(f64, f64)>,
+                        p0: (f64, f64),
+                        p1: (f64, f64),
+                        p2: (f64, f64),
+                        p3: (f64, f64)| {
+        const SEG: usize = 48;
+        for k in 0..SEG {
+            let t = k as f64 / SEG as f64;
+            let n = 1. - t;
+            let x = n * n * n * p0.0
+                + 3. * n * n * t * p1.0
+                + 3. * n * t * t * p2.0
+                + t * t * t * p3.0;
+            let y = n * n * n * p0.1
+                + 3. * n * n * t * p1.1
+                + 3. * n * t * t * p2.1
+                + t * t * t * p3.1;
+            poly.push(pt(x, y));
+        }
+    };
+    line_to(&mut poly, (346., 150.), (654., 150.));
+    cubic_to(&mut poly, (654., 150.), (690., 150.), (708., 176.), (708., 206.));
+    cubic_to(&mut poly, (708., 206.), (708., 226.), (702., 238.), (692., 251.));
+    line_to(&mut poly, (692., 251.), (628., 327.));
+    cubic_to(&mut poly, (628., 327.), (612., 346.), (606., 364.), (603., 386.));
+    line_to(&mut poly, (603., 386.), (592., 465.));
+    cubic_to(&mut poly, (592., 465.), (587., 498.), (560., 518.), (527., 518.));
+    cubic_to(&mut poly, (527., 518.), (501., 518.), (485., 504.), (472., 486.));
+    line_to(&mut poly, (472., 486.), (297., 248.));
+    cubic_to(&mut poly, (297., 248.), (286., 233.), (282., 220.), (282., 206.));
+    cubic_to(&mut poly, (282., 206.), (282., 174.), (306., 150.), (346., 150.));
     let n = poly.len();
     // Inside: non-zero winding along each row's centre.
     let mut inside = vec![false; w * h];

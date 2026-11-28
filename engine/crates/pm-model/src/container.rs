@@ -260,24 +260,45 @@ pub fn read_container<R: RandomAccess + ?Sized>(
     source: &R,
     options: ReadOptions,
 ) -> Result<Container, ContainerError> {
+    read(source, options, false).map(|(container, _)| container)
+}
+
+/// Reads a project like [`read_container`], leaving the history of a wrapped
+/// PMV4 document in its validated JSON buffer for entry-by-entry processing.
+/// Older formats and bare projects retain their ordinary decoded document.
+pub fn read_container_with_history<R: RandomAccess + ?Sized>(
+    source: &R,
+    options: ReadOptions,
+) -> Result<(Container, Option<json::RawHistory>), ContainerError> {
+    read(source, options, true)
+}
+
+fn read<R: RandomAccess + ?Sized>(
+    source: &R,
+    options: ReadOptions,
+    extract_history: bool,
+) -> Result<(Container, Option<json::RawHistory>), ContainerError> {
     let size = source.size()?;
     let prefix = read_vec(source, 0, size.min(9))?;
     if prefix.len() >= 5 && prefix[..5] == *PMV4_MAGIC {
-        return read_pmv4(source, size, options);
+        return read_pmv4(source, size, options, extract_history);
     }
     if prefix.len() >= 5 && prefix[..5] == *PMV3_MAGIC {
-        return read_pmv3(source, size);
+        return read_pmv3(source, size).map(|container| (container, None));
     }
     let text = read_vec(source, 0, size)?;
-    Ok(Container {
-        format: ContainerFormat::Json,
-        document: json::parse_project_file(&text)?,
-        asset_order: asset_order(&text, &[]),
-        media: Vec::new(),
-        archived_media: Vec::new(),
-        index: None,
-        legacy_metadata: None,
-    })
+    Ok((
+        Container {
+            format: ContainerFormat::Json,
+            document: json::parse_project_file(&text)?,
+            asset_order: asset_order(&text, &[]),
+            media: Vec::new(),
+            archived_media: Vec::new(),
+            index: None,
+            legacy_metadata: None,
+        },
+        None,
+    ))
 }
 
 /// `Number.isSafeInteger` for a JSON value.
@@ -427,7 +448,8 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
     source: &R,
     size: u64,
     options: ReadOptions,
-) -> Result<Container, ContainerError> {
+    extract_history: bool,
+) -> Result<(Container, Option<json::RawHistory>), ContainerError> {
     // readProjectFooter
     if size < PMV4_FOOTER_BYTES {
         return Err(BAD_COMMIT);
@@ -519,8 +541,12 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
     if crate::hash::sha256_hex(&bytes) != document.2 {
         return Err(BAD_CONTENT_CHECKSUM);
     }
-    let document = json::parse_project_file(&bytes)?;
     let asset_order = asset_order(&bytes, &[]);
+    let (document, history) = if extract_history {
+        json::parse_project_file_with_history(bytes)?
+    } else {
+        (json::parse_project_file(&bytes)?, None)
+    };
     let archived_media = media.split_off(items.len());
     let container = Container {
         format: ContainerFormat::Pmv4,
@@ -536,7 +562,7 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
             container.verify_media(source, record)?;
         }
     }
-    Ok(container)
+    Ok((container, history))
 }
 
 impl Container {

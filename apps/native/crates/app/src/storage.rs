@@ -621,6 +621,7 @@ impl crate::session::Controller {
         crate::extension_transfer::open_from_settings(
             original,
             self.profile.clone(),
+            this.clone(),
             move |cx| {
                 pm_compat_runner::host::rescan_all();
                 let _ = this.update(cx, |v, cx| v.refresh_storage(cx));

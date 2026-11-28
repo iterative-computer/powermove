@@ -982,6 +982,14 @@ fn frame_facts(
         "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }
             else if !model.selection.layers().is_empty() { json!({"kind":"layers","count":model.selection.layers().len()}) } else { Value::Null },
     });
+    if model.chrome.hide_type_badges {
+        frame["showTypeBadges"] = json!(false);
+    }
+    match model.chrome.toolbar_density {
+        crate::ToolbarDensity::Normal => {}
+        crate::ToolbarDensity::Compact => frame["toolbarDensity"] = json!("compact"),
+        crate::ToolbarDensity::Comfortable => frame["toolbarDensity"] = json!("comfortable"),
+    }
     frame["window"]["rows"] = Value::Array(rows);
     frame
 }

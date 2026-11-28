@@ -5,11 +5,175 @@ use super::*;
 use pm_gpu::readback::{f32_to_half, half_to_f32, read_f32, read_raw};
 
 #[test]
-fn preview_scaling_preserves_aspect_and_never_upscales_exact_sources() {
-    assert_eq!(preview_size((3840, 2160), Some(1920)), (1920, 1080));
-    assert_eq!(preview_size((3024, 4032), Some(1024)), (768, 1024));
-    assert_eq!(preview_size((640, 360), Some(2048)), (640, 360));
-    assert_eq!(preview_size((3840, 2160), None), (3840, 2160));
+fn video_preview_uses_the_smallest_exact_size_that_keeps_draw_density() {
+    let native = (3840, 2160);
+    assert_eq!(video_preview_size(native, (1921, 1)), native);
+    assert_eq!(video_preview_size(native, (1920, 1080)), (1920, 1080));
+    assert_eq!(video_preview_size(native, (1025, 1081)), native);
+    assert_eq!(video_preview_size(native, (1025, 1)), (1920, 1080));
+    assert_eq!(video_preview_size(native, (960, 1)), (960, 540));
+    assert_eq!(video_preview_size(native, (480, 1)), (480, 270));
+    assert_eq!(video_preview_size((1919, 1080), (800, 1)), (1919, 1080));
+    assert_eq!(video_preview_size((640, 360), (2048, 1)), (640, 360));
+}
+
+#[test]
+fn dyadic_420_conversion_matches_the_area_average() {
+    let gpu = pm_gpu::Gpu::new("dyadic video parity").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (w, h) = (68, 44);
+    let mut state = 1u32;
+    let mut plane = |width: u32, height: u32, format: wgpu::TextureFormat, bits: u32| {
+        let texture = Target::new(
+            &gpu.device,
+            "test video plane",
+            width,
+            height,
+            format,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        )
+        .texture;
+        let bpp = format.block_copy_size(None).unwrap();
+        let mut bytes = Vec::with_capacity((width * height * bpp) as usize);
+        for _ in 0..width * height * bpp / (bits / 8) {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            if bits == 16 {
+                let code = ((state >> 22) as u16) << 6;
+                bytes.extend_from_slice(&code.to_le_bytes());
+            } else {
+                bytes.push((state >> 24) as u8);
+            }
+        }
+        gpu.queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * bpp),
+                rows_per_image: None,
+            },
+            texture.size(),
+        );
+        texture
+    };
+    let sitings = [
+        ChromaSiting::Left,
+        ChromaSiting::Center,
+        ChromaSiting::TopLeft,
+        ChromaSiting::Top,
+        ChromaSiting::BottomLeft,
+        ChromaSiting::Bottom,
+    ];
+    for (packed, y_format, uv_format, codes, divisor) in [
+        (
+            8,
+            wgpu::TextureFormat::R8Unorm,
+            wgpu::TextureFormat::Rg8Unorm,
+            [255., 16., 219., 128.],
+            224.,
+        ),
+        (
+            16,
+            wgpu::TextureFormat::R16Unorm,
+            wgpu::TextureFormat::Rg16Unorm,
+            [65535., 4096., 56064., 32768.],
+            57344.,
+        ),
+    ] {
+        let y = plane(w, h, y_format, packed);
+        let uv = plane(w / 2, h / 2, uv_format, packed);
+        let cb = plane(w / 2, h / 2, y_format, packed);
+        let cr = plane(w / 2, h / 2, y_format, packed);
+        for siting in sitings {
+            let color = SourceColor {
+                unorm8: false,
+                transfer: Transfer::DisplayE,
+                primaries: Primaries::Bt709,
+                matrix: MatrixCoefficients::Bt709,
+                siting,
+                alpha: AlphaMode::Opaque,
+                tone_map: None,
+                chromaticities: None,
+                power: None,
+            };
+            for filter in [1, 2, 3] {
+                for scale in [2, 4] {
+                    for (precision, chroma, cr) in [
+                        (Precision::Unorm8, &uv, None),
+                        (Precision::Float16, &cb, Some(&cr)),
+                    ] {
+                        let mut p = source_uniform(
+                            &color,
+                            WorkingEncoding::Standard,
+                            precision,
+                            Some((Factors { x: 2, y: 2 }, w / 2, h / 2)),
+                        );
+                        p.a[0] = if cr.is_some() { 4 } else { 3 };
+                        p.b[2] = filter;
+                        p.codes = codes;
+                        p.chroma_divisor[0] = divisor;
+                        let read = |p: &SourceUniform| {
+                            let out = Target::new(
+                                &gpu.device,
+                                "dyadic video test",
+                                w / scale,
+                                h / scale,
+                                working_format(precision),
+                                pm_gpu::target::working_usage(),
+                            );
+                            let mut encoder =
+                                gpu.device.create_command_encoder(&Default::default());
+                            dispatch_source(
+                                &gpu.device,
+                                &gpu.queue,
+                                &pipelines,
+                                &mut encoder,
+                                &out,
+                                &y,
+                                Some(chroma),
+                                cr,
+                                p,
+                            );
+                            gpu.queue.submit([encoder.finish()]);
+                            read_raw(&gpu.device, &gpu.queue, &out.texture).unwrap()
+                        };
+                        let actual = read(&p);
+                        // 0.5 bypasses the fast-path predicate while still
+                        // using the regular YUV matrix (CL is encoded as 1).
+                        p.hdr[1] = 0.5;
+                        let reference = read(&p);
+                        let delta = if precision == Precision::Unorm8 {
+                            actual
+                                .iter()
+                                .zip(&reference)
+                                .map(|(a, b)| u16::from(a.abs_diff(*b)))
+                                .max()
+                        } else {
+                            actual
+                                .chunks_exact(2)
+                                .zip(reference.chunks_exact(2))
+                                .map(|(a, b)| {
+                                    let ordered = |c: &[u8]| {
+                                        let half = u16::from_le_bytes(c.try_into().unwrap());
+                                        if half & 0x8000 == 0 {
+                                            0x8000 + half
+                                        } else {
+                                            0x8000 - (half & 0x7fff)
+                                        }
+                                    };
+                                    ordered(a).abs_diff(ordered(b))
+                                })
+                                .max()
+                        };
+                        assert!(
+                            delta.unwrap() <= 1,
+                            "{packed} {siting:?} filter {filter} scale {scale} {precision:?}: {delta:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -153,7 +317,7 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
     let mut media = MediaCache::new(&gpu.device);
     let convert = |media: &mut MediaCache, preview: bool| {
         media.preview_video = preview;
-        media.draw_edge = Some(128);
+        media.draw_density = Some((128, 1));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
             .video(
@@ -180,7 +344,11 @@ fn preview_video_conversion_does_not_replace_the_exact_source() {
     };
     let (exact, pixels) = convert(&mut media, false);
     let (preview, _) = convert(&mut media, true);
-    assert!(preview.width() <= 128 && preview.height() <= 128);
+    assert_eq!(
+        (preview.width(), preview.height()),
+        video_preview_size((exact.width(), exact.height()), (128, 1))
+    );
+    assert!(preview.width().max(preview.height()) >= 128);
     let (again, after) = convert(&mut media, false);
     assert_eq!(
         (again.width(), again.height(), again.format()),
@@ -201,7 +369,7 @@ fn preview_video_downscale_averages_detail_finer_than_its_pixels() {
     let mut media = MediaCache::new(&gpu.device);
     let convert = |media: &mut MediaCache, preview: bool| {
         media.preview_video = preview;
-        media.draw_edge = Some(30);
+        media.draw_density = Some((30, 1));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
             .video(
@@ -283,7 +451,7 @@ fn preview_video_reduction_averages_working_colour() {
         let mut media = MediaCache::new(&gpu.device);
         let mut convert = |preview: bool| {
             media.preview_video = preview;
-            media.draw_edge = Some(edge);
+            media.draw_density = Some((edge, 1));
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             let target = media
                 .video(
@@ -1372,4 +1540,248 @@ fn idle_video_capacity_admits_still_prefetch_and_keeps_its_texture() {
         decoders: 0,
     });
     assert_eq!(media.image_bytes(), 0);
+}
+
+#[test]
+fn fused_progressive_yuv_matches_two_pass_conversion() {
+    use pm_media::frame::{Layout, PixelFormat, PlaneDesc, PlaneFormat};
+    use pm_protocol::color::{Range, SampleAlignment};
+
+    let gpu = pm_gpu::Gpu::new("fused YUV parity").unwrap();
+    let importer = DecodeImporter::new(&gpu.device).unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let color = SourceColor {
+        unorm8: false,
+        transfer: Transfer::DisplayE,
+        primaries: Primaries::Bt709,
+        matrix: MatrixCoefficients::Bt709,
+        siting: ChromaSiting::Left,
+        alpha: AlphaMode::Opaque,
+        tone_map: None,
+        chromaticities: None,
+        power: None,
+    };
+    let (width, height) = (34, 26);
+    for (layout, bits, sx, sy) in [
+        (Layout::Biplanar, 8, 1, 1),
+        (Layout::Planar, 8, 1, 1),
+        (Layout::Biplanar, 10, 1, 1),
+        (Layout::Planar, 10, 1, 0),
+        (Layout::Planar, 10, 0, 0),
+    ] {
+        let biplanar = layout == Layout::Biplanar;
+        let ten_bit = bits == 10;
+        let alignment = if biplanar && ten_bit {
+            SampleAlignment::MsbIn16
+        } else {
+            SampleAlignment::Lsb
+        };
+        let cw = width >> sx;
+        let ch = height >> sy;
+        let plane = |format, width, height| PlaneDesc {
+            format,
+            width,
+            height,
+        };
+        let (single, paired) = if ten_bit {
+            (PlaneFormat::R16, PlaneFormat::Rg16)
+        } else {
+            (PlaneFormat::R8, PlaneFormat::Rg8)
+        };
+        let mut planes = vec![
+            plane(single, width, height),
+            plane(if biplanar { paired } else { single }, cw, ch),
+        ];
+        if !biplanar {
+            planes.push(plane(single, cw, ch));
+        }
+        let textures = planes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let format = match p.format {
+                    PlaneFormat::R8 => wgpu::TextureFormat::R8Unorm,
+                    PlaneFormat::Rg8 => wgpu::TextureFormat::Rg8Unorm,
+                    PlaneFormat::R16 => wgpu::TextureFormat::R16Unorm,
+                    PlaneFormat::Rg16 => wgpu::TextureFormat::Rg16Unorm,
+                    _ => unreachable!(),
+                };
+                let t = Target::new(
+                    &gpu.device,
+                    "parity plane",
+                    p.width as u32,
+                    p.height as u32,
+                    format,
+                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                )
+                .texture;
+                let channels = if matches!(p.format, PlaneFormat::Rg8 | PlaneFormat::Rg16) {
+                    2
+                } else {
+                    1
+                };
+                let mut bytes = Vec::new();
+                for y in 0..p.height {
+                    for x in 0..p.width {
+                        for c in 0..channels {
+                            let v = ((x * 173 + y * 139 + x * y * 11 + i * 53 + c * 191)
+                                % (1 << bits)) as u16;
+                            if ten_bit {
+                                let sample = if biplanar { v << 6 } else { v };
+                                bytes.extend(sample.to_le_bytes());
+                            } else {
+                                bytes.push(v as u8);
+                            }
+                        }
+                    }
+                }
+                gpu.queue.write_texture(
+                    t.as_image_copy(),
+                    &bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(
+                            (p.width * channels * if ten_bit { 2 } else { 1 }) as u32,
+                        ),
+                        rows_per_image: Some(p.height as u32),
+                    },
+                    t.size(),
+                );
+                t
+            })
+            .collect();
+        let input = ImportedFrame {
+            textures,
+            format: Arc::new(PixelFormat {
+                layout,
+                bits,
+                alignment,
+                range: Range::Limited,
+                log2_chroma_w: sx,
+                log2_chroma_h: sy,
+                alpha_bits: 0,
+                planes,
+                width,
+                height,
+                label: "parity input".into(),
+                rgba_premultiplied: false,
+            }),
+            aliased: false,
+            desc: None,
+        };
+        for range in [Range::Limited, Range::Full] {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let normalized = importer
+                .normalize_luma_as(&gpu.queue, &mut encoder, &input, range)
+                .unwrap();
+            let codes = input.progressive_yuv_codes(range).unwrap();
+            for (size, precision) in [
+                ((width as u32, height as u32), Precision::Float16),
+                ((17, 13), Precision::Float16),
+                ((13, 9), Precision::Unorm8),
+                ((11, 7), Precision::Float32),
+            ] {
+                let mut convert = |planes| {
+                    convert_format_scaled(
+                        &gpu.device,
+                        &gpu.queue,
+                        &pipelines,
+                        &mut encoder,
+                        planes,
+                        &color,
+                        WorkingEncoding::Standard,
+                        precision,
+                        Factors::from_log2(sx, sy),
+                        None,
+                        working_format(precision),
+                        false,
+                        None,
+                        Some(size),
+                    )
+                };
+                let original = convert(SourcePlanes::Normalized(&normalized));
+                let fused = convert(SourcePlanes::ProgressiveYuv(&input, codes));
+                gpu.queue.submit([encoder.finish()]);
+                let expected = read_raw(&gpu.device, &gpu.queue, &original.texture).unwrap();
+                let actual = read_raw(&gpu.device, &gpu.queue, &fused.texture).unwrap();
+                assert!(
+                    actual == expected,
+                    "{layout:?} {bits}-bit {range:?} {precision:?} {size:?}, first differing byte {:?}",
+                    actual.iter().zip(expected).position(|(a, b)| *a != b)
+                );
+                encoder = gpu.device.create_command_encoder(&Default::default());
+            }
+            importer.recycle(normalized);
+        }
+    }
+}
+
+#[test]
+fn three_video_instances_reuse_converted_targets_and_retire_after_a_cut() {
+    let gpu = pm_gpu::Gpu::new("overlapping video reuse").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/h264-709-limited.mp4");
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_frames(1);
+    let mut seen = Vec::new();
+    for frame in 0u32..3 {
+        media.playback = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        media.begin_frame(false);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let before = pm_perf::snapshot();
+        let mut targets = Vec::new();
+        for instance in 0..3 {
+            let time = f64::from(instance * 7 + frame) / 30.;
+            let t = media
+                .video(
+                    &gpu.device,
+                    &gpu.queue,
+                    &pipelines,
+                    &mut encoder,
+                    &path,
+                    u64::from(instance),
+                    time,
+                    false,
+                    WorkingEncoding::Standard,
+                    Precision::Float16,
+                    None,
+                    pm_time::Rate::FPS_30,
+                    false,
+                )
+                .unwrap()
+                .unwrap();
+            assert!(targets.iter().all(|other| other != &t.texture));
+            if frame > 0 {
+                assert!(seen.contains(&t.texture));
+            }
+            targets.push(t.texture);
+        }
+        assert!(media.stand_ins.is_empty());
+        if frame > 0 {
+            assert_eq!(
+                pm_perf::snapshot()
+                    .since(&before)
+                    .get(pm_perf::Counter::TextureAllocs),
+                0
+            );
+        }
+        gpu.queue.submit([encoder.finish()]);
+        media.flush();
+        assert_eq!(media.frames.len(), 3);
+        seen = targets;
+    }
+    assert_eq!(media.video_seen.len(), 3);
+    assert!(media.service.usage().sessions > 0);
+    let bytes = media.frame_bytes();
+    let frame = media.frames.pop_first().unwrap().1;
+    media.free_frames.push(frame.target);
+    media.trim_frames(bytes);
+    assert_eq!(media.free_frames.len(), 1);
+    assert_eq!(media.frame_bytes(), bytes);
+    for _ in 0..5 {
+        media.begin_frame(false);
+    }
+    assert!(media.video_seen.is_empty());
+    assert_eq!(media.service.usage().sessions, 0);
 }

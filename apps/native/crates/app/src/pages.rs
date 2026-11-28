@@ -168,10 +168,13 @@ impl Controller {
                             self.profile.clone(),
                         );
                         let tokens = self.host.borrow().tokens.clone();
+                        let owner = cx.entity();
                         let store = cx.new(|cx| {
+                            cx.observe(&owner, |_, _, cx| cx.notify()).detach();
                             let mut store =
                                 crate::store_window::StoreWindow::new(services, tokens, cx);
                             store.embedded = true;
+                            store.slot_owner = Some(owner.downgrade());
                             store.attach_search(window, cx);
                             store
                         });

@@ -17,6 +17,8 @@ pub mod drag;
 pub mod agent_menu;
 pub mod area;
 #[cfg(target_os = "macos")]
+pub mod brand;
+#[cfg(target_os = "macos")]
 pub mod ease;
 #[cfg(target_os = "macos")]
 pub mod grade;
@@ -77,7 +79,8 @@ pub use native::{
 pub use native::agent_chooser::Spec as ChooserSpec;
 #[cfg(target_os = "macos")]
 pub use native::{
-    ExtensionMenuItem, ExtensionMenuSection, ExtensionToolbarItem, bring_forward, install_menus,
+    ExtensionAddMenuItem, ExtensionMenuItem, ExtensionMenuSection, ExtensionToolbarItem,
+    ExtensionToolbarMod, bring_forward, install_menus,
     quit_blocker_window, set_extension_menus, set_quit_hook, show_in_tab_group,
 };
 pub(crate) use macos::open_settings;
@@ -92,7 +95,7 @@ pub use macos::capture_app;
 pub use native::{
     AgentStatus, viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, front_window_id,
     live_window_ids, opens_in_place, project_menu_entries,
-    ADD, Command, FlowchartRow, TaskStatus, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
+    ADD, Command, ExportActivity, FlowchartRow, TaskStatus, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     capture_agent_picker, check_palette_typing, check_view3d, document_subtitle, flush_typing, history_titles, native_color, popover_frame, request_close, resize_from_top,
     send_menu_command, system_accent, viewer_slot, viewer_window, window_backdrop,
     zoom_limit,

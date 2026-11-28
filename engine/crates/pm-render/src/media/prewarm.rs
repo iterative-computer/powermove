@@ -501,13 +501,19 @@ impl MediaCache {
             // Thread creation failed; rendering still has its normal path.
             return Ok(false);
         };
+        // Probe-only work is shared by every instance and every time of
+        // the same file revision. Exact preparation retains its frame key.
         let key = Key {
             path: path.to_path_buf(),
-            instance,
+            instance: if decode { instance } else { 0 },
             export,
             decode,
             stamp: current,
-            settings: format!("{interpret:?}|{composition:?}|{seconds:?}"),
+            settings: if decode {
+                format!("{interpret:?}|{composition:?}|{seconds:?}")
+            } else {
+                String::new()
+            },
         };
         if background.pending.contains(&key) || background.pending.len() >= MAX_PENDING {
             return Ok(false);
@@ -558,6 +564,12 @@ mod tests {
             media
                 .prepare_video(&path, 7, 0., false, true, None, pm_time::Rate::FPS_30)
                 .unwrap()
+        );
+        assert!(
+            !media
+                .prepare_video(&path, 8, 1., false, true, None, pm_time::Rate::FPS_30)
+                .unwrap(),
+            "probe-only lookahead shares pending work across instances and times"
         );
         assert!(media.wait_for_preparation().is_empty());
         assert!(media.sources.contains_key(&path), "the cold index is ready");
