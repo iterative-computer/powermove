@@ -110,7 +110,7 @@ fn parse_interpret(text: Option<&str>) -> (Interpretation, Vec<String>) {
 }
 
 fn is_still(path: &Path) -> Result<bool> {
-    let mut head = [0u8; 512];
+    let mut head = [0u8; 4096];
     let n = {
         use std::io::Read;
         std::fs::File::open(path)?.read(&mut head)?

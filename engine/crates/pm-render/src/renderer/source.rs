@@ -143,7 +143,7 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         decode: SourceDecode,
     ) -> Result<Vec<u8>, String> {
-        let mut head = [0u8; 512];
+        let mut head = [0u8; 4096];
         let n = std::fs::File::open(path)
             .and_then(|mut f| f.read(&mut head))
             .map_err(|e| e.to_string())?;
@@ -254,7 +254,7 @@ impl Renderer {
         if times.is_empty() || times.len() > Self::source_batch_limit(output) {
             return Err("The source batch exceeds its bounded readback size".into());
         }
-        let mut head = [0u8; 512];
+        let mut head = [0u8; 4096];
         let n = std::fs::File::open(path)
             .and_then(|mut f| f.read(&mut head))
             .map_err(|e| e.to_string())?;

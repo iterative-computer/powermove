@@ -345,7 +345,7 @@ fn pm555_builtin_effect_reference_is_in_the_working_api_pack() {
     let reference: Value = serde_json::from_str(&source).unwrap();
     assert!(fs::metadata(&path).unwrap().permissions().readonly());
     let effects = reference["effects"].as_array().unwrap();
-    assert_eq!(effects.len(), 43);
+    assert_eq!(effects.len(), 45);
     assert!(
         effects
             .iter()

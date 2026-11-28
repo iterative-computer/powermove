@@ -107,6 +107,17 @@ pub fn make_attachment(
             return None;
         }
         out.stdout
+    } else if let Some((w, h, rgba)) = svg_rgba(path, (EDGE * 2) as u32) {
+        let side = w.min(h);
+        let (ox, oy) = ((w - side) / 2, (h - side) / 2);
+        let mut cropped = Vec::with_capacity(EDGE * EDGE * 4);
+        for y in 0..EDGE {
+            for x in 0..EDGE {
+                let at = ((oy + y * side / EDGE) * w + ox + x * side / EDGE) * 4;
+                cropped.extend_from_slice(&rgba[at..at + 4]);
+            }
+        }
+        cropped
     } else {
         let pool = pm_media::pool::FramePool::new(0);
         let still = pm_media::image::imageio::read_preview(path, &pool, (EDGE * 4) as u32).ok()?;
@@ -357,9 +368,49 @@ fn fitted(width: usize, height: usize, rgba: &[u8]) -> Picture {
     out
 }
 
-/// A still through ImageIO's thumbnail reader (every format the app reads
-/// there), else FFmpeg (DPX).
+/// Rasterizes an SVG still scaled so its longest side fits within `max_edge`,
+/// returning straight RGBA8 pixels for thumbnail fitting.
+fn svg_rgba(path: &Path, max_edge: u32) -> Option<(usize, usize, Vec<u8>)> {
+    let mut head = [0u8; 4096];
+    let n = {
+        use std::io::Read;
+        std::fs::File::open(path).ok()?.read(&mut head).ok()?
+    };
+    if pm_media::image::sniff(&head[..n]) != pm_media::image::ImageFormat::Svg {
+        return None;
+    }
+    let doc = pm_media::image::svg::SvgDocument::open(path).ok()?;
+    let (sw, sh) = doc.size();
+    if !sw.is_finite() || !sh.is_finite() || sw <= 0. || sh <= 0. {
+        return None;
+    }
+    let scale = f64::from(max_edge) / sw.max(sh);
+    let w = (sw * scale).round().clamp(1., f64::from(max_edge)) as u32;
+    let h = (sh * scale).round().clamp(1., f64::from(max_edge)) as u32;
+    let pool = pm_media::pool::FramePool::new(0);
+    let still = doc.render(w, h, &pool).ok()?;
+    let unit = pm_media::image::imageio::rgba_unit(&still.frame).ok()?;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for px in unit.chunks_exact(4) {
+        let a = px[3].clamp(0., 1.);
+        let unpremul = |c: f32| {
+            let v = if a > 0. && a < 1. { c / a } else { c };
+            (v.clamp(0., 1.) * 255.).round() as u8
+        };
+        rgba.push(unpremul(px[0]));
+        rgba.push(unpremul(px[1]));
+        rgba.push(unpremul(px[2]));
+        rgba.push((a * 255.).round() as u8);
+    }
+    Some((w as usize, h as usize, rgba))
+}
+
+/// A still through resvg (SVG), ImageIO's thumbnail reader (every format the
+/// app reads there), else FFmpeg (DPX).
 fn still(path: &Path, ffmpeg: Option<&Path>) -> Option<Picture> {
+    if let Some((w, h, rgba)) = svg_rgba(path, WIDTH) {
+        return Some(fitted(w, h, &rgba));
+    }
     let pool = pm_media::pool::FramePool::new(0);
     match pm_media::image::imageio::read_preview(path, &pool, WIDTH) {
         Ok(still) => {

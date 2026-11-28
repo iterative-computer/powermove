@@ -3256,8 +3256,7 @@ function Composer({
       if (typeof id === "string") send({ type: "chooseSlash", id });
     });
   }, [slashDraft]);
-  // The "+" menu: what can go with the draft, then how far the agent may go
-  // on its own (Approvals). Its rows are the window's composer menu.
+  // The "+" menu: what can go with the draft (files or a screen region).
   const full = s.attachments.length >= 6;
   const canAttach = !disabled;
   const canApprove = !!menu && !working && !s.composerDisabled;
@@ -3275,22 +3274,33 @@ function Composer({
         // was under it (the composition there, or the window).
         { label: "Select Part of the Screen", value: "pickRegion" },
       );
-    if (canApprove)
-      options.push(
-        ...(Object.keys(ACCESS) as Access[]).map((value) => ({
-          label: ACCESS[value].label,
-          detail: ACCESS[value].detail,
-          value,
-          checked: value === s.settings.access,
-          category: "Approvals",
-        })),
-      );
     void menu?.({ anchor, picker: "add", search: false, placeholder: "", options }).then((choice) => {
       if (menuEpoch.current !== epoch) return;
       setOpenPicker(null);
       if (choice === "attach") send({ type: "attach" });
       else if (choice === "pickRegion") send({ type: "pickRegion" });
-      else if (typeof choice === "string" && choice in ACCESS && choice !== s.settings.access)
+    });
+  };
+  // Approvals / access mode: how far the agent may go on its own.
+  const openAccess = (anchor: number) => {
+    awaiting.current = null;
+    const epoch = ++menuEpoch.current;
+    setOpenPicker("access");
+    void menu?.({
+      anchor,
+      picker: "access",
+      search: false,
+      placeholder: "",
+      options: (Object.keys(ACCESS) as Access[]).map((value) => ({
+        label: ACCESS[value].label,
+        detail: ACCESS[value].detail,
+        value,
+        checked: value === s.settings.access,
+      })),
+    }).then((choice) => {
+      if (menuEpoch.current !== epoch) return;
+      setOpenPicker(null);
+      if (typeof choice === "string" && choice in ACCESS && choice !== s.settings.access)
         send({ type: "setAccess", access: choice as Access });
     });
   };
@@ -3490,8 +3500,8 @@ function Composer({
           role="button"
           tabIndex={0}
           label="Add"
-          title="Add files or part of the screen, or choose approvals"
-          disabled={!menu || !(canAttach || canApprove)}
+          title="Add files or part of the screen"
+          disabled={!menu || !canAttach}
           open={openPicker === "add"}
           aria-haspopup="menu"
           aria-expanded={openPicker === "add"}
@@ -3539,6 +3549,71 @@ function Composer({
           openEffort={openEffort}
           signedOut={signedOut}
         />
+        <button
+          id="agent-access"
+          role="button"
+          tabIndex={0}
+          label={`Approvals, ${ACCESS[s.settings.access].label}`}
+          title="Approvals"
+          disabled={!canApprove}
+          open={openPicker === "access"}
+          aria-haspopup="menu"
+          aria-expanded={openPicker === "access"}
+          metadata={{ menuAnchor: true }}
+          preventDefault={{ keydown: ["Enter", " "] }}
+          onClick={(e) => {
+            if (canApprove) openAccess(Number(e.currentTarget));
+          }}
+          onKeyDown={(e) => {
+            if (!canApprove || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+            if (e.key === "Enter" || e.key === " ") openAccess(Number(e.currentTarget));
+          }}
+          style={{
+            ...target,
+            ...row,
+            ...shrink,
+            height: t("metrics.hit"),
+            paddingLeft: t("space.sm"),
+            paddingRight: t("space.sm"),
+            borderRadius: t("metrics.inner_radius"),
+            ...(openPicker === "access" ? { background: t("colors.selected_fill") } : {}),
+          }}
+        >
+          <text
+            style={{
+              ...shrink,
+              fontSize: t("typography.body"),
+              color: t(
+                !canApprove
+                  ? "colors.faint"
+                  : s.settings.access === "full"
+                    ? "colors.warning"
+                    : "colors.muted",
+              ),
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {ACCESS[s.settings.access].label}
+          </text>
+          <div
+            metadata={{ symbol: "composer.chevron", turn: openPicker === "access" }}
+            style={{
+              flexShrink: 0,
+              width: t("metrics.composer_symbol"),
+              height: t("metrics.composer_symbol"),
+              symbolSize: t("metrics.composer_symbol"),
+              marginLeft: t("space.xs"),
+              color: t(
+                !canApprove
+                  ? "colors.faint"
+                  : s.settings.access === "full"
+                    ? "colors.warning"
+                    : "colors.muted",
+              ),
+            }}
+          />
+        </button>
         {aeroNeedsPlan(s, n) && (
           // Aero on Free: Checkout straight from the composer, a compact
           // accent pill beside the model's (the plan the backend offers).

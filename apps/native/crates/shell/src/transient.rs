@@ -7,8 +7,7 @@ pub enum ComposerPicker {
     Model,
     Access,
     Threads,
-    /// The composer's "+": attachments, Select Part of the Screen and the
-    /// Approvals choice.
+    /// The composer's "+": attachments and Select Part of the Screen.
     Add,
 }
 impl ComposerPicker {
@@ -26,12 +25,13 @@ impl ComposerPicker {
         match self {
             Self::Model => 260.,
             Self::Threads => 288.,
-            Self::Access | Self::Add => 360.,
+            Self::Access => 360.,
+            Self::Add => 240.,
         }
     }
     /// Its rows carry their description under the label (Approvals').
     pub fn describes(self) -> bool {
-        matches!(self, Self::Access | Self::Add)
+        matches!(self, Self::Access)
     }
 }
 

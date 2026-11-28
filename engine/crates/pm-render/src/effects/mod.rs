@@ -1548,4 +1548,38 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn fill_noise_and_grain_v3_translate_to_wgsl() {
+        let cat = pm_fx_defs::catalog::main_catalog();
+        let main = pm_fx_defs::catalog::main_effects();
+        for id in ["fill", "noise", "grain"] {
+            let def = cat.current(id).expect(id);
+            let version = pm_fx_defs::catalog::effect_version(def.metadata.get("version")).unwrap();
+            let shader = main
+                .shaders
+                .iter()
+                .find(|s| s.id == id && s.version == version)
+                .expect(id);
+            let prepared = pm_glsl::prepare(&shader.source, 0)
+                .unwrap_or_else(|e| panic!("{id} v{version} failed GLSL->naga pipeline: {e:?}"));
+            let names: Vec<&str> = prepared
+                .fragment
+                .reflection
+                .block
+                .as_ref()
+                .expect("uniform block")
+                .members
+                .iter()
+                .map(|u| u.name.as_str())
+                .collect();
+            for p in &def.params {
+                let expected = format!("u_{}", p.k);
+                assert!(
+                    names.contains(&expected.as_str()),
+                    "{id} v{version} missing uniform {expected} (found {names:?})"
+                );
+            }
+        }
+    }
 }

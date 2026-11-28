@@ -4,15 +4,15 @@ use serde_json::{Value, json};
 #[test]
 fn pinned_main_has_every_family_and_full_historical_revisions() {
     assert_eq!(main_effects().commit, MAIN_COMMIT);
-    // Main's 43 and the three grading effects made here (`grade`).
-    assert_eq!(main_effects().effects.len(), 46);
+    // Main's 43, the three grading effects (`grade`), and native Fill + Noise.
+    assert_eq!(main_effects().effects.len(), 48);
     // 53 pinned from main, Apply Color LUT's native revision 2, the four
     // unclipped revisions, Levels and Levels (Individual Controls) with their
-    // clip switches off, Duotone and Posterize grading faint pixels, and
-    // Color Wheels, Color Curves, Color Space Transform, and Gradient Ramp's
-    // stop-aware revision 3 (both older ramp implementations are retained).
-    assert_eq!(main_catalog().definitions().count(), 66);
-    assert_eq!(main_catalog().current_definitions().count(), 46);
+    // clip switches off, Duotone and Posterize grading faint pixels,
+    // Color Wheels, Color Curves, Color Space Transform, Gradient Ramp's
+    // stop-aware revision 3, Grain's revision 3, Fill, and Noise.
+    assert_eq!(main_catalog().definitions().count(), 69);
+    assert_eq!(main_catalog().current_definitions().count(), 48);
     assert_eq!(main_effects().blobs.len(), 22);
     let raw: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
     assert_eq!(raw["effects"].as_array().unwrap().len(), 43);
@@ -239,7 +239,7 @@ fn changed_historical_gradient_requires_provenance_instead_of_silent_reinterpret
 fn assembled_programs_are_keyed_by_implementation_revision_and_preserve_raw_sources() {
     use std::collections::BTreeSet;
     let shaders = &main_effects().shaders;
-    assert_eq!(shaders.len(), 66);
+    assert_eq!(shaders.len(), 69);
     let mut keys = BTreeSet::new();
     for shader in shaders {
         assert!(keys.insert((&shader.id, shader.version)));
@@ -320,8 +320,10 @@ fn unclipped_revisions_keep_the_pinned_shaders_as_history() {
     let pinned: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
     for id in ["color", "channelMixer", "sharpen", "grain"] {
         let old = main_catalog().get(id, 1).unwrap();
-        let current = main_catalog().current(id).unwrap();
-        assert_eq!(current, main_catalog().get(id, 2).unwrap(), "{id}");
+        let unclipped = main_catalog().get(id, 2).unwrap();
+        if id != "grain" {
+            assert_eq!(main_catalog().current(id).unwrap(), unclipped, "{id}");
+        }
         let original = pinned["effects"]
             .as_array()
             .unwrap()
@@ -330,7 +332,7 @@ fn unclipped_revisions_keep_the_pinned_shaders_as_history() {
             .unwrap();
         assert_eq!(old.frag, original["frag"].as_str().unwrap(), "{id}");
         assert!(old.frag.contains("clamp("), "{id}");
-        assert_eq!(old.params, current.params, "{id}");
+        assert_eq!(old.params, unclipped.params, "{id}");
         // A file saved without a version, or by v1.2.0, keeps the old shader.
         assert_eq!(
             definition_for_file(id, None, Some("1.2.0")).unwrap().frag,
@@ -338,12 +340,47 @@ fn unclipped_revisions_keep_the_pinned_shaders_as_history() {
         );
         assert_eq!(
             definition_for_file(id, Some(&json!(2)), Some("1.2.0")).unwrap(),
-            current
+            unclipped
         );
     }
     let colour = &main_catalog().current("color").unwrap().frag;
     assert!(!colour.contains("clamp(x,0.,8.)"));
     assert!(colour.contains("pm_e_dec"));
+}
+
+#[test]
+fn fill_noise_and_grain_effects_are_registered_without_film_grain_label() {
+    let cat = main_catalog();
+    assert!(
+        cat.current_definitions()
+            .all(|d| d.label != "Film Grain"),
+        "Film Grain should be replaced by separate Noise and Grain effects"
+    );
+
+    let fill = cat.current("fill").expect("fill effect");
+    assert_eq!(fill.label, "Fill");
+    assert_eq!(fill.group.as_deref(), Some("Generate"));
+    assert!(fill.params.iter().any(|p| p.k == "color" && p.kind.as_deref() == Some("color")));
+    assert!(fill.params.iter().any(|p| p.k == "invert" && p.kind.as_deref() == Some("toggle")));
+    assert!(fill.params.iter().any(|p| p.k == "opacity"));
+
+    let noise = cat.current("noise").expect("noise effect");
+    assert_eq!(noise.label, "Noise");
+    assert_eq!(noise.group.as_deref(), Some("Stylize"));
+    assert!(noise.params.iter().any(|p| p.k == "amount"));
+    assert!(noise.params.iter().any(|p| p.k == "colorNoise" && p.kind.as_deref() == Some("toggle")));
+    assert!(noise.params.iter().any(|p| p.k == "clipResult" && p.kind.as_deref() == Some("toggle")));
+
+    let grain = cat.current("grain").expect("grain effect");
+    assert_eq!(grain.label, "Grain");
+    assert_eq!(grain.metadata["version"], json!(3));
+    assert!(grain.params.iter().any(|p| p.k == "softness"));
+    assert!(grain.params.iter().any(|p| p.k == "saturation"));
+    assert!(grain.params.iter().any(|p| p.k == "shadows"));
+    assert!(grain.params.iter().any(|p| p.k == "highlights"));
+    // Legacy v1 and v2 Film Grain remain resolvable for saved projects.
+    assert_eq!(cat.get("grain", 1).unwrap().label, "Film Grain");
+    assert_eq!(cat.get("grain", 2).unwrap().label, "Film Grain");
 }
 
 #[test]

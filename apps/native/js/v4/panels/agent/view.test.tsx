@@ -155,6 +155,7 @@ test("focus order follows the thread bar, conversation and the composer's one ro
     "agent-add",
     "agent-model",
     "agent-effort",
+    "agent-access",
     "agent-send",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
@@ -180,9 +181,9 @@ test("the model's name gives way in the docked composer's one row; effort keeps 
   expect(label(effort)?.props.style).toMatchObject({ flexShrink: 0 });
   expect(label(effort)?.props.metadata).toBeUndefined();
   // Every control sits in the composer's one row, on its one surface: "+",
-  // then the model chooser (the model and its effort, one control).
+  // the model chooser (model and effort), and Approvals.
   const options = byId(root, "agent-options");
-  for (const id of ["agent-add", "agent-chooser"])
+  for (const id of ["agent-add", "agent-chooser", "agent-access"])
     expect(options.children).toContain(byId(root, id).id);
   for (const id of ["agent-model", "agent-effort"])
     expect(byId(root, "agent-chooser").children).toContain(byId(root, id).id);
@@ -214,7 +215,7 @@ test("the composer is one surface: the draft sits on it with no inset field, its
     expect(composer.children).toContain(text.id);
     expect(text.props.style.background).toEqual(composer.props.style.background);
     // Pickers are quiet on the surface until their menu is open.
-    for (const id of ["agent-model", "agent-effort", "agent-add"])
+    for (const id of ["agent-model", "agent-effort", "agent-access", "agent-add"])
       expect(byId(root, id).props.style).not.toHaveProperty("background");
   }
   root.dispose();
@@ -343,7 +344,7 @@ test("the thread picker lists threads with their state, switches, and offers New
   assertWire(commits);
   root.dispose();
 });
-test("provider and model share one menu; effort has its own; approvals are in +; picks reach the model", async () => {
+test("provider and model share one menu; effort and approvals each have their own; picks reach the model", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -360,7 +361,7 @@ test("provider and model share one menu; effort has its own; approvals are in +;
   };
   p.snapshot.settings.model = "gpt-6";
   p.snapshot.settings.effort = "high";
-  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto"];
+  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto", "attach"];
   const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
     asked.push(r.options);
@@ -371,10 +372,12 @@ test("provider and model share one menu; effort has its own; approvals are in +;
   );
   expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6");
   expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, High");
+  expect(byId(root, "agent-access").props.label).toBe("Approvals, Composition only");
   for (const id of [
     "agent-model",
     "agent-model",
     "agent-effort",
+    "agent-access",
     "agent-add",
   ]) {
     await root.drive(byId(root, id).id, "click");
@@ -389,21 +392,34 @@ test("provider and model share one menu; effort has its own; approvals are in +;
     ["Low", false],
     ["High", true],
   ]);
-  // "+": the attachments, then Approvals as a section of their own.
-  expect(asked[3]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
-    ["", "Add Files…", false],
-    ["", "Select Part of the Screen", false],
-    ["Approvals", "Composition only", true],
-    ["Approvals", "Supervised", false],
-    ["Approvals", "Auto", false],
-    ["Approvals", "Full access", false],
+  // Approvals: its own picker in the composer row.
+  expect(asked[3]!.map((o) => [o.label, o.checked ?? false])).toEqual([
+    ["Composition only", true],
+    ["Supervised", false],
+    ["Auto", false],
+    ["Full access", false],
+  ]);
+  // "+": attachments only.
+  expect(asked[4]!.map((o) => o.label)).toEqual([
+    "Add Files…",
+    "Select Part of the Screen",
   ]);
   expect(actions).toEqual([
     { type: "setProvider", provider: "claude" },
     { type: "setModel", model: "gpt-6-mini", effort: "high" },
     { type: "setModel", model: "gpt-6", effort: "low" },
     { type: "setAccess", access: "auto" },
+    { type: "attach" },
   ]);
+  // Full access highlights the composer's Approvals button in warning ink.
+  p.snapshot.settings.access = "full";
+  await root.render(
+    <AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />,
+  );
+  const accessNode = byId(root, "agent-access");
+  expect(accessNode.props.label).toBe("Approvals, Full access");
+  const accessText = root.inspect().nodes.find((n) => accessNode.children.includes(n.id) && n.type === "text");
+  expect(accessText?.props.style.color).toEqual({ token: "colors.warning" });
   root.dispose();
 });
 test("the effort picker names the model's effort, lists only its levels and hides for a model with none", async () => {
@@ -636,14 +652,16 @@ test("composer pickers use the pressed anchor and enable search only for a long 
   };
   const render = () => root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   await render();
-  for (const id of ["agent-model", "agent-effort", "agent-add"]) {
+  for (const id of ["agent-model", "agent-effort", "agent-access", "agent-add"]) {
     const button = byId(root, id);
     await root.drive(button.id, "click");
     // The effort part's menu is the pill's own reasoning menu (no search).
     expect(requests.at(-1)).toMatchObject(
       id === "agent-effort"
         ? { anchor: button.id, picker: "chooser", menu: "effort" }
-        : { anchor: button.id, search: false },
+        : id === "agent-access"
+          ? { anchor: button.id, picker: "access", search: false }
+          : { anchor: button.id, search: false },
     );
     await Promise.resolve();
   }
@@ -1496,7 +1514,7 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
       .inspect()
       .nodes.filter((n) => n.props.metadata?.symbol === "composer.chevron")
       .map((n) => n.props.metadata.turn);
-  expect(turns()).toEqual([true, false]);
+  expect(turns()).toEqual([true, false, false]);
   expect(
     requests[0]!.options.find((o) => o.value === "model:opus"),
   ).toMatchObject({ label: "Opus 5.5", detail: "1M context" });
@@ -1504,10 +1522,10 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   for (let i = 0; i < 4; i++) await Promise.resolve();
   await root.flush();
   expect(byId(root, "agent-model").props.open).toBe(false);
-  expect(turns()).toEqual([false, false]);
+  expect(turns()).toEqual([false, false, false]);
   p.snapshot.runId = "busy";
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
-  for (const id of ["agent-model", "agent-effort"])
+  for (const id of ["agent-model", "agent-effort", "agent-access"])
     expect(byId(root, id).props.disabled).toBe(true);
   // During a run "+" still adds files; Approvals wait for the run to end.
   expect(byId(root, "agent-add").props.disabled).toBe(false);
@@ -1531,7 +1549,7 @@ test("Space and Return reach the shell toggle for open composer pickers", async 
     return new Promise((resolve) => { settle = resolve; });
   };
   await root.render(<AgentView publication={fixture()} menu={menu} send={() => {}} />);
-  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-add", "Enter"]]) {
+  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-access", "Enter"], ["agent-add", "Enter"]]) {
     const trigger = byId(root, id);
     await root.drive(trigger.id, "keydown", { key });
     expect(byId(root, id).props["aria-expanded"]).toBe(true);
@@ -1540,7 +1558,7 @@ test("Space and Return reach the shell toggle for open composer pickers", async 
     expect(byId(root, id).props["aria-expanded"]).toBe(false);
   }
   expect(requests.map(({ picker }) => picker)).toEqual([
-    "model", "model", "chooser", "chooser", "add", "add",
+    "model", "model", "chooser", "chooser", "access", "access", "add", "add",
   ]);
   root.dispose();
 });
@@ -2065,7 +2083,7 @@ test("with Aero the composer is one row: \"+\", the split pill (the Aero mark an
   expect(segmented(root)).toEqual([]);
   const options = byId(root, "agent-options");
   const kids = options.children.map((id: number) => root.inspect().nodes.find((n) => n.id === id)!);
-  expect(kids.map((n: any) => n.props.id ?? null)).toEqual(["agent-add", "agent-chooser", null, "agent-send"]);
+  expect(kids.map((n: any) => n.props.id ?? null)).toEqual(["agent-add", "agent-chooser", "agent-access", null, "agent-send"]);
   expect(byId(root, "agent-chooser").props.metadata).toEqual({ pill: "group" });
   const inside = (id: string) => {
     const part = byId(root, id);

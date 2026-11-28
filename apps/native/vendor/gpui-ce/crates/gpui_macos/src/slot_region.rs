@@ -107,6 +107,34 @@ pub(crate) fn shows(gpui: &NSView, region: usize, rect: NSRect) -> bool {
     })
 }
 
+/// Converts `rect` (in `region`'s content coordinates) into top-down GPUI
+/// window coordinates, clipped by every enclosing region's viewport.
+pub(crate) fn window_rect(gpui: &NSView, region: usize, rect: NSRect) -> Option<NSRect> {
+    let view = gpui as *const NSView as usize;
+    HOSTS.with_borrow(|hosts| {
+        let targets = &hosts.get(&view)?.targets;
+        let mut r = rect;
+        let mut current = Some(region);
+        while let Some(id) = current {
+            let t = targets.get(&id)?;
+            let a = applied(t);
+            r = NSRect::new(
+                NSPoint::new(
+                    r.origin.x + a.frame.origin.x + a.origin.x,
+                    r.origin.y + a.frame.origin.y + a.origin.y,
+                ),
+                r.size,
+            );
+            r = intersect(r, a.frame);
+            if r.size.width <= 0. || r.size.height <= 0. {
+                return None;
+            }
+            current = t.parent;
+        }
+        Some(r)
+    })
+}
+
 /// The content view of region `region` for a slot: placed by this present
 /// (`apply`), or only as it stands (`None` when not made yet).
 pub(crate) fn content_view(gpui: &NSView, region: usize, apply: bool) -> Option<Retained<NSView>> {

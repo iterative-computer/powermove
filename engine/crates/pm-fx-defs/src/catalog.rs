@@ -141,6 +141,7 @@ pub fn main_effects() -> &'static MainEffects {
         add_unclipped_revisions(&mut main);
         crate::grade::add(&mut main);
         add_gradient_stops_revision(&mut main);
+        crate::native_effects::add(&mut main);
         main
     })
 }

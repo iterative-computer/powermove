@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod grade;
 pub mod graph;
 pub mod inputs;
+pub mod native_effects;
 pub mod spatial;
 pub mod handles;
 

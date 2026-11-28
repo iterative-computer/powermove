@@ -907,7 +907,8 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -1011,7 +1012,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -1383,8 +1384,159 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -1399,11 +1551,11 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -1447,12 +1599,12 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -1484,16 +1636,6 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -1869,6 +2011,33 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -2802,7 +2971,8 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -2906,7 +3076,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -3278,8 +3448,159 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Supervised",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Supervised",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -3294,11 +3615,11 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -3342,12 +3663,12 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -3379,16 +3700,6 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -3764,6 +4075,33 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -4697,7 +5035,8 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -4801,7 +5140,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -5173,8 +5512,159 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -5189,11 +5679,11 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -5237,12 +5727,12 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -5274,16 +5764,6 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -5659,6 +6139,33 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -6591,7 +7098,8 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -6695,7 +7203,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -7067,8 +7575,159 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -7083,11 +7742,11 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -7131,12 +7790,12 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -7168,16 +7827,6 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -7553,6 +8202,33 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -10498,7 +11174,8 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         30,
         31,
         41,
-        42,
+        45,
+        46,
       ],
       "id": 29,
       "input": null,
@@ -10659,7 +11336,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -11031,8 +11708,149 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "type": "div",
     },
     "41": {
-      "children": [],
+      "children": [
+        42,
+        44,
+      ],
       "id": 41,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 29,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "42": {
+      "children": [
+        43,
+      ],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 41,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "43": {
+      "children": [],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 41,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
       "input": null,
       "listeners": {},
       "parent": 29,
@@ -11047,11 +11865,11 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "div",
     },
-    "42": {
+    "46": {
       "children": [
-        43,
+        47,
       ],
-      "id": 42,
+      "id": 46,
       "input": null,
       "listeners": {
         "click": {
@@ -11095,12 +11913,12 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "button",
     },
-    "43": {
+    "47": {
       "children": [],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {},
-      "parent": 42,
+      "parent": 46,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -11508,6 +12326,33 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "insertBefore",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
     "insertBefore",
     "create",
     "setProps",
@@ -11537,7 +12382,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     9,
     11,
     17,
-    31,
+    35,
   ],
   "nodes": {
     "0": {
@@ -11901,7 +12746,8 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         19,
         20,
         30,
-        31,
+        34,
+        35,
       ],
       "id": 18,
       "input": null,
@@ -12005,7 +12851,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -12444,8 +13290,149 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "type": "button",
     },
     "30": {
-      "children": [],
+      "children": [
+        31,
+        33,
+      ],
       "id": 30,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 18,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "31": {
+      "children": [
+        32,
+      ],
+      "id": 31,
+      "input": null,
+      "listeners": {},
+      "parent": 30,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "32": {
+      "children": [],
+      "id": 32,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "33": {
+      "children": [],
+      "id": 33,
+      "input": null,
+      "listeners": {},
+      "parent": 30,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "34": {
+      "children": [],
+      "id": 34,
       "input": null,
       "listeners": {},
       "parent": 18,
@@ -12460,11 +13447,11 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "div",
     },
-    "31": {
+    "35": {
       "children": [
-        32,
+        36,
       ],
-      "id": 31,
+      "id": 35,
       "input": null,
       "listeners": {
         "click": {
@@ -12508,12 +13495,12 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "button",
     },
-    "32": {
+    "36": {
       "children": [],
-      "id": 32,
+      "id": 36,
       "input": null,
       "listeners": {},
-      "parent": 31,
+      "parent": 35,
       "props": {
         "metadata": {
           "symbol": "composer.stop",
@@ -12891,6 +13878,33 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -13287,7 +14301,8 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         19,
         20,
         30,
-        31,
+        34,
+        35,
       ],
       "id": 18,
       "input": null,
@@ -13391,7 +14406,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -13830,8 +14845,149 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "type": "button",
     },
     "30": {
-      "children": [],
+      "children": [
+        31,
+        33,
+      ],
       "id": 30,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 18,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "31": {
+      "children": [
+        32,
+      ],
+      "id": 31,
+      "input": null,
+      "listeners": {},
+      "parent": 30,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "32": {
+      "children": [],
+      "id": 32,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "33": {
+      "children": [],
+      "id": 33,
+      "input": null,
+      "listeners": {},
+      "parent": 30,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "34": {
+      "children": [],
+      "id": 34,
       "input": null,
       "listeners": {},
       "parent": 18,
@@ -13846,11 +15002,11 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "div",
     },
-    "31": {
+    "35": {
       "children": [
-        32,
+        36,
       ],
-      "id": 31,
+      "id": 35,
       "input": null,
       "listeners": {
         "click": {
@@ -13894,12 +15050,12 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "32": {
+    "36": {
       "children": [],
-      "id": 32,
+      "id": 36,
       "input": null,
       "listeners": {},
-      "parent": 31,
+      "parent": 35,
       "props": {
         "metadata": {
           "symbol": "composer.stop",
@@ -14277,6 +15433,33 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -15414,7 +16597,8 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         42,
         43,
         53,
-        54,
+        57,
+        58,
       ],
       "id": 41,
       "input": null,
@@ -15518,7 +16702,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -15872,8 +17056,149 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "type": "div",
     },
     "53": {
-      "children": [],
+      "children": [
+        54,
+        56,
+      ],
       "id": 53,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 41,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "54": {
+      "children": [
+        55,
+      ],
+      "id": 54,
+      "input": null,
+      "listeners": {},
+      "parent": 53,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "55": {
+      "children": [],
+      "id": 55,
+      "input": null,
+      "listeners": {},
+      "parent": 54,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "56": {
+      "children": [],
+      "id": 56,
+      "input": null,
+      "listeners": {},
+      "parent": 53,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "57": {
+      "children": [],
+      "id": 57,
       "input": null,
       "listeners": {},
       "parent": 41,
@@ -15888,11 +17213,11 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "div",
     },
-    "54": {
+    "58": {
       "children": [
-        55,
+        59,
       ],
-      "id": 54,
+      "id": 58,
       "input": null,
       "listeners": {
         "click": {
@@ -15936,12 +17261,12 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "button",
     },
-    "55": {
+    "59": {
       "children": [],
-      "id": 55,
+      "id": 59,
       "input": null,
       "listeners": {},
-      "parent": 54,
+      "parent": 58,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -16388,6 +17713,33 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -16940,7 +18292,8 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         24,
         25,
         35,
-        36,
+        39,
+        40,
       ],
       "id": 23,
       "input": null,
@@ -17044,7 +18397,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -17445,8 +18798,149 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "35": {
-      "children": [],
+      "children": [
+        36,
+        38,
+      ],
       "id": 35,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 23,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "36": {
+      "children": [
+        37,
+      ],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 36,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "38": {
+      "children": [],
+      "id": 38,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "39": {
+      "children": [],
+      "id": 39,
       "input": null,
       "listeners": {},
       "parent": 23,
@@ -17461,11 +18955,39 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "36": {
+    "4": {
       "children": [
-        37,
+        5,
       ],
-      "id": 36,
+      "id": 4,
+      "input": null,
+      "listeners": {},
+      "parent": 3,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "40": {
+      "children": [
+        41,
+      ],
+      "id": 40,
       "input": null,
       "listeners": {
         "click": {
@@ -17509,12 +19031,12 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "37": {
+    "41": {
       "children": [],
-      "id": 37,
+      "id": 41,
       "input": null,
       "listeners": {},
-      "parent": 36,
+      "parent": 40,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -17546,34 +19068,6 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       },
       "text": "",
       "type": "div",
-    },
-    "4": {
-      "children": [
-        5,
-      ],
-      "id": 4,
-      "input": null,
-      "listeners": {},
-      "parent": 3,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
     },
     "5": {
       "children": [],
@@ -17914,6 +19408,33 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -18613,7 +20134,8 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         28,
         29,
         39,
-        40,
+        43,
+        44,
       ],
       "id": 27,
       "input": null,
@@ -18717,7 +20239,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -19118,21 +20640,77 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "39": {
-      "children": [],
+      "children": [
+        40,
+        42,
+      ],
       "id": 39,
       "input": null,
-      "listeners": {},
-      "parent": 27,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-          "minWidth": {
-            "token": "space.xs",
-          },
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
         },
       },
+      "parent": 27,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
       "text": "",
-      "type": "div",
+      "type": "button",
     },
     "4": {
       "children": [
@@ -19167,6 +20745,91 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         41,
       ],
       "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "43": {
+      "children": [],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+          "minWidth": {
+            "token": "space.xs",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "44": {
+      "children": [
+        45,
+      ],
+      "id": 44,
       "input": null,
       "listeners": {
         "click": {
@@ -19210,12 +20873,12 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "41": {
+    "45": {
       "children": [],
-      "id": 41,
+      "id": 45,
       "input": null,
       "listeners": {},
-      "parent": 40,
+      "parent": 44,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -19609,6 +21272,33 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -20308,7 +21998,8 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         28,
         29,
         39,
-        40,
+        43,
+        44,
       ],
       "id": 27,
       "input": null,
@@ -20412,7 +22103,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -20813,21 +22504,77 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "39": {
-      "children": [],
+      "children": [
+        40,
+        42,
+      ],
       "id": 39,
       "input": null,
-      "listeners": {},
-      "parent": 27,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-          "minWidth": {
-            "token": "space.xs",
-          },
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
         },
       },
+      "parent": 27,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
       "text": "",
-      "type": "div",
+      "type": "button",
     },
     "4": {
       "children": [
@@ -20862,6 +22609,91 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         41,
       ],
       "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "43": {
+      "children": [],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+          "minWidth": {
+            "token": "space.xs",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "44": {
+      "children": [
+        45,
+      ],
+      "id": 44,
       "input": null,
       "listeners": {
         "click": {
@@ -20905,12 +22737,12 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "41": {
+    "45": {
       "children": [],
-      "id": 41,
+      "id": 45,
       "input": null,
       "listeners": {},
-      "parent": 40,
+      "parent": 44,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -21304,6 +23136,33 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -22235,7 +24094,8 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -22339,7 +24199,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -22711,8 +24571,159 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -22727,11 +24738,11 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -22775,12 +24786,12 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -22812,16 +24823,6 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -23197,6 +25198,33 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -24127,7 +26155,8 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         39,
         40,
         50,
-        51,
+        54,
+        55,
       ],
       "id": 38,
       "input": null,
@@ -24231,7 +26260,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -24613,8 +26642,149 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "type": "text",
     },
     "50": {
-      "children": [],
+      "children": [
+        51,
+        53,
+      ],
       "id": 50,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 38,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "51": {
+      "children": [
+        52,
+      ],
+      "id": 51,
+      "input": null,
+      "listeners": {},
+      "parent": 50,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "52": {
+      "children": [],
+      "id": 52,
+      "input": null,
+      "listeners": {},
+      "parent": 51,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "53": {
+      "children": [],
+      "id": 53,
+      "input": null,
+      "listeners": {},
+      "parent": 50,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "54": {
+      "children": [],
+      "id": 54,
       "input": null,
       "listeners": {},
       "parent": 38,
@@ -24629,11 +26799,11 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "51": {
+    "55": {
       "children": [
-        52,
+        56,
       ],
-      "id": 51,
+      "id": 55,
       "input": null,
       "listeners": {
         "click": {
@@ -24677,12 +26847,12 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "52": {
+    "56": {
       "children": [],
-      "id": 52,
+      "id": 56,
       "input": null,
       "listeners": {},
-      "parent": 51,
+      "parent": 55,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -25097,6 +27267,33 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -26094,7 +28291,8 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         38,
         39,
         49,
-        50,
+        53,
+        54,
       ],
       "id": 37,
       "input": null,
@@ -26198,7 +28396,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -26570,21 +28768,77 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "type": "div",
     },
     "49": {
-      "children": [],
+      "children": [
+        50,
+        52,
+      ],
       "id": 49,
       "input": null,
-      "listeners": {},
-      "parent": 37,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-          "minWidth": {
-            "token": "space.xs",
-          },
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
         },
       },
+      "parent": 37,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
       "text": "",
-      "type": "div",
+      "type": "button",
     },
     "5": {
       "children": [],
@@ -26601,6 +28855,91 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         51,
       ],
       "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "51": {
+      "children": [],
+      "id": 51,
+      "input": null,
+      "listeners": {},
+      "parent": 50,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "52": {
+      "children": [],
+      "id": 52,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "53": {
+      "children": [],
+      "id": 53,
+      "input": null,
+      "listeners": {},
+      "parent": 37,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+          "minWidth": {
+            "token": "space.xs",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "54": {
+      "children": [
+        55,
+      ],
+      "id": 54,
       "input": null,
       "listeners": {
         "click": {
@@ -26644,12 +28983,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "51": {
+    "55": {
       "children": [],
-      "id": 51,
+      "id": 55,
       "input": null,
       "listeners": {},
-      "parent": 50,
+      "parent": 54,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -27065,6 +29404,33 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -27764,7 +30130,8 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         28,
         29,
         39,
-        40,
+        43,
+        44,
       ],
       "id": 27,
       "input": null,
@@ -27868,7 +30235,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -28269,21 +30636,77 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "type": "div",
     },
     "39": {
-      "children": [],
+      "children": [
+        40,
+        42,
+      ],
       "id": 39,
       "input": null,
-      "listeners": {},
-      "parent": 27,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-          "minWidth": {
-            "token": "space.xs",
-          },
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
         },
       },
+      "parent": 27,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
       "text": "",
-      "type": "div",
+      "type": "button",
     },
     "4": {
       "children": [
@@ -28318,6 +30741,91 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         41,
       ],
       "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "43": {
+      "children": [],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+          "minWidth": {
+            "token": "space.xs",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "44": {
+      "children": [
+        45,
+      ],
+      "id": 44,
       "input": null,
       "listeners": {
         "click": {
@@ -28361,12 +30869,12 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "button",
     },
-    "41": {
+    "45": {
       "children": [],
-      "id": 41,
+      "id": 45,
       "input": null,
       "listeners": {},
-      "parent": 40,
+      "parent": 44,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -28760,6 +31268,33 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -29459,7 +31994,8 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         28,
         29,
         39,
-        40,
+        43,
+        44,
       ],
       "id": 27,
       "input": null,
@@ -29563,7 +32099,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -29964,21 +32500,77 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "type": "div",
     },
     "39": {
-      "children": [],
+      "children": [
+        40,
+        42,
+      ],
       "id": 39,
       "input": null,
-      "listeners": {},
-      "parent": 27,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-          "minWidth": {
-            "token": "space.xs",
-          },
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
         },
       },
+      "parent": 27,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
       "text": "",
-      "type": "div",
+      "type": "button",
     },
     "4": {
       "children": [
@@ -30013,6 +32605,91 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         41,
       ],
       "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "43": {
+      "children": [],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+          "minWidth": {
+            "token": "space.xs",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "44": {
+      "children": [
+        45,
+      ],
+      "id": 44,
       "input": null,
       "listeners": {
         "click": {
@@ -30056,12 +32733,12 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "text": "",
       "type": "button",
     },
-    "41": {
+    "45": {
       "children": [],
-      "id": 41,
+      "id": 45,
       "input": null,
       "listeners": {},
-      "parent": 40,
+      "parent": 44,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -30455,6 +33132,33 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -31068,7 +33772,8 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         26,
         27,
         37,
-        38,
+        41,
+        42,
       ],
       "id": 25,
       "input": null,
@@ -31172,7 +33877,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -31572,8 +34277,177 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "type": "div",
     },
     "37": {
-      "children": [],
+      "children": [
+        38,
+        40,
+      ],
       "id": 37,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 25,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "38": {
+      "children": [
+        39,
+      ],
+      "id": 38,
+      "input": null,
+      "listeners": {},
+      "parent": 37,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "39": {
+      "children": [],
+      "id": 39,
+      "input": null,
+      "listeners": {},
+      "parent": 38,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "4": {
+      "children": [
+        5,
+      ],
+      "id": 4,
+      "input": null,
+      "listeners": {},
+      "parent": 3,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "40": {
+      "children": [],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 37,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
       "input": null,
       "listeners": {},
       "parent": 25,
@@ -31588,11 +34462,11 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "div",
     },
-    "38": {
+    "42": {
       "children": [
-        39,
+        43,
       ],
-      "id": 38,
+      "id": 42,
       "input": null,
       "listeners": {
         "click": {
@@ -31636,12 +34510,12 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "button",
     },
-    "39": {
+    "43": {
       "children": [],
-      "id": 39,
+      "id": 43,
       "input": null,
       "listeners": {},
-      "parent": 38,
+      "parent": 42,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -31673,34 +34547,6 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       },
       "text": "",
       "type": "div",
-    },
-    "4": {
-      "children": [
-        5,
-      ],
-      "id": 4,
-      "input": null,
-      "listeners": {},
-      "parent": 3,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
     },
     "5": {
       "children": [],
@@ -32071,6 +34917,33 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -32684,7 +35557,8 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         26,
         27,
         37,
-        38,
+        41,
+        42,
       ],
       "id": 25,
       "input": null,
@@ -32788,7 +35662,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -33188,8 +36062,177 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "type": "div",
     },
     "37": {
-      "children": [],
+      "children": [
+        38,
+        40,
+      ],
       "id": 37,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 25,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "38": {
+      "children": [
+        39,
+      ],
+      "id": 38,
+      "input": null,
+      "listeners": {},
+      "parent": 37,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "39": {
+      "children": [],
+      "id": 39,
+      "input": null,
+      "listeners": {},
+      "parent": 38,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "4": {
+      "children": [
+        5,
+      ],
+      "id": 4,
+      "input": null,
+      "listeners": {},
+      "parent": 3,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "40": {
+      "children": [],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 37,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
       "input": null,
       "listeners": {},
       "parent": 25,
@@ -33204,11 +36247,11 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "div",
     },
-    "38": {
+    "42": {
       "children": [
-        39,
+        43,
       ],
-      "id": 38,
+      "id": 42,
       "input": null,
       "listeners": {
         "click": {
@@ -33252,12 +36295,12 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "button",
     },
-    "39": {
+    "43": {
       "children": [],
-      "id": 39,
+      "id": 43,
       "input": null,
       "listeners": {},
-      "parent": 38,
+      "parent": 42,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -33289,34 +36332,6 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       },
       "text": "",
       "type": "div",
-    },
-    "4": {
-      "children": [
-        5,
-      ],
-      "id": 4,
-      "input": null,
-      "listeners": {},
-      "parent": 3,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
     },
     "5": {
       "children": [],
@@ -33687,6 +36702,33 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -34620,7 +37662,8 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -34724,7 +37767,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -35096,8 +38139,159 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -35112,11 +38306,11 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -35160,12 +38354,12 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -35197,16 +38391,6 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -35582,6 +38766,33 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -36515,7 +39726,8 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -36619,7 +39831,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -36991,8 +40203,159 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -37007,11 +40370,11 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -37055,12 +40418,12 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -37092,16 +40455,6 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -37477,6 +40830,33 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",
@@ -38410,7 +41790,8 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         35,
         36,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 34,
       "input": null,
@@ -38514,7 +41895,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           },
         },
         "tabIndex": 0,
-        "title": "Add files or part of the screen, or choose approvals",
+        "title": "Add files or part of the screen",
       },
       "text": "",
       "type": "button",
@@ -38886,8 +42267,159 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
+      },
+      "parent": 34,
+      "props": {
+        "aria-expanded": false,
+        "aria-haspopup": "menu",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Approvals, Composition only",
+        "metadata": {
+          "menuAnchor": true,
+        },
+        "open": false,
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "button",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "height": {
+            "token": "metrics.hit",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "space.sm",
+          },
+          "paddingRight": {
+            "token": "space.sm",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Approvals",
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "composer.chevron",
+          "turn": false,
+        },
+        "style": {
+          "color": {
+            "token": "colors.faint",
+          },
+          "flexShrink": 0,
+          "height": {
+            "token": "metrics.composer_symbol",
+          },
+          "marginLeft": {
+            "token": "space.xs",
+          },
+          "symbolSize": {
+            "token": "metrics.composer_symbol",
+          },
+          "width": {
+            "token": "metrics.composer_symbol",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 34,
@@ -38902,11 +42434,11 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
+        52,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -38950,12 +42482,12 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "composer.send",
@@ -38987,16 +42519,6 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -39372,6 +42894,33 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
     "insertBefore",
     "insertBefore",
     "create",

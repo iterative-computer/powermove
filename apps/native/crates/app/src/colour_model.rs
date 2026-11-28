@@ -183,7 +183,8 @@ impl Color {
         let (body, opacity) = lower
             .rsplit_once('/')
             .map_or((lower.as_str(), None), |(b, a)| {
-                (b, Some(a.trim().trim_end_matches(')').trim()))
+                let trimmed = a.trim().trim_end_matches(')').trim();
+                (b, (!trimmed.is_empty()).then_some(trimmed))
             });
         if lower.contains('(')
             && (lower.matches('(').count() != 1
@@ -317,6 +318,14 @@ mod tests {
         assert_eq!(
             Color::parse_draft("#34C759", "Hex", c.0[3]).unwrap().hex(),
             "#34C75980"
+        );
+        assert_eq!(
+            Color::parse_draft("#34C759 /", "Hex", c.0[3]).unwrap().hex(),
+            "#34C75980"
+        );
+        assert_eq!(
+            Color::parse_draft("34c759", "Hex", 1.).unwrap().hex(),
+            "#34C759"
         );
         assert_eq!(
             Color::parse_draft("rgb(255 107 26 / 50%)", "Hex", 1.)

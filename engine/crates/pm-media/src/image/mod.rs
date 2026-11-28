@@ -265,7 +265,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
 /// structure a gain map needs (a JPEG's MPF segment, an AVIF's `tmap`), so
 /// others keep their own decoders.
 pub fn read_with(path: &Path, pool: &FramePool, rendition: Rendition) -> Result<StillImage> {
-    let mut head = [0u8; 512];
+    let mut head = [0u8; 4096];
     let n = {
         use std::io::Read;
         std::fs::File::open(path)?.read(&mut head)?

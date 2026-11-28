@@ -265,6 +265,36 @@ pub(crate) fn has_slots(key: usize) -> bool {
             .is_some_and(|s| s.iter().any(|s| s.strong_count() > 0))
     })
 }
+
+/// Hide any native control already staged earlier in the current paint whose
+/// visible window rectangle intersects `overlay` (top-down GPUI points), so
+/// floating GPUI popovers (such as the color picker) never let controls behind
+/// them bleed through or intercept pointer clicks.
+pub fn occlude_below(gpui: &NSView, overlay: NSRect) {
+    let key = gpui as *const NSView as usize;
+    let paint = crate::composition::open_paint(key);
+    let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
+    for state in slots.into_iter().filter_map(|s| s.upgrade()) {
+        let Some((p, placement)) = state.geometry.get() else {
+            continue;
+        };
+        if p != paint {
+            continue;
+        }
+        let own = State::visible_rect(placement.bounds, placement.clip);
+        let window_bounds = match placement.region {
+            None => Some(own),
+            Some(region) => crate::slot_region::window_rect(&state.gpui, region, own),
+        };
+        if let Some(bounds) = window_bounds {
+            let hit = crate::slot_region::intersect(bounds, overlay);
+            if hit.size.width > 0. && hit.size.height > 0. {
+                state.geometry.set(None);
+                state.settled.set(None);
+            }
+        }
+    }
+}
 pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::AccessibilityItem> {
     SLOTS.with(|s| {
         s.borrow()

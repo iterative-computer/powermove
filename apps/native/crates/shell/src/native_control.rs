@@ -2063,8 +2063,20 @@ impl Render for NativeControl {
 
 /// Record an opaque GPUI overlay rect so AppKit controls/text slots staged
 /// beneath it in the same paint are hidden instead of bleeding through.
-pub fn occlude_native_overlay(_bounds: Bounds<Pixels>, _window: &Window) {
-    // Handled by P-SLOT-REGION / native popover ordering in gpui_macos.
+pub fn occlude_native_overlay(bounds: Bounds<Pixels>, window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let Some(view) = (unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }) else {
+        return;
+    };
+    let rect = ns_rect(bounds);
+    gpui_macos::native_control::occlude_below(&view, rect);
+    gpui_macos::native_text::occlude_below(&view, rect);
 }
 
 /// First child for GPUI popovers/menus so AppKit subviews staged earlier in

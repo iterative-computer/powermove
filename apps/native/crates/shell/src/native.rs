@@ -4777,6 +4777,26 @@ fn cached_zoom_frame(
         NSSize::new(frame.size.width * ratio, frame.size.height * ratio),
     )
 }
+/// Whether scaling/panning `cached` still covers every visible pixel of
+/// `target`. An uncropped cached layer holds the whole composition, so scaling
+/// or panning it never reveals missing canvas; a cropped layer only holds its
+/// clipped slice, so zooming out or panning past its edges would show a
+/// cut-off rectangle unless we re-present at the live target geometry.
+fn cached_raster_covers(cached: SlotGeometry, cached_frame: NSRect, target: SlotGeometry) -> bool {
+    if cached.crop.is_none() {
+        return true;
+    }
+    const EPS: f64 = 0.5;
+    let cl = cached_frame.origin.x;
+    let cb = cached_frame.origin.y;
+    let cr = cl + cached_frame.size.width;
+    let ct = cb + cached_frame.size.height;
+    let tl = target.layer.origin.x;
+    let tb = target.layer.origin.y;
+    let tr = tl + target.layer.size.width;
+    let tt = tb + target.layer.size.height;
+    cl <= tl + EPS && cb <= tb + EPS && cr >= tr - EPS && ct >= tt - EPS
+}
 #[derive(Clone, Default)]
 pub(crate) struct NativePanelGeometry {
     pub bodies: Vec<(String, crate::layout::Rect)>,
@@ -7351,6 +7371,28 @@ impl Host {
             self.last_geometry = None;
         }
     }
+    /// Update the live viewer Metal layer's frame, crop and drawable size
+    /// immediately (with KVO so the engine's output binding redraws at once).
+    fn apply_live_viewer_geometry(&mut self, g: SlotGeometry) {
+        self.layer.set_contents_scale(g.scale);
+        self.viewer_crop.set(g.crop);
+        let key = NSString::from_str("drawableSize");
+        let layer = self.layer.as_ptr() as *mut AnyObject;
+        unsafe {
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            let _: () = msg_send![layer, setFrame:g.layer];
+            let _: () = msg_send![layer, willChangeValueForKey: &*key];
+            self.layer
+                .set_drawable_size(core_graphics::geometry::CGSize::new(
+                    g.layer.size.width * g.scale,
+                    g.layer.size.height * g.scale,
+                ));
+            let _: () = msg_send![layer, didChangeValueForKey: &*key];
+            CATransaction::commit();
+        }
+        self.last_geometry = None;
+    }
     /// Apply cached placement in the input transaction, alongside the overlay.
     pub fn place_cached_viewer(&mut self) {
         let Some((_, Some(zoom), pan)) = self.viewer_transform else {
@@ -7360,9 +7402,18 @@ impl Host {
             return;
         };
         let slot = [r.w as f64, r.h as f64];
+        let target = self.viewer_geometry();
         if let Some((cover, cached, old_zoom, old_pan)) = &self.viewer_cover {
+            let cached = *cached;
             let frame = cached_zoom_frame(cached.layer, slot, zoom / old_zoom, *old_pan, pan);
-            let target = self.viewer_geometry();
+            if let Some(g) = target
+                && !cached_raster_covers(cached, frame, g)
+            {
+                self.viewer_raster = None;
+                self.reveal_viewer_raster();
+                self.apply_live_viewer_geometry(g);
+                return;
+            }
             unsafe {
                 CATransaction::begin();
                 CATransaction::setDisableActions(true);
@@ -7376,6 +7427,13 @@ impl Host {
         }
         if let Some((cached, old_zoom, old_pan)) = self.viewer_raster {
             let frame = cached_zoom_frame(cached.layer, slot, zoom / old_zoom, old_pan, pan);
+            if let Some(g) = target
+                && !cached_raster_covers(cached, frame, g)
+            {
+                self.viewer_raster = None;
+                self.apply_live_viewer_geometry(g);
+                return;
+            }
             unsafe {
                 CATransaction::begin();
                 CATransaction::setDisableActions(true);
@@ -7604,11 +7662,13 @@ impl Host {
             || self.native_pending.as_ref().is_some_and(|pending| pending())
     }
     fn present(&mut self) -> gpui_macos::composition::SlotChange {
+        let geometry = self.viewer_geometry();
         if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
             &self.viewer_cover,
             self.viewer_transform,
             self.viewer_rect.get(),
         ) {
+            let cached = *cached;
             let frame = cached_zoom_frame(
                 cached.layer,
                 [r.w as f64, r.h as f64],
@@ -7616,11 +7676,34 @@ impl Host {
                 *old_pan,
                 pan,
             );
-            unsafe {
-                let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame];
+            if geometry.is_some_and(|g| !cached_raster_covers(cached, frame, g)) {
+                self.viewer_raster = None;
+                self.reveal_viewer_raster();
+                self.last_geometry = None;
+            } else {
+                unsafe {
+                    let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame];
+                }
             }
         }
-        let geometry = self.viewer_geometry();
+        if let (Some((cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r), Some(g)) = (
+            self.viewer_raster,
+            self.viewer_transform,
+            self.viewer_rect.get(),
+            geometry,
+        ) {
+            let frame = cached_zoom_frame(
+                cached.layer,
+                [r.w as f64, r.h as f64],
+                zoom / old_zoom,
+                old_pan,
+                pan,
+            );
+            if !cached_raster_covers(cached, frame, g) {
+                self.viewer_raster = None;
+                self.last_geometry = None;
+            }
+        }
         let moved = self.last_geometry != Some(geometry);
         if moved {
             if let Some(g) = geometry {
@@ -13576,6 +13659,57 @@ mod cached_zoom_tests {
         // Top-down +dx shifts right (+x); top-down +dy shifts down (-y in bottom-up layer coords).
         assert!((next.origin.x - (frame.origin.x + 75.)).abs() < 1e-6);
         assert!((next.origin.y - (frame.origin.y - 50.)).abs() < 1e-6);
+    }
+    #[test]
+    fn zooming_out_or_panning_a_cropped_layer_never_uses_a_cut_off_cached_raster() {
+        let slot = [940., 610.];
+        let dimensions = [1920., 1080.];
+        let old_zoom = 1.6;
+        let old_pan = [0., 0.];
+        let (layer, crop) = viewer_window(slot, dimensions.map(|d| d * old_zoom), 2., old_pan);
+        assert!(crop.is_some());
+        let geom = |layer, crop| SlotGeometry {
+            frame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(slot[0], slot[1])),
+            layer,
+            scale: 2.,
+            crop,
+            corners: [0., 0.],
+        };
+        let cached = geom(layer, crop);
+
+        // Zooming IN further keeps the cached slice covering the whole viewport.
+        let zoom_in = 2.4;
+        let (in_layer, in_crop) = viewer_window(slot, dimensions.map(|d| d * zoom_in), 2., old_pan);
+        let in_frame = cached_zoom_frame(cached.layer, slot, zoom_in / old_zoom, old_pan, old_pan);
+        assert!(cached_raster_covers(cached, in_frame, geom(in_layer, in_crop)));
+
+        // Zooming OUT shrinks the cropped slice inside the target, exposing missing image.
+        let zoom_out = 0.8;
+        let (out_layer, out_crop) = viewer_window(slot, dimensions.map(|d| d * zoom_out), 2., old_pan);
+        let out_frame = cached_zoom_frame(cached.layer, slot, zoom_out / old_zoom, old_pan, old_pan);
+        assert!(!cached_raster_covers(cached, out_frame, geom(out_layer, out_crop)));
+
+        // Panning past the cropped slice's edge exposes missing image.
+        let pan = [120., 0.];
+        let (pan_layer, pan_crop) = viewer_window(slot, dimensions.map(|d| d * old_zoom), 2., pan);
+        let pan_frame = cached_zoom_frame(cached.layer, slot, 1., old_pan, pan);
+        assert!(!cached_raster_covers(cached, pan_frame, geom(pan_layer, pan_crop)));
+
+        // An uncropped layer holds the whole image, so zooming out still covers it.
+        let fit_zoom = 0.4;
+        let (fit_layer, fit_crop) = viewer_window(slot, dimensions.map(|d| d * fit_zoom), 2., old_pan);
+        assert!(fit_crop.is_none());
+        let fit_cached = geom(fit_layer, fit_crop);
+        let smaller_zoom = 0.25;
+        let (small_layer, small_crop) =
+            viewer_window(slot, dimensions.map(|d| d * smaller_zoom), 2., old_pan);
+        let small_frame =
+            cached_zoom_frame(fit_cached.layer, slot, smaller_zoom / fit_zoom, old_pan, old_pan);
+        assert!(cached_raster_covers(
+            fit_cached,
+            small_frame,
+            geom(small_layer, small_crop)
+        ));
     }
 }
 

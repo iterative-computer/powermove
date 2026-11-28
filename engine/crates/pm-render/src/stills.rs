@@ -101,7 +101,7 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         ImageFormat::Avif if still.backend == pm_media::image::ImageBackend::ImageIo => {}
         // Container transforms are applied in the reader, as Blink does.
         ImageFormat::Avif => return avif(still),
-        ImageFormat::Svg => return unsupported("SVG stills"),
+        ImageFormat::Svg => return Ok(()),
         ImageFormat::Other => return unsupported("stills of an unrecognized format"),
     }
     let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;

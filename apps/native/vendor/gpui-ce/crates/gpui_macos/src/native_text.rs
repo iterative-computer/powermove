@@ -1065,7 +1065,7 @@ impl NativeTextSlot {
                 content.addSubview_positioned_relativeTo(
                     &state.wrapper,
                     NSWindowOrderingMode::Above,
-                    Some(gpui),
+                    None,
                 );
                 if let Some((host, _)) = &state.caret {
                     host.setAutoresizingMask(top);
@@ -1657,19 +1657,24 @@ fn place(key: usize, apply: bool) -> bool {
                 }
             }
         }
-        if apply && state.focus_pending.replace(false) {
-            if let Some(w) = state.gpui.window() {
-                if let Editor::Multiline(v) = &state.editor {
-                    w.makeFirstResponder(Some(v));
-                }
-                if let Editor::Field(v) = &state.editor {
-                    unsafe {
-                        v.selectText(None);
+        if !hidden && state.focus_pending.get() {
+            moved = true;
+            if apply {
+                state.focus_pending.set(false);
+                if let Some(w) = state.gpui.window() {
+                    if let Editor::Multiline(v) = &state.editor {
+                        w.makeFirstResponder(Some(v));
                     }
-                    if let Some(ed) = v.currentEditor() {
-                        configure_editor(&ed, !state.kind.number());
-                        if let Some((start, end)) = state.selection_pending.take() {
-                            ed.setSelectedRange(selection_range(start, end, ed.string().length()));
+                    if let Editor::Field(v) = &state.editor {
+                        w.makeFirstResponder(Some(v));
+                        unsafe {
+                            v.selectText(None);
+                        }
+                        if let Some(ed) = v.currentEditor() {
+                            configure_editor(&ed, !state.kind.number());
+                            if let Some((start, end)) = state.selection_pending.take() {
+                                ed.setSelectedRange(selection_range(start, end, ed.string().length()));
+                            }
                         }
                     }
                 }
@@ -1677,6 +1682,39 @@ fn place(key: usize, apply: bool) -> bool {
         }
     }
     moved
+}
+
+/// Hide any non-canvas native text slot already staged earlier in the current
+/// paint whose visible window rectangle intersects `overlay` (top-down GPUI
+/// points), so floating GPUI popovers (such as the color picker) never let
+/// underlying text fields bleed through or steal clicks while keeping fields
+/// painted inside the popover untouched.
+pub fn occlude_below(gpui: &NSView, overlay: NSRect) {
+    let key = gpui as *const NSView as usize;
+    let paint = crate::composition::open_paint(key);
+    let slots = SLOTS.with(|slots| slots.borrow().get(&key).cloned().unwrap_or_default());
+    for state in slots.into_iter().filter_map(|s| s.upgrade()) {
+        if state.kind == TextKind::Canvas {
+            continue;
+        }
+        let Some((p, placement)) = state.geometry.get() else {
+            continue;
+        };
+        if p != paint {
+            continue;
+        }
+        let visible = intersection(placement.bounds, placement.clip);
+        let window_bounds = match placement.region {
+            None => Some(visible),
+            Some(region) => crate::slot_region::window_rect(&state.gpui, region, visible),
+        };
+        if let Some(bounds) = window_bounds {
+            let hit = crate::slot_region::intersect(bounds, overlay);
+            if hit.size.width > 0. && hit.size.height > 0. {
+                state.geometry.set(None);
+            }
+        }
+    }
 }
 pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::AccessibilityItem> {
     SLOTS.with(|slots| {

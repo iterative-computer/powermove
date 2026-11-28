@@ -351,6 +351,7 @@ impl Picker {
     /// checked.
     fn open_menu(&mut self, settings: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_active(cx);
+        self.blur_fields(cx);
         let Some(control) = self.menu_anchors.borrow()[usize::from(settings)] else {
             return;
         };
@@ -403,12 +404,17 @@ impl Picker {
             9 + (i / 3) * 4 + i % 3
         }
     }
+    fn blur_fields(&self, cx: &mut Context<Self>) {
+        for f in &self.fields {
+            if f.read(cx).is_editing() {
+                f.update(cx, |f, cx| f.blur(cx));
+            }
+        }
+    }
     fn navigate(&mut self, d: isize, cx: &mut Context<Self>) {
         let index = (self.focus_index as isize + d).rem_euclid(STOP_COUNT as isize) as usize;
         self.focus_index = index;
-        for f in &self.fields {
-            f.update(cx, |f, cx| f.blur(cx));
-        }
+        self.blur_fields(cx);
         let handle = self.stops[index].clone();
         let window = self.window;
         cx.defer(move |cx| {
@@ -665,7 +671,12 @@ impl Picker {
         }
         for (i, field) in self.fields.iter().enumerate() {
             let text = self.channel_text(i);
-            field.update(cx, |f, cx| f.set_value(&text, cx));
+            field.update(cx, |f, cx| {
+                if f.is_editing() && !f.has_keyboard() {
+                    f.blur(cx);
+                }
+                f.set_value(&text, cx);
+            });
         }
         cx.emit(Edit::Value(c.hex()));
         cx.notify();
@@ -809,6 +820,7 @@ impl Picker {
                                         Track::Hue => 7,
                                     };
                                     p.apply_active(cx);
+                                    p.blur_fields(cx);
                                     p.stops[i].focus(window, cx);
                                     p.focus_index = i;
                                     p.drag = Some(Drag {
@@ -1085,7 +1097,10 @@ impl Render for Picker {
                         .aria_label("Restore previous color")
                         .child(swatch(self.previous))
                         .child(div().text_center().child("Previous"))
-                        .on_click(cx.listener(|p, _, _, cx| p.set(p.previous, cx))),
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            p.blur_fields(cx);
+                            p.set(p.previous, cx);
+                        })),
                 )
                 .child(
                     div()
@@ -1302,6 +1317,7 @@ impl Render for Picker {
                                     .when(!self.p3, |d| d.bg(rgb(t.colors.selected_fill)))
                                     .on_click(cx.listener(|p, _, _, cx| {
                                         p.apply_active(cx);
+                                        p.blur_fields(cx);
                                         p.p3 = false;
                                         p.notation = "OKLCH";
                                         p.hue = p.hsv()[0];
@@ -1318,6 +1334,7 @@ impl Render for Picker {
                                     .when(self.p3, |d| d.bg(rgb(t.colors.selected_fill)))
                                     .on_click(cx.listener(|p, _, _, cx| {
                                         p.apply_active(cx);
+                                        p.blur_fields(cx);
                                         p.p3 = true;
                                         p.notation = "OKLCH";
                                         p.hue = p.hsv()[0];
@@ -1339,6 +1356,7 @@ impl Render for Picker {
                         })
                         .on_click(cx.listener(|p, _, _, cx| {
                             p.apply_active(cx);
+                            p.blur_fields(cx);
                             p.sampling = true;
                             p.generation += 1;
                             p.status.clear();

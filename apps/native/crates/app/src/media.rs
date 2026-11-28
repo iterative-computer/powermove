@@ -666,6 +666,7 @@ pub fn agent_pasted_path(text: &str) -> Option<std::path::PathBuf> {
             | "heic"
             | "webp"
             | "gif"
+            | "svg"
             | "mov"
             | "mp4"
             | "webm"
@@ -834,6 +835,7 @@ pub fn attachment_records(paths: &[std::path::PathBuf]) -> Result<Vec<serde_json
             "gif" => Some("image/gif"),
             "webp" => Some("image/webp"),
             "heic" => Some("image/heic"),
+            "svg" => Some("image/svg+xml"),
             _ => None,
         };
         let mut record =

@@ -179,8 +179,12 @@ pub fn sniff(head: &[u8]) -> bool {
         )
         .0;
     let t = text.trim_start_matches('\u{feff}').trim_start();
-    t.starts_with("<svg")
-        || ((t.starts_with("<?xml") || t.starts_with("<!--")) && text.contains("<svg"))
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("<svg")
+        || ((lower.starts_with("<?xml")
+            || lower.starts_with("<!--")
+            || lower.starts_with("<!doctype"))
+            && lower.contains("<svg"))
 }
 
 pub use super::svg_broken::{MAX_ELEMENT_DEPTH, broken_image, broken_image_file};
@@ -247,6 +251,10 @@ mod tests {
             .flat_map(u16::to_be_bytes)
             .collect();
         assert!(sniff(&utf16));
+        assert!(sniff(
+            b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg/>"
+        ));
+        assert!(sniff(b"<!-- comment --><SVG width='10' height='10'/>"));
     }
 
     /// Valid SVGs in the encodings Chromium honors parse; their text keeps
