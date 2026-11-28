@@ -412,6 +412,7 @@ impl Backend {
             .ok_or("No open project")?
             .install_effect_catalog(catalog)
             .map_err(|e| e.to_string())?;
+        self.native.properties.effect_params = self.panel.presentation.parameters.clone();
         self.last_effects = next_effects;
         // Only now: a failed conversion must fail every sync, not just the first.
         self.last_registries = Some(registries);

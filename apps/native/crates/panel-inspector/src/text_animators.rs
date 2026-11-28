@@ -147,6 +147,148 @@ const PRESETS: [Preset; 13] = [
     ),
 ];
 
+/// Built-in text animator property kinds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AnimatorPropertyKind {
+    Number(f64),
+    Color,
+}
+
+/// One built-in text animator property that can be added to any text animator.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimatorPropertySpec {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub unit: &'static str,
+    pub step: f64,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub kind: AnimatorPropertyKind,
+}
+
+/// Every built-in property a user can add to a text animator, in menu order.
+pub const ANIMATOR_PROPERTIES: &[AnimatorPropertySpec] = &[
+    AnimatorPropertySpec {
+        key: "x",
+        label: "Position X",
+        unit: "px",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(0.0),
+    },
+    AnimatorPropertySpec {
+        key: "y",
+        label: "Position Y",
+        unit: "px",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(0.0),
+    },
+    AnimatorPropertySpec {
+        key: "scale",
+        label: "Scale",
+        unit: "%",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(100.0),
+    },
+    AnimatorPropertySpec {
+        key: "scaleX",
+        label: "Scale X",
+        unit: "%",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(100.0),
+    },
+    AnimatorPropertySpec {
+        key: "scaleY",
+        label: "Scale Y",
+        unit: "%",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(100.0),
+    },
+    AnimatorPropertySpec {
+        key: "rotation",
+        label: "Rotation",
+        unit: "°",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(0.0),
+    },
+    AnimatorPropertySpec {
+        key: "skew",
+        label: "Skew",
+        unit: "°",
+        step: 1.0,
+        min: Some(-80.0),
+        max: Some(80.0),
+        kind: AnimatorPropertyKind::Number(0.0),
+    },
+    AnimatorPropertySpec {
+        key: "opacity",
+        label: "Opacity",
+        unit: "%",
+        step: 1.0,
+        min: Some(0.0),
+        max: Some(100.0),
+        kind: AnimatorPropertyKind::Number(100.0),
+    },
+    AnimatorPropertySpec {
+        key: "blur",
+        label: "Blur",
+        unit: "px",
+        step: 0.5,
+        min: Some(0.0),
+        max: None,
+        kind: AnimatorPropertyKind::Number(0.0),
+    },
+    AnimatorPropertySpec {
+        key: "tracking",
+        label: "Tracking",
+        unit: "px",
+        step: 0.5,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Number(0.0),
+    },
+    AnimatorPropertySpec {
+        key: "color",
+        label: "Color",
+        unit: "",
+        step: 1.0,
+        min: None,
+        max: None,
+        kind: AnimatorPropertyKind::Color,
+    },
+];
+
+pub fn animator_property_spec(key: &str) -> Option<&'static AnimatorPropertySpec> {
+    ANIMATOR_PROPERTIES.iter().find(|spec| spec.key == key)
+}
+
+pub fn is_selector_channel(key: &str) -> bool {
+    matches!(
+        key,
+        "amount"
+            | "delay"
+            | "duration"
+            | "stagger"
+            | "start"
+            | "end"
+            | "offset"
+            | "smoothness"
+            | "speed"
+            | "spread"
+    )
+}
+
 /// The menu in its reading order, each entry a label with an id or a header.
 pub fn preset_menu() -> Vec<(Option<&'static str>, &'static str)> {
     let mut out = Vec::new();
@@ -280,6 +422,46 @@ impl Inspector {
                 TextCommand::RemoveAnimator {
                     layer_id: layer.into(),
                     animator_id: animator_id.into(),
+                }
+                .into(),
+            ],
+        )
+    }
+    pub fn add_text_animator_property(
+        &self,
+        caller: Caller,
+        layer: &str,
+        animator_id: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<Request, InspectorError> {
+        self.transaction(
+            caller,
+            vec![
+                TextCommand::AddAnimatorProperty {
+                    layer_id: layer.into(),
+                    animator_id: animator_id.into(),
+                    key: key.into(),
+                    value,
+                }
+                .into(),
+            ],
+        )
+    }
+    pub fn remove_text_animator_property(
+        &self,
+        caller: Caller,
+        layer: &str,
+        animator_id: &str,
+        key: &str,
+    ) -> Result<Request, InspectorError> {
+        self.transaction(
+            caller,
+            vec![
+                TextCommand::RemoveAnimatorProperty {
+                    layer_id: layer.into(),
+                    animator_id: animator_id.into(),
+                    key: key.into(),
                 }
                 .into(),
             ],

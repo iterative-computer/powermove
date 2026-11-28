@@ -87,6 +87,7 @@ export interface Row {
   hidden?: boolean;
   animation?: "static" | "animated" | "key-at-playhead";
   linked?: boolean;
+  removable?: boolean;
   separateDimensions?: boolean;
   expression?: { binding: Binding; source: string; error: string | null };
   error?: { kind: "number" } | { kind: "range"; min: number; max: number };
@@ -105,6 +106,15 @@ export interface AnimatorPreset {
   id: string | null;
   label: string;
   disabled: boolean;
+}
+export interface AnimatorAddItem {
+  id?: string | null;
+  label?: string;
+  header?: boolean;
+  separator?: boolean;
+  disabled?: boolean;
+  checked?: boolean;
+  children?: AnimatorAddItem[];
 }
 /** A finish tile drawn as a tiny shaded sphere (colours are content). */
 export interface Finish {
@@ -129,7 +139,12 @@ export interface Section {
   action?: SectionAction;
   /** Several quiet actions in a row (Time: remap, freeze, reverse). */
   actions?: SectionAction[];
-  animators?: { id: string; name: string; rows: Row[] }[];
+  animators?: {
+    id: string;
+    name: string;
+    rows: Row[];
+    addItems?: (AnimatorAddItem | null)[];
+  }[];
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */
   masks?: { id: string; name: string; rows: Row[] }[];
@@ -166,6 +181,7 @@ export type RowAction =
   | "show-graph"
   | "link"
   | "separate-dimensions"
+  | "remove-animator-property"
   | `ease:${string}`;
 export type Intent =
   | { type: "key"; row: string; removeAnimation: boolean }
@@ -177,6 +193,7 @@ export type Intent =
   | { type: "drop-effect"; effect: Json; target: string }
   | { type: "add-animator"; preset: string }
   | { type: "remove-animator"; animator: string }
+  | { type: "add-animator-property"; animator: string; item: string }
   | { type: "remove-mask"; mask: string }
   | { type: "set-value"; row: string; value: Json };
 export type ModelOperation = Extract<
@@ -204,6 +221,12 @@ export type NativeRequest =
   | { type: "new-layer-menu"; anchor: number; items: (string | null)[] }
   | { type: "row-menu"; anchor: number; row: string; items: MenuItem[] }
   | { type: "animator-menu"; anchor: number; items: AnimatorPreset[] }
+  | {
+      type: "animator-add-menu";
+      anchor: number;
+      animator: string;
+      items: (AnimatorAddItem | null)[];
+    }
   | {
       type: "font-menu";
       anchor: number;

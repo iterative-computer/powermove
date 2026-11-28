@@ -260,7 +260,7 @@ impl Inspector {
             })
             .collect()
     }
-    pub(crate) fn saved_parameter_presentation(
+    pub fn saved_parameter_presentation(
         &self,
         effect: &Value,
         key: &str,

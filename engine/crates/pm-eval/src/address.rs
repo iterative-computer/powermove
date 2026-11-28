@@ -213,6 +213,8 @@ pub fn text_animator_label(key: &JsString) -> JsValue {
         b"x" => "Position X",
         b"y" => "Position Y",
         b"scale" => "Scale",
+        b"scaleX" => "Scale X",
+        b"scaleY" => "Scale Y",
         b"rotation" => "Rotation",
         b"skew" => "Skew",
         b"tracking" => "Tracking",
@@ -229,7 +231,24 @@ pub fn text_animator_label(key: &JsString) -> JsValue {
         b"speed" => "Speed",
         b"spread" => "Spread",
         b"unit" => "Based on",
-        _ => return JsValue::String(key.clone()),
+        _ => {
+            let text = key.to_string_lossy();
+            if let Some(tag) = text.strip_prefix("fontAxis.") {
+                let axis = match tag {
+                    "wght" => "Weight",
+                    "wdth" => "Width",
+                    "slnt" => "Slant",
+                    "ital" => "Italic",
+                    "opsz" => "Optical Size",
+                    other => other,
+                };
+                return JsValue::from(axis);
+            }
+            if let Some((_, param)) = crate::text_anim::parse_effect_channel(&text) {
+                return JsValue::from(param);
+            }
+            return JsValue::String(key.clone());
+        }
     };
     JsValue::from(name)
 }

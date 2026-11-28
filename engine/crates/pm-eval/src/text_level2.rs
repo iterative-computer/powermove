@@ -238,6 +238,22 @@ impl<'d> Scope<'_, 'd> {
             .collect();
         let mut draws = Vec::new();
         let posed = !state.animators.is_empty() || !state.styles.is_empty();
+        let has_fx_anim = state.animators.iter().any(|a| a.has_effect_channels());
+        let fx_key_for = |source: usize| -> Vec<i64> {
+            if !has_fx_anim {
+                return Vec::new();
+            }
+            let Some(u) = units.get(&source) else {
+                return Vec::new();
+            };
+            state
+                .animators
+                .iter()
+                .filter(|a| a.has_effect_channels())
+                .map(|a| (crate::text_anim::animator_weight_for_unit(a, u) * 1000.0).round() as i64)
+                .collect()
+        };
+        let mut last_fx_key: Vec<i64> = Vec::new();
         for run in &layout.runs {
             let data = shaped
                 .faces
@@ -288,6 +304,7 @@ impl<'d> Scope<'_, 'd> {
                     }
                     _ => (IDENTITY, 1.0, 0.0, color_at(&d, &state.styles, source)),
                 };
+                let fx_key = fx_key_for(source);
                 let atom = Run {
                     line: run.line,
                     font: run.font.clone(),
@@ -309,12 +326,14 @@ impl<'d> Scope<'_, 'd> {
                     && last.opacity == opacity
                     && last.blur == blur
                     && last.color == color
+                    && (!has_fx_anim || last_fx_key == fx_key)
                 {
                     // One paint operation for equal poses retains the
                     // shaped run's coverage/compositing behavior at rest.
                     last.run.glyphs.extend(atom.glyphs);
                     last.run.sources.extend(atom.sources);
                 } else {
+                    last_fx_key = fx_key;
                     draws.push(Draw {
                         run: atom,
                         data: data.clone(),

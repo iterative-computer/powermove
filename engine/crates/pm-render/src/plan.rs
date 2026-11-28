@@ -1736,6 +1736,200 @@ fn draw_layer<'d>(
     let padding = effects
         .as_ref()
         .map_or(composite::effects::Padding::NONE, |e| e.padding);
+    // Per-unit text animator effect-control overrides: when a text layer has
+    // active effects AND at least one enabled text animator targets an effect
+    // control (`fx.<fxId>.<paramKey>`), partition glyphs into weight buckets so
+    // each unit renders with its modulated effect parameters.
+    if ty == "text"
+        && !source_owner
+        && let Some(ref layer_effects) = effects
+        && pm_eval::text_anim::has_effect_channels(layer)
+        && !node::array(node::member(node::member(Some(layer), "d"), "paths"))
+            .is_some_and(|p| !p.is_empty())
+        && b.text.as_deref().is_some_and(|t| t.has_fonts())
+    {
+        let world = b.world(scope, layer, time, scale)?;
+        let density = crate::text::continuous_raster_scale(&world);
+        let active_fx = |fx_id: &str| layer_effects.passes.has_effect_instance(fx_id);
+        let bucketed = b
+            .text
+            .as_deref_mut()
+            .expect("checked above")
+            .text_layer_effect_buckets(scope, layer, time, density, &active_fx)?;
+        for what in b
+            .text
+            .as_deref_mut()
+            .expect("checked above")
+            .take_unsupported()
+        {
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+        }
+        if let Some((fx_animators, buckets)) = bucketed {
+            if buckets.is_empty() {
+                return Ok(None);
+            }
+            let plane_matrix = if scope.is_3d_layer(layer)? {
+                let world3d = scope.world3d(layer, time, false)?;
+                scope.view_camera.map(|camera| {
+                    let (cw, ch) = scope.comp_size();
+                    camera.project_plane(&world3d, cw, ch)
+                })
+            } else {
+                None
+            };
+            let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+            if buckets.len() == 1 {
+                let (weights, quad) = buckets.into_iter().next().unwrap();
+                let pairs: Vec<_> = fx_animators.iter().zip(weights.iter().copied()).collect();
+                let bucket_effects = layer_effects
+                    .passes
+                    .with_text_animator_overrides(&pairs)
+                    .map(|(passes, pad)| composite::PreparedEffects {
+                        padding: pad,
+                        backdrop: layer_effects.backdrop,
+                        passes,
+                    })
+                    .unwrap_or_else(|| layer_effects.clone());
+                let Some(draw) = place_layer_quad(
+                    scope,
+                    b,
+                    layer,
+                    &ty,
+                    time,
+                    (width, height),
+                    scale,
+                    1.0,
+                    bucket_effects.padding,
+                    text_texture(quad),
+                    world,
+                    plane_matrix,
+                    camera_preview,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let masks = layer_masks(
+                    scope,
+                    b,
+                    layer,
+                    time,
+                    scale,
+                    width,
+                    height,
+                    has_masks && !source_owner,
+                )?;
+                let matte = if matted {
+                    layer_matte(scope, b, layer, time, width, height, scale)?
+                } else {
+                    None
+                };
+                return Ok(Some(vec![node(composite::Node::Layer(
+                    composite::LayerNode {
+                        layer: id.clone(),
+                        content: vec![draw],
+                        masks,
+                        effects: Some(bucket_effects),
+                        matte,
+                        blend,
+                        alpha,
+                        transition: transition.clone(),
+                        dof,
+                    },
+                ))]));
+            }
+            let mut bucket_draws = Vec::with_capacity(buckets.len());
+            for (weights, quad) in buckets {
+                let pairs: Vec<_> = fx_animators.iter().zip(weights.iter().copied()).collect();
+                let bucket_effects = layer_effects
+                    .passes
+                    .with_text_animator_overrides(&pairs)
+                    .map(|(passes, pad)| composite::PreparedEffects {
+                        padding: pad,
+                        backdrop: layer_effects.backdrop,
+                        passes,
+                    })
+                    .unwrap_or_else(|| layer_effects.clone());
+                let Some(draw) = place_layer_quad(
+                    scope,
+                    b,
+                    layer,
+                    &ty,
+                    time,
+                    (width, height),
+                    scale,
+                    1.0,
+                    bucket_effects.padding,
+                    text_texture(quad),
+                    world,
+                    plane_matrix,
+                    camera_preview,
+                )?
+                else {
+                    continue;
+                };
+                bucket_draws.push(node(composite::Node::Layer(composite::LayerNode {
+                    layer: id.clone(),
+                    content: vec![draw],
+                    masks: None,
+                    effects: Some(bucket_effects),
+                    matte: None,
+                    blend: BlendMode::Normal,
+                    alpha: 1.0,
+                    transition: None,
+                    dof: None,
+                })));
+            }
+            if bucket_draws.is_empty() {
+                return Ok(None);
+            }
+            let combined = Draw {
+                layer: id.clone(),
+                matrix: full,
+                content: Content::Texture {
+                    source: Source::Comp(Arc::new(CompPlan {
+                        composition: comp_id.clone(),
+                        group: true,
+                        width,
+                        height,
+                        background: Background::Transparent,
+                        draws: bucket_draws,
+                        view: b.level_view(scope, width, height, scale),
+                    })),
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    alpha: 1.0,
+                },
+            };
+            let masks = layer_masks(
+                scope,
+                b,
+                layer,
+                time,
+                scale,
+                width,
+                height,
+                has_masks && !source_owner,
+            )?;
+            let matte = if matted {
+                layer_matte(scope, b, layer, time, width, height, scale)?
+            } else {
+                None
+            };
+            return Ok(Some(vec![node(composite::Node::Layer(
+                composite::LayerNode {
+                    layer: id.clone(),
+                    content: vec![combined],
+                    masks,
+                    effects: None,
+                    matte,
+                    blend,
+                    alpha,
+                    transition: transition.clone(),
+                    dof,
+                },
+            ))]));
+        }
+    }
     let draw = if let Some(run) = text_run {
         let slot = run.draws.len();
         let mut local = None;

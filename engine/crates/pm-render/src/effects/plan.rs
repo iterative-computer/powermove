@@ -71,6 +71,8 @@ pub struct EffectStep {
     /// Pixels the effect samples outside a viewport: the sum of its
     /// `viewportPadding` parameter values.
     pub padding: f64,
+    /// Parameter keys that contribute to `padding` (`def.flags.viewport_padding`).
+    pub viewport_padding: Vec<String>,
     pub params: Vec<Param>,
     /// Output pixels per composition pixel where this step draws. A step
     /// without an owner binding uses composition pixels for built-ins;
@@ -294,8 +296,95 @@ pub fn effect_step(
         clamp: def.flags.clamp,
         viewport_safe: def.flags.viewport_safe,
         padding,
+        viewport_padding: def.flags.viewport_padding.clone(),
         params,
         density: [1., 1.],
+    }
+}
+
+/// Apply per-unit text animator effect-control overrides (`fx.<fxId>.<paramKey>`)
+/// to a cloned slice of [`EffectStep`]s and refresh each step's `padding`.
+pub fn apply_text_animator_overrides(
+    steps: &mut [EffectStep],
+    animators: &[(&pm_eval::text_anim::AnimatorState, f64)],
+) {
+    for step in steps {
+        let mut changed = false;
+        for param in &mut step.params {
+            let key = JsString::from(format!("fx.{}.{}", step.instance, param.key).as_str());
+            match &mut param.value {
+                Binding::Float(val) => {
+                    let base = *val;
+                    let mut next = base;
+                    let mut touched = false;
+                    for (animator, weight) in animators {
+                        let w = *weight;
+                        if w == 0.0 || w.is_nan() {
+                            continue;
+                        }
+                        let Some(anim_val) = animator.values.get(&key) else {
+                            continue;
+                        };
+                        touched = true;
+                        if let JsValue::Bool(b) = anim_val {
+                            if w.abs() >= 0.5 {
+                                next = if *b { 1.0 } else { 0.0 };
+                            }
+                        } else {
+                            let target = pm_eval::text_anim::num(anim_val, base);
+                            next += (target - base) * w;
+                        }
+                    }
+                    if touched {
+                        *val = if next.is_nan() || next == 0.0 {
+                            0.0
+                        } else {
+                            next
+                        };
+                        changed = true;
+                    }
+                }
+                Binding::Color(rgb) => {
+                    let mut next = *rgb;
+                    let mut touched = false;
+                    for (animator, weight) in animators {
+                        let w = pm_eval::text_anim::clamp01(*weight);
+                        if w <= 0.0 || w.is_nan() {
+                            continue;
+                        }
+                        let Some(anim_val) = animator.values.get(&key) else {
+                            continue;
+                        };
+                        if matches!(anim_val, JsValue::Undefined | JsValue::Null)
+                            || *anim_val == JsValue::from("")
+                        {
+                            continue;
+                        }
+                        let target = hex2rgb(&anim_val.to_js_string());
+                        for c in 0..3 {
+                            next[c] += (target[c] - next[c]) * w;
+                        }
+                        touched = true;
+                    }
+                    if touched {
+                        *rgb = next;
+                        changed = true;
+                    }
+                }
+                Binding::Stops(_) => {}
+            }
+        }
+        if changed && !step.viewport_padding.is_empty() {
+            step.padding = step
+                .viewport_padding
+                .iter()
+                .filter_map(|k| step.params.iter().find(|p| &p.key == k))
+                .map(|p| match p.value {
+                    Binding::Float(v) => v.abs(),
+                    Binding::Color(_) | Binding::Stops(_) => 0.0,
+                })
+                .sum();
+        }
     }
 }
 
@@ -1358,5 +1447,73 @@ mod stop_transport_tests {
             panic!("stop fallback")
         };
         assert_eq!(fallback.colors[1], [1.; 4]);
+    }
+
+    #[test]
+    fn text_animator_overrides_modulate_number_color_toggle_and_padding() {
+        let mut step = EffectStep {
+            fps: 30.0,
+            raster_space: false,
+            raster_texel: false,
+            owner: None,
+            source_domain: None,
+            spatial: None,
+            temporal: false,
+            references: vec![],
+            assets: vec![],
+            instance: "fx1".into(),
+            definition: "blur".into(),
+            passes: 1,
+            keep_orig: false,
+            backdrop: false,
+            clamp: false,
+            viewport_safe: false,
+            padding: 4.0,
+            viewport_padding: vec!["amount".into()],
+            params: vec![
+                Param {
+                    key: "amount".into(),
+                    color: false,
+                    value: Binding::Float(4.0),
+                },
+                Param {
+                    key: "tint".into(),
+                    color: true,
+                    value: Binding::Color([0.0, 0.0, 0.0]),
+                },
+                Param {
+                    key: "invert".into(),
+                    color: false,
+                    value: Binding::Float(0.0),
+                },
+            ],
+            density: [1.0, 1.0],
+        };
+
+        let mut values = pm_eval::evaluator::Content::new();
+        values.insert(pm_model::JsString::from("fx.fx1.amount"), JsValue::Number(24.0));
+        values.insert(pm_model::JsString::from("fx.fx1.tint"), JsValue::from("#ff0000"));
+        values.insert(pm_model::JsString::from("fx.fx1.invert"), JsValue::Bool(true));
+
+        let anim = pm_eval::text_anim::AnimatorState {
+            id: JsValue::from("ta1"),
+            mode: pm_eval::text_anim::Mode::Range,
+            unit: pm_eval::text_anim::UnitKind::Characters,
+            values,
+            weights: vec![0.5],
+        };
+
+        let mut steps = vec![step.clone()];
+        apply_text_animator_overrides(&mut steps, &[(&anim, 0.5)]);
+        assert_eq!(steps[0].params[0].value, Binding::Float(14.0));
+        assert_eq!(steps[0].params[1].value, Binding::Color([0.5, 0.0, 0.0]));
+        assert_eq!(steps[0].params[2].value, Binding::Float(1.0));
+        assert_eq!(steps[0].padding, 14.0);
+
+        // Zero weight leaves parameters untouched.
+        let mut untouched = vec![step];
+        apply_text_animator_overrides(&mut untouched, &[(&anim, 0.0)]);
+        assert_eq!(untouched[0].params[0].value, Binding::Float(4.0));
+        assert_eq!(untouched[0].padding, 4.0);
     }
 }

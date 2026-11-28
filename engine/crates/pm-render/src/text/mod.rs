@@ -1478,6 +1478,261 @@ impl TextContext {
         Ok(self.finish(scene))
     }
 
+    /// Render a text layer partitioned into per-unit effect-control buckets when
+    /// any enabled text animator targets an active effect on `layer`.
+    /// Returns `Ok(None)` when no animator targets an active effect.
+    pub(crate) fn text_layer_effect_buckets<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        scale: f64,
+        active_fx: &dyn Fn(&str) -> bool,
+    ) -> JsResult<
+        Option<(
+            Vec<pm_eval::text_anim::AnimatorState>,
+            Vec<(Vec<f64>, TextQuad)>,
+        )>,
+    > {
+        use std::collections::{HashMap, HashSet};
+        let filter_animators = |animators: &[pm_eval::text_anim::AnimatorState]| {
+            animators
+                .iter()
+                .filter(|a| {
+                    a.values.keys().any(|k| {
+                        pm_eval::text_anim::parse_effect_channel(&k.to_string_lossy())
+                            .is_some_and(|(fx_id, _)| active_fx(fx_id))
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let quantize = |weights: &[f64], step: f64| -> Vec<i64> {
+            weights
+                .iter()
+                .map(|w| {
+                    if w.is_finite() {
+                        (w * step).round() as i64
+                    } else {
+                        0
+                    }
+                })
+                .collect()
+        };
+        let choose_step = |all_weights: &[Vec<f64>]| -> f64 {
+            let unique: HashSet<Vec<i64>> =
+                all_weights.iter().map(|w| quantize(w, 1000.0)).collect();
+            if unique.len() <= 48 { 1000.0 } else { 32.0 }
+        };
+
+        if pm_eval::text_level2::is_level2(layer) {
+            self.sync_fonts();
+            let frame = {
+                let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+                scope.level2_text(layer, time, fonts.measure(), true, true)?
+            };
+            let controls = scope.text_controls(layer, time)?;
+            let state = scope.text_animation_weights(layer, time, controls, &frame.layout.units);
+            let fx_animators = filter_animators(&state.animators);
+            if fx_animators.is_empty() {
+                return Ok(None);
+            }
+            let raster = frame.raster();
+            let (w, h) = (raster.w + 8.0, raster.h + 8.0);
+            let (ax, ay) = (raster.anchor_x + 4.0, raster.anchor_y + 4.0);
+            let density = js_min(js_min(scale, 8192.0 / w), 8192.0 / h);
+            let target = (canvas_px(w, density), canvas_px(h, density));
+            let m = Affine::scale(density)
+                * Affine::translate((ax + frame.offset.x, ay + frame.offset.y));
+            let [a, b, c, d, _, _] = m.as_coeffs();
+            let aa = a * a + b * b;
+            let cc = c * c + d * d;
+            let bb = a * c + b * d;
+            let m_scale =
+                ((aa + cc + ((aa - cc) * (aa - cc) + 4.0 * bb * bb).sqrt()) / 2.0).sqrt();
+
+            let units: HashMap<usize, &pm_text::compat::Unit> = frame
+                .layout
+                .units
+                .characters
+                .iter()
+                .map(|u| (u.source_start, u))
+                .collect();
+            let draw_weights: Vec<Vec<f64>> = frame
+                .draws
+                .iter()
+                .map(|draw| {
+                    let unit = draw.run.sources.first().and_then(|s| units.get(s).copied());
+                    fx_animators
+                        .iter()
+                        .map(|anim| {
+                            unit.map_or(0.0, |u| {
+                                pm_eval::text_anim::animator_weight_for_unit(anim, u)
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+            let q_step = choose_step(&draw_weights);
+            let mut bucket_index: HashMap<Vec<i64>, usize> = HashMap::new();
+            let mut buckets: Vec<(Vec<f64>, TextScene)> = Vec::new();
+            let mut painter = Painter {
+                outlines: &mut self.outlines,
+                bitmaps: &mut self.bitmaps,
+                unsupported: Vec::new(),
+                smoothing: self.smoothing.level2(),
+            };
+            for (draw, weights) in frame.draws.iter().zip(draw_weights) {
+                if !draw.opacity.is_finite() || draw.opacity <= 0.0 {
+                    continue;
+                }
+                let key = quantize(&weights, q_step);
+                let idx = *bucket_index.entry(key).or_insert_with(|| {
+                    let i = buckets.len();
+                    buckets.push((
+                        weights,
+                        TextScene {
+                            width: target.0,
+                            height: target.1,
+                            items: Vec::new(),
+                        },
+                    ));
+                    i
+                });
+                let run = &draw.run;
+                let face = pm_text::render::outline::FaceRef {
+                    data: draw.data.as_slice(),
+                    index: 0,
+                    id: draw.data.id(),
+                };
+                let refs = [pm_text::render::scene::Run {
+                    face,
+                    size: run.size,
+                    coords: pm_text::render::outline::Coords::Normalized(&run.coords),
+                    synthetic_bold: run.synthetic_bold,
+                    synthetic_italic: false,
+                    oblique: f64::from(run.skew),
+                    glyphs: &run.glyphs,
+                    bitmap_size: None,
+                }];
+                let fill = fill_style(&draw.color, color::BLACK, &mut painter.unsupported);
+                painter.fill_text(
+                    &mut buckets[idx].1.items,
+                    &refs,
+                    (0.0, 0.0),
+                    m * Affine::new(draw.matrix),
+                    fill,
+                    draw.opacity,
+                    draw.blur * m_scale,
+                );
+            }
+            self.unsupported.append(&mut painter.unsupported);
+            let quads = buckets
+                .into_iter()
+                .filter_map(|(weights, scene)| {
+                    self.finish(scene)
+                        .map(|plan| (weights, Self::quad(plan, w, h, ax, ay)))
+                })
+                .collect();
+            return Ok(Some((fx_animators, quads)));
+        }
+
+        // Level 1 animated text with effect-control channels.
+        self.sync_fonts();
+        let d = scope.resolved_text_content(layer, time)?;
+        let tc = text_content(&d);
+        let (layout, raster) = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            let layout = fonts.measure().glyph_layout(&tc);
+            let raster = scope.text_raster(layer, time, fonts.measure())?;
+            (layout, raster)
+        };
+        let state = scope.text_animation_state(layer, time, &layout)?;
+        let fx_animators = filter_animators(&state.animators);
+        if fx_animators.is_empty() {
+            return Ok(None);
+        }
+        let animated = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.animated_raster_glyphs(&d, &layout, &state, fonts.measure())
+        };
+        let Some(a) = animated else {
+            return Ok(Some((fx_animators, Vec::new())));
+        };
+        let density = js_min(js_min(scale, 8192.0 / raster.w), 8192.0 / raster.h);
+        let target = (canvas_px(raster.w, density), canvas_px(raster.h, density));
+        let m = Affine::scale(density) * Affine::translate((raster.anchor_x, raster.anchor_y));
+        let glyph_weights: Vec<Vec<f64>> = a
+            .glyphs
+            .iter()
+            .map(|g| {
+                fx_animators
+                    .iter()
+                    .map(|anim| pm_eval::text_anim::animator_weight_for_unit(anim, &g.unit))
+                    .collect()
+            })
+            .collect();
+        let q_step = choose_step(&glyph_weights);
+        let mut bucket_index: HashMap<Vec<i64>, usize> = HashMap::new();
+        let mut buckets: Vec<(Vec<f64>, TextScene)> = Vec::new();
+        let (mut painter, fonts, unsupported) = self.painter();
+        for ((g, baseline), weights) in a.glyphs.iter().zip(&a.baselines).zip(glyph_weights) {
+            if g.opacity.is_nan() || g.opacity <= 0.0 {
+                continue;
+            }
+            let key = quantize(&weights, q_step);
+            let idx = *bucket_index.entry(key).or_insert_with(|| {
+                let i = buckets.len();
+                buckets.push((
+                    weights,
+                    TextScene {
+                        width: target.0,
+                        height: target.1,
+                        items: Vec::new(),
+                    },
+                ));
+                i
+            });
+            let glyph_m = animated_canvas_matrix(
+                m * Affine::translate((-a.x0, -a.y0)),
+                (g.unit.x, *baseline),
+                Affine::new(g.matrix),
+            );
+            let fill = match &g.color {
+                Some(c) => JsValue::String(c.clone()),
+                None => get(&g.style, "color").clone(),
+            };
+            let style_color = fill_style(&fill, color::BLACK, &mut painter.unsupported);
+            let blur = if g.blur > 0.01 {
+                g.blur * affine_max_scale(m)
+            } else {
+                0.0
+            };
+            let style = text_content(&g.style);
+            let runs = fonts.text_runs(&style, &g.unit.text, 0.0);
+            let faces = run_faces(fonts, &runs, glyph_m);
+            let refs = run_refs(&runs, &faces);
+            painter.fill_text(
+                &mut buckets[idx].1.items,
+                &refs,
+                (0.0, 0.0),
+                glyph_m,
+                style_color,
+                g.opacity,
+                blur,
+            );
+        }
+        unsupported.append(&mut painter.unsupported);
+        let quads = buckets
+            .into_iter()
+            .filter_map(|(weights, scene)| {
+                self.finish(scene)
+                    .map(|plan| (weights, Self::local_quad(plan, raster)))
+            })
+            .collect();
+        Ok(Some((fx_animators, quads)))
+    }
+
     /// A `compat` level 2 captions layer at output resolution: the same
     /// frame (layout, word states, box) drawn with exact outlines at
     /// exact positions through `m` (layer pixels to target pixels).

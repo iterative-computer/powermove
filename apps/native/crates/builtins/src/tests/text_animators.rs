@@ -162,6 +162,169 @@ fn properties_adds_a_preset_animator_with_font_sized_channels_and_removes_it() {
 }
 
 #[test]
+fn properties_adds_and_removes_animator_properties_and_effect_controls() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = json!({
+        "id":"synthetic","name":"Animators Fx","compId":"root","w":320,"h":180,"fps":30,"dur":2,
+        "bg":"#000000","assets":{},"comps":{},
+        "layers":[{
+            "id":"t","type":"text","name":"Title","from":0,"dur":2,"on":true,
+            "parent":null,"group":null,
+            "p":{"position.x":{"v":160,"kf":[]},"position.y":{"v":90,"kf":[]},
+                "anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},
+                "scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},
+                "rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},
+            "d":{"text":"Hello","font":"Inter","size":40,"color":"#FF0000"},
+            "fx":[{
+                "id":"fx1","type":"blur","version":2,"name":"Gaussian Blur","on":true,
+                "p":{"amount":{"v":12,"kf":[],"expr":null}}
+            }]
+        }]
+    });
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(data::model(&project).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    select_layer(&kernel, "t");
+
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+
+    // Add a Fade animator via the section button.
+    click(&mut panels, "Add Text Animator");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let request = loop {
+        if let Some(request) = panels
+            .take_platform_requests()
+            .into_iter()
+            .find(|r| r.operation == "contextMenu")
+        {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "the preset menu did not open");
+        thread::sleep(Duration::from_millis(1));
+    };
+    panels.platform_reply(request.id, Ok(json!("fade")));
+    settle(&mut panels, || animators(&kernel).len() == 1);
+
+    // Click the animator's Add button ("Add to Fade").
+    click(&mut panels, "Add to Fade");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let add_req = loop {
+        if let Some(request) = panels
+            .take_platform_requests()
+            .into_iter()
+            .find(|r| r.operation == "contextMenu")
+        {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "the add property menu did not open");
+        thread::sleep(Duration::from_millis(1));
+    };
+    let menu = add_req.input.as_array().unwrap();
+    // Properties section has Scale X (enabled) and Opacity (already checked/disabled).
+    assert!(menu.iter().any(|i| i["id"] == "prop:scaleX" && i["disabled"] == false));
+    assert!(menu.iter().any(|i| i["id"] == "prop:opacity" && i["checked"] == true && i["disabled"] == true));
+    // Effect Controls section exposes the layer's Gaussian Blur > Amount control.
+    let blur_group = menu
+        .iter()
+        .find(|i| i["label"] == "Gaussian Blur")
+        .expect("Gaussian Blur submenu in Add menu");
+    let blur_children = blur_group["children"].as_array().unwrap();
+    assert!(
+        blur_children
+            .iter()
+            .any(|c| c["id"] == "fx:fx1:amount" && c["disabled"] == false),
+        "missing fx:fx1:amount in {blur_children:?}"
+    );
+
+    // Choose Scale X.
+    panels.platform_reply(add_req.id, Ok(json!("prop:scaleX")));
+    settle(&mut panels, || {
+        animators(&kernel)[0]["p"].get("scaleX").is_some()
+    });
+    assert_eq!(animators(&kernel)[0]["p"]["scaleX"]["v"], 100.0);
+
+    // Click Add again and choose the Gaussian Blur Amount effect control.
+    click(&mut panels, "Add to Fade");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let add_fx_req = loop {
+        if let Some(request) = panels
+            .take_platform_requests()
+            .into_iter()
+            .find(|r| r.operation == "contextMenu")
+        {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "second add menu did not open");
+        thread::sleep(Duration::from_millis(1));
+    };
+    panels.platform_reply(add_fx_req.id, Ok(json!("fx:fx1:amount")));
+    settle(&mut panels, || {
+        animators(&kernel)[0]["p"].get("fx.fx1.amount").is_some()
+    });
+    assert_eq!(animators(&kernel)[0]["p"]["fx.fx1.amount"]["v"], 12.0);
+
+    // Inspect rows in Properties snapshot and edit the added effect control channel.
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let snapshot = presenter.snapshot(&mut model, 0., false).unwrap();
+    let section = snapshot["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "animators")
+        .unwrap();
+    let rows = section["animators"][0]["rows"].as_array().unwrap();
+    let scale_x_row = rows.iter().find(|r| r["label"] == "Scale X").unwrap();
+    assert_eq!(scale_x_row["removable"], true);
+    let fx_row = rows
+        .iter()
+        .find(|r| {
+            r["label"]
+                .as_str()
+                .is_some_and(|l| l.starts_with("Gaussian Blur · "))
+        })
+        .expect("effect control row on animator");
+    assert_eq!(fx_row["removable"], true);
+    let write_req = presenter
+        .write(
+            &mut model,
+            Caller::native(),
+            fx_row["control"]["axes"][0]["binding"]["handle"]
+                .as_str()
+                .unwrap(),
+            36.0.into(),
+            0.,
+        )
+        .unwrap();
+    let ack = kernel.call("synthetic", write_req).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    assert_eq!(animators(&kernel)[0]["p"]["fx.fx1.amount"]["v"], 36.0);
+
+    // Remove the Scale X property via the trailing Remove button.
+    for (_, ticket) in panels.publish() {
+        finish(ticket.unwrap());
+    }
+    click(&mut panels, "Remove Scale X");
+    settle(&mut panels, || {
+        animators(&kernel)[0]["p"].get("scaleX").is_none()
+    });
+    assert!(animators(&kernel)[0]["p"].get("fx.fx1.amount").is_some());
+    assert!(animators(&kernel)[0]["p"].get("amount").is_some());
+    assert!(panels.take_errors().is_empty());
+    panels.close();
+}
+
+#[test]
 fn project_media_moves_are_a_plain_kernel_edit_with_undo() {
     let actor = setup();
     let kernel = actor.handle();

@@ -224,6 +224,20 @@ pub trait EffectPasses: Send + Sync {
         None
     }
 
+    /// Whether this chain includes an active step for `instance` (`fx.id`).
+    fn has_effect_instance(&self, _instance: &str) -> bool {
+        false
+    }
+
+    /// Clone this chain with per-unit text animator effect-control overrides
+    /// applied, returning the updated passes and their recomputed padding.
+    fn with_text_animator_overrides(
+        &self,
+        _animators: &[(&pm_eval::text_anim::AnimatorState, f64)],
+    ) -> Option<(Arc<dyn EffectPasses>, Padding)> {
+        None
+    }
+
     /// Whether the chain provably maps an input whose every texel is `+0`
     /// to an output whose every texel is `+0` (or to no output), reading
     /// nothing else: no backdrop, other layers, assets, or frames

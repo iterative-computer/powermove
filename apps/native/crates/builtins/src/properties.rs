@@ -47,6 +47,12 @@ pub struct Properties {
     /// The registered transitions (v1's transitions-basic and any an
     /// extension adds), for a transition's Type menu and parameter labels.
     pub transitions: Vec<RegisteredTransition>,
+    /// Effect parameter display metadata synced from the winning registry,
+    /// used to label effect controls added to Text Animators.
+    pub effect_params: std::collections::HashMap<
+        (String, String),
+        pm_panel_inspector::v4_effects::ParameterPresentation,
+    >,
 }
 /// A transition the registry offers: its id, name, definition and each
 /// parameter's label by key.
@@ -809,6 +815,165 @@ impl Properties {
             if target["first"]["type"] == "text" {
                 let source = model.layer_node(&layer).map_err(|e| e.to_string())?;
                 let animators_value = source.get("d").map(|d| member(d, "animators"));
+                let layer_record = model.layer(&layer).map_err(|e| e.to_string())?;
+                // Gather variable font axes (if the layer's font is variable).
+                let font_family = source
+                    .get("d")
+                    .and_then(|d| d.get("font"))
+                    .and_then(node_string)
+                    .unwrap_or_default()
+                    .to_owned();
+                let font_facts = self
+                    .fonts
+                    .entry(font_family.clone())
+                    .or_insert_with(|| font_facts(&font_family))
+                    .clone();
+                let font_axes = model
+                    .font_axes(&layer, &font_facts, time)
+                    .unwrap_or_default();
+                // Gather effects on this layer and their animatable controls.
+                let layer_fx = layer_record
+                    .get("fx")
+                    .and_then(pm_model::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut name_counts: BTreeMap<String, usize> = BTreeMap::new();
+                for fx in &layer_fx {
+                    let name = model.effect_display_name(fx);
+                    *name_counts.entry(name).or_default() += 1;
+                }
+                let mut name_seen: BTreeMap<String, usize> = BTreeMap::new();
+                struct FxControlMeta {
+                    fx_id: String,
+                    fx_name: String,
+                    param_key: String,
+                    param_label: String,
+                    kind: String,
+                    unit: String,
+                    step: f64,
+                    precision: usize,
+                    min: Option<f64>,
+                    max: Option<f64>,
+                }
+                let mut fx_groups: Vec<(String, Vec<FxControlMeta>)> = Vec::new();
+                let mut fx_lookup: BTreeMap<(String, String), FxControlMeta> = BTreeMap::new();
+                for fx in &layer_fx {
+                    let Some(fx_id) = fx.get("id").and_then(pm_model::Value::as_str) else {
+                        continue;
+                    };
+                    let fx_type = fx
+                        .get("type")
+                        .and_then(pm_model::Value::as_str)
+                        .unwrap_or("");
+                    let base_name = model.effect_display_name(fx);
+                    let display_name = if name_counts.get(&base_name).copied().unwrap_or(0) > 1 {
+                        let n = name_seen.entry(base_name.clone()).or_default();
+                        *n += 1;
+                        format!("{base_name} {n}")
+                    } else {
+                        base_name
+                    };
+                    let params: Vec<pm_panel_inspector::ParamDefinition> =
+                        match model.effect_parameters(&layer, fx_id) {
+                            Ok(list) => list.into_iter().map(|(_, p)| p).collect(),
+                            Err(pm_panel_inspector::InspectorError::MissingDefinition(_)) => fx
+                                .get("p")
+                                .and_then(pm_model::Value::as_object)
+                                .map(|m| {
+                                    m.iter()
+                                        .filter_map(|(k, v)| {
+                                            let inner = v.get("v").unwrap_or(v);
+                                            let kind = match inner {
+                                                pm_model::Value::Number(_) => "number",
+                                                pm_model::Value::Bool(_) => "toggle",
+                                                pm_model::Value::String(s)
+                                                    if s.as_bytes().starts_with(b"#") =>
+                                                {
+                                                    "color"
+                                                }
+                                                _ => return None,
+                                            };
+                                            Some(pm_panel_inspector::ParamDefinition {
+                                                key: k.to_string_lossy(),
+                                                kind: kind.into(),
+                                                default: inner.clone(),
+                                                min: None,
+                                                max: None,
+                                                reference: false,
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            Err(_) => Vec::new(),
+                        };
+                    let mut group_items = Vec::new();
+                    for param in params {
+                        if param.reference
+                            || !matches!(param.kind.as_str(), "number" | "color" | "toggle")
+                        {
+                            continue;
+                        }
+                        let pres = model.saved_parameter_presentation(fx, &param.key).or_else(|| {
+                            self.effect_params
+                                .get(&(fx_type.to_owned(), param.key.clone()))
+                                .cloned()
+                        });
+                        if pres
+                            .as_ref()
+                            .is_some_and(|p| matches!(p.control.as_str(), "text" | "opaque"))
+                        {
+                            continue;
+                        }
+                        let param_label = pres
+                            .as_ref()
+                            .map(|p| p.label.clone())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| pm_surface::humanize(&param.key));
+                        let unit = pres
+                            .as_ref()
+                            .and_then(|p| p.unit.clone())
+                            .unwrap_or_default();
+                        let step = pres
+                            .as_ref()
+                            .and_then(|p| p.step)
+                            .filter(|s| s.is_finite() && *s > 0.)
+                            .unwrap_or(1.0);
+                        let precision = pres.as_ref().and_then(|p| p.precision).unwrap_or(2);
+                        let meta = FxControlMeta {
+                            fx_id: fx_id.to_owned(),
+                            fx_name: display_name.clone(),
+                            param_key: param.key.clone(),
+                            param_label,
+                            kind: param.kind.clone(),
+                            unit,
+                            step,
+                            precision,
+                            min: param.min,
+                            max: param.max,
+                        };
+                        fx_lookup.insert(
+                            (fx_id.to_owned(), param.key.clone()),
+                            FxControlMeta {
+                                fx_id: meta.fx_id.clone(),
+                                fx_name: meta.fx_name.clone(),
+                                param_key: meta.param_key.clone(),
+                                param_label: meta.param_label.clone(),
+                                kind: meta.kind.clone(),
+                                unit: meta.unit.clone(),
+                                step: meta.step,
+                                precision: meta.precision,
+                                min: meta.min,
+                                max: meta.max,
+                            },
+                        );
+                        group_items.push(meta);
+                    }
+                    if !group_items.is_empty() {
+                        fx_groups.push((display_name, group_items));
+                    }
+                }
+
                 let mut animators = vec![];
                 for animator in animators_value
                     .as_ref()
@@ -899,6 +1064,7 @@ impl Properties {
                             .collect::<Vec<_>>();
                         rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"control":{"kind":"choice","binding":lease,"value":value,"options":options}}));
                     }
+                    // Selector timing/range channels (non-removable).
                     for (key, label, unit) in [
                         ("amount", "Amount", "%"),
                         ("delay", "Start", "s"),
@@ -910,15 +1076,6 @@ impl Properties {
                         ("smoothness", "Softness", "%"),
                         ("speed", "Speed", ""),
                         ("spread", "Spread", ""),
-                        ("x", "Position X", "px"),
-                        ("y", "Position Y", "px"),
-                        ("opacity", "Opacity", "%"),
-                        ("scale", "Scale", "%"),
-                        ("rotation", "Rotation", "°"),
-                        ("skew", "Skew", "°"),
-                        ("blur", "Blur", "px"),
-                        ("tracking", "Tracking", "px"),
-                        ("color", "Color", ""),
                     ] {
                         if animator["p"].get(key).is_none() {
                             continue;
@@ -928,7 +1085,7 @@ impl Properties {
                         let state = model
                             .binding_state(&binding, time)
                             .map_err(|e| e.to_string())?;
-                        let lease = self.lease(model, &path, binding)?;
+                        let lease = self.lease(model, &path, binding.clone())?;
                         let animation = if state.key_at_playhead {
                             "key-at-playhead"
                         } else if state.animated {
@@ -936,14 +1093,243 @@ impl Properties {
                         } else {
                             "static"
                         };
-                        let control = if key == "color" {
-                            json!({"kind":"colour","binding":lease,"value":super::data::wire(&state.value)})
-                        } else {
-                            json!({"kind":"number","axes":[{"binding":lease,"value":super::data::wire(&state.value),"unit":unit,"step":if matches!(key,"delay"|"duration"|"stagger") {0.01} else if matches!(key,"tracking"|"blur") {0.5} else {1.0},"precision":2}]})
-                        };
-                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control}));
+                        let control = json!({"kind":"number","axes":[{"binding":lease,"value":super::data::wire(&state.value),"unit":unit,"step":if matches!(key,"delay"|"duration"|"stagger") {0.01} else {1.0},"precision":2}]});
+                        let mut row = json!({"id":path,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control});
+                        if let Some(expression) = self.expression(
+                            model,
+                            &path,
+                            vec![binding],
+                            state.expression.clone(),
+                            time,
+                        )? {
+                            row["expression"] = expression;
+                        }
+                        rows.push(row);
                     }
-                    animators.push(json!({"id":id,"name":animator["name"],"rows":rows}));
+                    // Built-in animated text properties (removable).
+                    for spec in pm_panel_inspector::text_animators::ANIMATOR_PROPERTIES {
+                        let key = spec.key;
+                        if animator["p"].get(key).is_none() {
+                            continue;
+                        }
+                        let path = format!("ta.{id}.{key}");
+                        let binding = Binding::Property(PropertyId::new(&layer, &path));
+                        let state = model
+                            .binding_state(&binding, time)
+                            .map_err(|e| e.to_string())?;
+                        let lease = self.lease(model, &path, binding.clone())?;
+                        let animation = if state.key_at_playhead {
+                            "key-at-playhead"
+                        } else if state.animated {
+                            "animated"
+                        } else {
+                            "static"
+                        };
+                        let wire_val = super::data::wire(&state.value);
+                        let control = match spec.kind {
+                            pm_panel_inspector::text_animators::AnimatorPropertyKind::Color => {
+                                let hex =
+                                    self.lease(model, &format!("{path}#hex"), binding.clone())?;
+                                json!({"kind":"colour","binding":lease,"value":wire_val,"hexBinding":hex,"hex":wire_val})
+                            }
+                            pm_panel_inspector::text_animators::AnimatorPropertyKind::Number(_) => {
+                                let mut axis = json!({"binding":lease,"value":wire_val,"unit":spec.unit,"step":spec.step,"precision":2});
+                                if let Some(min) = spec.min {
+                                    axis["min"] = json!(min);
+                                }
+                                if let Some(max) = spec.max {
+                                    axis["max"] = json!(max);
+                                }
+                                json!({"kind":"number","axes":[axis]})
+                            }
+                        };
+                        let mut row = json!({"id":path,"label":spec.label,"locked":!model.editable(&layer),"removable":true,"animation":animation,"control":control});
+                        if let Some(expression) = self.expression(
+                            model,
+                            &path,
+                            vec![binding],
+                            state.expression.clone(),
+                            time,
+                        )? {
+                            row["expression"] = expression;
+                        }
+                        rows.push(row);
+                    }
+                    // Additional dynamic channels on `animator.p`: variable font axes & effect controls.
+                    if let Some(p_map) = animator["p"].as_object() {
+                        for key in p_map.keys() {
+                            if pm_panel_inspector::text_animators::is_selector_channel(key)
+                                || pm_panel_inspector::text_animators::animator_property_spec(key)
+                                    .is_some()
+                            {
+                                continue;
+                            }
+                            if let Some(tag) = key.strip_prefix("fontAxis.") {
+                                let path = format!("ta.{id}.{key}");
+                                let binding = Binding::Property(PropertyId::new(&layer, &path));
+                                let state = model
+                                    .binding_state(&binding, time)
+                                    .map_err(|e| e.to_string())?;
+                                let lease = self.lease(model, &path, binding.clone())?;
+                                let animation = if state.key_at_playhead {
+                                    "key-at-playhead"
+                                } else if state.animated {
+                                    "animated"
+                                } else {
+                                    "static"
+                                };
+                                let mut axis = json!({"binding":lease,"value":super::data::wire(&state.value),"step":1.0,"precision":2});
+                                if let Some(found) = font_axes.iter().find(|a| a.axis.tag == tag) {
+                                    if let Some(min) = found.axis.min {
+                                        axis["min"] = json!(min);
+                                    }
+                                    if let Some(max) = found.axis.max {
+                                        axis["max"] = json!(max);
+                                    }
+                                }
+                                let mut row = json!({"id":path,"label":axis_label(tag),"locked":!model.editable(&layer),"removable":true,"animation":animation,"control":{"kind":"number","axes":[axis]}});
+                                if let Some(expression) = self.expression(
+                                    model,
+                                    &path,
+                                    vec![binding],
+                                    state.expression.clone(),
+                                    time,
+                                )? {
+                                    row["expression"] = expression;
+                                }
+                                rows.push(row);
+                            } else if let Some((fx_id, param_key)) =
+                                pm_eval::text_anim::parse_effect_channel(key)
+                            {
+                                let path = format!("ta.{id}.{key}");
+                                let binding = Binding::Property(PropertyId::new(&layer, &path));
+                                let state = model
+                                    .binding_state(&binding, time)
+                                    .map_err(|e| e.to_string())?;
+                                let lease = self.lease(model, &path, binding.clone())?;
+                                let animation = if state.key_at_playhead {
+                                    "key-at-playhead"
+                                } else if state.animated {
+                                    "animated"
+                                } else {
+                                    "static"
+                                };
+                                let wire_val = super::data::wire(&state.value);
+                                let meta = fx_lookup.get(&(fx_id.to_owned(), param_key.to_owned()));
+                                let label = match meta {
+                                    Some(m) => format!("{} · {}", m.fx_name, m.param_label),
+                                    None => format!(
+                                        "{fx_id} · {}",
+                                        pm_surface::humanize(param_key)
+                                    ),
+                                };
+                                let kind = meta.map(|m| m.kind.as_str()).unwrap_or_else(|| {
+                                    if wire_val.is_boolean() {
+                                        "toggle"
+                                    } else if wire_val.is_string() {
+                                        "color"
+                                    } else {
+                                        "number"
+                                    }
+                                });
+                                let control = match kind {
+                                    "color" => {
+                                        let hex = self.lease(
+                                            model,
+                                            &format!("{path}#hex"),
+                                            binding.clone(),
+                                        )?;
+                                        json!({"kind":"colour","binding":lease,"value":wire_val,"hexBinding":hex,"hex":wire_val})
+                                    }
+                                    "toggle" => {
+                                        json!({"kind":"toggle","binding":lease,"value":wire_val})
+                                    }
+                                    _ => {
+                                        let mut axis = json!({
+                                            "binding": lease,
+                                            "value": wire_val,
+                                            "unit": meta.map_or("", |m| m.unit.as_str()),
+                                            "step": meta.map_or(1.0, |m| m.step),
+                                            "precision": meta.map_or(2, |m| m.precision),
+                                        });
+                                        if let Some(min) = meta.and_then(|m| m.min) {
+                                            axis["min"] = json!(min);
+                                        }
+                                        if let Some(max) = meta.and_then(|m| m.max) {
+                                            axis["max"] = json!(max);
+                                        }
+                                        json!({"kind":"number","axes":[axis]})
+                                    }
+                                };
+                                let mut row = json!({"id":path,"label":label,"locked":!model.editable(&layer),"removable":true,"animation":animation,"control":control});
+                                if let Some(expression) = self.expression(
+                                    model,
+                                    &path,
+                                    vec![binding],
+                                    state.expression.clone(),
+                                    time,
+                                )? {
+                                    row["expression"] = expression;
+                                }
+                                rows.push(row);
+                            }
+                        }
+                    }
+
+                    // Build the Add menu (properties, font axes, and effect controls).
+                    let mut add_items = vec![json!({"label":"Properties","header":true})];
+                    for spec in pm_panel_inspector::text_animators::ANIMATOR_PROPERTIES {
+                        let present = animator["p"].get(spec.key).is_some();
+                        add_items.push(json!({
+                            "id": format!("prop:{}", spec.key),
+                            "label": spec.label,
+                            "checked": present,
+                            "disabled": present,
+                        }));
+                    }
+                    if !font_axes.is_empty() {
+                        let axis_children: Vec<Value> = font_axes
+                            .iter()
+                            .map(|axis| {
+                                let key = format!("fontAxis.{}", axis.axis.tag);
+                                let present = animator["p"].get(&key).is_some();
+                                json!({
+                                    "id": format!("prop:{key}"),
+                                    "label": axis_label(&axis.axis.tag),
+                                    "checked": present,
+                                    "disabled": present,
+                                })
+                            })
+                            .collect();
+                        add_items.push(json!({"label":"Font Axes","children":axis_children}));
+                    }
+                    add_items.push(Value::Null);
+                    add_items.push(json!({"label":"Effect Controls","header":true}));
+                    if fx_groups.is_empty() {
+                        add_items.push(json!({
+                            "id": Value::Null,
+                            "label": "No Effects on Layer",
+                            "disabled": true,
+                        }));
+                    } else {
+                        for (fx_name, controls) in &fx_groups {
+                            let children: Vec<Value> = controls
+                                .iter()
+                                .map(|ctrl| {
+                                    let channel_key = format!("fx.{}.{}", ctrl.fx_id, ctrl.param_key);
+                                    let present = animator["p"].get(&channel_key).is_some();
+                                    json!({
+                                        "id": format!("fx:{}:{}", ctrl.fx_id, ctrl.param_key),
+                                        "label": ctrl.param_label,
+                                        "checked": present,
+                                        "disabled": present,
+                                    })
+                                })
+                                .collect();
+                            add_items.push(json!({"label":fx_name,"children":children}));
+                        }
+                    }
+                    animators.push(json!({"id":id,"name":animator["name"],"rows":rows,"addItems":add_items}));
                 }
                 let presets = pm_panel_inspector::text_animators::preset_menu()
                     .into_iter()
@@ -3253,6 +3639,106 @@ impl Properties {
                 model.remove_text_animator(caller, &layer, id)
             };
             return request.map(Some).map_err(|e| e.to_string());
+        }
+        if intent["type"] == "add-animator-property" {
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            let animator_id = intent["animator"].as_str().ok_or("Text animator")?;
+            let item = intent["item"].as_str().ok_or("Animator property")?;
+            let (key, default_value) = if let Some(prop_key) = item.strip_prefix("prop:") {
+                if let Some(spec) =
+                    pm_panel_inspector::text_animators::animator_property_spec(prop_key)
+                {
+                    let val = match spec.kind {
+                        pm_panel_inspector::text_animators::AnimatorPropertyKind::Number(n) => {
+                            pm_model::Value::Number(n)
+                        }
+                        pm_panel_inspector::text_animators::AnimatorPropertyKind::Color => {
+                            let current = model
+                                .binding_state(
+                                    &Binding::Content {
+                                        layer: layer.clone(),
+                                        field: "color".into(),
+                                    },
+                                    time,
+                                )
+                                .ok()
+                                .and_then(|s| s.value.as_str().map(str::to_owned))
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "#FFFFFF".into());
+                            pm_model::Value::from(current.as_str())
+                        }
+                    };
+                    (prop_key.to_owned(), val)
+                } else if let Some(tag) = prop_key.strip_prefix("fontAxis.") {
+                    let source = model.layer_node(&layer).map_err(|e| e.to_string())?;
+                    let family = source
+                        .get("d")
+                        .and_then(|d| d.get("font"))
+                        .and_then(node_string)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let facts = self
+                        .fonts
+                        .entry(family.clone())
+                        .or_insert_with(|| font_facts(&family))
+                        .clone();
+                    let current = model
+                        .font_axes(&layer, &facts, time)
+                        .ok()
+                        .and_then(|axes| {
+                            axes.into_iter()
+                                .find(|a| a.axis.tag == tag)
+                                .and_then(|a| a.value.as_f64())
+                        })
+                        .unwrap_or(if tag == "wght" { 400.0 } else { 0.0 });
+                    (prop_key.to_owned(), pm_model::Value::Number(current))
+                } else {
+                    return Err(format!("Unknown animator property: {prop_key}"));
+                }
+            } else if let Some(rest) = item.strip_prefix("fx:") {
+                let (fx_id, param_key) = rest
+                    .split_once(':')
+                    .filter(|(a, b)| !a.is_empty() && !b.is_empty())
+                    .ok_or("Invalid effect control")?;
+                let current = model
+                    .binding_state(
+                        &Binding::Property(PropertyId::new(&layer, format!("{fx_id}.{param_key}"))),
+                        time,
+                    )
+                    .ok()
+                    .map(|s| s.value)
+                    .or_else(|| {
+                        model
+                            .effect_parameters(&layer, fx_id)
+                            .ok()
+                            .and_then(|params| {
+                                params
+                                    .into_iter()
+                                    .find(|(_, p)| p.key == param_key)
+                                    .map(|(_, p)| p.default)
+                            })
+                    })
+                    .unwrap_or(pm_model::Value::Number(0.0));
+                (format!("fx.{fx_id}.{param_key}"), current)
+            } else {
+                return Err(format!("Unknown animator add item: {item}"));
+            };
+            return model
+                .add_text_animator_property(caller, &layer, animator_id, &key, default_value)
+                .map(Some)
+                .map_err(|e| e.to_string());
+        }
+        if intent["type"] == "row-action" && intent["action"] == "remove-animator-property" {
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            let row = intent["row"].as_str().ok_or("Animator property row")?;
+            let (animator_id, key) = row
+                .strip_prefix("ta.")
+                .and_then(|rest| rest.split_once('.'))
+                .ok_or("Invalid animator property row")?;
+            return model
+                .remove_text_animator_property(caller, &layer, animator_id, key)
+                .map(Some)
+                .map_err(|e| e.to_string());
         }
         if (intent["type"] == "section-action" && intent["action"] == "mask")
             || intent["type"] == "remove-mask"

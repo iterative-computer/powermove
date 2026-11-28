@@ -150,3 +150,57 @@ test("property menu offers Save Animation Preset", async () => {
  const {rowMenu}=await import("../property-menu");
  expect(rowMenu({id:"opacity",label:"Opacity",control:{kind:"readonly",text:"100"}} as any).some(item=>item.action==="save-preset" && item.enabled)).toBe(true);
 });
+
+test("Text Animator Add menu dispatches chosen property or effect control and removable rows offer Remove from Animator", async () => {
+  const f = menuFixture();
+  await f.session.start();
+  f.session.nativeRequest({
+    type: "animator-add-menu",
+    anchor: 1,
+    animator: "ta_1",
+    items: [
+      { label: "Properties", header: true },
+      { id: "prop:blur", label: "Blur" },
+      null,
+      { label: "Effect Controls", header: true },
+      {
+        label: "Glow",
+        children: [{ id: "fx:fx_1:intensity", label: "Intensity" }],
+      },
+    ],
+  });
+  f.choose("fx:fx_1:intensity");
+  await flush();
+  expect(f.model.intents).toEqual([
+    {
+      type: "add-animator-property",
+      animator: "ta_1",
+      item: "fx:fx_1:intensity",
+    },
+  ]);
+  expect(f.errors).toEqual([]);
+  await f.session.dispose();
+
+  const { rowMenu } = await import("../property-menu");
+  const removable = rowMenu({
+    id: "ta.ta_1.fx.fx_1.intensity",
+    label: "Glow · Intensity",
+    control: { kind: "status", value: "" },
+    animation: "static",
+    removable: true,
+  });
+  expect(
+    removable.some(
+      (i) => i.action === "remove-animator-property" && i.enabled,
+    ),
+  ).toBe(true);
+  const fixed = rowMenu({
+    id: "ta.ta_1.amount",
+    label: "Amount",
+    control: { kind: "status", value: "" },
+    animation: "static",
+  });
+  expect(fixed.some((i) => i.action === "remove-animator-property")).toBe(
+    false,
+  );
+});

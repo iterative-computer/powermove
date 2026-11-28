@@ -3823,6 +3823,7 @@ fn inspector_platform<'a>(panel: &str, request: &'a Value) -> Result<(&'a str, V
             Some("part-menu") => return Ok(("partMenu", input.clone())),
             Some("part-pick") => return Ok(("partPick", input.clone())),
             Some("animator-menu") => return Ok(("contextMenu", input["items"].clone())),
+            Some("animator-add-menu") => return Ok(("contextMenu", input["items"].clone())),
             Some("row-menu") => {
                 let items = input["items"]
                     .as_array()

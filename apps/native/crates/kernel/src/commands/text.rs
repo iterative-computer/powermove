@@ -64,6 +64,19 @@ pub enum TextCommand {
         layer_id: String,
         animator_id: String,
     },
+    /// Add an animated property or effect control channel to a text animator's `p`.
+    AddAnimatorProperty {
+        layer_id: String,
+        animator_id: String,
+        key: String,
+        value: Value,
+    },
+    /// Remove an animated property or effect control channel from a text animator's `p`.
+    RemoveAnimatorProperty {
+        layer_id: String,
+        animator_id: String,
+        key: String,
+    },
     /// Add, replace or (`None`) remove a style range in `d.styles`
     /// (`ts.<id>`: start, end, and overrides).
     SetStyleRange {
@@ -81,6 +94,8 @@ impl TextCommand {
             TextCommand::Split { .. } => "Split Text",
             TextCommand::AddAnimator { .. } => "Add Text Animator",
             TextCommand::RemoveAnimator { .. } => "Remove Text Animator",
+            TextCommand::AddAnimatorProperty { .. } => "Add Animator Property",
+            TextCommand::RemoveAnimatorProperty { .. } => "Remove Animator Property",
             TextCommand::SetStyleRange { .. } => "Style Text",
         }
         .to_owned()
@@ -168,6 +183,80 @@ impl TextCommand {
                             "Text animator not found: {animator_id}"
                         )));
                     }
+                    Ok(())
+                })
+            }
+            TextCommand::AddAnimatorProperty {
+                layer_id,
+                animator_id,
+                key,
+                value,
+            } => {
+                text_layer(cx, layer_id)?;
+                if key.is_empty() {
+                    return Err(CommandError::Invalid(
+                        "Animator property key must not be empty".into(),
+                    ));
+                }
+                edit_list(cx, layer_id, "animators", |list| {
+                    let Some(animator) = list
+                        .iter_mut()
+                        .find(|a| values::text(a, "id") == Some(animator_id.as_str()))
+                    else {
+                        return Err(CommandError::Invalid(format!(
+                            "Text animator not found: {animator_id}"
+                        )));
+                    };
+                    let obj = values::obj(animator);
+                    if !matches!(obj.get("p"), Some(Value::Object(_))) {
+                        obj.insert("p", Value::Object(Map::new()));
+                    }
+                    let p = obj
+                        .get_mut("p")
+                        .and_then(Value::as_object_mut)
+                        .expect("object");
+                    if p.get(key.as_str()).is_none() {
+                        p.insert(key.clone(), values::property(value.clone()));
+                    }
+                    Ok(())
+                })
+            }
+            TextCommand::RemoveAnimatorProperty {
+                layer_id,
+                animator_id,
+                key,
+            } => {
+                text_layer(cx, layer_id)?;
+                if matches!(
+                    key.as_str(),
+                    "amount"
+                        | "delay"
+                        | "duration"
+                        | "stagger"
+                        | "start"
+                        | "end"
+                        | "offset"
+                        | "smoothness"
+                        | "speed"
+                        | "spread"
+                ) {
+                    return Err(CommandError::Invalid(format!(
+                        "Cannot remove animator selector control: {key}"
+                    )));
+                }
+                edit_list(cx, layer_id, "animators", |list| {
+                    let Some(animator) = list
+                        .iter_mut()
+                        .find(|a| values::text(a, "id") == Some(animator_id.as_str()))
+                    else {
+                        return Err(CommandError::Invalid(format!(
+                            "Text animator not found: {animator_id}"
+                        )));
+                    };
+                    let Some(p) = animator.as_object_mut().and_then(|o| o.get_mut("p")).and_then(Value::as_object_mut) else {
+                        return Ok(());
+                    };
+                    p.remove(key.as_str());
                     Ok(())
                 })
             }

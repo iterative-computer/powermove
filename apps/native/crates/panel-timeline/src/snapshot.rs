@@ -711,7 +711,45 @@ impl TimelineIndex {
         for (field, prefix) in [("animators", "ta"), ("styles", "ts")] {
             for item in array(content.and_then(|d| d.get(field))) {
                 if let Some(id) = string(item.get("id")) {
-                    collect_direct(item.get("p"), &format!("{prefix}.{id}"), &mut channels);
+                    let first = channels.len();
+                    let full_prefix = format!("{prefix}.{id}");
+                    collect_direct(item.get("p"), &full_prefix, &mut channels);
+                    if field == "animators" {
+                        for channel in &mut channels[first..] {
+                            let Some(key) = channel.path.strip_prefix(&format!("{full_prefix}."))
+                            else {
+                                continue;
+                            };
+                            if let Some((fx_id, param)) =
+                                pm_eval::text_anim::parse_effect_channel(key)
+                            {
+                                let fx_name = array(layer.get("fx"))
+                                    .iter()
+                                    .find(|fx| string(fx.get("id")).as_deref() == Some(fx_id))
+                                    .and_then(|fx| {
+                                        string(fx.get("name"))
+                                            .filter(|n| !n.is_empty())
+                                            .or_else(|| string(fx.get("type")))
+                                    })
+                                    .unwrap_or_else(|| fx_id.to_owned());
+                                channel.vertex_label = Some(format!(
+                                    "{} · {}",
+                                    pm_surface::humanize(&fx_name),
+                                    pm_surface::humanize(param)
+                                ));
+                            } else if let Some(tag) = key.strip_prefix("fontAxis.") {
+                                let label = match tag {
+                                    "wght" => "Weight".into(),
+                                    "wdth" => "Width".into(),
+                                    "slnt" => "Slant".into(),
+                                    "ital" => "Italic".into(),
+                                    "opsz" => "Optical Size".into(),
+                                    other => other.to_owned(),
+                                };
+                                channel.vertex_label = Some(label);
+                            }
+                        }
+                    }
                 }
             }
         }

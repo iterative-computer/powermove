@@ -1615,6 +1615,18 @@ impl EffectPasses for Chain {
         chain.inputs.clear();
         Some(Arc::new(chain))
     }
+    fn has_effect_instance(&self, instance: &str) -> bool {
+        self.steps.iter().any(|step| step.instance == instance)
+    }
+    fn with_text_animator_overrides(
+        &self,
+        animators: &[(&pm_eval::text_anim::AnimatorState, f64)],
+    ) -> Option<(Arc<dyn EffectPasses>, crate::composite::effects::Padding)> {
+        let mut chain = self.clone();
+        super::plan::apply_text_animator_overrides(&mut chain.steps, animators);
+        let padding = super::plan::region_padding(&chain.steps);
+        Some((Arc::new(chain), padding))
+    }
     fn key(&self) -> Vec<u8> {
         format!(
             "effects|{}|{:?}|{:?}|{:?}",

@@ -29,9 +29,60 @@ use crate::transform::Mat2d;
 
 /// `TEXT_ANIMATOR_PROPERTIES`: offsets are added at full weight; scale and
 /// opacity are target percentages.
-pub const PROPERTIES: [&str; 9] = [
-    "opacity", "x", "y", "scale", "rotation", "skew", "tracking", "blur", "color",
+pub const PROPERTIES: [&str; 11] = [
+    "opacity", "x", "y", "scale", "scaleX", "scaleY", "rotation", "skew", "tracking", "blur",
+    "color",
 ];
+
+/// Parse an animator effect-control channel key (`fx.<effectId>.<paramKey>`).
+pub fn parse_effect_channel(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix("fx.")?;
+    let (fx_id, param_key) = rest.split_once('.')?;
+    if fx_id.is_empty() || param_key.is_empty() {
+        return None;
+    }
+    Some((fx_id, param_key))
+}
+
+/// Whether any enabled text animator on `layer` targets an effect control
+/// (`fx.<effectId>.<paramKey>`).
+pub fn has_effect_channels(layer: &Node) -> bool {
+    let Some(animators) = node::array(node::member(node::member(Some(layer), "d"), "animators"))
+    else {
+        return false;
+    };
+    for item in animators {
+        if matches!(
+            node::member(Some(item), "enabled").map(Node::kind),
+            Some(pm_model::NodeKind::Bool(false))
+        ) {
+            continue;
+        }
+        let Some(p) = node::member(Some(item), "p") else {
+            continue;
+        };
+        if node::entries(p)
+            .into_iter()
+            .any(|(k, _)| parse_effect_channel(&k.to_string_lossy()).is_some())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Selection weight of `animator` for `glyph`.
+pub fn animator_weight_for_unit(animator: &AnimatorState, glyph: &Unit) -> f64 {
+    let index = match animator.unit {
+        UnitKind::Lines => Some(glyph.line_unit.unwrap_or(glyph.line)),
+        UnitKind::Words => glyph.word,
+        UnitKind::Characters => Some(glyph.index),
+    };
+    index
+        .and_then(|i| animator.weights.get(i))
+        .copied()
+        .unwrap_or(0.0)
+}
 
 /// An animator's mode (`animatorMode`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,6 +441,15 @@ pub struct AnimatorState {
     pub values: Content,
     /// Selection weight per unit, in layout order.
     pub weights: Vec<f64>,
+}
+
+impl AnimatorState {
+    /// Whether this animator contains any `fx.<effectId>.<paramKey>` channel.
+    pub fn has_effect_channels(&self) -> bool {
+        self.values
+            .keys()
+            .any(|k| parse_effect_channel(&k.to_string_lossy()).is_some())
+    }
 }
 
 /// One range style: the stored item with its channels evaluated.
@@ -863,9 +923,26 @@ impl<'d> Scope<'_, 'd> {
                         js_min(80.0, num(get(p, "skew"), 0.0) * w),
                     )));
                     let s = 1.0 + (num(get(p, "scale"), 100.0) / 100.0 - 1.0) * w;
-                    let cos = math::cos(r) * s;
-                    let sin = math::sin(r) * s;
-                    let mut local: Mat2d = [cos, sin, cos * -k - sin, sin * -k + cos, 0.0, 0.0];
+                    let has_axis_scale = p.contains_key(&JsString::from("scaleX"))
+                        || p.contains_key(&JsString::from("scaleY"));
+                    let mut local: Mat2d = if has_axis_scale {
+                        let sx = s * (1.0 + (num(get(p, "scaleX"), 100.0) / 100.0 - 1.0) * w);
+                        let sy = s * (1.0 + (num(get(p, "scaleY"), 100.0) / 100.0 - 1.0) * w);
+                        let cos_r = math::cos(r);
+                        let sin_r = math::sin(r);
+                        [
+                            cos_r * sx,
+                            sin_r * sx,
+                            (cos_r * -k - sin_r) * sy,
+                            (sin_r * -k + cos_r) * sy,
+                            0.0,
+                            0.0,
+                        ]
+                    } else {
+                        let cos = math::cos(r) * s;
+                        let sin = math::sin(r) * s;
+                        [cos, sin, cos * -k - sin, sin * -k + cos, 0.0, 0.0]
+                    };
                     local[4] =
                         px + num(get(p, "x"), 0.0) * w - (local[0] * px + local[2] * pivot_y);
                     local[5] =
@@ -885,6 +962,23 @@ impl<'d> Scope<'_, 'd> {
                             .clone()
                             .unwrap_or_else(|| get(&style, "color").to_js_string());
                         color = Some(mix_color(&base, &pc.to_js_string(), w));
+                    }
+                    for (axis_key, axis_val) in p {
+                        if !axis_key.as_bytes().starts_with(b"fontAxis.") {
+                            continue;
+                        }
+                        let base = style
+                            .get(axis_key)
+                            .map(|v| num(v, 0.0))
+                            .unwrap_or_else(|| {
+                                if axis_key.as_bytes() == b"fontAxis.wght" {
+                                    num(get(&style, "weight"), 400.0)
+                                } else {
+                                    0.0
+                                }
+                            });
+                        let target = num(axis_val, base);
+                        style.insert(axis_key.clone(), JsValue::Number(base + (target - base) * w));
                     }
                 }
                 PosedGlyph {
@@ -941,5 +1035,95 @@ pub fn unit_count(layout: &GlyphLayout, unit: UnitKind) -> usize {
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_text::compat::Unit;
+
+    #[test]
+    fn parse_effect_channel_splits_fx_id_and_param_key() {
+        assert_eq!(
+            parse_effect_channel("fx.fx_1.intensity"),
+            Some(("fx_1", "intensity"))
+        );
+        assert_eq!(
+            parse_effect_channel("fx.fx_1.color.r"),
+            Some(("fx_1", "color.r"))
+        );
+        assert_eq!(parse_effect_channel("fx..intensity"), None);
+        assert_eq!(parse_effect_channel("fx.fx_1."), None);
+        assert_eq!(parse_effect_channel("opacity"), None);
+    }
+
+    #[test]
+    fn posed_glyphs_supports_non_uniform_scale_and_font_axes() {
+        let doc = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r#"{"compId":"root","w":320,"h":180,"fps":30,"dur":2,"layers":[]}"#,
+                )
+                .unwrap(),
+            ),
+            0,
+        );
+        let comp = crate::comp::Comp::resolve(&doc, "root").unwrap();
+        let mut ev = crate::evaluator::Evaluator::new();
+        let mut scope = Scope::new(&mut ev, &comp, &comp);
+
+        let mut d = Content::new();
+        d.insert(JsString::from("size"), JsValue::Number(40.0));
+        d.insert(JsString::from("color"), JsValue::from("#ffffff"));
+        d.insert(JsString::from("weight"), JsValue::Number(400.0));
+        d.insert(JsString::from("fontAxis.wght"), JsValue::Number(400.0));
+
+        let unit = Unit {
+            index: 0,
+            text: "A".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 20.0,
+            line: 0,
+            line_unit: Some(0),
+            word: Some(0),
+            source_start: 0,
+        };
+        let layout = GlyphLayout {
+            characters: vec![unit.clone()],
+            words: vec![unit.clone()],
+            lines: vec![unit],
+        };
+
+        let mut values = Content::new();
+        values.insert(JsString::from("scaleX"), JsValue::Number(200.0));
+        values.insert(JsString::from("scaleY"), JsValue::Number(50.0));
+        values.insert(JsString::from("fontAxis.wght"), JsValue::Number(800.0));
+        values.insert(JsString::from("fx.fx1.amount"), JsValue::Number(25.0));
+
+        let anim = AnimatorState {
+            id: JsValue::from("ta1"),
+            mode: Mode::Range,
+            unit: UnitKind::Characters,
+            values,
+            weights: vec![0.5],
+        };
+        assert!(anim.has_effect_channels());
+        let state = TextAnimation {
+            animators: vec![anim],
+            styles: vec![],
+        };
+
+        let glyphs = scope.animated_glyphs(&d, &layout, &state);
+        assert_eq!(glyphs.len(), 1);
+        // scaleX 100->200 at w=0.5 => 1.5, scaleY 100->50 at w=0.5 => 0.75.
+        assert!((glyphs[0].matrix[0] - 1.5).abs() < 1e-9);
+        assert!((glyphs[0].matrix[3] - 0.75).abs() < 1e-9);
+        // fontAxis.wght 400->800 at w=0.5 => 600.
+        assert_eq!(
+            glyphs[0].style.get(&JsString::from("fontAxis.wght")),
+            Some(&JsValue::Number(600.0))
+        );
     }
 }

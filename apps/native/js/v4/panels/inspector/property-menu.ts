@@ -74,5 +74,15 @@ export function rowMenu(row: Row): MenuItem[] {
             checked: row.linked,
           },
         ]),
+    ...(row.removable
+      ? [
+          {
+            label: "Remove from Animator",
+            action: "remove-animator-property" as RowAction,
+            enabled,
+            separatorBefore: true,
+          },
+        ]
+      : []),
   ];
 }

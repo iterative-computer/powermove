@@ -583,6 +583,25 @@ function Property({
                 })
               }
             />
+          ) : row.removable ? (
+            <Action
+              id={`remove-animator-property:${row.id}`}
+              symbol="minus"
+              label={`Remove ${row.label}`}
+              tooltip="Remove from Animator"
+              style={{
+                color: token("colors.muted"),
+                symbolSize: token("metrics.symbol_inline"),
+              }}
+              disabled={disabled}
+              onActivate={() =>
+                session.send({
+                  type: "row-action",
+                  row: row.id,
+                  action: "remove-animator-property",
+                })
+              }
+            />
           ) : null
         }
       >
@@ -1270,19 +1289,46 @@ export function InspectorPanel({
                 label={animator.name}
                 leading={gutter}
               >
-                <Action
-                  id={`remove-animator:${animator.id}`}
-                  label={`Remove ${animator.name}`}
-                  tooltip="Remove Text Animator"
-                  symbol="minus"
-                  disabled={target.kind === "layers" && target.first.locked}
-                  onActivate={() =>
-                    session.send({
-                      type: "remove-animator",
-                      animator: animator.id,
-                    })
-                  }
-                />
+                <div style={{ ...horizontal, gap: token("metrics.border") }}>
+                  <Action
+                    id={`add-animator-property:${animator.id}`}
+                    label={`Add to ${animator.name}`}
+                    tooltip="Add Property or Effect Control"
+                    symbol="plus"
+                    children="Add"
+                    menu
+                    style={{
+                      gap: token("metrics.border"),
+                      paddingLeft: token("metrics.gap"),
+                      paddingRight: token("metrics.gap"),
+                      color: token("colors.muted"),
+                      fontSize: token("typography.label"),
+                      symbolSize: token("metrics.symbol_inline"),
+                    }}
+                    disabled={target.kind === "layers" && target.first.locked}
+                    onActivate={(event) =>
+                      session.nativeRequest({
+                        type: "animator-add-menu",
+                        anchor: event.currentTarget,
+                        animator: animator.id,
+                        items: animator.addItems ?? [],
+                      })
+                    }
+                  />
+                  <Action
+                    id={`remove-animator:${animator.id}`}
+                    label={`Remove ${animator.name}`}
+                    tooltip="Remove Text Animator"
+                    symbol="minus"
+                    disabled={target.kind === "layers" && target.first.locked}
+                    onActivate={() =>
+                      session.send({
+                        type: "remove-animator",
+                        animator: animator.id,
+                      })
+                    }
+                  />
+                </div>
               </InspectorRow>,
               ...animator.rows.map((row) => (
                 <Property key={row.id} row={row} session={session} />
