@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn a_plan_reads_its_lines_in_order() {
         let plan = Plan::parse(
-            "Aerolite\n$9.99\nper month\nYour editing agent, with inference included.\nGet Aerolite\n1,000 credits a month\tInference for Aerolite, run by Powermove",
+            "Aerolite\n$9.99\nper month\nYour editing agent, with inference included.\nGet Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove",
         );
         assert_eq!(plan.action, Action::Button("Get Aerolite".into()));
         assert!(plan.offered());
@@ -654,7 +654,7 @@ mod tests {
             plan.features,
             [(
                 "1,000 credits a month".to_owned(),
-                "Inference for Aerolite, run by Powermove".to_owned()
+                "Inference for Aero, run by Powermove".to_owned()
             )]
         );
         let free = Plan::parse(

@@ -225,7 +225,7 @@ impl AgentLink {
     fn aero_connection(&self) -> (&'static str, String) {
         use pm_agents::inference::Standing;
         let Some(env) = self.environment().filter(|env| env.aero.is_some()) else {
-            return ("unavailable", "Aerolite's development switch is off.".into());
+            return ("unavailable", "Aero's development switch is off.".into());
         };
         if fake_model(&env) {
             return ("connected", String::new());
@@ -374,7 +374,7 @@ impl AgentLink {
         if aero {
             // The harnesses: Aero (Powermove inference), Claude Code, Codex.
             providers = vec![
-                ("aero".into(), "Aerolite".into()),
+                ("aero".into(), "Aero".into()),
                 ("claude".into(), "Claude Code".into()),
                 ("chatgpt".into(), "Codex".into()),
             ];

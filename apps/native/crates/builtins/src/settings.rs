@@ -311,7 +311,7 @@ impl Backend {
         action: &dyn Fn(Value, &str, &str, String) -> Value,
     ) -> Vec<Value> {
         use pm_agents::inference::Standing;
-        const GROUP: &str = "Powermove Account (Aerolite)";
+        const GROUP: &str = "Powermove Account (Aero)";
         let cloud = &self.native.facts["cloud"];
         if !cloud.is_object() {
             return vec![];
@@ -320,11 +320,11 @@ impl Backend {
         let aero = match &standing {
             Some(Standing::Ready { billing, .. }) => {
                 let plan = billing.plan.as_ref().map_or("", |p| p.name.as_str());
-                format!("Aerolite runs on {plan}: {}.", billing.credits_left())
+                format!("Aero runs on {plan}: {}.", billing.credits_left())
             }
             Some(Standing::Free(_)) => pm_agents::inference::NEEDS_PLAN.into(),
             Some(Standing::Unreachable(why)) => why.clone(),
-            _ => "Aerolite runs on Powermove inference.".into(),
+            _ => "Aero runs on Powermove inference.".into(),
         };
         // Signed in here, but Powermove refused the session (it ended or
         // was revoked): the way back is Sign In, never only Sign Out.
@@ -335,7 +335,7 @@ impl Backend {
                 row("powermove", GROUP, "Powermove Account"),
                 "account.sign-in",
                 "Sign In…",
-                format!("Your session as {identity} ended. Sign in again to use Aerolite."),
+                format!("Your session as {identity} ended. Sign in again to use Aero."),
             );
             r["target"] = json!(identity);
             r
@@ -354,7 +354,7 @@ impl Backend {
                 row("powermove", GROUP, "Powermove Account"),
                 "account.sign-in",
                 "Sign In…",
-                "Signed out. Aerolite runs on Powermove inference.".into(),
+                "Signed out. Aero runs on Powermove inference.".into(),
             )
         };
         r["disabled"] = json!(cloud["busy"] == true);
@@ -1539,7 +1539,7 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
                     note.to_owned(),
                     format!("Get {name}"),
                     format!(
-                        "{} credits a month\tInference for Aerolite, run by Powermove",
+                        "{} credits a month\tInference for Aero, run by Powermove",
                         pm_agents::inference::grouped(credits(p))
                     ),
                 ];
@@ -2002,7 +2002,7 @@ mod cloud_tests {
         assert_eq!(
             options[1]["label"],
             "Aerolite\n$9.99\nper month\nYour editing agent, with inference included.\n\
-             Get Aerolite\n1,000 credits a month\tInference for Aerolite, run by Powermove"
+             Get Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove"
         );
         assert_eq!(options.len(), 3);
         // Only the plans the backend lists: Aerolite alone, no Aero anywhere.

@@ -1196,7 +1196,7 @@ export function slashCopy(
   return { label: `/${id}`, description: copy[id] ?? "" };
 }
 export function providerName(provider: string) {
-  if (provider === "aero") return "Aerolite";
+  if (provider === "aero") return "Aero";
   return provider === "compatible"
     ? "API or local model"
     : provider === "claude"

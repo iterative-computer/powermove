@@ -490,7 +490,7 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
     std::fs::create_dir_all(&scope).unwrap();
     assert!(aero::evaluate(&model, &scope, "Say hello.", &[]).is_err());
     let spent = model.take_failure().unwrap_or_default();
-    assert!(spent.contains("out of Aero credits"), "{spent}");
+    assert!(spent.contains("out of Aerolite credits"), "{spent}");
     control(&f.base, serde_json::json!({"aero": "plan"}));
     let signed_out = Environment {
         powermove: None,

@@ -1331,21 +1331,21 @@ pub(crate) fn step_frame(
                         detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: None,
-                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
                     },
                     (AeroPlan::On(plan), Some(_)) => Choice {
                         badge: Some("Recommended".into()),
                         detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: Some(plan.clone()),
-                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
                     },
                     _ => Choice {
                         badge: Some("Recommended".into()),
                         detail: None,
                         pill: powermove.is_none().then(|| "Connect".into()),
                         status: powermove.map(str::to_owned),
-                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
                     },
                 },
                 agent(
@@ -1376,7 +1376,7 @@ pub(crate) fn step_frame(
                         note: "Your editing agent, with inference included.".into(),
                         features: vec![(
                             format!("{credits} credits a month"),
-                            "Inference for Aerolite, run by Powermove".into(),
+                            "Inference for Aero, run by Powermove".into(),
                         )],
                         action: format!("Get {name}"),
                     })
@@ -2396,7 +2396,7 @@ mod step_frame_tests {
         let frame = step_frame(Onboard::Agent, &choices, &none, None, None);
         let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["aero", "claude", "chatgpt"]);
-        assert_eq!(frame.choices[0].label, "Aerolite");
+        assert_eq!(frame.choices[0].label, "Aero");
         assert_eq!(frame.chosen.as_deref(), Some("aero"));
         assert!(frame.choices.iter().all(|c| c.pill.as_deref() == Some("Connect") && c.status.is_none()));
         // A ChatGPT sign-in is Codex's only; the Powermove account is Aero's.

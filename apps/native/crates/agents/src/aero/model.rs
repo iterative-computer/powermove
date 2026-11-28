@@ -366,7 +366,7 @@ fn deliver_live(
             } else if (200..300).contains(&code) {
                 "The connection to the model dropped before its reply finished. Try again.".into()
             } else {
-                format!("Aerolite couldn't reach Powermove inference ({error}). Try again.")
+                format!("Aero couldn't reach Powermove inference ({error}). Try again.")
             });
         }
         if retry {
