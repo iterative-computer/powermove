@@ -1389,7 +1389,7 @@ fn a_draft_survives_stop_after_a_compile_error_and_the_next_send() {
         RunResult::Success { text, .. } => assert_eq!(text, "The draft is still there."),
         RunResult::Failure { error, .. } => assert_eq!(
             error,
-            "Aero stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
+            "Aerolite stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
         ),
     }
 }
@@ -1431,7 +1431,7 @@ fn a_draft_survives_an_exhausted_gate_and_the_next_send() {
     );
     let (result, _) = complete_with_progress(&first);
     assert!(
-        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Aero stopped before its checks passed")),
+        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Aerolite stopped before its checks passed")),
         "{result:?}"
     );
     let mut reopened = fixture.tools_at(&scope, Access::Project);
@@ -1999,7 +1999,7 @@ fn an_exhausted_gate_ends_the_turn_in_plain_words() {
     );
     assert_eq!(
         error,
-        "Aero stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
+        "Aerolite stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
     );
     assert!(
         !error.contains(['{', '[', '"']) && error.len() <= 400,
@@ -2086,7 +2086,7 @@ fn an_exhausted_gate_never_quotes_a_plan_or_the_project() {
     };
     assert_eq!(
         error,
-        "Aero stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
+        "Aerolite stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
     );
     assert!(
         error.len() <= 200 && !error.contains(['{', '[', '"']),
