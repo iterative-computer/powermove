@@ -84,11 +84,15 @@ jobs:
       - name: The app in place is V2, intact
         run: |
           set -euo pipefail
-          for i in $(seq 1 60); do
-            v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Powermove.app/Contents/Info.plist)
+          # Squirrel's ShipIt moves V1 out and V2 in after V1 quits: wait through the moment between.
+          v=""
+          for i in $(seq 1 100); do
+            v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Powermove.app/Contents/Info.plist 2>/dev/null || true)
             [ "$v" = "$VERSION" ] && break
             sleep 3
           done
+          ls -la /Applications | grep -i powermove || true
+          ls ~/Library/Caches/com.zellzoi.powermove.ShipIt 2>/dev/null && tail -40 ~/Library/Caches/com.zellzoi.powermove.ShipIt/ShipIt_stderr.log 2>/dev/null || true
           echo "version in place: $v"
           test "$v" = "$VERSION"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Powermove.app/Contents/Info.plist
