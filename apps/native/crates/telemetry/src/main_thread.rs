@@ -4,7 +4,7 @@
 //! sample suspends the main thread for one frame-pointer walk (no allocation
 //! while it is suspended).
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 pub const DEPTH: usize = 48;
@@ -13,6 +13,8 @@ static MAIN: AtomicU32 = AtomicU32::new(0);
 static STACK_LOW: AtomicU64 = AtomicU64::new(0);
 static STACK_HIGH: AtomicU64 = AtomicU64::new(0);
 static BEAT: AtomicU64 = AtomicU64::new(0);
+static QUEUE_BEAT: AtomicU64 = AtomicU64::new(0);
+static QUEUE_POSTED: AtomicBool = AtomicBool::new(false);
 
 fn clock() -> Instant {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -51,6 +53,43 @@ pub fn install() {
         MAIN.store(libc::pthread_mach_thread_np(me), Ordering::Relaxed);
     }
     beat();
+    QUEUE_BEAT.store(now_ms(), Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    let _ = std::thread::Builder::new()
+        .name("pm-main-queue-beat".into())
+        .spawn(post_queue_beats);
+}
+
+/// How long ago the main thread last drained its dispatch queue. The app's
+/// heartbeat ([`beat`]) is a GPUI task woken by a timer that passes through
+/// the shared background queues; this one is posted straight to the main
+/// queue from a thread of its own, so the two disagree only when the main
+/// thread answers but the background queues are held up.
+pub fn since_queue_beat_ms() -> u64 {
+    now_ms().saturating_sub(QUEUE_BEAT.load(Ordering::Relaxed))
+}
+
+#[cfg(target_os = "macos")]
+fn post_queue_beats() {
+    extern "C" fn answered(_: *mut std::ffi::c_void) {
+        QUEUE_BEAT.store(now_ms(), Ordering::Relaxed);
+        QUEUE_POSTED.store(false, Ordering::Relaxed);
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        // One post at a time: a hung main thread never gathers a backlog.
+        if !QUEUE_POSTED.swap(true, Ordering::Relaxed) {
+            // SAFETY: libdispatch's main queue lives for the process; the
+            // callback takes no context.
+            unsafe {
+                dispatch_async_f(
+                    std::ptr::addr_of!(_dispatch_main_q).cast_mut().cast(),
+                    std::ptr::null_mut(),
+                    answered,
+                )
+            };
+        }
+    }
 }
 
 pub fn installed() -> bool {
@@ -85,6 +124,12 @@ unsafe extern "C" {
     fn thread_resume(thread: u32) -> i32;
     fn thread_get_state(thread: u32, flavor: i32, state: *mut u32, count: *mut u32) -> i32;
     fn _dyld_get_image_vmaddr_slide(index: u32) -> isize;
+    static _dispatch_main_q: u8;
+    fn dispatch_async_f(
+        queue: *mut std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
     static mach_task_self_: u32;
     fn mach_vm_read_overwrite(
         task: u32,
@@ -260,6 +305,15 @@ mod tests {
             &mut out,
         );
         assert_eq!(&out[..n], &[1, 2, 0x1000, 0x1010, 0x1020, 0x1030]);
+    }
+
+    /// A main thread that never drains its dispatch queue (libtest's waits in
+    /// a join) reads stale on the queue heartbeat.
+    #[test]
+    fn the_queue_heartbeat_goes_stale_when_the_main_queue_is_not_drained() {
+        install();
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(since_queue_beat_ms() >= 600, "{}", since_queue_beat_ms());
     }
 
     /// The sampler suspends and resumes: the main thread keeps running.

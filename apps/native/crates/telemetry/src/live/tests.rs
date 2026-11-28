@@ -220,6 +220,76 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
         assert!(!text.contains(leak), "{leak} in {text}");
     }
 
+    // w150: a hang says what was going on as it began: the last command (as
+    // `command_invoked` named it), playback, the front surface and the
+    // project, counted on this thread. The pending copy (sent if the app is
+    // ended while it hangs) carries the same context.
+    hang::reset();
+    crate::capture(Event::CommandInvoked(CommandInvoked {
+        command_id: "play",
+        via: Via::Shortcut,
+        count: 1,
+    }));
+    crate::note_playing(true);
+    let counted_on = Arc::new(std::sync::Mutex::new(None));
+    let counted = counted_on.clone();
+    crate::note_editor(
+        Surface::Editor,
+        Some(Arc::new(move || {
+            *counted.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+            Some((4, true))
+        })),
+    );
+    crate::note_settings_key(true);
+    crate::note_settings_key(false);
+    send(Msg::HangBegan(
+        Box::new(hang::Context::now(false, false)),
+        now_ms(),
+        generation(),
+    ));
+    flush();
+    let pending: Value = serde_json::from_slice(
+        &std::fs::read(Outbox::new(p).dir().join(outbox::HANG_PENDING)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pending[0]["properties"]["duration"], "unrecovered");
+    assert_eq!(pending[0]["properties"]["last_command"], "play");
+    assert_eq!(counted_on.lock().unwrap().as_deref(), Some("pm-telemetry"));
+    send(Msg::HangEnded("5-10s", now_ms(), generation()));
+    flush();
+    let hang = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .find(|e| e["event"] == "hang")
+        .cloned()
+        .unwrap();
+    let properties = &hang["properties"];
+    for (key, value) in [
+        ("duration", serde_json::json!("5-10s")),
+        ("last_command", serde_json::json!("play")),
+        ("playing", serde_json::json!(true)),
+        ("surface", serde_json::json!("editor")),
+        ("main_thread_answered", serde_json::json!(false)),
+        ("layer_count", serde_json::json!("2-5")),
+        ("has_3d", serde_json::json!(true)),
+    ] {
+        assert_eq!(properties[key], value, "{key} in {hang}");
+    }
+    assert!(!Outbox::new(p).dir().join(outbox::HANG_PENDING).exists());
+    // No project, Settings in front, a hang as playback's frames stop.
+    crate::note_editor(Surface::Home, None);
+    crate::note_settings_key(true);
+    crate::note_playing(false);
+    let context = hang::Context::now(true, true).hang("2-5s");
+    let value = serde_json::to_value(&context).unwrap();
+    assert_eq!(value["surface"], "settings");
+    assert_eq!(value["playing"], true);
+    assert_eq!(value["main_thread_answered"], true);
+    assert!(value.get("layer_count").is_none() && value.get("has_3d").is_none());
+    hang::reset();
+
     // Sol P0: off drops the queue and the outbox, stops retries, and what was
     // captured before it never comes back, even when turned on again at once.
     up.store(false, Relaxed);

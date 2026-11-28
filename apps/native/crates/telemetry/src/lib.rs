@@ -269,6 +269,41 @@ pub fn note_playback_target(fps: f32) {
     let _ = fps;
 }
 
+/// Counts a project's layers and whether one is 3D, as `project_opened`
+/// does; a `hang` calls it on the telemetry thread, never the main thread.
+pub type ProjectFacts = Arc<dyn Fn() -> Option<(usize, bool)> + Send + Sync>;
+
+/// Playback was asked for (true) or stopped (false), for a `hang`.
+#[inline]
+pub fn note_playing(playing: bool) {
+    #[cfg(feature = "telemetry")]
+    live::hang::note_playing(playing);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = playing;
+}
+
+/// What the editor window shows as a person runs a command, and its
+/// project, for a `hang`.
+#[inline]
+pub fn note_editor(surface: Surface, project: Option<ProjectFacts>) {
+    #[cfg(feature = "telemetry")]
+    {
+        live::hang::note_surface(surface);
+        live::hang::note_project(project);
+    }
+    #[cfg(not(feature = "telemetry"))]
+    let _ = (surface, project);
+}
+
+/// The Settings window became key (true) or another window did (false).
+#[inline]
+pub fn note_settings_key(key: bool) {
+    #[cfg(feature = "telemetry")]
+    live::hang::note_settings_key(key);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = key;
+}
+
 /// Whether the app is the active app (hangs count only then: a background
 /// app's timers can be held by App Nap).
 #[inline]

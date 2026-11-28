@@ -4727,6 +4727,17 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        crate::telemetry::note_editor(
+            if self.pages.shown.as_deref() == Some("store") {
+                pm_telemetry::Surface::Store
+            } else if self.home_shown() {
+                pm_telemetry::Surface::Home
+            } else {
+                pm_telemetry::Surface::Editor
+            },
+            &self.kernel,
+            self.session.as_ref().map(|s| s.project.as_str()),
+        );
         if let Some(runtime) = &self.builtins.runtime {
             runtime.emit_event(
                 "command",

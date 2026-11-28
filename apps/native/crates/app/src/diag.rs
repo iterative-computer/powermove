@@ -220,7 +220,8 @@ pub fn install_probe(cx: &mut gpui::App) {
             }
             if reported.elapsed() >= Duration::from_secs(1) {
                 line(serde_json::json!({"probe_worst_ms":worst,
-                    "editors":EDITORS.load(std::sync::atomic::Ordering::Relaxed)}));
+                    "editors":EDITORS.load(std::sync::atomic::Ordering::Relaxed),
+                    "queue_beat_ms":pm_telemetry::main_thread::since_queue_beat_ms()}));
                 worst = 0.;
                 reported = Instant::now();
             }
