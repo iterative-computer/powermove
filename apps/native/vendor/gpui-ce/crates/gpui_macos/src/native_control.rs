@@ -135,8 +135,9 @@ impl State {
 /// Liquid Glass control (a glass push button, a large search field) draws its
 /// rim and shadow a few points outside its frame; a wrapper cut at the frame
 /// cut them off, flat along the top and bottom (worst in light mode). The
-/// wrapper still clips to the slot's region and content mask.
-const BLEED: f64 = 8.;
+/// wrapper still clips to the slot's region and content mask. A large glass button's
+/// light-mode shadow reaches past 8 pt (a square showed around Home's New Project).
+const BLEED: f64 = 24.;
 define_class!(
     /// A slot's clipping wrapper: a press in its bleed, outside the control,
     /// reaches GPUI's view below.
