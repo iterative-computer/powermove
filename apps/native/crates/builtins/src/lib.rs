@@ -1794,8 +1794,8 @@ impl Builtins {
     /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
     /// its writer on the isolate owner; the same id can mount again.
     pub fn unmount_extension(&self, id: &str) {
-        let mut extensions = self.extension_realms.shared();
-        if let Some(realm) = extensions.remove(id) {
+        let realm = self.extension_realms.shared().remove(id);
+        if let Some(realm) = realm {
             realm.close();
         }
         self.broker.extensions.shared().remove(id);
@@ -1811,7 +1811,6 @@ impl Builtins {
         self.broker.forget_events(id);
         self.broker.forget_timeline(id, None);
         self.broker.forget_painter(id);
-        drop(extensions);
         (self.broker.wake)();
     }
     /// Every extension command in this window when they changed since `seen`:
@@ -3990,13 +3989,18 @@ impl Broker {
     fn forget_effects(&self, panel: &str) {
         if let Some(entry) = self.entry(panel) {
             let owner = entry.shared().backend.shared().caller.writer;
-            let _ = self
+            let pending = self
                 .kernel
                 .state_transaction(pm_kernel::state::StateTransaction {
                     expected_revision: None,
                     ops: vec![pm_kernel::state::StateOp::DisposeOwner { owner }],
-                })
-                .wait();
+                });
+            // The transaction is already queued on the kernel actor's FIFO
+            // channel. Never block the main thread waiting for its ack: wait
+            // only from worker threads and tests.
+            if !is_main_thread() {
+                let _ = pending.wait();
+            }
         }
     }
     fn forget_commands(&self, panel: &str) {
@@ -4033,6 +4037,20 @@ impl WatchdogHooks for Broker {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "macos")]
+fn is_main_thread() -> bool {
+    unsafe extern "C" {
+        fn pthread_main_np() -> std::ffi::c_int;
+    }
+    // SAFETY: a libSystem query with no arguments.
+    unsafe { pthread_main_np() == 1 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_main_thread() -> bool {
+    false
+}
 
 /// A fork's mount script: the fork's module graph drawing built-in `panel`.
 fn fork_source(fork: &str, graph: &Value, panel: &str) -> String {

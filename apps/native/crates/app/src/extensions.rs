@@ -1552,8 +1552,13 @@ impl Controller {
         for id in &gone {
             let Some(rebuilt) = wanted.iter().find(|s| s["id"] == id.as_str()) else {
                 self.builtins.forget_surface(id);
-                runtime.unmount_extension(id);
                 self.extensions.surfaces.remove(id);
+                let (runtime, extension) = (runtime.clone(), id.clone());
+                cx.background_executor()
+                    .spawn(async move {
+                        runtime.unmount_extension(&extension);
+                    })
+                    .detach();
                 let shell = self.host.borrow();
                 shell.send_command(&format!("panel:remove:{id}"), vec![]);
                 continue;
@@ -1638,8 +1643,12 @@ impl Controller {
                 .unwrap_or(&id)
                 .to_owned();
             self.extensions.surfaces.insert(id.clone(), (title, hash));
-            let ticket = runtime.mount_extension(&id, &surface["graph"], None);
-            self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
+            let (runtime, extension, graph) =
+                (runtime.clone(), id.clone(), surface["graph"].clone());
+            let ticket = cx
+                .background_executor()
+                .spawn(async move { runtime.mount_extension(&extension, &graph, None) });
+            self.await_panel(id.clone(), id.clone(), ticket, cx);
             // Give a new panel a place without selecting it over the tab
             // the user is working in.
             if self.extensions.mounted_once.insert(id.clone())

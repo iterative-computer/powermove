@@ -715,6 +715,23 @@ impl TimelineIndex {
                 }
             }
         }
+        // Extrusion (`d.extrusion`) and 3D modeling (`d.modeling`) channels
+        // match `pm_eval::address::layer3d_properties`.
+        if let Some(extrusion) = content.and_then(|d| d.get("extrusion")) {
+            collect_direct(extrusion.get("p"), "geo", &mut channels);
+            if let Some(surfaces) = extrusion.get("surfaces") {
+                for surface in ["front", "bevel", "side", "back"] {
+                    collect_direct(
+                        surfaces.get(surface).and_then(|s| s.get("properties")),
+                        &format!("ms.{surface}"),
+                        &mut channels,
+                    );
+                }
+            }
+        }
+        if let Some(modeling) = content.and_then(|d| d.get("modeling")) {
+            collect_direct(modeling.get("p"), "model", &mut channels);
+        }
         let data = content.and_then(|d| d.get("data"));
         let scene = data.and_then(|d| d.get("scene"));
         for (field, prefix) in [("objects", "o"), ("lights", "light")] {
@@ -740,7 +757,8 @@ impl TimelineIndex {
         }
         // Standalone 3D layers (`powermove.3d.camera`, `powermove.3d.light`,
         // `powermove.3d.object`) store animated channels directly under `d.data`
-        // (e.g. `camera.targetX/Y/Z`, `camera.fov`, `light.targetX/Y/Z`, `m.*`).
+        // (matching `pm_eval::address::layer3d_properties` and
+        // `pm_kernel::commands::scene3d::path`).
         if scene.is_none()
             && let Some(data) = data
         {
@@ -751,13 +769,76 @@ impl TimelineIndex {
                     &mut channels,
                 );
             }
-            collect_direct(
-                data.get("object")
-                    .and_then(|o| o.get("material"))
-                    .and_then(|m| m.get("p")),
-                "m",
-                &mut channels,
-            );
+            if let Some(light) = data.get("light") {
+                collect_direct(
+                    light.get("world").and_then(|w| w.get("p")),
+                    "world",
+                    &mut channels,
+                );
+            }
+            if let Some(object) = data.get("object") {
+                for kind in ["world", "fog", "terrain", "scatter", "materialOptions"] {
+                    collect_direct(
+                        object.get(kind).and_then(|n| n.get("p")),
+                        kind,
+                        &mut channels,
+                    );
+                }
+                for (i, region) in array(object.get("terrain").and_then(|t| t.get("regions")))
+                    .iter()
+                    .enumerate()
+                {
+                    collect_direct(region.get("p"), &format!("terrain.region{i}"), &mut channels);
+                }
+                if let Some(material) = object.get("material") {
+                    collect_direct(material.get("p"), "m", &mut channels);
+                    collect_direct(
+                        material.get("shader").and_then(|s| s.get("p")),
+                        "shader",
+                        &mut channels,
+                    );
+                }
+                for slot in array(object.get("slots")) {
+                    if let Some(sid) = string(slot.get("id"))
+                        && let Some(material) = slot.get("material")
+                    {
+                        collect_direct(material.get("p"), &format!("slots.{sid}"), &mut channels);
+                        collect_direct(
+                            material.get("shader").and_then(|s| s.get("p")),
+                            &format!("slots.{sid}.shader"),
+                            &mut channels,
+                        );
+                    }
+                }
+                collect_direct(object.get("materialProperties"), "mi", &mut channels);
+                if let Some(NodeKind::Object(sources)) =
+                    object.get("sourceMaterialProperties").map(Node::kind)
+                {
+                    for (index, part) in sources.iter() {
+                        let index = index.to_string_lossy();
+                        collect_direct(Some(part), &format!("mi.{index}"), &mut channels);
+                    }
+                }
+                if let Some(NodeKind::Object(parts)) = object.get("parts").map(Node::kind) {
+                    for (key, part) in parts.iter() {
+                        let key = key.to_string_lossy();
+                        let prefix = format!("pt.{key}");
+                        let first = channels.len();
+                        collect_direct(part.get("p"), &prefix, &mut channels);
+                        if first < channels.len() {
+                            let name = string(part.get("name"))
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or_else(|| key.clone());
+                            path_groups.insert(prefix.clone(), name);
+                            for channel in &mut channels[first..] {
+                                let field = &channel.path[prefix.len() + 1..];
+                                channel.path_group = Some(prefix.clone());
+                                channel.vertex_label = Some(part_channel_label(field));
+                            }
+                        }
+                    }
+                }
+            }
         }
         let effects = array(layer.get("fx"))
             .iter()
@@ -1255,5 +1336,105 @@ fn collect_path(
         for channel in &mut out[first..] {
             channel.path_group = Some(prefix.to_owned());
         }
+    }
+}
+
+fn part_channel_label(field: &str) -> String {
+    match field {
+        "x" => "Position X".into(),
+        "y" => "Position Y".into(),
+        "z" => "Position Z".into(),
+        "rx" => "Rotation X".into(),
+        "ry" => "Rotation Y".into(),
+        "rz" => "Rotation Z".into(),
+        "scale" => "Scale".into(),
+        "visible" => "Visible".into(),
+        other => pm_surface::humanize(other),
+    }
+}
+
+#[cfg(test)]
+mod part_keyframe_tests {
+    use crate::{RowId, TimelineIndex, TimelineModel};
+    use pm_kernel::Snapshot;
+    use std::sync::Arc;
+
+    #[test]
+    fn model_part_and_3d_object_keyframes_appear_in_timeline_rows_and_summary() {
+        let root = pm_model::Node::parse_bytes(
+            br#"{
+            "id": "p",
+            "w": 1920,
+            "h": 1080,
+            "fps": 30,
+            "dur": 5,
+            "layers": [{
+                "id": "model1",
+                "name": "3D Model",
+                "type": "ext",
+                "from": 0,
+                "dur": 5,
+                "on": true,
+                "collapsed": false,
+                "p": {},
+                "d": {
+                    "definition": "powermove.3d.object",
+                    "data": {
+                        "object": {
+                            "parts": {
+                                "0_0": {
+                                    "name": "bAabNnUHbmPKkJf",
+                                    "p": {
+                                        "x": {"v": 0, "kf": []},
+                                        "rx": {"v": 0, "kf": [{"i": "k1", "t": 0, "v": 0}, {"i": "k2", "t": 1, "v": 90}]},
+                                        "ry": {"v": 0, "kf": [{"i": "k3", "t": 0, "v": 0}]},
+                                        "rz": {"v": 0, "kf": [{"i": "k4", "t": 0, "v": 0}]},
+                                        "scale": {"v": 100, "kf": []}
+                                    }
+                                }
+                            },
+                            "materialProperties": {
+                                "roughness": {"v": 0.5, "kf": [{"i": "k5", "t": 0.5, "v": 0.2}]}
+                            }
+                        }
+                    }
+                }
+            }]
+        }"#,
+            1,
+        )
+        .unwrap();
+        let snapshot = Snapshot {
+            doc_id: 1,
+            revision: 1,
+            document: Arc::new(pm_model::Document::from_root(Some(root), 1)),
+        };
+        let mut model = TimelineModel::default();
+        model.index = Arc::new(TimelineIndex::from_snapshot(&snapshot));
+        model.rebuild_rows();
+        let layer = model.index.layer("model1").expect("3D model layer");
+        assert!(layer.has_keyframed_channels());
+        assert_eq!(layer.path_name("pt.0_0"), "bAabNnUHbmPKkJf");
+        let rx = layer.channel("pt.0_0.rx").expect("part rotation X channel");
+        assert_eq!(rx.keys.len(), 2);
+        assert_eq!(rx.vertex_label.as_deref(), Some("Rotation X"));
+        assert!(layer.channel("mi.roughness").is_some());
+
+        let rows = model.rows();
+        assert!(rows.iter().any(|r| r.id
+            == RowId::Path {
+                layer_id: "model1".into(),
+                path: "pt.0_0".into(),
+            }));
+        assert!(rows.iter().any(|r| r.id
+            == RowId::Property {
+                layer_id: "model1".into(),
+                channel: "pt.0_0.rx".into(),
+            }));
+        assert!(rows.iter().any(|r| r.id
+            == RowId::Property {
+                layer_id: "model1".into(),
+                channel: "mi.roughness".into(),
+            }));
     }
 }
