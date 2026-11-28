@@ -138,13 +138,32 @@ async function mint(c: Context<Env>, state: string): Promise<string> {
   } catch {
     throw new ApiError({ error: 'unauthorized' });
   }
-  const [updated] = await c.var.data.db.update(desktopAuth).set({ tokenHash: await sha(token) }).where(
-    and(eq(desktopAuth.state, state), isNull(desktopAuth.tokenHash), isNull(desktopAuth.consumedAt)),
+  // Some browsers load the done page twice; whichever copy the person sees
+  // must work, so a repeat load adds its token beside the earlier one (a few
+  // at most, until the exchange consumes the flow).
+  const hashes = row.tokenHash ? row.tokenHash.split(' ') : [];
+  if (hashes.length >= MAX_TOKENS) {
+    throw new ApiError({ error: 'unauthorized' });
+  }
+  const [updated] = await c.var.data.db.update(desktopAuth).set({ tokenHash: [...hashes, await sha(token)].join(' ') }).where(
+    and(
+      eq(desktopAuth.state, state),
+      row.tokenHash ? eq(desktopAuth.tokenHash, row.tokenHash) : isNull(desktopAuth.tokenHash),
+      isNull(desktopAuth.consumedAt),
+    ),
   ).returning();
   if (!updated) {
     throw new ApiError({ error: 'unauthorized' });
   }
   return token;
+}
+const MAX_TOKENS = 3;
+
+async function matchesAny(token: string, stored: string): Promise<boolean> {
+  const hash = await sha(token);
+  let found = false;
+  for (const candidate of stored.split(' ')) found = constantTimeEqual(hash, candidate) || found;
+  return found;
 }
 
 async function exchange(c: Context<Env>, state: string, token: string, verifier: string): Promise<Response> {
@@ -156,7 +175,7 @@ async function exchange(c: Context<Env>, state: string, token: string, verifier:
       const challenge = await challengeOf(verifier);
       if (
         !row || row.consumedAt || row.expiresAt <= new Date() || !row.tokenHash || !challenge ||
-        !constantTimeEqual(challenge, row.challenge) || !constantTimeEqual(await sha(token), row.tokenHash)
+        !constantTimeEqual(challenge, row.challenge) || !await matchesAny(token, row.tokenHash)
       ) {
         throw new Error('invalid desktop exchange');
       }

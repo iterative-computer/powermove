@@ -61,7 +61,11 @@ export function createAuth(data: Data, env: CloudflareBindings, trackOtpDelivery
       oneTimeToken({ expiresIn: 3, storeToken: 'hashed' }),
     ],
     session: { expiresIn: 60 * 60 * 24 * 90 },
-    account: { accountLinking: { enabled: true, trustedProviders: ['google'] } },
+    // Google's state stays single-use and bound to its verification row; the
+    // browser cookie check is off because some browsers load the start link
+    // twice, and the cookie from the second load breaks the first flow. The
+    // desktop and web hand-offs are bound by their own PKCE verifier instead.
+    account: { accountLinking: { enabled: true, trustedProviders: ['google'] }, skipStateCookieCheck: true },
   });
 }
 export type AuthInstance = ReturnType<typeof createAuth>;
