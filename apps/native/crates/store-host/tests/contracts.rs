@@ -625,6 +625,43 @@ fn cannot_change_profile_or_publisher_through_update() {
     );
 }
 #[test]
+fn replace_publisher_switches_identity_and_clears_previous_permissions() {
+    let (mut k, _dir, mut a) = installed(&[Permission::Network]);
+    grant(&mut k, Permission::Network);
+    assert_eq!(
+        request(&k, &id("sample-ext"), Permission::Network).unwrap(),
+        Admission::Granted
+    );
+    let rev = state(&k).revision;
+    let (s, b) = fixture("1.0.0", &[Permission::Network]);
+    let mut stmt = s.statement;
+    stmt.publisher = "other".into();
+    let mut t = trust();
+    t.trust(
+        "other".into(),
+        "test-key".into(),
+        signing_key().verifying_key(),
+    )
+    .unwrap();
+    let v = verify(&sign(stmt), &b, &t, Limits::default()).unwrap();
+    assert_eq!(
+        replace_publisher(&mut k, &mut a, "wrong-profile", &v, Some(rev)).unwrap_err(),
+        Error::Conflict
+    );
+    assert_eq!(
+        replace_publisher(&mut k, &mut a, "test-profile", &v, Some(rev)).unwrap(),
+        InstallOutcome::Activated { revision: rev + 1 }
+    );
+    let after = state(&k);
+    assert_eq!(after.active.as_ref().unwrap().publisher, "other");
+    assert_eq!(after.active.as_ref().unwrap().manifest.version, "1.0.0");
+    assert!(after.permissions.is_empty());
+    assert!(matches!(
+        request(&k, &id("sample-ext"), Permission::Network).unwrap(),
+        Admission::Prompt(_)
+    ));
+}
+#[test]
 fn local_edits_keep_running_and_remote_candidate_stays_alongside() {
     let (mut k, _dir, mut a) = installed(&[]);
     let mut s = state(&k);

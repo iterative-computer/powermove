@@ -125,7 +125,8 @@ fn signed(release: &Release) -> (SignedRelease, Vec<u8>) {
     )
 }
 fn summary(release: &Release) -> Value {
-    json!({"id":release.0,"version":release.4,"publishedAt":release.5,"apiVersion":3,"yankedAt":null})
+    let size = archive(&files(release)).len();
+    json!({"id":release.0,"version":release.4,"publishedAt":release.5,"apiVersion":3,"sizeBytes":size,"yankedAt":null})
 }
 fn listing(repo: &str) -> Value {
     let latest = RELEASES.iter().rev().find(|r| r.1 == repo).unwrap();
@@ -1515,4 +1516,54 @@ fn words_publish_with_no_account_service_has_no_dead_sign_in_button() {
         Some(crate::publish::SIGN_IN)
     );
     assert!(cx.debug_bounds("store-sign-in").is_none());
+}
+
+#[::core::prelude::v1::test]
+fn store_window_populates_listing_detail_and_library_sizes() {
+    let f = fixture();
+    let folder = f.profile.path().join("extensions/made-here");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"made-here","name":"Made Here","version":"1.0.0","apiVersion":3,"author":"user"}"#,
+    )
+    .unwrap();
+    std::fs::write(folder.join("index.ts"), "export default function() {}").unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, true));
+    settle(&view, cx, "shelves", |v| {
+        matches!(v.shelves, crate::store_window::Load::Ready(_))
+    });
+    let listing = view.read_with(cx, |v, _| match &v.shelves {
+        crate::store_window::Load::Ready(shelves) => shelves[0].listings[0].clone(),
+        _ => panic!("shelves not ready"),
+    });
+    assert!(listing.size_bytes.is_some_and(|b| b > 0));
+    view.update(cx, |v, cx| v.open_detail(listing.clone(), cx));
+    settle(&view, cx, "detail", |v| {
+        matches!(v.detail, Some((_, crate::store_window::Load::Ready(_))))
+    });
+    view.read_with(cx, |v, _| {
+        let Some((_, crate::store_window::Load::Ready(detail))) = &v.detail else {
+            panic!("detail not ready");
+        };
+        assert!(detail.listing.size_bytes.is_some_and(|b| b > 0));
+        assert!(detail.releases.iter().all(|r| r.size_bytes.is_some_and(|b| b > 0)));
+    });
+    click(cx, "store-action");
+    settle(&view, cx, "installed", |v| {
+        v.busy.is_none()
+            && matches!(
+                &v.library,
+                crate::store_window::Load::Ready(items) if !items.is_empty()
+            )
+    });
+    view.read_with(cx, |v, _| {
+        let crate::store_window::Load::Ready(items) = &v.library else {
+            panic!("library not ready");
+        };
+        assert!(items.iter().all(|i| i.size_bytes > 0));
+        let yours = v.yours.iter().find(|y| y.id == "made-here").unwrap();
+        assert!(yours.size_bytes > 0);
+    });
 }

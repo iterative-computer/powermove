@@ -503,6 +503,24 @@ pub fn civil_from_days(days: i64) -> (i32, u32, u32) {
     ((yoe + era * 400 + i64::from(month <= 2)) as i32, month, day)
 }
 
+/// `285 MB`, `12 KB`, `840 B`: decimal units, as macOS Finder shows sizes.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1000.0 && unit + 1 < UNITS.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else if size < 10.0 {
+        format!("{size:.1} {}", UNITS[unit])
+    } else {
+        format!("{size:.0} {}", UNITS[unit])
+    }
+}
+
 /// A storefront card or search result, from a listing the client admitted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listing {
@@ -515,13 +533,16 @@ pub struct Listing {
     pub category: String,
     /// The latest release: (release id, version, apiVersion, published).
     pub latest: Option<(String, String, Option<u32>, String)>,
+    /// Archive size in bytes of the latest release, when the Store provides it.
+    pub size_bytes: Option<u64>,
     pub permissions: Vec<String>,
     pub install_count: u64,
 }
 impl Listing {
     pub fn from_value(value: &Value) -> Option<Self> {
         let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
-        let latest = value.get("latest").filter(|l| !l.is_null()).and_then(|l| {
+        let latest_obj = value.get("latest").filter(|l| !l.is_null());
+        let latest = latest_obj.and_then(|l| {
             Some((
                 l.get("id")?.as_str()?.to_owned(),
                 l.get("version")?.as_str()?.to_owned(),
@@ -534,6 +555,7 @@ impl Listing {
                     .to_owned(),
             ))
         });
+        let size_bytes = latest_obj.and_then(|l| l.get("sizeBytes").and_then(Value::as_u64));
         Some(Self {
             repo_id: text("repoId")?,
             handle: value.pointer("/owner/handle")?.as_str()?.to_owned(),
@@ -543,6 +565,7 @@ impl Listing {
             tagline: text("tagline").unwrap_or_default(),
             category: text("category").unwrap_or_default(),
             latest,
+            size_bytes,
             permissions: strings(value.get("permissions")),
             install_count: value
                 .get("installCount")
@@ -572,6 +595,7 @@ pub struct Release {
     pub notes: Option<String>,
     pub withdrawn: bool,
     pub api_version: Option<u32>,
+    pub size_bytes: Option<u64>,
 }
 /// A detail page: the listing, its about text and every release, newest first
 /// as the Store sends them.
@@ -588,7 +612,7 @@ pub struct Detail {
 }
 impl Detail {
     pub fn from_value(value: &Value) -> Option<Self> {
-        let listing = Listing::from_value(value)?;
+        let mut listing = Listing::from_value(value)?;
         let releases: Vec<&Value> = value.get("releases")?.as_array()?.iter().collect();
         let latest_id = listing.latest.as_ref().map(|l| l.0.clone());
         let latest = releases
@@ -599,6 +623,10 @@ impl Detail {
                     .iter()
                     .find(|r| r.get("yankedAt").is_none_or(Value::is_null))
             });
+        if listing.size_bytes.is_none() {
+            listing.size_bytes =
+                latest.and_then(|r| r.get("sizeBytes").and_then(Value::as_u64));
+        }
         let manifest = latest.and_then(|r| r.get("manifest"));
         let about = value
             .get("about")
@@ -638,6 +666,7 @@ impl Detail {
                             .get("apiVersion")
                             .and_then(Value::as_u64)
                             .and_then(|n| u32::try_from(n).ok()),
+                        size_bytes: r.get("sizeBytes").and_then(Value::as_u64),
                     })
                 })
                 .collect(),
@@ -870,6 +899,41 @@ mod tests {
             "Install and Set Up"
         );
         assert!(!detail_action(None, None, false, false, Some(5)).enabled());
+    }
+    #[test]
+    fn format_size_and_listing_detail_sizes_parse_cleanly() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(840), "840 B");
+        assert_eq!(format_size(1_250), "1.2 KB");
+        assert_eq!(format_size(12_252), "12 KB");
+        assert_eq!(format_size(1_500_000), "1.5 MB");
+        assert_eq!(format_size(14_200_000), "14 MB");
+
+        let with_latest_size = json!({
+            "repoId": "11111111-1111-4111-8111-111111111111",
+            "owner": { "handle": "zellzoi", "verified": true },
+            "slug": "liquid-glass-ios27",
+            "name": "Liquid Glass",
+            "latest": { "id": "r1", "version": "2.0.1", "apiVersion": 3, "publishedAt": "2026-10-01T00:00:00Z", "sizeBytes": 12252 }
+        });
+        assert_eq!(
+            Listing::from_value(&with_latest_size).unwrap().size_bytes,
+            Some(12_252)
+        );
+
+        let detail_without_latest_size = json!({
+            "repoId": "11111111-1111-4111-8111-111111111111",
+            "owner": { "handle": "zellzoi", "verified": true },
+            "slug": "liquid-glass-ios27",
+            "name": "Liquid Glass",
+            "latest": { "id": "r1", "version": "2.0.1", "apiVersion": 3, "publishedAt": "2026-10-01T00:00:00Z" },
+            "releases": [
+                { "id": "r1", "version": "2.0.1", "apiVersion": 3, "publishedAt": "2026-10-01T00:00:00Z", "sizeBytes": 12252 }
+            ]
+        });
+        let detail = Detail::from_value(&detail_without_latest_size).unwrap();
+        assert_eq!(detail.listing.size_bytes, Some(12_252));
+        assert_eq!(detail.releases[0].size_bytes, Some(12_252));
     }
 }
 

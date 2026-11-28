@@ -14,7 +14,7 @@ export function toListing(repo: Repo, extension: Extension, owner: Owner, latest
     repoId: repo.id, owner: { id: owner.id, handle: owner.handle, tombstoned: owner.tombstonedAt !== null, verified: owner.verifiedAt !== null }, slug: repo.slug,
     name: extension.name, tagline: extension.tagline, category: extension.category as ListingDto['category'],
     iconUrl: extension.iconKey ? `/v1/store/icons/${extension.iconKey}` : null, visibility: repo.visibility,
-    latest: latest ? { id: latest.id, version: latest.version, publishedAt: latest.publishedAt.toISOString(), apiVersion: latest.apiVersion, yankedAt: latest.yankedAt?.toISOString() ?? null } : null,
+    latest: latest ? { id: latest.id, version: latest.version, publishedAt: latest.publishedAt.toISOString(), apiVersion: latest.apiVersion, sizeBytes: latest.sizeBytes, yankedAt: latest.yankedAt?.toISOString() ?? null } : null,
     permissions: extension.permissions,
     installCount: extension.installCount, forkCount: extension.forkCount, licence: extension.licence, forkedFrom: lineage,
     createdAt: repo.createdAt.toISOString(), updatedAt: repo.updatedAt.toISOString()

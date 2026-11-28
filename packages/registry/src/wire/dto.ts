@@ -8,7 +8,7 @@ export const PublisherDto = z.object({ id: Uuid, handle: Handle, tombstoned: z.b
 export type PublisherDto = z.infer<typeof PublisherDto>;
 export const LineageDto = z.object({ repoId: Uuid, handle: Handle, slug: Slug, releaseId: Uuid, version: Version });
 export type LineageDto = z.infer<typeof LineageDto>;
-export const ReleaseSummaryDto = z.object({ id: Uuid, version: Version, publishedAt: IsoDate, apiVersion: z.number().int().positive(), yankedAt: IsoDate.nullable() });
+export const ReleaseSummaryDto = z.object({ id: Uuid, version: Version, publishedAt: IsoDate, apiVersion: z.number().int().positive(), sizeBytes: z.number().int().nonnegative().optional(), yankedAt: IsoDate.nullable() });
 export type ReleaseSummaryDto = z.infer<typeof ReleaseSummaryDto>;
 export const ListingDto = z.object({
   repoId: Uuid, owner: PublisherDto, slug: Slug, name: z.string(), tagline: z.string(), category: Category,

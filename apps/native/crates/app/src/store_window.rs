@@ -16,8 +16,8 @@ use pm_services::{
     store::{InstalledRelease, StoreClient, StoreTransport},
     surfaces::store::{
         Catalog, CatalogQuery, CatalogState, Detail, DetailAction, Health, ItemFacts, ItemGroup,
-        KINDS, Listing, detail_action, includes_text, kind_label, permission_lines, relative_date,
-        requires_text,
+        KINDS, Listing, detail_action, format_size, includes_text, kind_label, permission_lines,
+        relative_date, requires_text,
     },
 };
 use pm_shell::{
@@ -149,6 +149,7 @@ pub struct Installed {
     pub id: String,
     pub name: String,
     pub version: String,
+    pub size_bytes: u64,
     pub repo: Option<String>,
     pub release: Option<String>,
     /// (version, release id) of a newer release the Store has.
@@ -172,6 +173,7 @@ pub struct Yours {
     pub id: String,
     pub name: String,
     pub version: String,
+    pub size_bytes: u64,
     /// The version this Mac last published.
     pub published: Option<String>,
     /// Why its manifest can't be loaded (PM-505): the card says so instead of
@@ -1225,6 +1227,32 @@ pub(crate) fn broken_status(why: &str) -> &'static str {
 fn uuid_like(s: &str) -> bool {
     s.len() == 36 && s.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
 }
+/// Total size in bytes of regular files inside an extension folder, without
+/// following symlinks.
+fn directory_size(root: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
 /// Extensions made on this Mac (no Store marker), with what was published.
 pub fn yours(profile: &std::path::Path) -> Vec<Yours> {
     let provenance: Value = std::fs::read(profile.join("extensions-provenance.json"))
@@ -1237,9 +1265,11 @@ pub fn yours(profile: &std::path::Path) -> Vec<Yours> {
         .map(|found| {
             let manifest = found.manifest.as_ref().ok();
             let text = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_owned);
+            let size_bytes = directory_size(&found.directory);
             Yours {
                 name: text(manifest.and_then(|m| m.get("name"))).unwrap_or(found.id.clone()),
                 version: text(manifest.and_then(|m| m.get("version"))).unwrap_or_default(),
+                size_bytes,
                 published: text(provenance[&found.id]["published"].get("version")),
                 broken: found.manifest.as_ref().err().cloned(),
                 id: found.id,
@@ -1255,9 +1285,11 @@ pub fn scan(profile: &std::path::Path) -> Vec<Installed> {
             let marker = found.store.clone()?;
             let manifest = found.manifest.as_ref().ok();
             let text = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_owned);
+            let size_bytes = directory_size(&found.directory);
             Some(Installed {
                 name: text(manifest.and_then(|m| m.get("name"))).unwrap_or(found.id.clone()),
                 version: text(manifest.and_then(|m| m.get("version"))).unwrap_or_default(),
+                size_bytes,
                 repo: text(marker.get("repoId")),
                 release: text(marker.get("releaseId")),
                 id: found.id,
@@ -1637,6 +1669,9 @@ impl StoreWindow {
                         .aria_label("Verified")
                         .child(symbol("checkmark.seal.fill", c.verified)),
                 )
+            })
+            .when_some(listing.size_bytes, |d, bytes| {
+                d.child(div().flex_none().child(format!("· {}", format_size(bytes))))
             });
         // Keyed by repository: two makers' listings may share a slug.
         self.frame(
@@ -2280,11 +2315,19 @@ impl StoreWindow {
                 update,
                 cx,
             );
-            let facts = div().child(div().truncate().child(if item.update.is_some() {
-                format!("Version {} installed", item.version)
-            } else {
-                "From the Store".to_owned()
-            }));
+            let facts_text = {
+                let base = if item.update.is_some() {
+                    format!("Version {} installed", item.version)
+                } else {
+                    "From the Store".to_owned()
+                };
+                if item.size_bytes > 0 {
+                    format!("{base} · {}", format_size(item.size_bytes))
+                } else {
+                    base
+                }
+            };
+            let facts = div().child(div().truncate().child(facts_text));
             let card = self
                 .frame(
                     &format!("store-installed-{id}"),
@@ -2401,6 +2444,11 @@ impl StoreWindow {
                         (!unchanged).then_some(publish),
                         cx,
                     );
+                    let status_text = if item.size_bytes > 0 {
+                        format!("{status} · {}", format_size(item.size_bytes))
+                    } else {
+                        status
+                    };
                     let card = self
                         .frame(
                             &format!("store-yours-{id}"),
@@ -2410,7 +2458,7 @@ impl StoreWindow {
                                 name: &item.name,
                                 line: Some((format!("Version {}", item.version), c.muted)),
                             },
-                            div().child(div().truncate().child(status)),
+                            div().child(div().truncate().child(status_text)),
                             corner,
                         )
                         .into_any_element();
@@ -2778,6 +2826,12 @@ impl StoreWindow {
                     _ => latest.1.clone(),
                 }),
             ));
+            if let Some(bytes) = listing
+                .size_bytes
+                .or_else(|| installed.as_ref().map(|i| i.size_bytes).filter(|&b| b > 0))
+            {
+                facts.push(fact("Size", text(format_size(bytes))));
+            }
             let updated = relative_date(&latest.3, today());
             if !updated.is_empty() {
                 facts.push(fact("Updated", text(updated)));
@@ -2845,6 +2899,11 @@ impl StoreWindow {
             }
             let id = release.version.clone();
             let date = relative_date(&release.published_at, today());
+            let meta = match (date.is_empty(), release.size_bytes) {
+                (false, Some(bytes)) => format!("{date} · {}", format_size(bytes)),
+                (true, Some(bytes)) => format_size(bytes),
+                _ => date,
+            };
             versions = versions.child(
                 div()
                     .debug_selector(move || format!("store-version-{id}"))
@@ -2874,7 +2933,7 @@ impl StoreWindow {
                                 div()
                                     .text_role(t, Text::Caption)
                                     .text_color(rgb(c.muted))
-                                    .child(date),
+                                    .child(meta),
                             ),
                     )
                     .children(release.notes.clone().map(|note| {

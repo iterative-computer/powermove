@@ -163,6 +163,56 @@ pub fn install<K: StoreKernel, A: ArtifactStore>(
     Ok(outcome)
 }
 
+/// Explicitly replaces an extension's pinned publisher when a person chooses
+/// another publisher's listing sharing the same extension id (for example,
+/// switching between a fork and its upstream). Profile boundaries remain
+/// enforced, the previous active release is archived, and all prior publisher
+/// permission decisions are cleared so the replacement never inherits grants.
+pub fn replace_publisher<K: StoreKernel, A: ArtifactStore>(
+    kernel: &mut K,
+    artifacts: &mut A,
+    profile: &str,
+    verified: &VerifiedRelease,
+    expected: Option<u64>,
+) -> Result<InstallOutcome> {
+    let id = &verified.manifest.id;
+    let previous = kernel.load(id)?;
+    check_expected(&previous, expected)?;
+    let data_store = DataStoreIdentity::new(profile, id.clone())?;
+    if let Some(old) = &previous
+        && old.data_store != data_store
+    {
+        return Err(Error::Conflict);
+    }
+    artifacts.preserve(verified)?;
+    let mut state = previous.unwrap_or(ExtensionState {
+        revision: 0,
+        data_store,
+        data_status: DataStoreStatus::Archived,
+        active: None,
+        archives: Vec::new(),
+        permissions: BTreeMap::new(),
+    });
+    advance(&mut state)?;
+    archive_active(&mut state, ArchiveReason::Updated);
+    state.permissions.clear();
+    state.active = Some(InstalledRelease {
+        manifest: verified.manifest.clone(),
+        publisher: verified.statement.publisher.clone(),
+        publisher_identity: verified.publisher_identity.clone(),
+        release_id: verified.statement.release_id.clone(),
+        bundle: verified.statement.archive_sha256.clone(),
+        proof: verified.proof.clone(),
+        local_overlay: None,
+    });
+    state.data_status = DataStoreStatus::Active;
+    let outcome = InstallOutcome::Activated {
+        revision: state.revision,
+    };
+    kernel.compare_exchange(id, expected, &state)?;
+    Ok(outcome)
+}
+
 pub fn uninstall<K: StoreKernel>(kernel: &mut K, id: &ExtensionId, expected: u64) -> Result<u64> {
     let mut state = kernel.load(id)?.ok_or(Error::NotInstalled)?;
     if state.revision != expected {

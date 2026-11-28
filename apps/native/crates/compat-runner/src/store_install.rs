@@ -230,10 +230,24 @@ fn commit(
     }
     let mut adapter = KernelStoreAdapter::new(kernel);
     let current = adapter.load(&statement.extension).map_err(refusal)?;
-    if let Some(installed) = current
+    let pinned_publisher = current
         .as_ref()
-        .and_then(|state| state.active.as_ref())
-        .map(|active| active.manifest.version.as_str())
+        .and_then(|state| {
+            state
+                .active
+                .as_ref()
+                .or_else(|| state.archives.last().map(|a| &a.release))
+        })
+        .map(|release| release.publisher.as_str());
+    let switching_publisher = pinned_publisher.is_some_and(|p| p != statement.publisher);
+    let folder_present =
+        fs::symlink_metadata(profile.join("extensions").join(statement.extension.as_str())).is_ok();
+    if !switching_publisher
+        && folder_present
+        && let Some(installed) = current
+            .as_ref()
+            .and_then(|state| state.active.as_ref())
+            .map(|active| active.manifest.version.as_str())
         && !newer(request.version, installed)
     {
         return Err(Error::Host(format!(
@@ -242,10 +256,24 @@ fn commit(
         )));
     }
     // An update replaces the release this app installed before, at its revision.
+    // Switching to another publisher's extension sharing the same manifest id
+    // (for example, between a fork and its upstream) uses replace_publisher so
+    // the previous publisher's permissions are cleared.
     let expected = current.map(|state| state.revision);
     let mut artifacts = FileArtifacts::new(profile.join("store-artifacts")).map_err(refusal)?;
-    pm_store_host::install::install(&mut adapter, &mut artifacts, namespace, verified, expected)
+    if switching_publisher {
+        pm_store_host::install::replace_publisher(
+            &mut adapter,
+            &mut artifacts,
+            namespace,
+            verified,
+            expected,
+        )
         .map_err(refusal)?;
+    } else {
+        pm_store_host::install::install(&mut adapter, &mut artifacts, namespace, verified, expected)
+            .map_err(refusal)?;
+    }
     let repo = request.repo;
     let id = statement.extension.as_str().to_owned();
     let root = profile.join("extensions");
@@ -662,15 +690,22 @@ mod tests {
             "synthetic-release"
         );
     }
-    fn signed(version: &str, release: &str, source: &[u8]) -> (SignedRelease, Vec<u8>) {
+    fn signed_by(
+        publisher: &str,
+        key_id: &str,
+        seed: [u8; 32],
+        version: &str,
+        release: &str,
+        source: &[u8],
+    ) -> (SignedRelease, Vec<u8>) {
         let manifest = json!({"id":"synthetic-store","name":"Synthetic","version":version,"apiVersion":3,"permissions":[]}).to_string();
         let files: [(&str, &[u8]); 2] =
             [("manifest.json", manifest.as_bytes()), ("index.ts", source)];
         let bytes = archive(&files);
         let statement = ReleaseStatement {
             format: 1,
-            key_id: "synthetic-key".into(),
-            publisher: "synthetic-publisher".into(),
+            key_id: key_id.into(),
+            publisher: publisher.into(),
             extension: ExtensionId::new("synthetic-store").unwrap(),
             release_id: release.into(),
             archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
@@ -685,7 +720,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let signature = SigningKey::from_bytes(&[7; 32])
+        let signature = SigningKey::from_bytes(&seed)
             .sign(&statement.signing_bytes().unwrap())
             .to_vec();
         (
@@ -695,6 +730,9 @@ mod tests {
             },
             bytes,
         )
+    }
+    fn signed(version: &str, release: &str, source: &[u8]) -> (SignedRelease, Vec<u8>) {
+        signed_by("synthetic-publisher", "synthetic-key", [7; 32], version, release, source)
     }
     #[test]
     fn an_update_archives_the_folder_it_replaces_and_uninstall_archives_without_deleting() {
@@ -847,6 +885,118 @@ mod tests {
             b"export default 2"
         );
         assert!(!profile.join("extensions/.archive").exists());
+    }
+    #[test]
+    fn switching_to_another_publisher_sharing_manifest_id_with_lower_version_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().canonicalize().unwrap();
+        let kernel = Mutex::new(Kernel::new(KernelConfig::default()));
+        let mut trust = TrustStore::default();
+        trust
+            .trust(
+                "fork-publisher".into(),
+                "fork-key".into(),
+                SigningKey::from_bytes(&[11; 32]).verifying_key(),
+            )
+            .unwrap();
+        trust
+            .trust(
+                "origin-publisher".into(),
+                "origin-key".into(),
+                SigningKey::from_bytes(&[12; 32]).verifying_key(),
+            )
+            .unwrap();
+        let fork = signed_by(
+            "fork-publisher",
+            "fork-key",
+            [11; 32],
+            "2.0.8",
+            "fork-release",
+            b"export default 'fork'",
+        );
+        let origin = signed_by(
+            "origin-publisher",
+            "origin-key",
+            [12; 32],
+            "2.0.1",
+            "origin-release",
+            b"export default 'origin'",
+        );
+        let fork_req = Request {
+            release: "fork-release",
+            repo: "fork-repo",
+            extension: "synthetic-store",
+            version: "2.0.8",
+        };
+        let origin_req = Request {
+            release: "origin-release",
+            repo: "origin-repo",
+            extension: "synthetic-store",
+            version: "2.0.1",
+        };
+        install_verified(
+            &kernel,
+            &profile,
+            "synthetic",
+            &fork_req,
+            &fork.0,
+            &fork.1,
+            &trust,
+        )
+        .unwrap();
+        // Installing the upstream extension (2.0.1) while a higher-version fork
+        // (2.0.8) from another publisher is active must succeed.
+        install_verified(
+            &kernel,
+            &profile,
+            "synthetic",
+            &origin_req,
+            &origin.0,
+            &origin.1,
+            &trust,
+        )
+        .unwrap();
+        let folder = profile.join("extensions/synthetic-store");
+        assert_eq!(
+            fs::read(folder.join("index.ts")).unwrap(),
+            b"export default 'origin'"
+        );
+        assert_eq!(
+            crate::store_host::marker(&folder).unwrap()["repoId"],
+            "origin-repo"
+        );
+        // After uninstalling origin, installing fork again must also succeed.
+        uninstall(&kernel, &profile, "synthetic-store").unwrap();
+        install_verified(
+            &kernel,
+            &profile,
+            "synthetic",
+            &fork_req,
+            &fork.0,
+            &fork.1,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(folder.join("index.ts")).unwrap(),
+            b"export default 'fork'"
+        );
+        // Removing the folder on disk must allow reinstalling the same version.
+        fs::remove_dir_all(&folder).unwrap();
+        install_verified(
+            &kernel,
+            &profile,
+            "synthetic",
+            &fork_req,
+            &fork.0,
+            &fork.1,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(folder.join("index.ts")).unwrap(),
+            b"export default 'fork'"
+        );
     }
     #[test]
     fn deleting_a_custom_extension_archives_its_folder_and_refuses_the_rest() {
