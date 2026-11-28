@@ -242,8 +242,13 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
     );
     crate::note_settings_key(true);
     crate::note_settings_key(false);
+    let mut sample = Vec::new();
+    backtrace::trace(|frame| {
+        sample.push(frame.ip() as u64);
+        sample.len() < 16
+    });
     send(Msg::HangBegan(
-        Box::new(hang::Context::now(false, false)),
+        Box::new(hang::Context::now(false, false, sample)),
         now_ms(),
         generation(),
     ));
@@ -254,6 +259,12 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
     .unwrap();
     assert_eq!(pending[0]["properties"]["duration"], "unrecovered");
     assert_eq!(pending[0]["properties"]["last_command"], "play");
+    assert!(
+        pending[0]["properties"]["location"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "missing location in pending hang: {pending}"
+    );
     assert_eq!(counted_on.lock().unwrap().as_deref(), Some("pm-telemetry"));
     send(Msg::HangEnded("5-10s", now_ms(), generation()));
     flush();
@@ -277,17 +288,34 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
     ] {
         assert_eq!(properties[key], value, "{key} in {hang}");
     }
+    assert!(
+        properties["location"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "missing location in hang: {hang}"
+    );
+    assert!(
+        properties["stack"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty()),
+        "missing stack in hang: {hang}"
+    );
+    let hang_text = hang.to_string();
+    for leak in ["/Users", "Jane"] {
+        assert!(!hang_text.contains(leak), "{leak} in {hang_text}");
+    }
     assert!(!Outbox::new(p).dir().join(outbox::HANG_PENDING).exists());
     // No project, Settings in front, a hang as playback's frames stop.
     crate::note_editor(Surface::Home, None);
     crate::note_settings_key(true);
     crate::note_playing(false);
-    let context = hang::Context::now(true, true).hang("2-5s");
+    let context = hang::Context::now(true, true, vec![]).hang("2-5s", None);
     let value = serde_json::to_value(&context).unwrap();
     assert_eq!(value["surface"], "settings");
     assert_eq!(value["playing"], true);
     assert_eq!(value["main_thread_answered"], true);
     assert!(value.get("layer_count").is_none() && value.get("has_3d").is_none());
+    assert!(value.get("location").is_none() && value.get("stack").is_none());
     hang::reset();
 
     // Sol P0: off drops the queue and the outbox, stops retries, and what was

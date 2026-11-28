@@ -6,6 +6,7 @@
 //! hung thread.
 use crate::ProjectFacts;
 use crate::events::{Hang, Surface, count_bucket};
+use crate::live::exception;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed};
 
@@ -61,12 +62,15 @@ pub struct Context {
     surface: Surface,
     main_thread_answered: bool,
     project: Option<ProjectFacts>,
+    addrs: Vec<u64>,
 }
 
 impl Context {
     /// `main_thread_answered`: the main queue's own heartbeat is fresh
     /// ([`crate::main_thread::since_queue_beat_ms`]).
-    pub fn now(played_recently: bool, main_thread_answered: bool) -> Context {
+    /// `addrs`: raw return addresses sampled from the hung main thread
+    /// (innermost first), resolved on the telemetry thread.
+    pub fn now(played_recently: bool, main_thread_answered: bool, addrs: Vec<u64>) -> Context {
         Context {
             // The main thread holds these locks only for a store; one it
             // holds now (the hang began inside it) reads as unknown.
@@ -75,12 +79,16 @@ impl Context {
             surface: surface(),
             main_thread_answered,
             project: PROJECT.try_lock().ok().and_then(|p| p.clone()),
+            addrs,
         }
     }
 
-    /// The event, its project counted here (on the telemetry thread).
-    pub fn hang(&self, duration: &'static str) -> Hang {
+    /// The event, its project counted and its stack resolved here (on the
+    /// telemetry thread).
+    pub fn hang(&self, duration: &'static str, main: Option<&exception::Image>) -> Hang {
         let facts = self.project.as_ref().and_then(|count| count());
+        let resolved = exception::resolve(&self.addrs, main);
+        let (location, stack, debug_id) = exception::hang_trace(&resolved, main);
         Hang {
             duration,
             last_command: self.last_command,
@@ -89,6 +97,9 @@ impl Context {
             main_thread_answered: self.main_thread_answered,
             layer_count: facts.map(|(layers, _)| count_bucket(layers)),
             has_3d: facts.map(|(_, has_3d)| has_3d),
+            location,
+            stack,
+            debug_id,
         }
     }
 }

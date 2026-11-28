@@ -469,6 +469,21 @@ pub struct Hang {
     pub layer_count: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_3d: Option<bool>,
+    /// Innermost in-app call site where the hang was detected: sanitized
+    /// function name when symbols are present, slide-independent
+    /// `powermove+0x…` offset in stripped release builds, or
+    /// `[system or other binary]` when no frame in our binary was sampled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Sanitized call stack (innermost first, up to 16 frames): only our own
+    /// binary's symbols/offsets; external runs collapse to
+    /// `[system or other binary]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<Vec<String>>,
+    /// Validated Mach-O UUID of our executable so stripped `powermove+0x…`
+    /// offsets can be symbolicated against the release `.dSYM`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_id: Option<String>,
 }
 
 /// What the front window showed: a project, Home, the Store page, or the
@@ -680,12 +695,17 @@ mod tests {
             main_thread_answered: false,
             layer_count: Some("6-20"),
             has_3d: Some(false),
+            location: Some("pm_native_app::save".into()),
+            stack: Some(vec!["pm_native_app::save".into()]),
+            debug_id: Some("6030AB4F-66DD-3529-86E7-67196E0787B0".into()),
         }))
         .unwrap();
         assert_eq!(
             h["properties"],
             serde_json::json!({"duration":"2-5s","last_command":"save","playing":false,
-                "surface":"store","main_thread_answered":false,"layer_count":"6-20","has_3d":false})
+                "surface":"store","main_thread_answered":false,"layer_count":"6-20","has_3d":false,
+                "location":"pm_native_app::save","stack":["pm_native_app::save"],
+                "debug_id":"6030AB4F-66DD-3529-86E7-67196E0787B0"})
         );
     }
 

@@ -434,7 +434,7 @@ impl Worker {
                 self.panic(addrs, location, at)
             }
             Msg::HangBegan(context, at, g) if self.current(g) => {
-                let hang = context.hang("unrecovered");
+                let hang = context.hang("unrecovered", self.main.as_ref());
                 // Kept in case the app is ended while it hangs.
                 if self.may_write()
                     && let Some(record) = self.event_record(&Event::Hang(hang.clone()), at)
@@ -890,11 +890,12 @@ fn install_panic_hook() {
 }
 
 /// Watches the main thread's heartbeat: blocked for more than 2 s while the
-/// app is active, it tells the worker what was going on ([`hang::Context`];
-/// the worker keeps a pending `hang`, sent at the next launch if the app is
-/// ended while it hangs); when the main thread answers, the hang is sent
-/// with its duration. No stack is taken: the main thread is never suspended
-/// for telemetry.
+/// app is active, it takes a one-shot lock-free stack sample of the main
+/// thread ([`crate::main_thread::sample`]) and tells the worker what was going
+/// on ([`hang::Context`]; the worker resolves our binary's call site on the
+/// telemetry thread and keeps a pending `hang`, sent at the next launch if the
+/// app is ended while it hangs); when the main thread answers, the hang is
+/// sent with its duration and sampled `location`.
 fn watch_hangs() {
     let mut last = Instant::now();
     let mut began: Option<u64> = None;
@@ -914,8 +915,14 @@ fn watch_hangs() {
                 {
                     let start = crate::main_thread::now_ms().saturating_sub(late);
                     began = Some(start);
+                    let mut addrs = [0u64; crate::main_thread::DEPTH];
+                    let depth = crate::main_thread::sample(&mut addrs);
                     let answered = crate::main_thread::since_queue_beat_ms() < 1000;
-                    let context = hang::Context::now(perf::played_before(start), answered);
+                    let context = hang::Context::now(
+                        perf::played_before(start),
+                        answered,
+                        addrs[..depth].to_vec(),
+                    );
                     send(Msg::HangBegan(Box::new(context), now_ms(), generation()));
                 }
             }
