@@ -158,9 +158,12 @@ impl Models {
         caller: Caller,
         application: bool,
         loads_agent: bool,
+        carried_agent: Option<crate::agent_host::SharedAgent>,
     ) -> Result<Self, String> {
         let timeline_source = (!application).then(|| (kernel.clone(), project.to_owned(), caller));
-        let agent = if loads_agent {
+        let agent = if let Some(carried) = carried_agent {
+            Some(carried)
+        } else if loads_agent {
             let mut store = KernelStore::new(kernel, application);
             let panel = pm_panel_agentpanel::model::Panel::load(
                 &mut store,

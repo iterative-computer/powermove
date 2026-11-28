@@ -115,6 +115,15 @@ impl Backend {
         panel: &str,
         application: bool,
     ) -> Result<Self, String> {
+        Self::new_with_agent(kernel, identity, panel, application, None)
+    }
+    pub fn new_with_agent(
+        kernel: KernelHandle,
+        identity: Identity,
+        panel: &str,
+        application: bool,
+        carried_agent: Option<crate::agent_host::SharedAgent>,
+    ) -> Result<Self, String> {
         let published = if application {
             None
         } else {
@@ -149,6 +158,7 @@ impl Backend {
             Caller::realm(realm, 1, Origin::Interface),
             application,
             panel == "agent",
+            carried_agent,
         )?;
         let document = published.as_ref().map(|p| p.snapshot.doc_id);
         Ok(Self {

@@ -322,6 +322,16 @@ struct Broker {
     /// Each panel's entry has its own lock: one panel's slow poll never holds
     /// another's calls (all nine built-ins share this broker).
     entries: Mutex<BTreeMap<String, Arc<Mutex<Entry>>>>,
+    /// Lightweight per-panel metadata readable from the main thread without
+    /// locking any panel's `Entry` or `Backend` (which V8 workers hold across
+    /// host calls, saves, and agent snapshots).
+    panel_generations: Mutex<BTreeMap<String, u64>>,
+    panel_writers: Mutex<BTreeMap<String, pm_kernel::Writer>>,
+    /// Direct handle to the live `"agent"` panel's state for non-blocking
+    /// handoff (`carry_agent`) without locking the agent panel's `Entry`/`Backend`.
+    live_agent: Mutex<Option<agent_host::SharedAgent>>,
+    /// Bumped whenever v4 extension effect/transition/layer registrations change.
+    native_effects_revision: std::sync::atomic::AtomicU64,
     publications: Mutex<BTreeMap<String, Publication>>,
     platform: Mutex<Vec<PlatformRequest>>,
     drop_lookup: Mutex<Option<DropLookup>>,
@@ -502,8 +512,7 @@ impl Builtins {
         if !self.broker.application {
             return None;
         }
-        let entry = self.broker.entry("agent")?;
-        let state = entry.shared().backend.shared().native.agent.clone()?;
+        let state = self.broker.live_agent.shared().clone()?;
         let carry = AgentCarry::take(&self.broker.agent, &state)?;
         self.broker
             .agent_released
@@ -1479,6 +1488,10 @@ impl Builtins {
             application,
             kernel,
             entries: Default::default(),
+            panel_generations: Default::default(),
+            panel_writers: Default::default(),
+            live_agent: Default::default(),
+            native_effects_revision: std::sync::atomic::AtomicU64::new(1),
             publications: Default::default(),
             platform: Default::default(),
             drop_lookup: Default::default(),
@@ -2365,20 +2378,45 @@ impl Builtins {
         }
     }
 
+    /// Whether `panel` currently has a live, non-revoked entry at `generation`.
+    /// Never locks any panel's `Entry` or `Backend` so the UI drain never
+    /// blocks behind busy V8 workers.
+    pub fn is_panel_generation(&self, panel: &str, generation: u64) -> bool {
+        self.broker
+            .panel_generations
+            .shared()
+            .get(panel)
+            .copied()
+            == Some(generation)
+    }
+
+    /// Monotonically increasing revision bumped whenever a v4 extension's
+    /// registered effects, transitions, or custom layers change.
+    pub fn native_effects_revision(&self) -> u64 {
+        self.broker
+            .native_effects_revision
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The v4 definitions (effects, transitions, and custom layers) in this
     /// runtime, with their provider ids. The kernel registry also contains
     /// extensions mounted by other windows.
+    /// Reads immutable panel writer identities without locking any panel's
+    /// `Entry` or `Backend`.
     pub fn extension_effects(&self) -> Vec<(String, pm_protocol::definitions::DefinitionSnapshot)> {
-        let owners: BTreeMap<_, _> = self
-            .extension_realms
-            .shared()
-            .keys()
-            .filter_map(|id| {
-                let entry = self.broker.entry(id)?;
-                let owner = entry.shared().backend.shared().caller.writer;
-                Some((owner, id.clone()))
-            })
+        let extension_ids: Vec<String> = self.extension_realms.shared().keys().cloned().collect();
+        if extension_ids.is_empty() {
+            return Vec::new();
+        }
+        let writers = self.broker.panel_writers.shared();
+        let owners: BTreeMap<_, _> = extension_ids
+            .into_iter()
+            .filter_map(|id| Some((*writers.get(&id)?, id)))
             .collect();
+        drop(writers);
+        if owners.is_empty() {
+            return Vec::new();
+        }
         let state = self.broker.kernel.state();
         ["effects", "transitions", "layers"]
             .into_iter()
@@ -3085,11 +3123,10 @@ impl EngineProxy for Broker {
             return Ok(Value::Null);
         }
         if operation == "identity" {
-            let mut entries = self.entries.shared();
             if !self.panel(generation).is_ok_and(|id| id == panel) {
                 return Err(Error::StaleGeneration);
             }
-            if entries.contains_key(panel) {
+            if self.entries.shared().contains_key(panel) {
                 return Err(Error::Invalid("duplicate panel identity"));
             }
             let identity = Identity {
@@ -3097,39 +3134,88 @@ impl EngineProxy for Broker {
                 generation: generation.number,
                 project: self.project.clone(),
             };
-            let backend = Arc::new(Mutex::new(
-                Backend::new(
-                    self.kernel.clone(),
-                    identity.clone(),
-                    panel,
-                    self.application,
-                )
-                .map_err(Error::Host)?,
-            ));
-            backend.shared().native.agent_link = self.agent.clone();
-            backend.shared().native.timeline_view = self.timeline_view.clone();
-            backend.shared().native.timeline_outline = self.timeline_outline.clone();
-            if let Some(model) = backend.shared().model.as_mut() {
+            // Construct Backend (including Agent panel thread loading and
+            // Inspector setup) outside `self.entries` so starting panels never
+            // serialize each other or block lookups on `entries`.
+            let carried = if panel == "agent" {
+                self.carried.shared().take()
+            } else {
+                None
+            };
+            let built = Backend::new_with_agent(
+                self.kernel.clone(),
+                identity.clone(),
+                panel,
+                self.application,
+                carried.clone(),
+            );
+            let mut backend_value = match built {
+                Ok(backend) => backend,
+                Err(error) => {
+                    if let Some(state) = carried {
+                        *self.carried.shared() = Some(state);
+                    }
+                    return Err(Error::Host(error));
+                }
+            };
+            backend_value.native.agent_link = self.agent.clone();
+            backend_value.native.timeline_view = self.timeline_view.clone();
+            backend_value.native.timeline_outline = self.timeline_outline.clone();
+            if let Some(model) = backend_value.model.as_mut() {
                 model.clipboard = self.effect_clipboard.shared().clone();
-            }
-            if panel == "agent"
-                && let Some(state) = self.carried.shared().take()
-            {
-                backend.shared().native.agent = Some(state);
             }
             let facts = self.facts.shared().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {
-                backend.shared().native.facts = facts;
+                backend_value.native.facts = facts;
             }
-            let router = HostRouter::new(
-                identity.clone(),
-                HostDataService::new(identity.clone(), data::Data(backend.clone()))
-                    .map_err(Error::Host)?,
-            )
-            .map_err(Error::Host)?;
-            if panel == "export" {
-                *self.export_probe.shared() = Some(backend.shared().native.export_probe.clone());
+            let writer = backend_value.caller.writer;
+            let live_agent = if panel == "agent" {
+                backend_value.native.agent.clone()
+            } else {
+                None
+            };
+            let export_probe = if panel == "export" {
+                Some(backend_value.native.export_probe.clone())
+            } else {
+                None
+            };
+            let backend = Arc::new(Mutex::new(backend_value));
+            let router = match HostDataService::new(identity.clone(), data::Data(backend.clone()))
+                .and_then(|service| HostRouter::new(identity.clone(), service))
+            {
+                Ok(router) => router,
+                Err(error) => {
+                    if let Some(state) = carried {
+                        *self.carried.shared() = Some(state);
+                    }
+                    return Err(Error::Host(error));
+                }
+            };
+            let mut entries = self.entries.shared();
+            if !self.panel(generation).is_ok_and(|id| id == panel) {
+                drop(entries);
+                if let Some(state) = carried {
+                    *self.carried.shared() = Some(state);
+                }
+                return Err(Error::StaleGeneration);
             }
+            if entries.contains_key(panel) {
+                drop(entries);
+                if let Some(state) = carried {
+                    *self.carried.shared() = Some(state);
+                }
+                return Err(Error::Invalid("duplicate panel identity"));
+            }
+            if let Some(probe) = export_probe {
+                *self.export_probe.shared() = Some(probe);
+            }
+            if let Some(agent) = live_agent {
+                *self.live_agent.shared() = Some(agent);
+            }
+            self.panel_generations
+                .shared()
+                .insert(panel.into(), generation.number);
+            self.panel_writers.shared().insert(panel.into(), writer);
             entries.insert(
                 panel.into(),
                 Arc::new(Mutex::new(Entry {
@@ -3335,6 +3421,8 @@ impl EngineProxy for Broker {
                         .wait()
                         .ok_or(Error::Invalid("kernel stopped"))?
                         .map_err(|e| Error::Host(e.to_string()))?;
+                    self.native_effects_revision
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 }
                 (self.wake)();
                 Ok(Value::Null)
@@ -3877,6 +3965,12 @@ impl KernelHooks for Broker {
             return;
         }
         entry.revoked = true;
+        {
+            let mut generations = self.panel_generations.shared();
+            if generations.get(panel).copied() == Some(generation.number) {
+                generations.remove(panel);
+            }
+        }
         let _ = entry.router.retire();
         self.clear_ui_owner(panel, &mut entry);
         // A generation that failed (a quota, a crash) takes down what it put
@@ -3906,6 +4000,11 @@ impl Broker {
         self.entries.shared().get(panel).cloned()
     }
     fn remove_entry(&self, panel: &str) {
+        self.panel_generations.shared().remove(panel);
+        self.panel_writers.shared().remove(panel);
+        if panel == "agent" {
+            *self.live_agent.shared() = None;
+        }
         let entry = self.entries.shared().remove(panel);
         if let Some(entry) = entry {
             let mut entry = entry.shared();
@@ -3988,8 +4087,7 @@ impl Broker {
         }
     }
     fn forget_effects(&self, panel: &str) {
-        if let Some(entry) = self.entry(panel) {
-            let owner = entry.shared().backend.shared().caller.writer;
+        if let Some(owner) = self.panel_writers.shared().get(panel).copied() {
             let pending = self
                 .kernel
                 .state_transaction(pm_kernel::state::StateTransaction {
@@ -4002,6 +4100,8 @@ impl Broker {
             if !is_main_thread() {
                 let _ = pending.wait();
             }
+            self.native_effects_revision
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
     }
     fn forget_commands(&self, panel: &str) {

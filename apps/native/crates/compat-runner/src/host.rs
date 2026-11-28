@@ -1168,6 +1168,10 @@ impl ExtensionHost {
     pub fn publication(&self) -> Publication {
         self.shared.published.lock().unwrap().publication()
     }
+    /// Current publication revision without cloning payloads or definition lists.
+    pub fn publication_revision(&self) -> u64 {
+        self.shared.published.lock().unwrap().revision
+    }
     /// The realm generation drawing now, 0 with none. A page belongs to one
     /// generation: when this moves, that page is finished.
     pub fn view(&self) -> u64 {

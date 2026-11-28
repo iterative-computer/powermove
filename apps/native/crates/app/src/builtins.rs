@@ -1004,14 +1004,9 @@ impl Controller {
         })
         .detach();
     }
-    fn facts(&self, cx: &App) -> Value {
-        let (mut facts, io) = self.facts_deferred(cx);
-        io.resolve(&mut facts);
-        facts
-    }
     /// `facts` with Settings' file-system reads (Storage's original-app
     /// lock, the Project header's poster) left for `FactsIo::resolve`,
-    /// which `update_builtins` runs on its worker.
+    /// which workers run off the main thread.
     fn facts_deferred(&self, cx: &App) -> (Value, crate::settings_window::FactsIo) {
         let (header, poster) = self.settings_header_deferred(cx);
         let io = crate::settings_window::FactsIo {
@@ -2071,9 +2066,7 @@ impl Controller {
                 })
                 || (pm_builtins::is_protected_surface(&p.panel)
                     && (p.panel != "settings"
-                        || !runtime.status().iter().any(|entry| {
-                            entry["panel"] == "settings" && entry["generation"] == p.generation
-                        })))
+                        || !runtime.is_panel_generation("settings", p.generation)))
             {
                 continue;
             }
@@ -2916,7 +2909,7 @@ impl Controller {
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
         // The panel's first publication in this window already knows where it is shown.
-        let facts = self.facts(cx);
+        let (mut facts, facts_io) = self.facts_deferred(cx);
         let export_inventory = (id == "export")
             .then(|| self.published.as_ref())
             .flatten()
@@ -2931,6 +2924,7 @@ impl Controller {
             let page_for = page.clone();
             let id_for = id.clone();
             let show = async move {
+                facts_io.resolve(&mut facts);
                 told.update_facts(facts);
                 if let Some((snapshot, inventory)) = export_inventory {
                     let bundle = inventory.collect(&snapshot, true);
@@ -3407,29 +3401,40 @@ impl Controller {
                                 // Space on the selection: Quick Look, as in Finder.
                                 pm_panel_media::Effect::TogglePreview(id)
                                 | pm_panel_media::Effect::ShowPreview(id) => {
-                                    let selection = self
-                                        .builtins
-                                        .runtime
-                                        .as_ref()
-                                        .map(|r| r.project_selection())
-                                        .unwrap_or_default();
-                                    let names = self.asset_names();
-                                    let files = quick_look_files(
-                                        &selection,
-                                        &id,
-                                        &self.media_base.originals,
-                                    )
-                                    .into_iter()
-                                    .map(|(id, path)| {
-                                        let name = names.get(&id).cloned().unwrap_or_else(|| {
-                                            path.file_name()
-                                                .map(|n| n.to_string_lossy().into_owned())
-                                                .unwrap_or_default()
+                                    let runtime = self.builtins.runtime.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        let selection = match runtime {
+                                            Some(runtime) => cx
+                                                .background_executor()
+                                                .spawn(async move { runtime.project_selection() })
+                                                .await,
+                                            None => Vec::new(),
+                                        };
+                                        let _ = this.update(cx, |v, _| {
+                                            let names = v.asset_names();
+                                            let files = quick_look_files(
+                                                &selection,
+                                                &id,
+                                                &v.media_base.originals,
+                                            )
+                                            .into_iter()
+                                            .map(|(id, path)| {
+                                                let name = names.get(&id).cloned().unwrap_or_else(
+                                                    || {
+                                                        path.file_name()
+                                                            .map(|n| {
+                                                                n.to_string_lossy().into_owned()
+                                                            })
+                                                            .unwrap_or_default()
+                                                    },
+                                                );
+                                                (path, name)
+                                            })
+                                            .collect();
+                                            crate::quick_look::toggle(files);
                                         });
-                                        (path, name)
                                     })
-                                    .collect();
-                                    crate::quick_look::toggle(files);
+                                    .detach();
                                 }
                                 // Double-click or Return on a ready item, and the
                                 // item menus (v1 `addFromAsset`, `Comps.fromAsset`,

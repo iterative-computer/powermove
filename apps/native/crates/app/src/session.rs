@@ -4814,27 +4814,38 @@ impl Controller {
         }
         if cmd.name == "palette.addEffect" {
             if let (Some(published), Some(runtime), Some(id)) = (
-                self.published.as_deref(),
-                self.builtins.runtime.as_ref(),
-                cmd.args.first().and_then(|a| a.as_str()),
+                self.published.clone(),
+                self.builtins.runtime.clone(),
+                cmd.args.first().and_then(|a| a.as_str()).map(str::to_owned),
             ) {
                 let state = self.kernel.state();
                 if let Some((_, label)) = crate::layer_commands::palette_effects(&state)
                     .into_iter()
-                    .find(|(key, _)| key == id)
+                    .find(|(key, _)| key == &id)
                 {
-                    let plan =
-                        crate::layer_commands::palette_effect_plan(published, &label, |layer| {
-                            runtime.effect_commands("viewer", layer, id, self.time())
+                    let time = self.time();
+                    let revision = published.revision();
+                    cx.spawn(async move |this, cx| {
+                        let plan = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::layer_commands::palette_effect_plan(
+                                    &published,
+                                    &label,
+                                    |layer| runtime.effect_commands("viewer", layer, &id, time),
+                                )
+                            })
+                            .await;
+                        let _ = this.update(cx, |v, cx| match plan {
+                            Ok(Some(plan)) => v.run_layer_plan_at(plan, Some(revision), cx),
+                            Ok(None) => {}
+                            Err(why) => {
+                                v.message = why;
+                                cx.notify();
+                            }
                         });
-                    match plan {
-                        Ok(Some(plan)) => self.run_layer_plan(plan, cx),
-                        Ok(None) => {}
-                        Err(why) => {
-                            self.message = why;
-                            cx.notify();
-                        }
-                    }
+                    })
+                    .detach();
                 }
             }
             return true;
@@ -5422,10 +5433,16 @@ impl Controller {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
             }
             "native.addCompositionToTimeline" | "native.addLayerFromAsset" => {
-                if let Some(runtime) = &self.builtins.runtime {
-                    let (assets, comps) = runtime
-                        .project_timeline_items(cmd.name == "native.addCompositionToTimeline");
-                    self.add_to_timeline(&assets, &comps, cx);
+                if let Some(runtime) = self.builtins.runtime.clone() {
+                    let compositions = cmd.name == "native.addCompositionToTimeline";
+                    cx.spawn(async move |this, cx| {
+                        let (assets, comps) = cx
+                            .background_executor()
+                            .spawn(async move { runtime.project_timeline_items(compositions) })
+                            .await;
+                        let _ = this.update(cx, |v, cx| v.add_to_timeline(&assets, &comps, cx));
+                    })
+                    .detach();
                 }
             }
             "saveAs" => self.save_dialog(cx),

@@ -492,8 +492,13 @@ fn fake_model(env: &Environment) -> bool {
 pub struct AgentCarry(pub(crate) Option<(Arc<AgentLink>, SharedAgent)>);
 impl AgentCarry {
     /// The window giving these up stops publishing to its realms.
+    /// Never blocks the main thread waiting on a busy agent worker: if the
+    /// agent state mutex is currently held (a turn or launch is in progress),
+    /// carry the state rather than stalling the UI thread.
     pub(crate) fn take(link: &Arc<AgentLink>, state: &SharedAgent) -> Option<Self> {
-        if state.shared().runs.active() == 0 {
+        if let Some(guard) = state.try_shared()
+            && guard.runs.active() == 0
+        {
             return None;
         }
         link.realms.shared().clear();

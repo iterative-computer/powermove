@@ -344,34 +344,41 @@ impl Controller {
             self.message = format!("{name} is audio: audio layers don't take effects");
             return cx.notify();
         }
-        let commands = self
-            .builtins
-            .runtime
-            .as_ref()
-            .ok_or_else(|| "The Effects panel closed.".to_owned())
-            .and_then(|r| {
-                r.effect_commands(
-                    &drop.panel,
-                    &layer,
-                    &drop.definition,
-                    drop.at.unwrap_or_else(|| self.time()),
-                )
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            self.message = "The Effects panel closed.".into();
+            return cx.notify();
+        };
+        let time = drop.at.unwrap_or_else(|| self.time());
+        let revision = self.published.as_ref().map(|p| p.revision());
+        let panel = drop.panel;
+        let definition = drop.definition;
+        let label = drop.label;
+        cx.spawn(async move |this, cx| {
+            let layer_for_worker = layer.clone();
+            let commands = cx
+                .background_executor()
+                .spawn(async move {
+                    runtime.effect_commands(&panel, &layer_for_worker, &definition, time)
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| match commands {
+                Ok(commands) => v.run_layer_plan_at(
+                    crate::layer_commands::Plan {
+                        label: format!("Add {label}"),
+                        commands,
+                        select: Some(vec![layer]),
+                        count_keys: None,
+                    },
+                    revision,
+                    cx,
+                ),
+                Err(why) => {
+                    v.message = why;
+                    cx.notify();
+                }
             });
-        match commands {
-            Ok(commands) => self.run_layer_plan(
-                crate::layer_commands::Plan {
-                    label: format!("Add {}", drop.label),
-                    commands,
-                    select: Some(vec![layer]),
-                    count_keys: None,
-                },
-                cx,
-            ),
-            Err(why) => {
-                self.message = why;
-                cx.notify();
-            }
-        }
+        })
+        .detach();
     }
     /// A transition from the Effects panel on a clip's edge (v1's timeline
     /// drop: the nearer half); without a clip under it, the selected layer's
@@ -596,39 +603,64 @@ impl Controller {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let drag = self
-            .builtins
-            .runtime
-            .as_ref()
-            .and_then(|r| r.project_drag());
-        if let Some(view) = self.builtins.views.get(pm_builtins::PROJECT_PANEL).cloned() {
-            view.update(cx, |v, cx| v.end_drag(cx));
-        }
-        let (Some(drag), Some(published)) = (drag, self.published.clone()) else {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            if let Some(view) = self.builtins.views.get(pm_builtins::PROJECT_PANEL).cloned() {
+                view.update(cx, |v, cx| v.end_drag(cx));
+            }
             return;
         };
-        let (assets, compositions) = match &drag.primary {
-            pm_panel_media::ItemId::Composition(id) => (vec![], vec![id.clone()]),
-            _ => (drag.assets.clone(), vec![]),
-        };
-        let still = self.pro_media.preferences().still();
-        match pm_builtins::media_import::place_items(&published, &assets, &compositions, at, index, still)
-        {
-            Ok((layers, commands)) => {
-                let label = format!("Add {}", drag.name);
-                let plan = crate::layer_commands::Plan {
-                    label,
-                    commands,
-                    select: Some(layers),
-                    count_keys: None,
+        let check = runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let drag = cx
+                .background_executor()
+                .spawn(async move { runtime.project_drag() })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                if !v
+                    .builtins
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| std::sync::Arc::ptr_eq(r, &check))
+                {
+                    return;
+                }
+                if let Some(view) = v.builtins.views.get(pm_builtins::PROJECT_PANEL).cloned() {
+                    view.update(cx, |v, cx| v.end_drag(cx));
+                }
+                let (Some(drag), Some(published)) = (drag, v.published.clone()) else {
+                    return;
                 };
-                self.run_layer_plan(plan, cx);
-            }
-            Err(why) => {
-                self.message = why;
-                cx.notify();
-            }
-        }
+                let (assets, compositions) = match &drag.primary {
+                    pm_panel_media::ItemId::Composition(id) => (vec![], vec![id.clone()]),
+                    _ => (drag.assets.clone(), vec![]),
+                };
+                let still = v.pro_media.preferences().still();
+                match pm_builtins::media_import::place_items(
+                    &published,
+                    &assets,
+                    &compositions,
+                    at,
+                    index,
+                    still,
+                ) {
+                    Ok((layers, commands)) => {
+                        let label = format!("Add {}", drag.name);
+                        let plan = crate::layer_commands::Plan {
+                            label,
+                            commands,
+                            select: Some(layers),
+                            count_keys: None,
+                        };
+                        v.run_layer_plan(plan, cx);
+                    }
+                    Err(why) => {
+                        v.message = why;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
     /// What a drop imports, as Import Media does: a project opens; caption
     /// files become captions layers where media lands; a folder of numbered

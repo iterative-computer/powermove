@@ -8607,3 +8607,111 @@ fn v4_chrome_failed_activation_removes_partially_published_ui() {
     panels.close();
     actor.shutdown();
 }
+
+#[test]
+fn main_thread_drain_helpers_never_block_on_busy_panel_locks() {
+    let wait = |ticket: Ticket<Evaluation>| -> pm_runtime_v8::Result<Evaluation> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(result) = ticket.try_take() {
+                return result;
+            }
+            assert!(Instant::now() < deadline, "panel ticket timed out");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let settings_eval = wait(panels.mount("settings").unwrap()).unwrap();
+    let agent_eval = wait(panels.mount("agent").unwrap()).unwrap();
+    let settings_gen = settings_eval.generation.number;
+    assert!(panels.is_panel_generation("settings", settings_gen));
+    assert!(!panels.is_panel_generation("settings", settings_gen + 1));
+    assert!(panels.is_panel_generation("agent", agent_eval.generation.number));
+
+    let rev_before = panels.native_effects_revision();
+    let graph = graph_of(
+        r#"
+        export async function mount(env) {
+            env.effects.register({
+                id: 'nonblocking.fx',
+                label: 'Nonblocking FX',
+                group: 'Test',
+                params: [{ k: 'amount', label: 'Amount', min: 0, max: 1, def: 0.5 }],
+                frag: 'o = src(v_uv) * u_amount;',
+            });
+            const root = env.root();
+            await root.render(null);
+            return { root, dispose: () => root.dispose() };
+        }
+    "#,
+    );
+    let _ext_eval = wait(panels.mount_extension("nonblocking-ext", &graph, None).unwrap()).unwrap();
+    let rev_after_register = panels.native_effects_revision();
+    assert!(
+        rev_after_register > rev_before,
+        "registering a v4 effect must bump native_effects_revision"
+    );
+
+    // Hold Entry + Backend locks for settings, agent, and the extension on this
+    // thread. Any call that tries to lock Entry or Backend would deadlock here.
+    let agent_entry = panels.broker.entry("agent").unwrap();
+    let settings_entry = panels.broker.entry("settings").unwrap();
+    let ext_entry = panels.broker.entry("nonblocking-ext").unwrap();
+    let agent_guard = agent_entry.lock().unwrap();
+    let agent_backend_guard = agent_guard.backend.lock().unwrap();
+    let settings_guard = settings_entry.lock().unwrap();
+    let settings_backend_guard = settings_guard.backend.lock().unwrap();
+    let ext_guard = ext_entry.lock().unwrap();
+    let ext_backend_guard = ext_guard.backend.lock().unwrap();
+
+    // `is_panel_generation` and `extension_effects` must complete immediately
+    // without touching any panel's Entry or Backend mutex.
+    assert!(panels.is_panel_generation("settings", settings_gen));
+    let effects = panels.extension_effects();
+    assert!(
+        effects
+            .iter()
+            .any(|(owner, def)| owner == "nonblocking-ext" && def.id.as_str() == "nonblocking.fx"),
+        "expected nonblocking.fx in {effects:?}"
+    );
+
+    drop(ext_backend_guard);
+    drop(ext_guard);
+    drop(settings_backend_guard);
+    drop(settings_guard);
+    drop(agent_backend_guard);
+    drop(agent_guard);
+
+    panels.unmount_extension("nonblocking-ext");
+    assert!(
+        panels.native_effects_revision() > rev_after_register,
+        "unmounting an extension must bump native_effects_revision"
+    );
+    assert!(panels.extension_effects().is_empty());
+    panels.close();
+
+    // Application-mode `carry_agent` must never block when the Agent panel's
+    // Entry, Backend, or AgentState mutex is held by a busy worker.
+    let mut app_panels = Builtins::application(actor.handle(), || {}, None).unwrap();
+    let _ = wait(app_panels.mount("agent").unwrap()).unwrap();
+    let app_agent_entry = app_panels.broker.entry("agent").unwrap();
+    let app_agent_guard = app_agent_entry.lock().unwrap();
+    let app_agent_backend_guard = app_agent_guard.backend.lock().unwrap();
+    let app_agent_state = app_agent_backend_guard.native.agent.clone().unwrap();
+    let app_agent_state_guard = app_agent_state.lock().unwrap();
+
+    // Must not deadlock even with Entry, Backend, and AgentState all locked.
+    let carried = app_panels.carry_agent();
+    assert!(
+        carried.is_some(),
+        "busy application agent state should carry without blocking"
+    );
+
+    drop(app_agent_state_guard);
+    drop(app_agent_backend_guard);
+    drop(app_agent_guard);
+    drop(carried);
+    app_panels.close();
+    actor.shutdown();
+}

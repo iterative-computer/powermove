@@ -358,6 +358,9 @@ pub struct Extensions {
     /// `(doc_id, revision, resource_generation)` last reconciled for stale
     /// persisted `"missing": true` flags on effects and transitions.
     reconciled: Option<(u64, u64, u64)>,
+    /// `(compat_revision, native_effects_revision, native_loading)` last
+    /// pinned, so `drain_builtins` skips redundant JSON cloning on every wake.
+    native_effects_key: Option<(u64, u64, usize)>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -448,6 +451,7 @@ impl Default for Extensions {
             settle_after: None,
             awaiting: Default::default(),
             reconciled: None,
+            native_effects_key: None,
         }
     }
 }
@@ -486,6 +490,7 @@ impl Extensions {
         self.v4_tool_choices.clear();
         self.v4_panel_headers.clear();
         self.seen = 0;
+        self.native_effects_key = None;
     }
     fn palette_choices(&self) -> Vec<Choice> {
         self.compat_choices
@@ -1924,6 +1929,13 @@ impl Controller {
     /// the project uses may yet arrive: `ResourceSnapshot::pending`), all from
     /// one publication of the host.
     fn pin_definitions(&mut self, publication: &pm_compat_runner::host::Publication) {
+        let native_rev = self
+            .builtins
+            .runtime
+            .as_deref()
+            .map_or(0, pm_builtins::Builtins::native_effects_revision);
+        self.extensions.native_effects_key =
+            Some((publication.revision, native_rev, self.extensions.native_loading));
         let mut publication = publication.clone();
         publication.settled &= self.extensions.native_loading == 0;
         if let Some(value) = publication.contributions.as_deref() {
@@ -1953,10 +1965,22 @@ impl Controller {
         }
     }
     pub(crate) fn refresh_native_effects(&mut self) {
-        if let Some(host) = &self.extensions.host {
-            let publication = host.publication();
-            self.pin_definitions(&publication);
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        let key = (
+            host.publication_revision(),
+            self.builtins
+                .runtime
+                .as_deref()
+                .map_or(0, pm_builtins::Builtins::native_effects_revision),
+            self.extensions.native_loading,
+        );
+        if self.extensions.native_effects_key == Some(key) {
+            return;
         }
+        let publication = host.publication();
+        self.pin_definitions(&publication);
     }
     /// An open waiting for effects its extensions load waits [`OPEN_WAIT`] at
     /// most: then the project opens, frames that need an effect still loading
