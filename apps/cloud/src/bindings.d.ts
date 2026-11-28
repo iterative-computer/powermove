@@ -23,6 +23,7 @@ interface CloudflareBindings {
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_PRICE_AEROLITE?: string;
+  COMP_COUPONS?: string;
   STRIPE_PRICE_AERO?: string;
   /** Development only: the local fake Stripe (loopback hosts only). */
   STRIPE_API_BASE?: string;
