@@ -119,6 +119,10 @@ jobs:
           pid=$!
           sleep 45
           if kill -0 "$pid" 2>/dev/null; then echo "V2 is running after 45 s"; alive=yes; else alive=""; fi
+          # Running is not enough: "Powermove can't start" also stays up. The V1 library must be migrated.
+          native="$HOME/Library/Application Support/com.zellzoi.powermove.native-beta"
+          echo '--- native profile'; ls -la "$native" || true
+          test -f "$native/migration.json" || { echo "V2 did not migrate the V1 profile"; alive=""; }
           echo '--- V2 log'; tail -60 "$RUNNER_TEMP/v2.log"
           echo '--- profiles'; ls ~/Library/Application\ Support/ | grep -i powermove || true
           kill "$pid" 2>/dev/null || true
