@@ -104,7 +104,7 @@ pub type Open =
 pub struct Launcher(pub Open);
 impl std::fmt::Debug for Launcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Aerolite")
+        f.write_str("Aero")
     }
 }
 
@@ -273,7 +273,7 @@ pub fn start(
             run: run_id,
             result,
         });
-        let _ = events.send(Event::Stopped("Aerolite's turn ended.".into()));
+        let _ = events.send(Event::Stopped("Aero's turn ended.".into()));
     });
     handle
 }
@@ -316,7 +316,7 @@ fn unfinished(failures: &[Failure]) -> String {
         .join(", ");
     let total = failures.len();
     format!(
-        "Aerolite stopped before its checks passed: {total} {} ({kinds}). Review the result before you continue.",
+        "Aero stopped before its checks passed: {total} {} ({kinds}). Review the result before you continue.",
         if total == 1 {
             "problem remains"
         } else {
@@ -1014,14 +1014,14 @@ fn drive(
                             ("cancelled", "Stopped.".into())
                         }
                         (Some("deadline"), _) => {
-                            ("deadline", "Aerolite reached its time limit for one turn. Send a message to continue.".into())
+                            ("deadline", "Aero reached its time limit for one turn. Send a message to continue.".into())
                         }
                         (_, StopReason::EndTurn) => gate_exhausted.take().map_or_else(
                             || ("completed", std::mem::take(&mut text)),
                             |text| ("gate-exhausted", text),
                         ),
                         (_, StopReason::MaxSteps) => {
-                            ("step-limit", "Aerolite reached its tool-step limit for one turn. Send a message to continue.".into())
+                            ("step-limit", "Aero reached its tool-step limit for one turn. Send a message to continue.".into())
                         }
                         // The edge's own words for a failed request (a
                         // dropped or silent stream) before the core's code.
@@ -1101,7 +1101,7 @@ fn drive(
                     if reason == "cancelled" {
                         "Stopped.".into()
                     } else {
-                        "Aerolite reached its time limit for one turn. Send a message to continue.".into()
+                        "Aero reached its time limit for one turn. Send a message to continue.".into()
                     },
                 ));
                 break;

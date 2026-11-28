@@ -45,8 +45,8 @@ pub const CATALOGUE: &str = "pm/";
 pub const DEVELOPMENT_CREDENTIAL: &str = "pm-aero-development";
 /// How long a billing or catalogue read may stay silent.
 const READ_IDLE: Duration = Duration::from_secs(15);
-pub const SIGN_IN: &str = "Sign in to Powermove to use Aerolite.";
-const SIGN_IN_AGAIN: &str = "Your Powermove session ended. Sign in to Powermove again to use Aerolite.";
+pub const SIGN_IN: &str = "Sign in to Powermove to use Aero.";
+const SIGN_IN_AGAIN: &str = "Your Powermove session ended. Sign in to Powermove again to use Aero.";
 
 /// The signed-in Powermove account (the app's Cloud session).
 #[derive(Clone, PartialEq, Eq)]
@@ -274,7 +274,7 @@ pub fn standing(env: &Environment) -> Standing {
             },
         )
     };
-    let unreachable = || Standing::Unreachable("Aerolite couldn’t reach Powermove. Try again.".into());
+    let unreachable = || Standing::Unreachable("Aero couldn’t reach Powermove. Try again.".into());
     let Ok((status, body)) = get(BILLING) else {
         return unreachable();
     };
@@ -287,21 +287,21 @@ pub fn standing(env: &Environment) -> Standing {
     match parse_billing(status, &body) {
         Ok(BillingAnswer::SignedOut) => ended(),
         Ok(BillingAnswer::Missing) => {
-            Standing::Unreachable("Aerolite isn’t available on Powermove yet.".into())
+            Standing::Unreachable("Aero isn’t available on Powermove yet.".into())
         }
         Ok(BillingAnswer::Billing(billing)) if !billing.subscribed() => Standing::Free(billing),
         Ok(BillingAnswer::Billing(billing)) => match get(&format!("{PATH}/models")) {
             Ok((200, body)) => match parse_models(&body) {
                 Ok(models) => Standing::Ready { billing, models },
                 Err(_) => {
-                    Standing::Unreachable("Aerolite couldn’t read its models from Powermove.".into())
+                    Standing::Unreachable("Aero couldn’t read its models from Powermove.".into())
                 }
             },
             Ok((401, _)) => ended(),
             Ok((403, _)) => Standing::SignedOut,
             _ => unreachable(),
         },
-        Err(_) => Standing::Unreachable("Aerolite couldn’t read your plan from Powermove.".into()),
+        Err(_) => Standing::Unreachable("Aero couldn’t read your plan from Powermove.".into()),
     }
 }
 
@@ -658,7 +658,7 @@ pub fn live_in(
     })
 }
 /// Why a thread's model can't run: it names none of the catalogue's.
-pub const CHOOSE: &str = "Choose a model for Aerolite from Powermove’s catalogue.";
+pub const CHOOSE: &str = "Choose a model for Aero from Powermove’s catalogue.";
 pub const CHANGED: &str = "The Powermove account changed during this turn. Send it again.";
 
 /// The core's connection to Aero's Chat Completions: the picked level as

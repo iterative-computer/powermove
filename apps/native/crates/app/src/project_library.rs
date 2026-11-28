@@ -933,7 +933,7 @@ impl ProjectLibrary {
                 .id("home-aero-offer")
                 .debug_selector(|| "home-aero-offer".into())
                 .role(Role::Group)
-                .aria_label(format!("Aerolite, your editing agent. Get {plan}."))
+                .aria_label(format!("Aero, your editing agent. Get {plan}."))
                 .relative()
                 .mx(px(t.space.xs))
                 .mb(px(t.space.sm))

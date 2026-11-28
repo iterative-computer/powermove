@@ -947,7 +947,7 @@ mod tests {
     fn parses_markdown_bullets_and_summary_into_highlights() {
         let body = "Rebuilt natively on Rust, Metal, and GPUI.\n\n\
             - **Significantly better performance** — Native Rust & Metal playback\n\
-            - **Introducing Powermove Aerolite**: Built-in agent with inference included\n\
+            - **Introducing Powermove Aerolite**: Aero, our built-in agent, with inference included\n\
             - Live export progress - Toolbar ring while rendering";
         let (summary, highlights) = parse_release_body(body);
         assert_eq!(
