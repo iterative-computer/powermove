@@ -93,7 +93,7 @@ def info(channel, version, build, sparkle_feed=None, sparkle_key=None, bundle_id
         raise ValueError("only a dev bundle takes its own com.powermove.native.dev.<name> id")
     value = {
         "CFBundleName": "Powermove", "CFBundleDisplayName": "Powermove",
-        "CFBundleIdentifier": bundle_id or IDS[channel], "CFBundleExecutable": "powermove-native",
+        "CFBundleIdentifier": bundle_id or IDS[channel], "CFBundleExecutable": EXECUTABLE,
         "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version,
         "CFBundleVersion": build, "LSMinimumSystemVersion": "14.0",
         # The system allocator otherwise keeps freed large blocks (V8, codecs)
@@ -156,6 +156,10 @@ def native_file(path):
     return path
 
 
+# The bundle's executable keeps V1's name. Squirrel.Mac (V1's updater) installs
+# the update as "<CFBundleExecutable>.app", so any other name would move a V1
+# user's /Applications/Powermove.app to a new path on the V2 update.
+EXECUTABLE = "Powermove"
 HELPERS = ("pm-store-helper", "pm-glsl-compiler")
 
 
@@ -197,7 +201,7 @@ def bundle(executable, destination, channel, version, build,
     resources = contents / "Resources"
     (contents / "MacOS").mkdir(parents=True)
     resources.mkdir()
-    shutil.copy2(executable, contents / "MacOS" / "powermove-native")
+    shutil.copy2(executable, contents / "MacOS" / EXECUTABLE)
     # Worker executables the app starts by path: the confined Store helper and
     # the killable shader compiler. They sit beside the build's main binary
     # unless the compiler is given from another build.
@@ -231,9 +235,9 @@ def bundle(executable, destination, channel, version, build,
         shutil.copyfile(library.resolve(strict=True), frameworks / library.name)
         (frameworks / library.name).chmod(0o755)
     if compile_assets:
-        for rpath in rpaths(contents / "MacOS" / "powermove-native"):
+        for rpath in rpaths(contents / "MacOS" / EXECUTABLE):
             if not rpath.startswith(("@executable_path", "@loader_path")):
-                run(["install_name_tool", "-delete_rpath", rpath, contents / "MacOS" / "powermove-native"])
+                run(["install_name_tool", "-delete_rpath", rpath, contents / "MacOS" / EXECUTABLE])
     # sign() discovers both Mach-O tools and signs them with the other helpers.
     # The layout provider discovery reads: <name>/bin/<name> under Resources.
     if claude_runtime:
@@ -322,7 +326,7 @@ def sign(app, identity=None, *, adhoc_proof=False):
         raise ValueError("compile the asset catalog before distribution signing")
     # Validate identity availability without printing Keychain contents.
     for target in nested_code(app):
-        if target == app / "Contents" / "MacOS" / "powermove-native":
+        if target == app / "Contents" / "MacOS" / EXECUTABLE:
             continue  # app signing seals its executable with the main entitlements
         run(["codesign", "--force", timestamp, *runtime, "--sign", identity,
              "--preserve-metadata=identifier,entitlements", target])

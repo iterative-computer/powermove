@@ -68,9 +68,9 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((frameworks / "libavformat.63.dylib").is_symlink())
         self.assertIn(frameworks / "libavformat.63.dylib", package.nested_code(self.app))
         run.assert_any_call(["install_name_tool", "-delete_rpath", "/build/ffmpeg/out/lib",
-                             self.app / "Contents/MacOS/powermove-native"])
+                             self.app / "Contents/MacOS/Powermove"])
         self.assertNotIn(["install_name_tool", "-delete_rpath", "@executable_path/../Frameworks",
-                          self.app / "Contents/MacOS/powermove-native"], [c.args[0] for c in run.call_args_list])
+                          self.app / "Contents/MacOS/Powermove"], [c.args[0] for c in run.call_args_list])
 
     def test_missing_media_tool_refuses_bundle(self):
         (self.ffmpeg_dir / "bin/ffprobe").unlink()
@@ -93,7 +93,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(info["UTExportedTypeDeclarations"][0]["UTTypeConformsTo"], ["public.data"])
         self.assertEqual(info["LSMinimumSystemVersion"], "14.0")
         self.assertEqual(info["NSAccentColorName"], "AccentColor")
-        self.assertEqual((self.app / "Contents/MacOS/powermove-native").read_bytes(), self.binary.read_bytes())
+        self.assertEqual((self.app / "Contents/MacOS/Powermove").read_bytes(), self.binary.read_bytes())
         self.assertEqual((self.app / "Contents/PkgInfo").read_bytes(), b"APPL????")
         for name in ("icon.icns", "document.icns"):
             self.assertTrue((self.app / "Contents/Resources" / name).is_file())
@@ -451,7 +451,7 @@ releaseDate: '2026-11-27T09:30:00.000Z'
     def test_continuity_checks_v1_requirement_identifier_and_arm64(self):
         app = self.root / "Powermove.app"
         (app / "Contents/MacOS").mkdir(parents=True)
-        info = {"CFBundleIdentifier": "com.zellzoi.powermove", "CFBundleExecutable": "powermove-native"}
+        info = {"CFBundleIdentifier": "com.zellzoi.powermove", "CFBundleExecutable": "Powermove"}
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         lipo = unittest.mock.Mock(stdout="arm64\n")
         with patch.object(package, "macos"), patch.object(package.subprocess, "run", return_value=lipo):

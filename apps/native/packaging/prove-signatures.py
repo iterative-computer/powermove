@@ -51,9 +51,9 @@ def synthetic(root):
         (contents / "Helpers").mkdir()
         resources = contents / "Resources"
         resources.mkdir()
-        shutil.copy2(binary, contents / "MacOS/powermove-native")
+        shutil.copy2(binary, contents / "MacOS/Powermove")
         shutil.copy2(binary, contents / "Helpers/proof-helper")
-        (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier, "CFBundleExecutable": "powermove-native", "CFBundlePackageType": "APPL", "CFBundleVersion": version, "CFBundleShortVersionString": version, "LSMinimumSystemVersion": "14.0"}))
+        (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier, "CFBundleExecutable": "Powermove", "CFBundlePackageType": "APPL", "CFBundleVersion": version, "CFBundleShortVersionString": version, "LSMinimumSystemVersion": "14.0"}))
         catalog = package.NATIVE / "bundle/Assets.xcassets"
         run(["xcrun", "actool", "--compile", resources, "--platform", "macosx", "--minimum-deployment-target", "14.0", "--accent-color", "AccentColor", "--output-partial-info-plist", resources / "asset-info.plist", catalog])
         package.sign(app, adhoc_proof=True)
@@ -63,7 +63,7 @@ def synthetic(root):
     checks["same_requirement_new_version"] = require(apps[1], requirement)
     checks["wrong_requirement_rejected"] = not require(apps[2], requirement)
     # Every slice must be present, signed and sealed. Never execute either slice.
-    checks["both_architectures"] = all(set(run(["lipo", "-archs", app / "Contents/MacOS/powermove-native"]).stdout.decode().split()) == {"arm64", "x86_64"} for app in apps)
+    checks["both_architectures"] = all(set(run(["lipo", "-archs", app / "Contents/MacOS/Powermove"]).stdout.decode().split()) == {"arm64", "x86_64"} for app in apps)
     entitlement_data = run(["codesign", "-d", "--entitlements", ":-", apps[1]]).stdout
     entitlements = plistlib.loads(entitlement_data)
     checks["only_reviewed_jit_entitlement"] = entitlements == {"com.apple.security.cs.allow-jit": True}
