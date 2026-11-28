@@ -1289,7 +1289,14 @@ export function InspectorPanel({
                 label={animator.name}
                 leading={gutter}
               >
-                <div style={{ ...horizontal, gap: token("metrics.border") }}>
+                <div
+                  style={{
+                    ...horizontal,
+                    justifyContent: "flex-end",
+                    flexGrow: 1,
+                    gap: token("metrics.border"),
+                  }}
+                >
                   <Action
                     id={`add-animator-property:${animator.id}`}
                     label={`Add to ${animator.name}`}
