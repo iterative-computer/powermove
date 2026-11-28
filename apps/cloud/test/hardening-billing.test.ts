@@ -149,3 +149,23 @@ test('10. one pending Checkout per account, reused until it expires; a second su
       expect(state.credits).toEqual({ included: 1000, used: 0, remaining: 1000 });
     } finally { await s.stop(); }
   }));
+
+test('2b. a $0 invoice grants only when our own comp coupon zeroed it', async () =>
+  withData(async (data) => {
+    const s = await stack(data);
+    try {
+      s.env.COMP_COUPONS = 'comp-forever';
+      const { subscriptionId } = await subscribe(s);
+      const sub = s.stripe.state.subscriptions.get(subscriptionId)!;
+      const start = sub.items.data[0].current_period_end, end = start + 30 * 86_400;
+      Object.assign(sub.items.data[0], { current_period_start: start, current_period_end: end });
+      const aerolite = priceId(s.stripe, 'powermove_aerolite_monthly');
+      const zero = (coupon: string) => invoiceOf(s, sub, [{ price: aerolite, period: { start, end }, amount: 0 }], { amount_paid: 0, amount_due: 0, discounts: [{ id: 'di_x', object: 'discount', source: { type: 'coupon', coupon } }] });
+      await s.stripe.emit('invoice.paid', zero('someone-elses-coupon'));
+      expect(await grants(data, s.user.id)).toHaveLength(1);
+      await s.stripe.emit('invoice.paid', zero('comp-forever'));
+      const rows = await grants(data, s.user.id);
+      expect(rows).toHaveLength(2);
+      expect(rows[1]).toMatchObject({ credits: 1000 });
+    } finally { await s.stop(); }
+  }));

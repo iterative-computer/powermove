@@ -76,6 +76,7 @@ export const billing = new Hono<Env>()
         customer,
         line_items: [{ price, quantity: 1 }],
         automatic_tax: { enabled: true },
+        allow_promotion_codes: true,
         billing_address_collection: 'required',
         tax_id_collection: { enabled: true },
         customer_update: { address: 'auto', name: 'auto' },

@@ -344,6 +344,10 @@ export function startFakeStripe(options: FakeStripeOptions = {}): FakeStripe {
         const charge = state.charges.get(match[1]!);
         return charge ? Response.json(charge) : error(404, 'no such charge');
       }
+      if ((match = path.match(/^\/v1\/invoices\/(in_\w+)$/)) && method === 'GET') {
+        const invoice = state.invoices.get(match[1]!) ?? [...state.events].reverse().map(event => (event as Obj).data?.object).find(object => object?.id === match![1]);
+        return invoice ? Response.json(invoice) : error(404, 'no such invoice');
+      }
       if (path === '/v1/invoices' && method === 'GET') {
         const subscription = url.searchParams.get('subscription'), status = url.searchParams.get('status');
         const data = [...state.invoices.values()].filter(invoice => (!subscription || invoice.parent?.subscription_details?.subscription === subscription) && (!status || invoice.status === status));

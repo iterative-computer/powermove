@@ -26,6 +26,6 @@
   "triggers": { "crons": ["0 */6 * * *"] },
   // LOCAL_POSTGRES is intentionally unset here. Set it to "1" in .dev.vars only.
   // ADMIN_ORIGIN is the admin panel (apps/admin); web sign-in hands its token back only there.
-  "vars": { "ENVIRONMENT": "production", "POSTHOG_HOST": "https://us.i.posthog.com", "STRIPE_PRICE_AEROLITE": "price_1UgIimRoSgKdCfjDZKQ3a3Yc", "AERO_GLOBAL_DAILY_USD": "250", "EMAIL_DAILY_LIMIT": "150", "TURNSTILE_ENABLED": "1", "TURNSTILE_SITE_KEY": "0x4AAAAAAFEFmLgsfY1Hnm3q", "TURNSTILE_CLEARANCE_DAYS": "30", "APP_ORIGIN": "https://cloud.trypowermove.com", "ADMIN_ORIGIN": "https://admin.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com", "EMAIL_FROM": "Powermove <sign-in@trypowermove.com>" },
+  "vars": { "ENVIRONMENT": "production", "POSTHOG_HOST": "https://us.i.posthog.com", "STRIPE_PRICE_AEROLITE": "price_1UgIimRoSgKdCfjDZKQ3a3Yc", "COMP_COUPONS": "powermove-comp-forever", "AERO_GLOBAL_DAILY_USD": "250", "EMAIL_DAILY_LIMIT": "150", "TURNSTILE_ENABLED": "1", "TURNSTILE_SITE_KEY": "0x4AAAAAAFEFmLgsfY1Hnm3q", "TURNSTILE_CLEARANCE_DAYS": "30", "APP_ORIGIN": "https://cloud.trypowermove.com", "ADMIN_ORIGIN": "https://admin.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com", "EMAIL_FROM": "Powermove <sign-in@trypowermove.com>" },
   "observability": { "enabled": true, "redact_query_string": true }
 }

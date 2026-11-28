@@ -59,6 +59,19 @@ function aeroliteLine(env: CloudflareBindings, invoice: Stripe.Invoice, subscrip
   }) ?? null;
 }
 
+/** A $0 invoice zeroed by one of our own comp coupons (COMP_COUPONS: coupon ids, comma-separated). Only we can
+    create those coupons, so such an invoice grants like a paid one; any other $0 invoice still grants nothing. */
+async function comped(env: CloudflareBindings, invoiceId: string): Promise<boolean> {
+  const allowed = (env.COMP_COUPONS ?? '').split(',').map(id => id.trim()).filter(Boolean);
+  if (!allowed.length) return false;
+  const full = await stripeClient(env).invoices.retrieve(invoiceId, { expand: ['discounts'] });
+  return (full.discounts ?? []).some((discount) => {
+    const coupon = (discount as any)?.source?.coupon ?? (discount as any)?.coupon;
+    const id = typeof coupon === 'string' ? coupon : coupon?.id;
+    return typeof id === 'string' && allowed.includes(id);
+  });
+}
+
 /** The invoice a charge paid, through Stripe's invoice payments. */
 async function invoiceOfCharge(env: CloudflareBindings, charge: Stripe.Charge): Promise<{ invoiceId: string; customerId: string | null } | null> {
   const intent = idOf(charge.payment_intent as string | { id: string } | null);
@@ -95,13 +108,15 @@ async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event, pen
       if (!subscriptionId || !invoice.id || (reason !== 'subscription_create' && reason !== 'subscription_cycle' && reason !== 'subscription_update')) return null;
       const sub = await stripeClient(env).subscriptions.retrieve(subscriptionId);
       if (idOf(sub.customer) !== idOf(invoice.customer)) return null;
+      const free = invoice.status === 'paid' && invoice.amount_paid === 0 && await comped(env, invoice.id);
       return async (tx) => {
         const userId = await upsertSubscription(tx, env, sub, at, pending);
         if (!userId) return null;
-        // A grant only for a paid invoice that took money, from its line for the exact Aerolite price on this
-        // subscription; the credits and the period come from that line, never from the subscription's plan now.
+        // A grant only for a paid invoice that took money (or one our comp coupon zeroed), from its line for the
+        // exact Aerolite price on this subscription; the credits and the period come from that line, never from the
+        // subscription's plan now.
         const line = aeroliteLine(env, invoice, sub.id);
-        if (invoice.status !== 'paid' || !(invoice.amount_paid > 0) || !line || (sub.status !== 'active' && sub.status !== 'trialing')) return userId;
+        if (invoice.status !== 'paid' || !(invoice.amount_paid > 0 || free) || !line || (sub.status !== 'active' && sub.status !== 'trialing')) return userId;
         if (!await isSurviving(tx, userId, sub.id)) return userId;
         const plan = planById('aerolite');
         const period = { start: new Date(line.period.start * 1000), end: new Date(line.period.end * 1000) };
