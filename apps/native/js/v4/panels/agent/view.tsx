@@ -236,7 +236,13 @@ export function AttachmentTile({
         label={`Open ${a.name}`}
         title={a.name}
         tabIndex={0}
+        metadata={{ focusOnClick: true }}
+        preventDefault={{ keydown: ["Enter", " "] }}
         onClick={() => send({ type: "openAttachment", id: a.id })}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ")
+            send({ type: "openAttachment", id: a.id });
+        }}
         onFocus={focus}
         onBlur={blur}
         style={{
@@ -258,6 +264,10 @@ export function AttachmentTile({
             borderWidth: t("metrics.border"),
             borderColor: t("colors.hairline"),
             paddingRight: t("metrics.gap"),
+          }),
+          ...(focused && {
+            borderWidth: t("metrics.border"),
+            borderColor: t("colors.focus"),
           }),
         }}
       >
@@ -3851,9 +3861,13 @@ export function AgentView({
           label={setup ? "Agent setup" : "Agent conversation"}
           tabIndex={0}
           onScroll={(e) => {
-            const { away, compact } = obj(e.value);
+            const { away, compact, top, bottom } = obj(e.value);
             if (typeof away === "boolean") setAway(away);
             if (typeof compact === "boolean") setCompactWelcome(compact);
+            if (top === true && s.rows.range[0] > 0)
+              send({ type: "loadRows", direction: "earlier" });
+            if (bottom === true && s.rows.range[1] < s.rows.count)
+              send({ type: "loadRows", direction: "later" });
           }}
           metadata={{
             count: s.rows.count,
@@ -3985,10 +3999,9 @@ export function AgentView({
               ...row,
               justifyContent: "center",
               position: "absolute",
-              left: 0,
-              right: 0,
-              bottom: 0,
-              paddingBottom: t("metrics.gap"),
+              left: t("metrics.gap"),
+              right: t("metrics.gap"),
+              bottom: t("metrics.gap"),
             }}
           >
             <UI.ToolbarItem
@@ -3997,6 +4010,8 @@ export function AgentView({
               title="Scroll to latest"
               metadata={{ symbol: "chevron.down" }}
               onClick={() => {
+                if (s.rows.range[1] < s.rows.count)
+                  send({ type: "loadRows", direction: "latest" });
                 setAway(false);
                 setJumps(jumps + 1);
               }}

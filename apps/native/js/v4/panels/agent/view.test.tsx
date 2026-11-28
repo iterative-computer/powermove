@@ -2609,3 +2609,72 @@ test("signed out: the pill reads Sign in to Powermove (Aero, with its mark) or C
     root.dispose();
   }
 });
+
+test("focused attachment tiles open on Space and Return and opt into focusOnClick", async () => {
+  const { root, commits } = mount();
+  const p = fixture();
+  const actions: Action[] = [];
+  p.snapshot.rows.count = 1;
+  p.snapshot.rows.range = [0, 1];
+  p.snapshot.rows.items = [
+    {
+      id: "history:sent-1",
+      commandId: "history:sent-1",
+      value: {
+        role: "user",
+        text: "Recreate this",
+        attachments: [
+          { id: "img-a", name: "Screen.png", type: "image/png" },
+          { id: "img-b", name: "Wallpaper.png", type: "image/png" },
+        ],
+      },
+      chosen: {},
+      open: false,
+    },
+  ];
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} />,
+  );
+  const first = byLabel(root, "Open Screen.png");
+  expect((first.props.metadata as any)?.focusOnClick).toBe(true);
+  await root.drive(first.id, "keydown", { key: " " });
+  await root.drive(first.id, "keydown", { key: "Enter" });
+  expect(actions).toEqual([
+    { type: "openAttachment", id: "img-a" },
+    { type: "openAttachment", id: "img-a" },
+  ]);
+  assertWire(commits);
+  root.dispose();
+});
+
+test("scrolling to the top or bottom of a windowed thread requests earlier or later rows", async () => {
+  const { root, commits } = mount();
+  const p = fixture();
+  const actions: Action[] = [];
+  p.snapshot.rows.count = 400;
+  p.snapshot.rows.range = [144, 400];
+  p.snapshot.rows.items = [
+    {
+      id: "history:m144",
+      commandId: "history:m144",
+      value: { role: "user", text: "Middle" },
+      chosen: {},
+      open: false,
+    },
+  ];
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} />,
+  );
+  const convo = byId(root, "agent-conversation");
+  await root.drive(convo.id, "scroll", { value: { away: true, top: true } });
+  expect(actions).toEqual([{ type: "loadRows", direction: "earlier" }]);
+  actions.length = 0;
+  p.snapshot.rows.range = [0, 256];
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} />,
+  );
+  await root.drive(convo.id, "scroll", { value: { away: false, bottom: true } });
+  expect(actions).toEqual([{ type: "loadRows", direction: "later" }]);
+  assertWire(commits);
+  root.dispose();
+});

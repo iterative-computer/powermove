@@ -825,12 +825,9 @@ impl Backend {
         let window =
             pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
         let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
+        let range = self.native.agent_link.row_range(active, count);
         let mut snapshot = window
-            .snapshot(
-                panel,
-                count.saturating_sub(64)..count,
-                crate::agent_host::now_ms(),
-            )
+            .snapshot(panel, range, crate::agent_host::now_ms())
             .map_err(|e| format!("{e:?}"))?;
         // The images, videos and sounds each reply names, for its cards.
         let home = reply_home();
@@ -2345,6 +2342,19 @@ impl Backend {
                     let (provider, live) = (session.settings.provider, session.run.is_some());
                     let sequence = link.admitted_sequence(args, &thread, &session.draft.text());
                     let action = &args["action"];
+                    if action["type"] == "loadRows" {
+                        let direction = action["direction"].as_str().unwrap_or("latest");
+                        let window = pm_panel_agentpanel::v4::Window::new(&state.panel, &thread)
+                            .map_err(|e| format!("{e:?}"))?;
+                        let count = window
+                            .count(&state.panel)
+                            .map_err(|e| format!("{e:?}"))?;
+                        link.page_rows(&thread, direction, count);
+                        drop(state);
+                        link.touch();
+                        link.publish_now();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "connect" {
                         // The provider's own sign-in, as Settings › Accounts
                         // starts it; its progress comes back as `waiting`.
@@ -2570,6 +2580,9 @@ impl Backend {
                     {
                         link.typed(&thread, text);
                     }
+                    if sending {
+                        link.reset_rows(&thread);
+                    }
                     let now = crate::agent_host::now_ms();
                     // A composer send publishes its row before the provider worker
                     // sets up the request or writes the archive.
@@ -2632,17 +2645,56 @@ impl Backend {
                         EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
                         EffectKind::ChooseFiles => Some(("agent.attach", Value::Null)),
                         EffectKind::OpenAttachment { attachment, .. } => {
+                            let hydrate = |store: &mut KernelStore, item: &mut Value| -> Result<(), String> {
+                                if item["payloadStored"] == true
+                                    && !["dataUrl", "dataBase64", "content"]
+                                        .iter()
+                                        .any(|key| item[*key].is_string())
+                                {
+                                    pm_agents::persistence::hydrate_attachment(store, item)
+                                        .map_err(|error| error.to_string())?;
+                                }
+                                Ok(())
+                            };
                             let mut attachment = attachment.clone();
-                            if attachment["payloadStored"] == true
-                                && !["dataUrl", "dataBase64", "content"]
-                                    .iter()
-                                    .any(|key| attachment[*key].is_string())
+                            hydrate(&mut store, &mut attachment)?;
+                            let clicked_id = attachment["id"].as_str().map(str::to_owned);
+                            let siblings: Option<Vec<Value>> = clicked_id.as_deref().and_then(|id| {
+                                let state = agent.shared();
+                                let session = state.panel.session(&effect.target.thread).ok()?;
+                                if session.draft.attachment(id).is_some() {
+                                    return Some(
+                                        session
+                                            .draft
+                                            .attachments()
+                                            .map(|a| a.record().clone())
+                                            .collect(),
+                                    );
+                                }
+                                session.conversation.values().find_map(|row| {
+                                    let files = row["attachments"].as_array()?;
+                                    files
+                                        .iter()
+                                        .any(|a| a["id"].as_str() == Some(id))
+                                        .then(|| files.clone())
+                                })
+                            });
+                            if let Some(mut items) = siblings
+                                && items.len() > 1
                             {
-                                pm_agents::persistence::hydrate_attachment(
-                                    &mut store,
-                                    &mut attachment,
-                                )
-                                .map_err(|error| error.to_string())?;
+                                let index = items
+                                    .iter()
+                                    .position(|item| item["id"].as_str() == clicked_id.as_deref())
+                                    .unwrap_or(0);
+                                for (i, item) in items.iter_mut().enumerate() {
+                                    if i == index {
+                                        *item = attachment.clone();
+                                    } else {
+                                        let _ = hydrate(&mut store, item);
+                                    }
+                                }
+                                attachment["previewItems"] = Value::Array(items);
+                                attachment["previewIndex"] = json!(index);
                             }
                             Some(("agent.previewAttachment", attachment))
                         }

@@ -19,7 +19,8 @@ use pm_panel_agentpanel::{
 use pm_runtime_v8::{Realm, StateChannel};
 use serde_json::Value;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
+    ops::Range,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -27,6 +28,10 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// Maximum rows published in one Agent panel snapshot (matches `v4::Window`).
+pub(crate) const AGENT_ROW_WINDOW: usize = 256;
+const AGENT_ROW_STEP: usize = 128;
 
 /// Everything the panel shares with its window, without locking a Backend.
 pub(crate) struct AgentLink {
@@ -40,6 +45,9 @@ pub(crate) struct AgentLink {
     /// The last whole-text draft typing set, by thread: typing that arrives
     /// after an unrelated republish still applies while the draft is unchanged.
     typed: Mutex<Option<(String, String)>>,
+    /// Per-thread upper bound of the visible row window when scrolled above
+    /// the latest `AGENT_ROW_WINDOW` rows. Absent means anchored at the end.
+    row_windows: Mutex<HashMap<String, usize>>,
     /// The window's notification policy (S114), told on the delivery worker.
     notices: Mutex<Option<Arc<NoticeSink>>>,
     pub completion: Mutex<Option<Arc<crate::agent_completion::Service>>>,
@@ -58,6 +66,7 @@ impl Default for AgentLink {
             closing: AtomicBool::new(false),
             sequence: AtomicU64::new(1),
             typed: Mutex::default(),
+            row_windows: Mutex::default(),
             notices: Mutex::default(),
             completion: Mutex::default(),
             account_revision: AtomicU64::new(0),
@@ -160,6 +169,53 @@ impl AgentLink {
     /// Typing set `text` as `thread`'s draft.
     pub fn typed(&self, thread: &str, text: &str) {
         *self.typed.shared() = Some((thread.into(), text.into()));
+    }
+    /// The serialized row slice for `thread`, bounded to `AGENT_ROW_WINDOW`.
+    pub fn row_range(&self, thread: &str, count: usize) -> Range<usize> {
+        let end = self
+            .row_windows
+            .shared()
+            .get(thread)
+            .copied()
+            .map_or(count, |end| end.min(count).max(count.min(AGENT_ROW_WINDOW)));
+        end.saturating_sub(AGENT_ROW_WINDOW)..end
+    }
+    /// Move `thread`'s row window toward earlier history, later rows, or the tail.
+    pub fn page_rows(&self, thread: &str, direction: &str, count: usize) {
+        let mut windows = self.row_windows.shared();
+        match direction {
+            "earlier" => {
+                let current_end = windows
+                    .get(thread)
+                    .copied()
+                    .unwrap_or(count)
+                    .min(count);
+                let min_end = count.min(AGENT_ROW_WINDOW);
+                let next_end = current_end.saturating_sub(AGENT_ROW_STEP).max(min_end);
+                if next_end < count {
+                    windows.insert(thread.into(), next_end);
+                } else {
+                    windows.remove(thread);
+                }
+            }
+            "later" => {
+                if let Some(&current_end) = windows.get(thread) {
+                    let next_end = current_end.saturating_add(AGENT_ROW_STEP);
+                    if next_end >= count {
+                        windows.remove(thread);
+                    } else {
+                        windows.insert(thread.into(), next_end);
+                    }
+                }
+            }
+            _ => {
+                windows.remove(thread);
+            }
+        }
+    }
+    /// Anchor `thread` back at its latest rows (e.g. after sending a message).
+    pub fn reset_rows(&self, thread: &str) {
+        self.row_windows.shared().remove(thread);
     }
     /// Signed in to `provider` (its run can start), `None` while that is
     /// still being checked.
@@ -518,9 +574,9 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
     let allowed = match action["type"].as_str() {
         Some(
             "draft" | "focus" | "newThread" | "switchThread" | "deleteThread" | "disclose"
-            | "removeAttachment" | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer"
-            | "keepResult" | "undoResult" | "applyPlan" | "dismissPlan" | "dismissInterrupted"
-            | "openSettings" | "subscribe",
+            | "openAttachment" | "removeAttachment" | "citations" | "setProvider" | "setModel"
+            | "chooseAnswer" | "typeAnswer" | "keepResult" | "undoResult" | "applyPlan"
+            | "dismissPlan" | "dismissInterrupted" | "openSettings" | "subscribe",
         ) => true,
         Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,
@@ -1722,10 +1778,26 @@ mod tests {
             json!({"type":"stop"}),
             json!({"type":"draft"}),
             json!({"type":"openSettings"}),
+            json!({"type":"openAttachment","id":"attachment-1"}),
+            json!({"type":"citations","citations":[]}),
             json!({"type":"key","key":{"key":"Enter","composing":true}}),
         ] {
             assert!(admit(&action, false, false).is_ok());
         }
+    }
+    #[test]
+    fn row_window_defaults_to_latest_256_and_pages_to_top() {
+        let link = AgentLink::default();
+        assert_eq!(link.row_range("t", 80), 0..80);
+        assert_eq!(link.row_range("t", 400), 144..400);
+        link.page_rows("t", "earlier", 400);
+        assert_eq!(link.row_range("t", 400), 16..272);
+        link.page_rows("t", "earlier", 400);
+        assert_eq!(link.row_range("t", 400), 0..256);
+        link.page_rows("t", "later", 400);
+        assert_eq!(link.row_range("t", 400), 128..384);
+        link.page_rows("t", "latest", 400);
+        assert_eq!(link.row_range("t", 400), 144..400);
     }
     #[test]
     fn resumed_launch_uses_saved_request_and_refuses_missing_original_attachment() {

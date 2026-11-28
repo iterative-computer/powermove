@@ -466,9 +466,12 @@ struct Capture {
 #[derive(Default)]
 struct Follow {
     token: Value,
+    range: Value,
     anchor_start: bool,
     compact: Option<bool>,
     away: bool,
+    at_top: bool,
+    at_bottom: bool,
 }
 /// How far from the end still counts as at the end (the original panel's
 /// jump threshold).
@@ -5203,15 +5206,24 @@ impl SurfaceView {
             if follows || starts {
                 // A new token or anchor changes where the scroll area starts.
                 let token = metadata.map_or(Value::Null, |m| m["scrollToken"].clone());
+                let range = metadata.map_or(Value::Null, |m| m["range"].clone());
                 let mut follow = self.follow.borrow_mut();
                 let f = follow.entry(id).or_insert_with(|| Follow {
                     token: token.clone(),
+                    range: range.clone(),
                     ..Follow::default()
                 });
+                if f.range != range {
+                    f.range = range;
+                    f.at_top = false;
+                    f.at_bottom = false;
+                }
                 if f.token != token || f.anchor_start != starts {
                     f.token = token;
                     f.anchor_start = starts;
                     f.away = false;
+                    f.at_top = false;
+                    f.at_bottom = false;
                     if starts {
                         scroll.set_offset(point(px(0.), px(0.)));
                     } else {
@@ -5250,25 +5262,38 @@ impl SurfaceView {
                         let Some(scroll) = v.scrolls.get(&id) else {
                             return;
                         };
-                        let distance =
-                            f32::from(scroll.max_offset().y) + f32::from(scroll.offset().y);
+                        let max_y = f32::from(scroll.max_offset().y);
+                        let offset_y = f32::from(scroll.offset().y);
+                        let distance = max_y + offset_y;
                         let away = distance > FOLLOW_SLACK;
-                        let changed = {
+                        let at_top = max_y > 0. && offset_y >= -FOLLOW_SLACK;
+                        let at_bottom = max_y > 0. && distance <= FOLLOW_SLACK;
+                        let (away_changed, reached_top, reached_bottom) = {
                             let mut follow = v.follow.borrow_mut();
                             let f = follow.entry(id).or_default();
-                            std::mem::replace(&mut f.away, away) != away
+                            let away_changed = std::mem::replace(&mut f.away, away) != away;
+                            let was_top = std::mem::replace(&mut f.at_top, at_top);
+                            let was_bottom = std::mem::replace(&mut f.at_bottom, at_bottom);
+                            (away_changed, at_top && !was_top, at_bottom && !was_bottom)
                         };
                         let listens = v
                             .publication
                             .surface
                             .node(id)
                             .is_some_and(|n| n.listeners.contains_key("scroll"));
-                        if changed && listens {
+                        if (away_changed || reached_top || reached_bottom) && listens {
+                            let mut value = json!({ "away": away });
+                            if reached_top {
+                                value["top"] = json!(true);
+                            }
+                            if reached_bottom {
+                                value["bottom"] = json!(true);
+                            }
                             v.send(
                                 id,
                                 "scroll",
                                 EventDetail {
-                                    value: Some(json!({ "away": away })),
+                                    value: Some(value),
                                     ..Default::default()
                                 },
                                 cx,
@@ -6089,6 +6114,14 @@ impl SurfaceView {
                     return;
                 }
                 cx.stop_propagation();
+                if v.publication
+                    .surface
+                    .node(id)
+                    .and_then(|n| n.props.get("metadata"))
+                    .is_some_and(|m| m["focusOnClick"] == true)
+                {
+                    v.focus_pressed(id, window, cx);
+                }
                 let position = event.position();
                 let detail = v.detail(position, Some(0), 0, event.click_count(), event.modifiers());
                 if clickable {

@@ -145,21 +145,50 @@ fn hide() {
 }
 
 /// Clicking an attachment toggles its own preview or replaces the open one.
-pub fn show(mut files: Vec<(PathBuf, String)>) {
+pub fn show(files: Vec<(PathBuf, String)>) {
+    show_at(files, 0);
+}
+
+/// Show Quick Look over `files`, starting at `initial_index`. Clicking the
+/// currently displayed item toggles Quick Look closed; clicking a sibling
+/// jumps directly to it so arrow keys browse the rest of the set.
+pub fn show_at(files: Vec<(PathBuf, String)>, initial_index: usize) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    files.retain(|(path, _)| path.is_file());
-    if files.is_empty() {
+    let mut kept = Vec::with_capacity(files.len());
+    let mut index = 0usize;
+    for (i, (path, name)) in files.into_iter().enumerate() {
+        if path.is_file() {
+            if i == initial_index {
+                index = kept.len();
+            }
+            kept.push((path, name));
+        }
+    }
+    if kept.is_empty() {
         return;
     }
+    let index = index.min(kept.len() - 1);
     let source = source(mtm);
-    if showing() && has_source(panel(), &source) && *source.ivars().files.borrow() == files {
-        hide();
+    let panel = panel();
+    if panel.is_null() {
+        return;
+    }
+    if showing() && has_source(panel, &source) && *source.ivars().files.borrow() == kept {
+        let current: isize = unsafe { msg_send![panel, currentPreviewItemIndex] };
+        if current == index as isize {
+            hide();
+        } else {
+            unsafe {
+                let _: () = msg_send![panel, setCurrentPreviewItemIndex: index as isize];
+                let _: () = msg_send![panel, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+            }
+        }
         return;
     }
     install();
-    *source.ivars().previews.borrow_mut() = files
+    *source.ivars().previews.borrow_mut() = kept
         .iter()
         .map(|(path, name)| {
             let data = ItemData {
@@ -169,11 +198,7 @@ pub fn show(mut files: Vec<(PathBuf, String)>) {
             unsafe { msg_send![super(Item::alloc(mtm).set_ivars(data)), init] }
         })
         .collect();
-    *source.ivars().files.borrow_mut() = files;
-    let panel = panel();
-    if panel.is_null() {
-        return;
-    }
+    *source.ivars().files.borrow_mut() = kept;
     source.ivars().opening.set(true);
     unsafe {
         // Becoming key can change the responder chain, including when an
@@ -184,7 +209,7 @@ pub fn show(mut files: Vec<(PathBuf, String)>) {
         let _: () = msg_send![panel, updateController];
         if has_source(panel, &source) {
             let _: () = msg_send![panel, reloadData];
-            let _: () = msg_send![panel, setCurrentPreviewItemIndex: 0isize];
+            let _: () = msg_send![panel, setCurrentPreviewItemIndex: index as isize];
         }
     }
     source.ivars().opening.set(false);

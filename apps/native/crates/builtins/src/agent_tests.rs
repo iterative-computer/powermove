@@ -3094,3 +3094,93 @@ fn the_launcher_task_switch_never_waits_behind_a_check() {
     launch.join().unwrap();
     assert_eq!(panel.panels.agent_launcher_try_switch(&id), Ok(true));
 }
+
+#[test]
+fn clicking_sent_or_draft_attachment_opens_quick_look_with_sibling_items() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel
+        .panels
+        .agent_attach(vec![
+            json!({
+                "id": "img-1",
+                "name": "UI.png",
+                "type": "image/png",
+                "dataUrl": "data:image/png;base64,iVBORw0KGgo=",
+                "size": 8
+            }),
+            json!({
+                "id": "img-2",
+                "name": "Wallpaper.png",
+                "type": "image/png",
+                "dataUrl": "data:image/png;base64,iVBORw0KGgo=",
+                "size": 8
+            }),
+        ])
+        .unwrap();
+    let dispatch = |panel: &Agent, action: Value| {
+        let backend = panel
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut backend = backend.lock().unwrap();
+        let pub_snap = backend.agent_snapshot().unwrap();
+        let snap = &pub_snap["snapshot"];
+        let envelope = json!({
+            "sequence": pub_snap["sequence"],
+            "target": {
+                "project": snap["projectId"],
+                "thread": snap["threadId"],
+                "run": snap["runId"],
+            },
+            "action": action,
+        });
+        let out = backend.native_command("panel.agent.dispatch", &envelope);
+        let platform = std::mem::take(&mut backend.native.platform);
+        (out, platform)
+    };
+    // Draft attachment preview works before sending.
+    let (res, platform) = dispatch(&panel, json!({ "type": "openAttachment", "id": "img-2" }));
+    assert!(
+        res.is_ok(),
+        "draft openAttachment must be admitted: {:?}",
+        res.err()
+    );
+    let (_, input) = platform
+        .iter()
+        .find(|(op, _)| op == "agent.previewAttachment")
+        .expect("previewAttachment emitted for draft");
+    assert_eq!(input["id"], "img-2");
+    assert_eq!(input["previewIndex"], 1);
+    assert_eq!(input["previewItems"].as_array().unwrap().len(), 2);
+
+    // Send the message so the attachments move into archived history (payloadStored).
+    panel.send("Recreate this UI");
+    panel.wait(idle);
+    let (res, platform) = dispatch(&panel, json!({ "type": "openAttachment", "id": "img-1" }));
+    assert!(
+        res.is_ok(),
+        "sent openAttachment must be admitted: {:?}",
+        res.err()
+    );
+    let (_, input) = platform
+        .iter()
+        .find(|(op, _)| op == "agent.previewAttachment")
+        .expect("previewAttachment emitted for sent message");
+    assert_eq!(input["id"], "img-1");
+    assert_eq!(input["dataUrl"], "data:image/png;base64,iVBORw0KGgo=");
+    assert_eq!(input["previewIndex"], 0);
+    assert_eq!(input["previewItems"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        input["previewItems"][1]["dataUrl"],
+        "data:image/png;base64,iVBORw0KGgo="
+    );
+    panel.panels.close();
+}

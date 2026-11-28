@@ -209,7 +209,8 @@ export type Action =
   | { type: "typeAnswer"; step: string; question: string; text: string }
   | { type: "answer"; step: string; skip: boolean }
   | { type: "artifact"; path: string; import: boolean }
-  | { type: "openMedia"; path: string; reveal: boolean };
+  | { type: "openMedia"; path: string; reveal: boolean }
+  | { type: "loadRows"; direction: "earlier" | "later" | "latest" };
 export interface Publication {
   generation: number;
   sequence: number;

@@ -3739,14 +3739,49 @@ impl Controller {
                 }
                 "agent.previewAttachment" => {
                     let record = request.input.clone();
-                    let name = record["name"].as_str().unwrap_or("Attachment").to_owned();
                     cx.spawn(async move |this, cx| {
-                        let file = cx
+                        let resolved = cx
                             .background_executor()
-                            .spawn(async move { crate::media::attachment_preview_path(&record) })
+                            .spawn(async move {
+                                if let Some(items) = record["previewItems"].as_array()
+                                    && !items.is_empty()
+                                {
+                                    let requested = record["previewIndex"]
+                                        .as_u64()
+                                        .map(|n| n as usize)
+                                        .unwrap_or(0)
+                                        .min(items.len() - 1);
+                                    let mut files = Vec::with_capacity(items.len());
+                                    let mut index = 0usize;
+                                    for (i, item) in items.iter().enumerate() {
+                                        let name = item["name"]
+                                            .as_str()
+                                            .unwrap_or("Attachment")
+                                            .to_owned();
+                                        match crate::media::attachment_preview_path(item) {
+                                            Ok(path) => {
+                                                if i == requested {
+                                                    index = files.len();
+                                                }
+                                                files.push((path, name));
+                                            }
+                                            Err(message) if i == requested => return Err(message),
+                                            Err(_) => {}
+                                        }
+                                    }
+                                    Ok((files, index))
+                                } else {
+                                    let name = record["name"]
+                                        .as_str()
+                                        .unwrap_or("Attachment")
+                                        .to_owned();
+                                    let path = crate::media::attachment_preview_path(&record)?;
+                                    Ok((vec![(path, name)], 0))
+                                }
+                            })
                             .await;
-                        let _ = this.update(cx, |v, cx| match file {
-                            Ok(path) => crate::quick_look::show(vec![(path, name)]),
+                        let _ = this.update(cx, |v, cx| match resolved {
+                            Ok((files, index)) => crate::quick_look::show_at(files, index),
                             Err(message) => {
                                 v.errors.borrow_mut().tell("Agent", &message);
                                 cx.notify();
