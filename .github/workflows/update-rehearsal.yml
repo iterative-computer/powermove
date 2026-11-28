@@ -29,10 +29,16 @@ jobs:
       - name: V2 from the dry run
         run: |
           set -euo pipefail
-          gh run download "${{ inputs.dry_run_id }}" -R "$GITHUB_REPOSITORY" -n "dry-run-$VERSION" -D dry
           gh run download "${{ inputs.dry_run_id }}" -R "$GITHUB_REPOSITORY" -n "signed-app-$VERSION" -D signed
-          find dry signed -maxdepth 3 -type f | sed 's/^/  /'
           feed="$GITHUB_WORKSPACE/dry/feeds"
+          mkdir -p "$feed"
+          # A dry run also keeps its feeds; a real release run keeps only the signed app, so the
+          # feed is written here in electron-updater's shape.
+          if ! gh run download "${{ inputs.dry_run_id }}" -R "$GITHUB_REPOSITORY" -n "dry-run-$VERSION" -D dry; then
+            printf 'version: %s\nfiles:\n  - url: Powermove-%s-mac-arm64.zip\n    sha512: x\n    size: 0\npath: Powermove-%s-mac-arm64.zip\nsha512: x\nreleaseDate: %s\nminimumSystemVersion: 23.0.0\n' \
+              "$VERSION" "$VERSION" "$VERSION" "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'" > "$feed/latest-mac.yml"
+          fi
+          find dry signed -maxdepth 3 -type f 2>/dev/null | sed 's/^/  /' || true
           # A dry run keeps the signed app (a ditto archive, as the update ZIP is) but not the ZIP itself:
           # serve it as the ZIP, with the feed's checksum and size made to match.
           zip="$feed/Powermove-$VERSION-mac-arm64.zip"
@@ -95,6 +101,8 @@ jobs:
           ls ~/Library/Caches/com.zellzoi.powermove.ShipIt 2>/dev/null && tail -40 ~/Library/Caches/com.zellzoi.powermove.ShipIt/ShipIt_stderr.log 2>/dev/null || true
           echo "version in place: $v"
           test "$v" = "$VERSION"
+          # Squirrel names the installed bundle after CFBundleExecutable: V2 must land at the same path.
+          test ! -e /Applications/powermove-native.app || { echo "V2 was installed under another name"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Powermove.app/Contents/Info.plist
           codesign --verify --deep --strict --verbose=2 /Applications/Powermove.app
           ls ~/Library/Caches/com.zellzoi.powermove.ShipIt 2>/dev/null | head || true
