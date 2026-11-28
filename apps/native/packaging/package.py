@@ -335,7 +335,14 @@ def sign(app, identity=None, *, adhoc_proof=False):
     run(["codesign", "--verify", "--deep", "--strict", "--all-architectures", app])
 
 
+CREATE_DMG = "create-dmg@8.1.0"
+
+
 def dmg(app, destination):
+    """The download DMG: create-dmg's window (the app beside an Applications
+    link, the app icon on the disk), then signed with the Developer ID when
+    PM_CODESIGN_IDENTITY is set (Gatekeeper rejects an unsigned DMG, even
+    notarized). create-dmg never signs; GraphicsMagick draws the disk icon."""
     macos()
     app = Path(app).resolve(strict=True)
     if app.suffix != ".app":
@@ -344,13 +351,18 @@ def dmg(app, destination):
     if destination.suffix != ".dmg":
         raise ValueError("expected .dmg destination")
     run(["codesign", "--verify", "--deep", "--strict", "--all-architectures", app])
-    # An unstyled filesystem image; no Finder layout, background, window or copy choices.
-    # Interrupted output is retained. No -ov flag and no recursive removal.
+    # Interrupted output is retained: a new staging folder, never -ov or a recursive removal.
     staging = new_destination(destination.with_suffix(".dmg-staging"))
     staging.mkdir()
-    shutil.copytree(app, staging / app.name, symlinks=True)
-    run(["hdiutil", "create", "-format", "UDZO", "-fs", "HFS+", "-volname", "Powermove",
-         "-srcfolder", staging, destination])
+    run(["npx", "--yes", CREATE_DMG, "--no-code-sign", "--no-version-in-filename",
+         "--dmg-title", "Powermove", app, staging])
+    made = staging / "Powermove.dmg"
+    if not made.is_file():
+        raise ValueError("create-dmg wrote no Powermove.dmg")
+    made.rename(destination)
+    identity = os.environ.get("PM_CODESIGN_IDENTITY")
+    if identity:
+        run(["codesign", "--force", "--timestamp", "--sign", identity, destination])
     return destination
 
 
