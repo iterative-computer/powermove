@@ -53,6 +53,19 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             crate::cloud::billing_returned(cx);
             continue;
         }
+        // Back from Google: taken at once, even before the first editor window
+        // exists. Onboarding's account step waits for it with only the Welcome
+        // window open, and the queue below drains only once an editor is up.
+        if raw.starts_with("powermove://auth")
+            && let Ok(link) = AuthLink::parse(&raw)
+        {
+            if !crate::cloud::receive_link(link.state(), link.token(), cx) {
+                crate::error_log::shared(cx)
+                    .borrow_mut()
+                    .push("Open", "Ignored a sign-in link: no sign-in is waiting.");
+            }
+            continue;
+        }
         // Development builds: on-screen reviews reach a menu command without
         // pressing a menu item (which could bring the app forward);
         // `review/command/<name>/<arg>/…` passes string arguments.
