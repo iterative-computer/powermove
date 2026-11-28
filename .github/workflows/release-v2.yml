@@ -69,7 +69,7 @@ jobs:
           echo "PM_ZIG_HOME=$PM_ZIG_HOME" >> "$GITHUB_ENV"
           echo "PM_FFMPEG_DIR=$RUNNER_TEMP/ffmpeg/out" >> "$GITHUB_ENV"
           rustup toolchain install 1.96.1 --profile minimal
-          brew install llvm@21 meson ninja pkg-config autoconf automake libtool cmake xz openssl@3
+          brew install llvm@21 meson ninja pkg-config autoconf automake libtool cmake xz openssl@3 graphicsmagick
           echo "LIBCLANG_PATH=$(brew --prefix llvm@21)/lib" >> "$GITHUB_ENV"
           echo "PM_OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
           apps/native/vendor/fx/install-zig.sh
@@ -230,12 +230,33 @@ jobs:
       - name: Inputs
         run: |
           set -euo pipefail
-          brew install openssl@3
+          brew install openssl@3 graphicsmagick
           echo "PM_OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
           apps/native/packaging/release-inputs.sh "$RUNNER_TEMP/inputs" sparkle >> "$GITHUB_ENV"
           mkdir "$RUNNER_TEMP/out"
           ditto -x -k "$RUNNER_TEMP/signed-app.zip" "$RUNNER_TEMP/out"
           python3 apps/native/packaging/package.py continuity "$RUNNER_TEMP/out/Powermove.app"
+      - name: Import Developer ID certificate (signs the DMG)
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_P12"
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          umask 077
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          identity=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -m1 -o '"Developer ID Application: [^"]*"' | tr -d '"')
+          test -n "$identity"
+          echo "PM_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
       - name: Notarize and staple the app
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -287,4 +308,6 @@ jobs:
           gh release edit "$tag" --draft=false --latest
       - name: Remove signing material
         if: always()
-        run: rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/sparkle.key"
+        run: |
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/sparkle.key"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

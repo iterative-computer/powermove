@@ -261,21 +261,32 @@ class PackagingTests(unittest.TestCase):
                 package.nested_code(self.app)
             link.unlink()
 
-    def test_dmg_contains_the_app_and_keeps_existing_staging_and_output(self):
+    def test_dmg_is_create_dmgs_window_signed_and_keeps_existing_output(self):
         self.bundle()
         destination = self.root / "Powermove.dmg"
-        with patch.object(package, "macos"), patch.object(package, "run") as run:
+
+        def fake_run(command, *_, **__):
+            command = [str(x) for x in command]
+            if any(c.startswith("create-dmg@") for c in command):
+                (Path(command[-1]) / "Powermove.dmg").write_bytes(b"dmg")
+
+        with patch.object(package, "macos"), patch.object(package, "run", side_effect=fake_run) as run, \
+                patch.dict(package.os.environ, {"PM_CODESIGN_IDENTITY": "Developer ID Application: Test (TEAM)"}):
             package.dmg(self.app, destination)
-            command = [str(x) for x in run.call_args.args[0]]
-            staging = Path(command[command.index("-srcfolder") + 1])
-            self.assertTrue((staging / "Powermove.app/Contents/Info.plist").exists())
-            self.assertNotIn("-ov", command)
+            calls = [[str(x) for x in c.args[0]] for c in run.call_args_list]
+            create = next(c for c in calls if any(x.startswith("create-dmg@") for x in c))
+            self.assertIn("--no-code-sign", create)
+            self.assertEqual(create[-2], str(self.app.resolve()))
+            self.assertEqual(calls[-1][:2], ["codesign", "--force"])
+            self.assertEqual(calls[-1][-1], str(destination))
+            self.assertEqual(destination.read_bytes(), b"dmg")
             with self.assertRaises(ValueError):
                 package.dmg(self.app, destination)
-        destination.write_bytes(b"retained existing DMG")
+        other = self.root / "Other.dmg"
+        other.write_bytes(b"retained existing DMG")
         with patch.object(package, "macos"), self.assertRaises(ValueError):
-            package.dmg(self.app, destination)
-        self.assertEqual(destination.read_bytes(), b"retained existing DMG")
+            package.dmg(self.app, other)
+        self.assertEqual(other.read_bytes(), b"retained existing DMG")
 
     def test_transition_zip_is_full_keep_parent_archive_after_signature_verification(self):
         self.bundle()
