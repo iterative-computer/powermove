@@ -301,3 +301,16 @@ fn an_agent_adds_a_color_space_transform() {
     );
     assert!(format!("{:?}", refused.err()).contains("one of"));
 }
+
+/// An effect whose defaults size from the frame (the gradient's end points
+/// have a `defaultFrom`) is added by an agent as the Effects panel adds it:
+/// the owner's "add a solid and make it gradient" turn failed with
+/// "Not available in this build: runtime-resolved parameter defaults".
+#[test]
+fn an_agent_adds_an_effect_whose_defaults_size_from_the_frame() {
+    let f = Fixture::new();
+    f.agent(vec![json!({"type":"add_effect","target":"clip","effect":"gradient"})]);
+    let fx = f.fx();
+    assert_eq!(fx.len(), 1, "{fx:?}");
+    assert_eq!(fx[0]["type"], "gradient");
+}

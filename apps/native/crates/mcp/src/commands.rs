@@ -880,7 +880,7 @@ fn plan_on(
                         effect_type: name,
                         version: definition["version"].as_u64().unwrap_or(1) as u32,
                         label: definition["label"].as_str().unwrap_or("Effect").into(),
-                        params: parameters(&definition)?,
+                        params: parameters(&definition, comp_size(&p))?,
                         source_processing: definition["sourceProcessing"] == true,
                         backdrop: definition["backdrop"] == true,
                     },
@@ -954,7 +954,7 @@ fn plan_on(
                     Some(Box::new(pm_kernel::commands::effects::TransitionSpec {
                         definition: pm_kernel::commands::effects::TransitionDefinition {
                             transition_type: name,
-                            params: parameters(&definition)?,
+                            params: parameters(&definition, comp_size(&p))?,
                         },
                         duration: c["transition"]
                             .get("dur")
@@ -1507,21 +1507,45 @@ fn definition(
         .map(|r| json_value(&r.definition))
         .ok_or_else(|| Error::unavailable(format!("{registry} runtime definition: {id}")))
 }
-fn parameters(definition: &Value) -> Result<Vec<pm_kernel::commands::effects::ParamDefinition>> {
+/// The open composition's size, for defaults a definition sizes from it.
+fn comp_size(p: &Doc) -> (f64, f64) {
+    (
+        p.comp_field("w").as_f64().filter(|w| *w > 0.0).unwrap_or(1920.0),
+        p.comp_field("h").as_f64().filter(|h| *h > 0.0).unwrap_or(1080.0),
+    )
+}
+/// A definition's parameters with their defaults resolved: a `defaultFrom`
+/// default is the composition's width or height times its factor, as the
+/// Effects panel resolves it for a full-frame layer.
+fn parameters(
+    definition: &Value,
+    (width, height): (f64, f64),
+) -> Result<Vec<pm_kernel::commands::effects::ParamDefinition>> {
     definition["params"]
         .as_array()
         .unwrap_or(&vec![])
         .iter()
         .map(|p| {
-            if p.get("defaultFrom").is_some() {
-                return Err(Error::unavailable("runtime-resolved parameter defaults"));
-            }
+            let default = match p.get("defaultFrom") {
+                None => model(&p["def"]),
+                Some(from) => {
+                    let factor = from["factor"]
+                        .as_f64()
+                        .filter(|f| f.is_finite())
+                        .ok_or_else(|| Error::unavailable("runtime-resolved parameter defaults"))?;
+                    match from["dimension"].as_str() {
+                        Some("width") => model(&json!(width * factor)),
+                        Some("height") => model(&json!(height * factor)),
+                        _ => return Err(Error::unavailable("runtime-resolved parameter defaults")),
+                    }
+                }
+            };
             let kind = p["type"].as_str().unwrap_or("number").to_owned();
             Ok(pm_kernel::commands::effects::ParamDefinition {
                 key: required(p, "k")?,
                 reference: kind == "layer" || kind == "texture",
                 kind,
-                default: model(&p["def"]),
+                default,
                 min: p["min"].as_f64(),
                 max: p["max"].as_f64(),
             })
