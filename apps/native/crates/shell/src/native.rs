@@ -9092,7 +9092,7 @@ fn popup_shape(t: &Tokens, surface: Surface) -> PopupShape {
     } else {
         PopupShape {
             radius: t.radius.lg,
-            inset: t.space.xs,
+            inset: t.space.sm,
             row: t.metrics.row,
             heading: t.metrics.row - t.space.xs,
         }
@@ -9418,8 +9418,8 @@ fn fade(view: &NSView, alpha: f64, seconds: f64) {
 }
 /// The command palette and the menus a button of ours opens: a search field
 /// over quiet rows in sections, on glass. Nothing is lit when it opens; one
-/// highlight follows the pointer and the keyboard, gliding between rows on
-/// the layout spring, and leaves with the pointer.
+/// highlight follows the pointer and the keyboard directly, and leaves with
+/// the pointer.
 /// What a pop-up does when its window's appearance changes (PM-400): every
 /// window's change once rebuilt its palette's and field menu's material and
 /// rows, so restoring N windows rebuilt them N times over at launch.
@@ -9552,11 +9552,6 @@ pub struct Popup {
     /// Command → shortcut glyphs for accessibility help.
     shortcuts: HashMap<String, String>,
     glider: Retained<NSBox>,
-    /// The highlight is on a row (it fades in where it lands, then glides).
-    lit: bool,
-    /// The highlight's travel to its row, and the timer that draws it.
-    glide: Option<(std::time::Instant, pm_design::motion::Analytic)>,
-    timer: Option<Retained<objc2_foundation::NSTimer>>,
     me: std::rc::Weak<RefCell<Popup>>,
     target: Option<Retained<PopupTarget>>,
     model: Picker,
@@ -9674,9 +9669,6 @@ impl Popup {
             lit_row_place: None,
             shortcuts: HashMap::new(),
             glider,
-            lit: false,
-            glide: None,
-            timer: None,
             me: std::rc::Weak::new(),
             target: None,
             model: Picker {
@@ -9851,7 +9843,14 @@ impl Popup {
             self.color_search_caret();
         }
         self.glider.setFillColor(&popup_highlight(t));
+        let shape = popup_shape(t, surface);
+        self.glider.setCornerRadius(if surface == Surface::Palette {
+            f64::from(spotlight::ROW_RADIUS)
+        } else {
+            t.radius.nested(shape.radius, shape.inset) as f64
+        });
         self.window.setContentView(Some(&root));
+        self.scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         self.window.setHasShadow(pad == 0.);
         self.shadow_host = shadow_host;
         self.body = body;
@@ -9933,6 +9932,8 @@ impl Popup {
         } else if let Some(first) = self.rows.first() {
             // Reopened over the same rows: from the top, as a fresh list.
             let mut rect = first.rect;
+            rect.origin.x = 0.;
+            rect.size.width = 1.;
             rect.origin.y = 0.;
             self.list.scrollRectToVisible(rect);
         }
@@ -10578,6 +10579,26 @@ pub fn check_palette_typing() {
     assert!(fields.search.downcast_ref::<NSSearchField>().is_some());
     assert!(fields.chrome.is_none());
     assert_eq!(fields.rows.len(), 2);
+    assert_eq!(fields.rows[0].rect.origin.x, f64::from(t.space.sm));
+    // Hover snaps immediately to the hovered row without sliding or lagging.
+    let first = fields.rows[0].rect;
+    let second = fields.rows[1].rect;
+    fields.point(Some(NSPoint::new(first.origin.x + 10., first.origin.y + 4.)));
+    assert_eq!(fields.glider.frame(), first);
+    assert_eq!(fields.glider.alphaValue(), 1.);
+    fields.point(Some(NSPoint::new(second.origin.x + 10., second.origin.y + 4.)));
+    assert_eq!(fields.glider.frame(), second);
+    assert_eq!(fields.glider.alphaValue(), 1.);
+    fields.point(None);
+    // Search query `"de"` still keeps row 0 keyed when the pointer leaves.
+    assert_eq!(fields.glider.frame(), first);
+    assert_eq!(fields.glider.alphaValue(), 1.);
+    fields.model.keyed = None;
+    fields.light(false);
+    assert_eq!(fields.glider.alphaValue(), 0.);
+    // Revealing a row never scrolls the list horizontally off its left inset.
+    fields.reveal_checked();
+    assert_eq!(fields.scroll.contentView().bounds().origin.x, 0.);
     assert!(fields.list.subviews().to_vec().iter().any(|view| {
         view.downcast_ref::<NSTextField>()
             .is_some_and(|label| label.stringValue().to_string() == "158 more · type to narrow")
@@ -11414,6 +11435,7 @@ impl PopupLayout<'_> {
             self.parts
                 .push(Retained::into_super(Retained::into_super(title)));
         }
+        self.scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         let scroll_frame = NSRect::new(NSPoint::new(0., below), NSSize::new(width, shown));
         if self.scroll.frame() != scroll_frame {
             self.scroll.setFrame(scroll_frame);
@@ -11472,6 +11494,8 @@ fn reveal_popup_check(model: &Picker, rows: &[PopupRow], list: &PopupList, scrol
     if let Some(row) = popup_checked_row(model, rows) {
         let mut rect = row.rect;
         let room = scroll.frame().size.height;
+        rect.origin.x = 0.;
+        rect.size.width = 1.;
         rect.origin.y = (rect.origin.y - (room - rect.size.height) / 2.).max(0.);
         rect.size.height = room;
         list.scrollRectToVisible(rect);
@@ -11818,111 +11842,22 @@ impl Popup {
         }
     }
 
-    /// Puts the highlight on the lit row. It appears where it lands when
-    /// nothing was lit, glides there on the layout spring when `glide` (the
-    /// pointer, or one key press), and fades when nothing is lit any more.
-    fn light(&mut self, glide: bool) {
+    /// Puts the highlight directly on the lit row, or hides it when none is lit.
+    fn light(&mut self, _glide: bool) {
         let lit = self.model.lit();
         self.update_row_selection(lit);
         self.sync_badges();
-        let (reduce, spring) = (
-            self.tokens.accessibility.reduce_motion,
-            pm_design::motion::Preset::Layout.spring(&self.tokens.motion),
-        );
-        let quick = if reduce {
-            self.tokens.motion.reduced
-        } else {
-            self.tokens.motion.interaction
-        };
         let Some(rect) = lit.and_then(|lit| {
             self.rows
                 .iter()
                 .find(|row| row.place == lit)
                 .map(|row| row.rect)
         }) else {
-            self.rest();
-            if self.lit {
-                fade(&self.glider, 0., quick);
-            }
-            self.lit = false;
+            self.glider.setAlphaValue(0.);
             return;
         };
-        if !self.lit || !glide || reduce {
-            self.rest();
-            self.glider.setFrame(rect);
-            if !self.lit {
-                fade(&self.glider, 1., quick);
-            }
-            self.lit = true;
-            return;
-        }
-        // Retargeted from where it is, with the speed it has.
-        let velocity = self.glide.map_or(0., |(start, spring)| {
-            spring
-                .sample(start.elapsed().as_secs_f64() / review_slow())
-                .1
-        });
-        let mut from = self.glider.frame();
-        self.glide = Some((
-            std::time::Instant::now(),
-            pm_design::motion::Analytic {
-                from: from.origin.y,
-                velocity,
-                target: rect.origin.y,
-                mass: 1.,
-                stiffness: spring.stiffness as f64,
-                damping: spring.damping as f64,
-            },
-        ));
-        // Rows share a width and a height: only the place along the list moves.
-        from.origin.x = rect.origin.x;
-        from.size = rect.size;
-        self.glider.setFrame(from);
-        if self.timer.is_none() {
-            let me = self.me.clone();
-            let step =
-                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    if let Some(popup) = me.upgrade()
-                        && let Ok(mut popup) = popup.try_borrow_mut()
-                    {
-                        popup.step();
-                    }
-                });
-            // In the common modes, so it keeps moving while a scroll tracks.
-            let timer = unsafe {
-                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
-                    1. / 120.,
-                    true,
-                    &step,
-                )
-            };
-            unsafe {
-                objc2_foundation::NSRunLoop::mainRunLoop()
-                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
-            };
-            self.timer = Some(timer);
-        }
-    }
-    /// One frame of the highlight's travel.
-    fn step(&mut self) {
-        let Some((start, spring)) = self.glide else {
-            self.rest();
-            return;
-        };
-        let (y, velocity) = spring.sample(start.elapsed().as_secs_f64() / review_slow());
-        let there = (y - spring.target).abs() < 0.2 && velocity.abs() < 2.;
-        let mut origin = self.glider.frame().origin;
-        origin.y = if there { spring.target } else { y };
-        self.glider.setFrameOrigin(origin);
-        if there {
-            self.rest();
-        }
-    }
-    fn rest(&mut self) {
-        self.glide = None;
-        if let Some(timer) = self.timer.take() {
-            timer.invalidate();
-        }
+        self.glider.setFrame(rect);
+        self.glider.setAlphaValue(1.);
     }
     fn row_at(&self, at: Option<NSPoint>) -> Option<usize> {
         at.and_then(|at| {
@@ -12087,6 +12022,8 @@ impl Popup {
             return;
         };
         let mut rect = row.rect;
+        rect.origin.x = 0.;
+        rect.size.width = 1.;
         if row.place == 0 {
             rect.size.height += rect.origin.y;
             rect.origin.y = 0.;
@@ -12225,7 +12162,6 @@ impl Popup {
         self.update_row_selection(None);
         self.search.setStringValue(&NSString::from_str(""));
         self.previous = self.parent.firstResponder();
-        self.lit = false;
         self.glider.setAlphaValue(0.);
         self.picked = false;
         if self.stale {
@@ -12268,6 +12204,7 @@ impl Popup {
         }
         self.window.setIgnoresMouseEvents(false);
         gpui_macos::child_window::attach(&self.window, &self.parent);
+        self.scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
         self.focus_search();
@@ -12312,7 +12249,6 @@ impl Popup {
             });
         }
         self.dismiss = None;
-        self.rest();
         gpui_macos::child_window::forget(&self.window);
         let duration = animate_as(&self.window, false, true, &self.tokens, &mut self.spring);
         unsafe {

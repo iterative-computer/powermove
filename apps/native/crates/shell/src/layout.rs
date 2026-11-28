@@ -2065,14 +2065,23 @@ fn side_group_heights(
     let fills_column = |g: &Group| !g.collapsed && g.size.is_none() && !is_properties(g.active());
     let flex = groups.iter().filter(|g| fills_column(g)).count();
     let gaps = t.metrics.dock_gap * groups.len().saturating_sub(1) as f32;
+    let extra = (viewport_height - gaps - heights.iter().sum::<f32>()).max(0.);
     if flex > 0 {
-        let extra = (viewport_height - gaps - heights.iter().sum::<f32>()).max(0.);
         let each = extra / flex as f32;
         for (g, h) in groups.iter().zip(&mut heights) {
             if fills_column(g) {
                 *h += each;
             }
         }
+    } else if extra > 0.
+        && let Some(last) = groups
+            .iter()
+            .rposition(|g| !g.collapsed && !is_properties(g.active()))
+    {
+        // When Properties is the only fluid group (e.g. Design's right dock),
+        // give spare height to the last open companion panel instead of leaving
+        // empty space below it.
+        heights[last] += extra;
     }
     // An oversized saved height would hide the panel's own bottom and
     // leave its list fighting the column for scroll. Give each group at
@@ -2164,6 +2173,36 @@ fn properties_tracks_content_until_its_splitter_is_resized() {
     assert_eq!(height(&groups, 140., bases), 290.);
     groups[0].size = Some(310.);
     assert_eq!(height(&groups, 500., BTreeMap::new()), 310.);
+}
+
+#[cfg(test)]
+#[test]
+fn design_right_dock_fills_spare_height_below_properties() {
+    let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let groups = [
+        Group {
+            tabs: vec!["inspector".into()],
+            active: 0,
+            collapsed: false,
+            size: None,
+        },
+        Group {
+            tabs: vec!["fxbrowser".into(), "agent".into()],
+            active: 1,
+            collapsed: false,
+            size: Some(DEFAULT_EFFECTS),
+        },
+    ];
+    let natural = BTreeMap::from([("inspector".into(), 240.)]);
+    let viewport = 860.;
+    let h = side_group_heights(&groups, viewport, 950., &t, &natural, &BTreeMap::new());
+    // Properties stays compact at its content height; the companion panel below
+    // stretches to fill the column rather than leaving dead space beneath it.
+    assert_eq!(h[0], 240.);
+    assert!(
+        (h[0] + h[1] + t.metrics.dock_gap - viewport).abs() < 0.01,
+        "right column should fill viewport {viewport}, got {h:?}"
+    );
 }
 
 fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {

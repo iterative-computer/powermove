@@ -1456,6 +1456,18 @@ fn account_line(status: &pm_agents::account::Status) -> Option<String> {
     }
 }
 
+/// Account lines for only the providers whose sign-in the agent step started.
+fn account_updates(
+    accounts: &pm_agents::account::Accounts,
+    requested: &[pm_agents::Provider],
+) -> Vec<(pm_agents::Provider, Option<String>)> {
+    requested
+        .iter()
+        .copied()
+        .map(|provider| (provider, account_line(&accounts.status(provider))))
+        .collect()
+}
+
 /// The first run's four steps, the one under way (`None`: the Welcome).
 fn steps_outline(current: Option<usize>) -> pm_shell::welcome::Outline {
     pm_shell::welcome::Outline {
@@ -1780,6 +1792,7 @@ pub fn gate(
             window: Rc::default(),
             tx,
             accounts: Rc::default(),
+            connecting: Arc::default(),
         };
         driver.begin(rx, cx);
     })
@@ -1817,6 +1830,10 @@ struct Driver {
     /// The agent step's sign-ins, made when a person first presses Connect
     /// (nothing reads an account before that).
     accounts: Rc<RefCell<Option<Arc<pm_agents::account::Accounts>>>>,
+    /// Providers the person asked to connect on the agent step. `Accounts::new`
+    /// starts every slot in `State::Checking`, so only requested providers are
+    /// published back to the step.
+    connecting: Arc<std::sync::Mutex<Vec<pm_agents::Provider>>>,
 }
 /// Where the first run shows: the stage on the launch that onboards (the
 /// film, then the steps on its card), else the Welcome window.
@@ -1845,6 +1862,12 @@ pub fn play_sound(id: &str, _: &mut gpui::App) {
 impl Driver {
     /// Settings › Providers' sign-in for `provider`, from the agent step.
     fn connect(&self, provider: pm_agents::Provider) {
+        {
+            let mut connecting = self.connecting.lock().unwrap();
+            if !connecting.contains(&provider) {
+                connecting.push(provider);
+            }
+        }
         let mut slot = self.accounts.borrow_mut();
         let accounts = slot.get_or_insert_with(|| {
             let environment = pm_agents::launch::Environment::current(
@@ -1853,6 +1876,7 @@ impl Driver {
                 pm_mcp::catalog::composition_names(),
             );
             let tx = self.tx.clone();
+            let connecting = self.connecting.clone();
             let accounts = Arc::new(std::sync::OnceLock::<std::sync::Weak<pm_agents::account::Accounts>>::new());
             let reader = accounts.clone();
             let made = pm_agents::account::Accounts::new(
@@ -1862,8 +1886,9 @@ impl Driver {
                     let Some(accounts) = reader.get().and_then(std::sync::Weak::upgrade) else {
                         return;
                     };
-                    for provider in [pm_agents::Provider::Chatgpt, pm_agents::Provider::Claude] {
-                        let _ = tx.try_send(Message::Account(provider, account_line(&accounts.status(provider))));
+                    let active = connecting.lock().unwrap().clone();
+                    for (provider, line) in account_updates(&accounts, &active) {
+                        let _ = tx.try_send(Message::Account(provider, line));
                     }
                 }),
             );
@@ -2407,6 +2432,53 @@ mod step_frame_tests {
             assert_eq!(choice.status.is_some(), connected, "{}", choice.id);
         }
         assert_eq!(frame.choices[0].status.as_deref(), Some("ana@example.com"));
+    }
+
+    /// Pressing Connect on one provider must not publish the other untouched
+    /// provider's initial `State::Checking` slot as "Checking…".
+    #[test]
+    fn connecting_one_agent_leaves_the_other_provider_untouched() {
+        let dir = std::env::temp_dir().join(format!(
+            "pm-first-run-accounts-{}",
+            std::process::id()
+        ));
+        let environment = pm_agents::launch::Environment::current(dir, vec![], vec![]);
+        let accounts = pm_agents::account::Accounts::new(
+            environment,
+            Arc::new(|_| Ok(())),
+            Arc::new(|| {}),
+        );
+        // Fresh `Accounts::new` starts both slots in `State::Checking`.
+        assert_eq!(
+            account_updates(&accounts, &[pm_agents::Provider::Chatgpt]),
+            vec![(pm_agents::Provider::Chatgpt, Some("Checking…".into()))]
+        );
+        assert_eq!(
+            account_updates(&accounts, &[pm_agents::Provider::Claude]),
+            vec![(pm_agents::Provider::Claude, Some("Checking…".into()))]
+        );
+        // Apply only the ChatGPT update into the onboarding flow: Claude keeps Connect.
+        let mut flow = Flow::new(Plan {
+            config: None,
+            original: None,
+            profile: PathBuf::from("/tmp/pm-unused"),
+            launch: Launch::Fresh,
+            onboard: true,
+        });
+        flow.start();
+        for action in ["begin", "continue", "not_now"] {
+            flow.action(action);
+        }
+        for (provider, line) in account_updates(&accounts, &[pm_agents::Provider::Chatgpt]) {
+            flow.message(Message::Account(provider, line));
+        }
+        let frame = flow.frame();
+        let claude = frame.choices.iter().find(|c| c.id == "claude").unwrap();
+        let chatgpt = frame.choices.iter().find(|c| c.id == "chatgpt").unwrap();
+        assert_eq!(chatgpt.status.as_deref(), Some("Checking…"));
+        assert_eq!(chatgpt.pill, None);
+        assert_eq!(claude.status, None);
+        assert_eq!(claude.pill.as_deref(), Some("Connect"));
     }
 
     fn frame_offer(choices: &Choices) -> Option<pm_shell::welcome::Offer> {
