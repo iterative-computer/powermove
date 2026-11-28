@@ -328,7 +328,7 @@ pub enum Menu {
     More,
 }
 
-type MenuRequest = Box<dyn Fn(Menu, &mut Window, &mut App)>;
+type MenuRequest = std::rc::Rc<dyn Fn(Menu, &mut Window, &mut App)>;
 
 /// The plot's errors.
 pub const READ_FAILED: &str = "Scopes can’t read this frame.";
@@ -377,7 +377,7 @@ impl ScopesView {
     }
 
     pub fn on_menu(&mut self, request: impl Fn(Menu, &mut Window, &mut App) + 'static) {
-        self.on_menu = Some(Box::new(request));
+        self.on_menu = Some(std::rc::Rc::new(request));
     }
 
     /// Shows a finished trace.
@@ -418,8 +418,11 @@ impl ScopesView {
                 .text_color(rgb(c.secondary))
                 .child(label)
                 .on_click(cx.listener(move |v, _, window, cx| {
-                    if let Some(request) = &v.on_menu {
-                        request(menu, window, cx);
+                    // After this click's update: the request reads this view
+                    // (its kind and settings), which can't happen while it is
+                    // being updated (Parade/Vectorscope crashed in 2.0.0).
+                    if let Some(request) = v.on_menu.clone() {
+                        window.defer(cx, move |window, cx| request(menu, window, cx));
                     }
                 }))
         };
@@ -709,13 +712,23 @@ mod tests {
         let mut cx = app();
         let chosen = Arc::new(std::sync::Mutex::new(vec![]));
         let sink = chosen.clone();
+        // The app's request reads the view it came from (its kind and
+        // settings): doing that inside the click's update aborted 2.0.0.
+        let this: std::rc::Rc<std::cell::RefCell<Option<Entity<ScopesView>>>> = Default::default();
+        let reader = this.clone();
         let window = cx
             .open_window(size(px(320.), px(32.)), move |_, cx| {
                 let view = cx.new(|_| {
                     let mut view = ScopesView::new(tokens());
-                    view.on_menu(move |menu, _, _| sink.lock().unwrap().push(menu));
+                    view.on_menu(move |menu, _, cx| {
+                        if let Some(view) = reader.borrow().as_ref() {
+                            let _ = view.read(cx).kind;
+                        }
+                        sink.lock().unwrap().push(menu)
+                    });
                     view
                 });
+                *this.borrow_mut() = Some(view.clone());
                 cx.new(|_| Header(view))
             })
             .unwrap();
