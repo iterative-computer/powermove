@@ -477,6 +477,15 @@ releaseDate: '2026-11-27T09:30:00.000Z'
             with self.assertRaises(ValueError):
                 package.continuity(app, run=calls.append)
 
+    def test_release_script_archive_and_feeds_do_not_require_cargo_target_dir(self):
+        script = package.HERE / "release.sh"
+        env = {k: v for k, v in os.environ.items() if k != "CARGO_TARGET_DIR"}
+        env.pop("PM_RELEASE_VERSION", None)
+        for command in ("archive", "feeds"):
+            result = package.subprocess.run(["bash", str(script), command], env=env, capture_output=True, text=True)
+            self.assertNotIn("CARGO_TARGET_DIR", result.stderr)
+            self.assertIn("PM_RELEASE_VERSION", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

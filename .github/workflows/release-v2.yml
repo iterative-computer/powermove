@@ -23,6 +23,11 @@ on:
         required: true
         type: boolean
         default: true
+      build_run_id:
+        description: Optional existing build run ID to reuse signed-app-<version> (skips build)
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -35,6 +40,7 @@ env:
   V8_COMMIT: 2768994f664e8a6e3aba27503606c58339136e2a
 jobs:
   build:
+    if: ${{ inputs.build_run_id == '' }}
     runs-on: macos-26
     timeout-minutes: 340
     env:
@@ -209,21 +215,30 @@ jobs:
 
   release:
     needs: build
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !inputs.dry_run && (needs.build.result == 'success' || (inputs.build_run_id != '' && needs.build.result == 'skipped')) }}
     runs-on: macos-26
     timeout-minutes: 90
     # Protected: a required reviewer approves before anything is notarized or published.
     environment: release
     permissions:
+      actions: read
       contents: write
     env:
       PM_SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_ED_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        if: ${{ inputs.build_run_id == '' }}
         with:
           name: signed-app-${{ inputs.version }}
           path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.build_run_id != '' }}
+        with:
+          name: signed-app-${{ inputs.version }}
+          path: ${{ runner.temp }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

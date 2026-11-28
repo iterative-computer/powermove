@@ -41,10 +41,10 @@ version() {
 repo=${PM_RELEASE_REPO:-iterative-computer/powermove}
 feed=${PM_SPARKLE_FEED:-https://github.com/$repo/releases/latest/download/appcast.xml}
 channel=${PM_RELEASE_CHANNEL:-cutover}
-release=${CARGO_TARGET_DIR:?set CARGO_TARGET_DIR}/${PM_RELEASE_PROFILE:-release}
 
 case ${1:?command} in
 build)
+  need CARGO_TARGET_DIR
   cd "$native"
   export PM_BUILD_COMMIT=${PM_BUILD_COMMIT:-$(git rev-parse --short=10 HEAD)}
   export CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
@@ -56,7 +56,8 @@ build)
   ;;
 app)
   version
-  need SPARKLE_DIR PM_SPARKLE_PUBLIC_KEY PM_FFMPEG_DIR PM_TRANSCRIBE_RUNTIME PM_CODEX_VENDOR PM_CLAUDE_RUNTIME
+  need CARGO_TARGET_DIR SPARKLE_DIR PM_SPARKLE_PUBLIC_KEY PM_FFMPEG_DIR PM_TRANSCRIBE_RUNTIME PM_CODEX_VENDOR PM_CLAUDE_RUNTIME
+  release=${CARGO_TARGET_DIR}/${PM_RELEASE_PROFILE:-release}
   out=${2:?new folder}
   [ -e "$out" ] && { echo "release: $out exists" >&2; exit 1; }
   mkdir -p "$out"
