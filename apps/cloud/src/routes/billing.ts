@@ -47,6 +47,9 @@ function priceFor(c: Context<Env>, plan: Plan): string {
   return configured;
 }
 
+/** Checkout sessions created before this carry older settings (no promotion codes) and are not handed back. */
+const CHECKOUT_SETTINGS_SINCE = new Date('2026-11-28T04:28:00Z');
+
 export const billing = new Hono<Env>()
   .get('/', async (c) => {
     const userId = signedIn(c);
@@ -70,7 +73,9 @@ export const billing = new Hono<Env>()
     const url = await c.var.data.tx(async (tx) => {
       await lockBalance(tx, userId);
       const [open] = await tx.select().from(checkoutSessions).where(and(eq(checkoutSessions.userId, userId), sql`${checkoutSessions.expiresAt} > now() + interval '5 minutes'`)).limit(1);
-      if (open) return open.url;
+      // A session made before Checkout's current settings (promotion codes, 2026-11-28) is replaced, not reused.
+      if (open && open.createdAt >= CHECKOUT_SETTINGS_SINCE) return open.url;
+      if (open) await stripe.checkout.sessions.expire(open.sessionId).catch(() => null);
       const session = await stripe.checkout.sessions.create({
         mode: 'subscription',
         customer,
