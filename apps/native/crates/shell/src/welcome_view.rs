@@ -2893,6 +2893,31 @@ pub fn open_welcome(
 }
 /// The Welcome frame in its own window, for a step opened later (Settings ›
 /// Storage › Bring In Extensions…): `quits` false closes just the window.
+/// The window's AppKit controls (the email field, Continue with Google,
+/// Connect) take its appearance, not the system's: the window is always dark,
+/// and in light mode they drew dark text on it (owner's friend, launch night).
+#[cfg(target_os = "macos")]
+fn dark_appkit(window: &Window) {
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSView,
+    };
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    if let Some(window) = view.window() {
+        window.setAppearance(
+            NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref(),
+        );
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn dark_appkit(_: &Window) {}
+
 pub fn open_welcome_window(
     tokens: Tokens,
     frame: Frame,
@@ -2925,6 +2950,7 @@ pub fn open_welcome_window(
             .is_resizable(false)
             .is_minimizable(false),
         move |window, cx| {
+            dark_appkit(window);
             let view = cx.new(|cx| {
                 let mut view = WelcomeView::new(tokens, frame, on_action, cx);
                 view.stage = true;

@@ -17,8 +17,9 @@ use objc2::{
     runtime::{AnyObject, ProtocolObject},
 };
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSAnimationContext, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowDidDeminiaturizeNotification, NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSAppearance, NSAppearanceCustomization,
+    NSAppearanceNameDarkAqua, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowDidDeminiaturizeNotification, NSWindowTitleVisibility,
     NSWindowWillMiniaturizeNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
@@ -149,6 +150,13 @@ pub fn open(
             let mut observers = vec![];
             if let Some(ns) = ns_window(window) {
                 ns.setLevel(LEVEL);
+                // The window is drawn dark whatever the system's appearance,
+                // so its AppKit controls (the email field, Continue with
+                // Google, Continue, Connect) take dark too: in light mode
+                // their dark text vanished on the dark ground.
+                ns.setAppearance(
+                    NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref(),
+                );
                 ns.setTitleVisibility(NSWindowTitleVisibility::Hidden);
                 ns.setCollectionBehavior(
                     NSWindowCollectionBehavior::CanJoinAllSpaces
