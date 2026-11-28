@@ -8,13 +8,13 @@ import { HEADLINE, MALLEABLE, absolute } from './site';
 const SUMMARY = `${HEADLINE}. ${MALLEABLE} Powermove is free and open source (AGPL-3.0), for Macs with Apple silicon.`;
 
 const FACTS = [
-  'Powermove is a motion and video editor: layers, keyframes, curves, and effects on a timeline, with an agent panel beside them.',
-  'Connect Claude Code, Codex, or an OpenAI-compatible endpoint. The agent edits the project through the same typed, undoable tools you use.',
-  'A deliberately tiny kernel (project store, typed edits, undo, compositor). Panels, effects, transitions, themes, and keymaps are extensions, and the agent can write new ones.',
+  'Powermove is a native Rust and Metal video and motion editor for Apple silicon Macs, with layers, keyframes, easing curves, and GPU effects on a timeline.',
+  'Works with Powermove’s built-in Aerolite agent ($9.99/month, 1,000 AI credits monthly) as well as your own Claude Code, Codex, or OpenAI-compatible model.',
+  'A deliberately tiny kernel (project store, typed edits, undo, compositor). Panels, effects, transitions, themes, and keymaps are extensions, and the agent can write new ones on the spot.',
   'Extensions can be turned off in Settings and back on when needed. Examples include motion tracking and audio-reactive visuals.',
-  'Export MP4, WebM, or ProRes with sound, a still, or a PNG sequence, or save an editable project with every layer and its media.',
-  'Projects stay on your Mac. Prompts go only to the AI provider you choose; with a local model nothing leaves your machine.',
-  'Free and open source under AGPL-3.0. Runs on Macs with Apple silicon.',
+  'Export MP4, WebM, or ProRes video with audio, still frames, PNG sequences, or a self-contained editable project with every layer and its media.',
+  'Projects, media, and renders stay local on your Mac. Prompts go only to the AI provider you choose; with a local model nothing leaves your machine.',
+  'Free and open source under AGPL-3.0. Runs natively on Apple silicon Macs (M1 and newer).',
 ];
 
 export function llmsTxt(downloadHref: string): string {

@@ -20,7 +20,7 @@
     if (!stack) return;
     const observer = new IntersectionObserver(
       ([entry]) => { if (entry.isIntersecting) { stackIn = true; observer.disconnect(); } },
-      { threshold: 0.5 },
+      { threshold: 0.35 },
     );
     observer.observe(stack);
     return () => observer.disconnect();
@@ -39,31 +39,25 @@
 <main id="top">
   <div class="top">
     <div class="top-glow" aria-hidden="true"></div>
-    <section class="hero" aria-labelledby="headline">
-      <h1 id="headline" class="sr-only">Powermove: the video editor you customize with AI</h1>
-      <Hero />
-    </section>
+    <Hero />
     <figure class="stage-window">
       <picture>
         <source srcset="/editor-window.webp" type="image/webp" />
-        <img src="/editor-window.png" alt="The Powermove editor with a project called Summer in Lisbon: a graded sunset over Lisbon with the title in the viewer, a Layers timeline with captions, title keyframes, lower thirds and shots, a Grade layer’s Color Wheels, Vignette and Film Grain, and an Aero agent turn that warmed the sunset and added a glow to the title." width="1598" height="1030" fetchpriority="high" />
+        <img
+          src="/editor-window.png"
+          alt="The Powermove editor with a project called Summer in Lisbon: a graded sunset over Lisbon with the title in the viewer, a Layers timeline with captions, title keyframes, lower thirds and shots, a Grade layer’s Color Wheels, Vignette and Film Grain, and an Aerolite agent turn that warmed the sunset and added a glow to the title."
+          width="1598"
+          height="1030"
+          fetchpriority="high"
+        />
       </picture>
     </figure>
   </div>
 
   <section class="rows" id="features" aria-labelledby="features-title">
-    <h2 id="features-title" class="rows-title"><span class="strong">Welcome to malleable software.</span> A real motion editor, with an agent that adds what it’s missing.</h2>
-
-    <article class="row" id="editor" aria-labelledby="editor-title">
-      <div class="row-copy">
-        <h3 id="editor-title">A real motion editor</h3>
-        <p><span class="strong">Layers, keyframes, curves, and effects.</span> All on a timeline, with the agent in a panel beside them.</p>
-      </div>
-      <div class="row-media"><picture><source srcset="/editor-hero.webp" type="image/webp" /><img src="/editor-hero.png" alt="The Powermove editor with a project called Summer in Lisbon: a graded sunset over Lisbon with the title in the viewer, a Layers timeline with captions, title keyframes, lower thirds and shots, a Grade layer’s Color Wheels, Vignette and Film Grain, and an Aero agent turn that warmed the sunset and added a glow to the title over a dark ember gradient." width="1920" height="1280" loading="lazy" /></picture></div>
-    </article>
+    <h2 id="features-title" class="rows-title"><span class="strong">Welcome to malleable software.</span></h2>
 
     <Features />
-
 
     <article class="row" aria-labelledby="kernel-title">
       <div class="row-copy">
@@ -83,7 +77,7 @@
   </section>
 
   <Pricing />
-  <Faq items={HOME_FAQ} lead="What Powermove is, and what malleable means." />
+  <Faq items={HOME_FAQ} title="Questions and answers." />
 </main>
 
 <Footer />

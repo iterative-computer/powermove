@@ -6,18 +6,18 @@ import type { Download } from './releases';
    pages, sitemap.xml, llms.txt, and llms-full.txt all read from here. */
 
 export const SITE_URL = 'https://trypowermove.com';
-export const HEADLINE = 'The video editor you customize with AI';
+export const HEADLINE = 'The video editor that lets you do anything';
 
 export const HOME_TITLE = `${HEADLINE} · Powermove for Mac`;
 export const HOME_DESCRIPTION =
-  'The video editor you customize with AI. Connect Claude or Codex to Powermove to add extensions, restyle the interface, and generate effects. Free, open source.';
+  'The video editor that lets you do anything. Ask an agent to build any effect, tool, or panel right inside the app. Free, open source, for Apple silicon Macs.';
 
 /** The plain-language definition of "malleable", reused wherever we explain it. */
 export const MALLEABLE =
-  'Powermove is a malleable video editor: you connect a coding agent such as Claude or Codex, and it adds extensions, restyles the interface, and generates effects and shaders while you work.';
+  'Powermove is a malleable video editor: use Aerolite’s built-in agent, or connect Claude Code or Codex, to add extensions, restyle the workspace, and build custom effects while you work.';
 
 export const OG_IMAGE = `${SITE_URL}/og.png?v=3`;
-export const OG_IMAGE_ALT = 'Powermove, with the editor over a desert night background.';
+export const OG_IMAGE_ALT = 'Powermove, the video editor that lets you do anything.';
 
 export const ORG_ID = `${SITE_URL}/#organization`;
 export const APP_ID = `${SITE_URL}/#app`;
@@ -70,10 +70,10 @@ export function softwareApplication(download: Download): Json {
     screenshot: absolute('/editor-window.png'),
     image: OG_IMAGE,
     featureList: [
-      'Connect a coding agent (Claude, Codex, or an OpenAI-compatible endpoint) to customize the editor',
-      'Agent-built extensions, interface themes, effects, and shaders',
-      'Layers, keyframes, curves, and effects on a timeline',
-      'Export MP4, WebM, or ProRes with sound, stills, PNG sequences, or an editable project',
+      'Use Aerolite’s built-in AI agent or connect Claude Code, Codex, or an OpenAI-compatible model',
+      'Agent-built extensions, panels, themes, effects, and shaders',
+      'Built natively in Rust and Metal for Apple silicon Macs',
+      'Export MP4, WebM, and ProRes video with audio, still frames, PNG sequences, or a self-contained project',
       'Free and open source (AGPL-3.0)',
     ],
     sameAs: [GITHUB],

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Qa } from './site';
 
-  let { items, title = 'Questions, answered.', lead = '' }: { items: Qa[]; title?: string; lead?: string } = $props();
+  let { items, title = 'Questions and answers.', lead = '' }: { items: Qa[]; title?: string; lead?: string } = $props();
 </script>
 
 <!-- Every answer stays open: short, visible text is what readers skim and what
