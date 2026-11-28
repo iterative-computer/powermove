@@ -200,3 +200,28 @@ test('desktop handoff token is not written to application logs', () =>
     expect(token!).toBeTruthy();
     expect(JSON.stringify(calls)).not.toContain(token!);
   }));
+
+test('a done page loaded twice: either copy\'s token signs the app in, once, and repeats are capped', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), browser = await seedSession(data, env);
+    const first = await setup(data, env, browser.headers);
+    // The browser loads the done page again: a second token for the same flow.
+    const again = await first.app.request(`/v1/auth/desktop/done?state=${first.state}`, { headers: browser.headers }, env);
+    expect(again.status).toBe(200);
+    const exchange = (token: string) => first.app.request('/v1/auth/desktop/exchange', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: first.state, token, verifier: first.verifier }),
+    }, env);
+    // The first copy's token still works, and the flow is then used up.
+    expect((await exchange(first.token)).status).toBe(200);
+    const [row] = await data.db.select().from(desktopAuth).where(eq(desktopAuth.state, first.state));
+    expect(row!.consumedAt).not.toBeNull();
+    expect((await first.app.request(`/v1/auth/desktop/done?state=${first.state}`, { headers: browser.headers }, env)).status).toBe(401);
+    // An unused flow takes a few loads at most.
+    const capped = await setup(data, env, browser.headers);
+    for (let i = 0; i < 2; i++) {
+      expect((await capped.app.request(`/v1/auth/desktop/done?state=${capped.state}`, { headers: browser.headers }, env)).status).toBe(200);
+    }
+    expect((await capped.app.request(`/v1/auth/desktop/done?state=${capped.state}`, { headers: browser.headers }, env)).status).toBe(401);
+  }));
