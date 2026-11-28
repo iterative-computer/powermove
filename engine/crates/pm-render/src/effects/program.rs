@@ -384,12 +384,12 @@ impl GpuProgram {
         });
         let (vertex, fragment) = match stages {
             Ok(s) => s,
-            Err(e) => {
-                let scoped = pop_error(scopes);
-                return Err(Failure::new(
-                    FailureStage::NagaValidate,
-                    scoped.map_or(e.clone(), |s| format!("{e}; {s}")),
-                ));
+            Err(mut failure) => {
+                if let Some(error) = pop_error(scopes) {
+                    failure.message.push_str(": ");
+                    failure.message.push_str(&error);
+                }
+                return Err(failure);
             }
         };
         // Every legacy texture is filterable (`rgba16float`, or

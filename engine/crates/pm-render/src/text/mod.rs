@@ -460,7 +460,7 @@ impl TextContext {
         self.generation
     }
 
-    fn sync_fonts(&mut self) {
+    pub(crate) fn sync_fonts(&mut self) {
         self.sync_fonts_before_reset(|_| {});
     }
 

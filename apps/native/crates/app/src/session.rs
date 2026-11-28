@@ -976,6 +976,38 @@ impl pm_shell::integration::Integration for Bridge {
     ) -> Vec<pm_shell::integration::PanelHeaderButton> {
         self.0.read(cx).extension_panel_header_actions(id)
     }
+    fn has_extension_context_menus(&self, cx: &App) -> bool {
+        self.0.read(cx).extensions_listen()
+    }
+    fn surface_context_menu(&self, location: &'static str, at: (f32, f32), cx: &mut App) {
+        self.0.update(cx, |v, cx| v.open_surface_context_menu(location, at, cx));
+    }
+    fn extension_slot(
+        &self,
+        id: &str,
+        tokens: &pm_design::Tokens,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        self.0
+            .update(cx, |v, cx| v.slot_elements(id, tokens, window, cx))
+    }
+    fn status_bar_extensions(
+        &self,
+        cx: &App,
+    ) -> (
+        Vec<pm_shell::view::ExtensionStatusBarItem>,
+        Vec<pm_shell::view::ExtensionStatusBarMod>,
+    ) {
+        let extensions = &self.0.read(cx).extensions;
+        (
+            extensions.v4_status.clone(),
+            extensions.v4_status_mods.clone(),
+        )
+    }
+    fn panel_header_mods(&self, cx: &App) -> Vec<pm_shell::view::PanelHeaderMod> {
+        self.0.read(cx).extensions.v4_header_mods.clone()
+    }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
     }
@@ -1743,7 +1775,31 @@ impl Controller {
             nudge_idle: None,
         }
     }
+    pub(crate) fn sync_export_toolbar(&self) {
+        let activity = {
+            let tasks = self.builtins.export_tasks.lock().unwrap();
+            crate::export_coordinator::toolbar_activity(self.builtins.export_job.as_deref(), &tasks)
+        };
+        self.host.borrow_mut().set_export_progress(activity);
+    }
+
     pub fn initialize(&mut self, opening: Option<crate::entry::Pending>, cx: &mut Context<Self>) {
+        self.sync_export_toolbar();
+        cx.spawn(async move |this, cx| {
+            let mut sequence = None;
+            loop {
+                let current = this.update(cx, |v, _| {
+                    let current = v.builtins.export_tasks.lock().unwrap().sequence();
+                    if sequence != Some(current) {
+                        v.sync_export_toolbar();
+                    }
+                    current
+                });
+                let Ok(current) = current else { break };
+                sequence = Some(current);
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+            }
+        }).detach();
         self.load_recent(cx);
         match opening {
             Some(pending) => self.apply_pending(pending, cx),
@@ -4880,7 +4936,11 @@ impl Controller {
             if self.tool != cmd.name {
                 crate::telemetry::tool_selected(&cmd.name);
             }
+            let was_extension = self.tool.starts_with(crate::extensions::V4_TOOL);
             self.tool = cmd.name.clone();
+            if was_extension {
+                self.sync_extension_tool_buttons();
+            }
             if let Some(runtime) = &self.builtins.runtime {
                 runtime.set_active_tool(None);
                 runtime.emit_event("tool", &serde_json::json!({ "tool": self.tool }));

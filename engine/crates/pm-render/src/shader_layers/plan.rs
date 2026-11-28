@@ -164,6 +164,8 @@ fn size<'d>(
     output: (u32, u32),
     scale: (f64, f64),
     time: f64,
+    origin: (f64, f64),
+    playback: bool,
 ) -> JsResult<(f64, f64, u32, u32)> {
     let (cw, ch) = scope.comp_size();
     let (w, tw) = crate::scene3d::legacy::target_size(
@@ -178,7 +180,44 @@ fn size<'d>(
         f64::from(output.1),
         scale.1,
     );
-    if crate::sampling::is_level2(layer) {
+    let level2 = crate::sampling::is_level2(layer);
+    if !level2 && scope.is_3d_layer(layer)? {
+        let offset = scope.size_anchor_offset(layer, time)?;
+        let matrix = scope.plane_matrix(layer, time, false)?;
+        let plane = crate::space25d::fold(&matrix, scale, w, h, -offset.x, -offset.y);
+        let plane = crate::plan::plane_at_origin(plane, origin);
+        let (x, y) =
+            crate::space25d::visible_density(&plane, output.0, output.1).unwrap_or((0., 0.));
+        let limit = 4096.0f64;
+        let cap = |viewport: u32, legacy: f64| {
+            if playback {
+                limit.min(f64::from(viewport).max(legacy).max(256.))
+            } else {
+                limit
+            }
+        };
+        // Legacy programs can use iResolution to correct their aspect
+        // ratio. Increase both dimensions by the same factor relative to
+        // their legacy output scale so that correction stays valid.
+        let mut density = (x / (w * scale.0)).max(y / (h * scale.1)).max(1.);
+        if playback {
+            density = crate::space25d::local::playback_density(density);
+        }
+        let (base_w, base_h) = (w * scale.0, h * scale.1);
+        density = density
+            .min(cap(output.0, tw) / base_w)
+            .min(cap(output.1, th) / base_h);
+        if density <= 1. {
+            return Ok((w, h, tw as u32, th as u32));
+        }
+        return Ok((
+            w,
+            h,
+            (base_w * density).ceil().clamp(2., limit) as u32,
+            (base_h * density).ceil().clamp(2., limit) as u32,
+        ));
+    }
+    if level2 {
         let (dx, dy) = crate::sampling::precomp_density(scope, layer, time, scale, w, h)?;
         let side = |size: f64, s: f64, d: f64| {
             js::min(
@@ -302,8 +341,10 @@ pub(crate) fn shader_layer<'d>(
     output: (u32, u32),
     scale: (f64, f64),
     fallback_runner: bool,
+    origin: (f64, f64),
+    playback: bool,
 ) -> JsResult<Planned> {
-    let sized = size(scope, layer, d, output, scale, time)?;
+    let sized = size(scope, layer, d, output, scale, time, origin, playback)?;
     let code_value = js::get(d, "code");
     // `PM.SHADER_HEADER + '\n' + d.code` (string concatenation, so a missing
     // code is the text "undefined" and fails to compile, as today).
@@ -356,8 +397,10 @@ pub(crate) fn missing_placeholder<'d>(
     output: (u32, u32),
     scale: (f64, f64),
     fallback_runner: bool,
+    origin: (f64, f64),
+    playback: bool,
 ) -> JsResult<Planned> {
-    let sized = size(scope, layer, d, output, scale, time)?;
+    let sized = size(scope, layer, d, output, scale, time, origin, playback)?;
     let (source, line_offset) = super::missing_layer_program();
     let calls = base_calls(scope, layer, time, sized.2, sized.3);
     Ok(program_plan(
@@ -386,11 +429,12 @@ pub(crate) fn extension_layer<'d>(
     scale: (f64, f64),
     definitions: Option<&Effects>,
     fallback_runner: bool,
+    origin: (f64, f64),
+    playback: bool,
 ) -> JsResult<Option<Planned>> {
     let Some(effects) = definitions else {
         return Ok(None);
     };
-    let sized = size(scope, layer, d, output, scale, time)?;
     let Some(snapshot) = effects.get(DefinitionKind::Layer, definition) else {
         // A frame that shows the project (`Effects::bypass_missing`: the
         // viewer, agent stills) draws an uninstalled extension's layer as
@@ -401,21 +445,15 @@ pub(crate) fn extension_layer<'d>(
             )))));
         }
         // `definition` undefined: the header and the checkerboard.
-        let (source, line_offset) = super::missing_layer_program();
-        let calls = base_calls(scope, layer, time, sized.2, sized.3);
-        return Ok(Some(program_plan(
-            layer,
-            "missing-layer placeholder",
-            source,
-            line_offset,
-            calls,
-            sized,
-            fallback_runner,
-        )));
+        return missing_placeholder(
+            scope, layer, d, time, output, scale, fallback_runner, origin, playback,
+        )
+        .map(Some);
     };
     if !matches!(snapshot.renderer, Some(LayerRenderer::Fragment { .. })) {
         return Ok(None);
     }
+    let sized = size(scope, layer, d, output, scale, time, origin, playback)?;
     let mut calls = base_calls(scope, layer, time, sized.2, sized.3);
     let params = node::member(node::member(Some(layer), "d"), "params");
     for spec in &snapshot.params {

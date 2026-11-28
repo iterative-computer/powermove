@@ -53,16 +53,27 @@ pub(crate) fn source_edge(
     uv: [f64; 4],
     plane: Option<&crate::space25d::Plane>,
 ) -> Option<u32> {
-    // Output pixels per unit of u and of v: the affine matrix's columns, or
-    // a 2.5D plane's densest corner (it was read whole, so a 3D group's
-    // stills were decoded whole in the frame that met them).
+    source_density(matrix, uv, plane, None)
+        .map(|(w, h)| w.max(h).clamp(64, 16384).next_power_of_two())
+}
+
+fn source_density(
+    matrix: &[f64; 6],
+    uv: [f64; 4],
+    plane: Option<&crate::space25d::Plane>,
+    viewport: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
     let (du, dv) = match plane {
-        Some(plane) => crate::space25d::corner_density(plane)?,
+        Some(plane) => match viewport {
+            Some((width, height)) => crate::space25d::visible_density(plane, width, height)?,
+            None => crate::space25d::corner_density(plane)?,
+        },
         None => (matrix[0].hypot(matrix[1]), matrix[2].hypot(matrix[3])),
     };
     let width = du / (uv[2] - uv[0]).abs().max(0.0001);
     let height = dv / (uv[3] - uv[1]).abs().max(0.0001);
-    Some((width.max(height).ceil().clamp(64., 16384.) as u32).next_power_of_two())
+    let pixels = |extent: f64| extent.ceil().clamp(1., f64::from(u32::MAX)) as u32;
+    Some((pixels(width), pixels(height)))
 }
 
 impl Resolved {
@@ -541,12 +552,32 @@ impl Exec<'_> {
                         // shares its parent's pixel space: it renders only
                         // the region, drawn 1:1.
                         let group = child.group;
-                        let child_region = if group { region } else { None };
+                        let accumulate = matches!(source, Source::Accumulate(_));
+                        let child_region = if group {
+                            if self.pipelines.direct_group_target
+                                && !self.final_frame
+                                && self.recycle
+                                && !self.depth_id
+                                && !accumulate
+                                && r.plane.is_none()
+                                && r.level2.is_none()
+                                && child.view.is_none()
+                                && (child.width, child.height) == (plan.width, plan.height)
+                            {
+                                crate::composite::exec::group_region(
+                                    draw, child, *uv, *alpha, region,
+                                )
+                                .or(region)
+                            } else {
+                                region
+                            }
+                        } else {
+                            None
+                        };
                         // The same composition planned the same way earlier
                         // in this frame: its target holds exactly the pixels
                         // rendering it again would draw (never a group pass:
                         // `comp_twins` lists nested compositions only).
-                        let accumulate = matches!(source, Source::Accumulate(_));
                         let cache_group = group && !accumulate && self.groups.is_some();
                         if cache_group
                             && let Some((target, revision)) =
@@ -809,8 +840,16 @@ impl Exec<'_> {
                         composition_rate,
                         ..
                     } => {
-                        self.media.draw_edge =
-                            self.media.preview_video.then(|| r.source_edge()).flatten();
+                        self.media.draw_density = if self.media.preview_video {
+                            source_density(
+                                &r.matrix,
+                                r.uv,
+                                r.plane.as_ref(),
+                                Some((plan.width, plan.height)),
+                            )
+                        } else {
+                            None
+                        };
                         match self.media.video(
                             self.device,
                             self.queue,
@@ -1033,10 +1072,15 @@ impl Exec<'_> {
             let levels = r.mip_levels(texture, sampling);
             let view = r.view.as_ref().filter(|v| v.texture() == texture);
             let mut transient = crate::sampling::gpu::PyramidCache::new();
-            let cache = if r.transient_source {
-                &mut transient
-            } else {
+            // Playback's shared cache sheds transient source views at the
+            // next frame boundary. Their separately allocated tails can
+            // then be reused, even when the source target was recycled.
+            let cache = if !r.transient_source
+                || (self.pool.playback_retention() && texture.mip_level_count() == 1)
+            {
                 &mut *self.pyramids
+            } else {
+                &mut transient
             };
             r.pyramid = Some(self.pipelines.resample.pyramid_for(
                 self.device,
@@ -1928,7 +1972,17 @@ mod sequence_read_tests {
 
 #[cfg(test)]
 mod source_edge_tests {
-    use super::source_edge;
+    use super::{source_density, source_edge};
+
+    #[test]
+    fn video_density_measures_visible_texels_in_the_uv_window() {
+        let uv = [0.25, 0.25, 0.75, 0.75];
+        let plane = [100., 0., 1., 0., 100., 0., -50., 0., 0.01];
+        let whole = source_density(&[0.; 6], uv, Some(&plane), None).unwrap();
+        let visible = source_density(&[0.; 6], uv, Some(&plane), Some((100, 100))).unwrap();
+        assert!(whole.0 > 1_000_000);
+        assert_eq!(visible, (555, 393));
+    }
 
     /// A still on a 2.5D plane is read at the size its densest corner draws
     /// it, as an affine draw is: a flat plane reads the affine edge, a

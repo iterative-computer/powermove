@@ -291,6 +291,16 @@ function CompositionTab({
     </div>
   );
 }
+function toolbarGap(frame: TimelineFrame) {
+  return t(
+    frame.toolbarDensity === "compact"
+      ? "space.xs"
+      : frame.toolbarDensity === "comfortable"
+        ? "space.md"
+        : "metrics.gap",
+  );
+}
+
 /** v1's tab row: one tab per open composition (the active one in the text
  * ink on the kit's selected ground, a raised neutral cell: the accent marks
  * the playhead alone), and the Layers / Tracks switch at its end. */
@@ -303,8 +313,8 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
         ...split,
         alignItems: "stretch",
         height: t("metrics.header"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        paddingLeft: toolbarGap(f),
+        paddingRight: toolbarGap(f),
       }}
     >
       <div
@@ -318,7 +328,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           minWidth: t("metrics.comp_tab_gap"),
           flexShrink: 1,
           overflow: "scroll",
-          gap: t("metrics.comp_tab_gap"),
+          gap: t(f.toolbarDensity === "comfortable" ? "space.xs" : "metrics.comp_tab_gap"),
         }}
       >
         {f.hasComposition &&
@@ -366,11 +376,11 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
       style={{
         ...split,
         height: t("metrics.ruler"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.gap"),
+        paddingLeft: f.toolbarDensity === "compact" ? toolbarGap(f) : t("metrics.inset"),
+        paddingRight: toolbarGap(f),
       }}
     >
-      <div style={{ ...line, gap: t("metrics.gap") }}>
+      <div style={{ ...line, gap: toolbarGap(f) }}>
         <Icon
           id="timeline:play"
           label={f.playing ? "Pause" : "Play"}
@@ -419,7 +429,9 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           </UI.ToolbarItem>
         )}
       </div>
-      <div style={line}>
+      <div
+        style={f.toolbarDensity === "comfortable" ? { ...line, gap: toolbarGap(f) } : line}
+      >
         {graph && (
           <Icon
             id="timeline:graph-options"
@@ -487,10 +499,12 @@ function Layer({
   send,
   single,
   lit,
+  showTypeBadges,
 }: {
   row: LayerRow;
   send: Send;
   single: boolean;
+  showTypeBadges: boolean;
   /** Selected while the timeline holds the keyboard: the accent's. */
   lit: boolean;
 }) {
@@ -617,31 +631,33 @@ function Layer({
           ))}
           <Disclosure row={row} send={send} lit={lit} />
         </div>
-        <div
-          role="presentation"
-          attr={{ symbol: row.layerKind ? kindSymbol(row.layerKind) : null }}
-          metadata={{
-            recipe: "kind-badge",
-            designTodo: row.layerKind ? null : "native-schema-kind",
-          }}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: t("metrics.kind_badge"),
-            minWidth: t("metrics.kind_badge"),
-            flexShrink: 0,
-            height: t("metrics.kind_badge"),
-            borderRadius: t("metrics.inner_radius"),
-            background: t(
-              row.labelColor
-                ? `colors.labels.${row.labelColor}`
-                : "colors.field",
-            ),
-            color: t(lit ? "colors.accent_text" : "colors.text"),
-            symbolSize: t("metrics.symbol_inline"),
-          }}
-        />
+        {showTypeBadges && (
+          <div
+            role="presentation"
+            attr={{ symbol: row.layerKind ? kindSymbol(row.layerKind) : null }}
+            metadata={{
+              recipe: "kind-badge",
+              designTodo: row.layerKind ? null : "native-schema-kind",
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: t("metrics.kind_badge"),
+              minWidth: t("metrics.kind_badge"),
+              flexShrink: 0,
+              height: t("metrics.kind_badge"),
+              borderRadius: t("metrics.inner_radius"),
+              background: t(
+                row.labelColor
+                  ? `colors.labels.${row.labelColor}`
+                  : "colors.field",
+              ),
+              color: t(lit ? "colors.accent_text" : "colors.text"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        )}
         {row.nameEditor ? (
           // The field takes the name's place across the column while it
           // edits (a field in a row grows; the cluster gives it the room).
@@ -909,10 +925,12 @@ const TimelineRow = memo(
     send,
     single,
     focused,
+    showTypeBadges,
   }: {
     row: Row;
     send: Send;
     single: boolean;
+    showTypeBadges: boolean;
     /** The timeline holds the keyboard (PM-367): selection takes the
      * accent then, the neutral selection fill otherwise (the Mac's). */
     focused: boolean;
@@ -1024,6 +1042,7 @@ const TimelineRow = memo(
             send={send}
             single={single}
             lit={row.selected && focused}
+            showTypeBadges={showTypeBadges}
           />
         ) : row.kind === "property" ? (
           <Property row={row} send={send} />
@@ -1111,6 +1130,7 @@ const TimelineRow = memo(
     before.send === after.send &&
     before.single === after.single &&
     before.focused === after.focused &&
+    before.showTypeBadges === after.showTypeBadges &&
     JSON.stringify(before.row) === JSON.stringify(after.row),
 );
 
@@ -1230,6 +1250,7 @@ export function TimelinePanel({
                       send={send}
                       single={!f.selection || f.selection.count <= 1}
                       focused={f.focused !== false}
+                      showTypeBadges={f.showTypeBadges !== false}
                     />
                   ))}
                 </UI.Tree>

@@ -29,6 +29,7 @@ pub struct Scene {
 }
 /// The viewer's rendered-frame cache (RGBA16F surfaces).
 const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const CACHED_OUTPUT_FRAMES: u64 = 8;
 fn focus_group_key(group: Option<&str>) -> u64 {
     let Some(group) = group else {
         return 0;
@@ -57,16 +58,15 @@ pub(crate) fn large_scene(scene: &Scene) -> bool {
 /// for the next video when recent frames have only drawn stills or graphics.
 fn playback_cache_parts(reads_video: bool) -> (u64, u64, u64, u64, u64, u64) {
     if reads_video {
-        (18, 15, 15, 7, 35, 10)
+        (20, 14, 15, 7, 37, 7)
     } else {
-        (4, 24, 5, 17, 36, 14)
+        (4, 18, 5, 17, 46, 10)
     }
 }
 
-/// Most playback target memory goes to the working textures that every
-/// pass needs. Mip pyramids and bindings share the rest of the allowance.
+/// The pool can borrow unused pyramid space within the target allowance.
 fn playback_pool_budget(targets: u64) -> u64 {
-    (targets - targets / 8).min(96 << 20)
+    targets.min(96 << 20)
 }
 
 /// One viewer frame's request. The renderer's playback path, never an export.
@@ -713,6 +713,7 @@ pub struct Engine {
     budgeted_grant: u64,
     budgeted_pressure: crate::memory::Pressure,
     visible_playback: bool,
+    pub(crate) keep_playback_loop: bool,
     budgeted_playback: bool,
     budgeted_video: bool,
     /// The settling renderer's part of the grant ([`split_for_settling`]).
@@ -1016,16 +1017,22 @@ impl Engine {
         // A completed submission can return a surface for a turn before the
         // next needs it. Give that capacity back to the caches only after
         // playback has lived without it for two seconds so surface counts
-        // oscillating 3<->4 never thrash cache trims mid-playback.
-        if playback
-            && self.budgeted_playback
-            && share == self.budgeted_grant
-            && request == u64::MAX
+        // oscillating 3<->4 never thrash cache trims mid-playback. Reserve
+        // one surface of headroom after a burst or a render-grid change.
+        if playback && self.budgeted_playback && share == self.budgeted_grant && request == u64::MAX
         {
             if surfaces >= self.budgeted_surfaces {
                 self.surface_budget_peak_at = Instant::now();
             } else if self.surface_budget_peak_at.elapsed() < Duration::from_millis(2000) {
-                surfaces = self.budgeted_surfaces;
+                let headroom = self
+                    .pool
+                    .iter()
+                    .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
+                    .max()
+                    .unwrap_or(0);
+                surfaces = self
+                    .budgeted_surfaces
+                    .min(surfaces.saturating_add(headroom));
             }
         } else {
             self.surface_budget_peak_at = Instant::now();
@@ -1418,6 +1425,7 @@ impl Engine {
             budgeted_grant: 0,
             budgeted_pressure: crate::memory::Pressure::Normal,
             visible_playback: false,
+            keep_playback_loop: true,
             budgeted_playback: false,
             budgeted_video: false,
             settle_budget: split_for_settling(DEFAULT_GRANT).1,
@@ -2006,7 +2014,7 @@ impl Engine {
                 if self.frame_interrupt.is_none() || !large_scene(scene) {
                     self.renderer.prewarm(&scene.doc);
                 }
-                self.renderer.prewarm_programs(&scene.doc);
+                self.renderer.prewarm_programs_for(&scene.doc, &scene.comp);
                 self.prewarm_key = Some(prewarm_key);
             }
             self.studio_content = Some(key);
@@ -2380,12 +2388,14 @@ impl Engine {
             found
         } else {
             let uploading = std::time::Instant::now();
-            // Playing video gets the bytes of frames already passed back for
-            // its decoders; a picture without video (a still, text, shapes on
-            // a loop) keeps them, so its loop is presented from memory.
+            // Keep the long output queue only for a loop that can fit in it.
+            // Linear playback gives those bytes back to working targets and
+            // video decode as the playhead moves through the composition.
             let surface = self.cache_surface_for(
                 size,
-                spec.moment == Moment::Playing && !spec.exact && self.renderer.reads_video(),
+                spec.moment == Moment::Playing
+                    && !spec.exact
+                    && (!self.keep_playback_loop || self.renderer.reads_video()),
             )?;
             if let Some((_, pixels)) = disk {
                 self.upload(&surface, size, &pixels);
@@ -2463,7 +2473,8 @@ impl Engine {
                 }
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
-                let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
+                let count_work = trace.lock().unwrap().count_work;
+                let work = count_work.then(pm_perf::snapshot);
                 pm_render::media::note_reads();
                 pm_perf::stall::stall(pm_perf::stall::Stage::Render);
                 let rendered = self.renderer.render_into(
@@ -2487,6 +2498,13 @@ impl Engine {
                         }
                     }
                     t.images_over = self.renderer.image_over_budget();
+                }
+                let effect_program_us = self.renderer.take_effect_program_build_us();
+                if count_work && effect_program_us > 0 {
+                    eprintln!(
+                        "PM_EFFECT_BUILD ticks={} us={effect_program_us}",
+                        time.get(),
+                    );
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
@@ -2801,7 +2819,8 @@ impl Engine {
         // A linear playback run needs its current and upcoming surfaces,
         // not a long cache of frames it has already passed. Returning those
         // bytes lets the same grant retain the live video working set.
-        let capacity = ((limit / bytes).clamp(1, if playing { 3 } else { 8 })) as usize;
+        let capacity =
+            ((limit / bytes).clamp(1, if playing { 3 } else { CACHED_OUTPUT_FRAMES })) as usize;
         while self.cache.len() >= capacity {
             self.cache.pop_front();
         }

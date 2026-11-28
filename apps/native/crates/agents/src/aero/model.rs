@@ -366,7 +366,7 @@ fn deliver_live(
             } else if (200..300).contains(&code) {
                 "The connection to the model dropped before its reply finished. Try again.".into()
             } else {
-                format!("Aero couldn't reach Powermove inference ({error}). Try again.")
+                format!("Aerolite couldn't reach Powermove inference ({error}). Try again.")
             });
         }
         if retry {
@@ -381,7 +381,7 @@ fn deliver_live(
             // Aero's backend: the plan's credits are spent (the contract's 402).
             if code == 402 {
                 *failed.lock().unwrap() = Some(
-                    "You’re out of Aero credits. They come back when your plan resets.".into(),
+                    "You’re out of Aerolite credits. They come back when your plan resets.".into(),
                 );
             }
             return status(remote, fetch, code).and_then(|_| push(remote, fetch, &safe));

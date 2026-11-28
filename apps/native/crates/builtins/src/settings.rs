@@ -311,7 +311,7 @@ impl Backend {
         action: &dyn Fn(Value, &str, &str, String) -> Value,
     ) -> Vec<Value> {
         use pm_agents::inference::Standing;
-        const GROUP: &str = "Powermove Account (Aero)";
+        const GROUP: &str = "Powermove Account (Aerolite)";
         let cloud = &self.native.facts["cloud"];
         if !cloud.is_object() {
             return vec![];
@@ -320,11 +320,11 @@ impl Backend {
         let aero = match &standing {
             Some(Standing::Ready { billing, .. }) => {
                 let plan = billing.plan.as_ref().map_or("", |p| p.name.as_str());
-                format!("Aero runs on {plan}: {}.", billing.credits_left())
+                format!("Aerolite runs on {plan}: {}.", billing.credits_left())
             }
             Some(Standing::Free(_)) => pm_agents::inference::NEEDS_PLAN.into(),
             Some(Standing::Unreachable(why)) => why.clone(),
-            _ => "Aero runs on Powermove inference.".into(),
+            _ => "Aerolite runs on Powermove inference.".into(),
         };
         // Signed in here, but Powermove refused the session (it ended or
         // was revoked): the way back is Sign In, never only Sign Out.
@@ -335,7 +335,7 @@ impl Backend {
                 row("powermove", GROUP, "Powermove Account"),
                 "account.sign-in",
                 "Sign In…",
-                format!("Your session as {identity} ended. Sign in again to use Aero."),
+                format!("Your session as {identity} ended. Sign in again to use Aerolite."),
             );
             r["target"] = json!(identity);
             r
@@ -354,7 +354,7 @@ impl Backend {
                 row("powermove", GROUP, "Powermove Account"),
                 "account.sign-in",
                 "Sign In…",
-                "Signed out. Aero runs on Powermove inference.".into(),
+                "Signed out. Aerolite runs on Powermove inference.".into(),
             )
         };
         r["disabled"] = json!(cloud["busy"] == true);
@@ -362,7 +362,7 @@ impl Backend {
         // On Free: the plans are on Settings › Account.
         if cloud["signedIn"] == true && matches!(standing, Some(Standing::Free(_))) {
             rows.push(action(
-                row("aero-plan", GROUP, "Aero"),
+                row("aero-plan", GROUP, "Aerolite"),
                 "settings.show-account",
                 "Choose a Plan…",
                 "Aerolite, on your Powermove account.".into(),
@@ -383,49 +383,53 @@ impl Backend {
         vec![row]
     }
     fn subscription_rows(&self) -> Vec<Value> {
+        let aerolite = aerolite_subscription_row(&self.native.facts["cloud"]);
         let Some(accounts) = self.native.agent_link.accounts() else {
-            return vec![notification_row()];
+            return vec![aerolite, notification_row()];
         };
-        [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")]
-            .into_iter()
-            .map(|(provider, name)| {
-                let status = accounts.status(provider);
-                let target = status.email.clone();
-                let who = [status.email, status.plan]
+        std::iter::once(aerolite)
+            .chain(
+                [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")]
                     .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                let id = format!("account.{}", name.to_lowercase());
-                // The signed-in account (none while signing in) a press acts on.
-                let mut row = json!({"id":id,"section":"agents","group":"Subscriptions",
-                    "label":name,"target":target});
-                let (action, label) = match status.state {
-                    State::Connected => (Some("account.disconnect"), "Sign Out"),
-                    State::Connecting => (Some("account.disconnect"), "Cancel"),
-                    State::Disconnected => (Some("account.connect"), "Sign In…"),
-                    State::Checking | State::Unavailable => (None, ""),
-                };
-                match action {
-                    Some(action) => {
-                        row["control"] = json!("action");
-                        row["action"] = json!(action);
-                        row["actionLabel"] = json!(label);
-                        if let Some(detail) = status.detail {
-                            row["detail"] = json!(detail);
-                        } else if !who.is_empty() {
-                            row["detail"] = json!(who);
+                    .map(|(provider, name)| {
+                        let status = accounts.status(provider);
+                        let target = status.email.clone();
+                        let who = [status.email, status.plan]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        let id = format!("account.{}", name.to_lowercase());
+                        // The signed-in account (none while signing in) a press acts on.
+                        let mut row = json!({"id":id,"section":"agents","group":"Subscriptions",
+                            "label":name,"target":target});
+                        let (action, label) = match status.state {
+                            State::Connected => (Some("account.disconnect"), "Sign Out"),
+                            State::Connecting => (Some("account.disconnect"), "Cancel"),
+                            State::Disconnected => (Some("account.connect"), "Sign In…"),
+                            State::Checking | State::Unavailable => (None, ""),
+                        };
+                        match action {
+                            Some(action) => {
+                                row["control"] = json!("action");
+                                row["action"] = json!(action);
+                                row["actionLabel"] = json!(label);
+                                if let Some(detail) = status.detail {
+                                    row["detail"] = json!(detail);
+                                } else if !who.is_empty() {
+                                    row["detail"] = json!(who);
+                                }
+                            }
+                            None => {
+                                row["control"] = json!("status");
+                                let checking = status.state == State::Checking;
+                                let value = status.detail.filter(|_| !checking);
+                                row["value"] = json!(value.as_deref().unwrap_or("Checking…"));
+                            }
                         }
-                    }
-                    None => {
-                        row["control"] = json!("status");
-                        let checking = status.state == State::Checking;
-                        let value = status.detail.filter(|_| !checking);
-                        row["value"] = json!(value.as_deref().unwrap_or("Checking…"));
-                    }
-                }
-                row
-            })
+                        row
+                    }),
+            )
             .chain([notification_row()])
             .collect()
     }
@@ -1338,6 +1342,59 @@ fn destructive(action: &str) -> bool {
             | "providers.anthropic.remove"
     ) || action.starts_with("storage.delete.")
 }
+/// Settings › Agents › Subscriptions: Powermove’s own Aerolite subscription,
+/// alongside ChatGPT and Claude.
+pub(crate) fn aerolite_subscription_row(cloud: &Value) -> Value {
+    let signed_in = cloud["signedIn"] == true;
+    let billing = &cloud["billing"];
+    let mut row = json!({
+        "id": "account.aerolite",
+        "section": "agents",
+        "group": "Subscriptions",
+        "label": "Aerolite",
+        "control": "action",
+        "disabled": cloud["busy"] == true,
+    });
+    if !signed_in {
+        row["action"] = json!("account.sign-in");
+        row["actionLabel"] = json!("Sign In…");
+        if cloud["sessionEnded"] == true {
+            row["detail"] = json!("Your session ended. Sign in again.");
+            row["reading"] = json!(true);
+        } else {
+            row["detail"] = json!("Powermove’s built-in agent, with inference included.");
+        }
+        return row;
+    }
+    let identity = cloud["identity"].as_str().unwrap_or_default();
+    if !identity.is_empty() {
+        row["target"] = json!(identity);
+    }
+    row["action"] = json!("settings.show-account");
+    if billing["state"] == "ready" && billing["subscribed"] == true {
+        let plan = billing["plan"]["name"].as_str().unwrap_or("Aerolite");
+        let remaining = billing["credits"]["remaining"].as_u64();
+        let included = billing["credits"]["included"].as_u64();
+        row["actionLabel"] = json!("Manage…");
+        row["detail"] = json!(match (remaining, included) {
+            (Some(rem), Some(inc)) if inc > 0 => format!(
+                "{plan} · {} of {} credits left",
+                pm_agents::inference::grouped(rem),
+                pm_agents::inference::grouped(inc),
+            ),
+            _ => format!("{plan} · Active"),
+        });
+    } else if billing["state"] == "ready" && billing["subscribed"] == false {
+        row["actionLabel"] = json!("Get Aerolite");
+        row["detail"] = json!("Your editing agent, with inference included.");
+    } else {
+        row["actionLabel"] = json!("Manage…");
+        if !identity.is_empty() {
+            row["detail"] = json!(identity);
+        }
+    }
+    row
+}
 /// (v1.2.0 SettingsScreen): Sign In… while signed out; the identity with Sign
 /// Out, Remember Installs and Delete Account… while signed in.
 pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
@@ -1472,7 +1529,7 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
             options.extend(plans.iter().map(|p| {
                 let name = p["name"].as_str().unwrap_or_default();
                 let note = match p["id"].as_str() {
-                    Some("aerolite") => "Aero, our agent, with inference included.",
+                    Some("aerolite") => "Your editing agent, with inference included.",
                     _ => "",
                 };
                 let lines = [
@@ -1482,7 +1539,7 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
                     note.to_owned(),
                     format!("Get {name}"),
                     format!(
-                        "{} credits a month\tInference for Aero, run by Powermove",
+                        "{} credits a month\tInference for Aerolite, run by Powermove",
                         pm_agents::inference::grouped(credits(p))
                     ),
                 ];
@@ -1513,7 +1570,7 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
         ),
     });
     if billing["status"] == "past_due" {
-        card["error"] = json!("Update your payment method to keep Aero running.");
+        card["error"] = json!("Update your payment method to keep Aerolite running.");
     }
     if let Some(error) = billing["error"].as_str() {
         card["error"] = json!(error);
@@ -1832,8 +1889,43 @@ mod protected_folders_tests {
 }
 #[cfg(test)]
 mod cloud_tests {
-    use super::cloud_rows;
+    use super::{aerolite_subscription_row, cloud_rows};
     use serde_json::json;
+
+    #[test]
+    fn aerolite_subscription_row_follows_account_and_plan_state() {
+        let out = aerolite_subscription_row(&json!({"signedIn": false}));
+        assert_eq!(out["id"], "account.aerolite");
+        assert_eq!(out["group"], "Subscriptions");
+        assert_eq!(out["label"], "Aerolite");
+        assert_eq!(out["action"], "account.sign-in");
+        assert_eq!(out["actionLabel"], "Sign In…");
+
+        let ended = aerolite_subscription_row(&json!({"signedIn": false, "sessionEnded": true}));
+        assert_eq!(ended["detail"], "Your session ended. Sign in again.");
+
+        let free = aerolite_subscription_row(&json!({
+            "signedIn": true,
+            "identity": "@maker",
+            "billing": { "state": "ready", "subscribed": false }
+        }));
+        assert_eq!(free["action"], "settings.show-account");
+        assert_eq!(free["actionLabel"], "Get Aerolite");
+
+        let active = aerolite_subscription_row(&json!({
+            "signedIn": true,
+            "identity": "@maker",
+            "billing": {
+                "state": "ready",
+                "subscribed": true,
+                "plan": { "id": "aerolite", "name": "Aerolite" },
+                "credits": { "included": 1000, "remaining": 812 }
+            }
+        }));
+        assert_eq!(active["action"], "settings.show-account");
+        assert_eq!(active["actionLabel"], "Manage…");
+        assert_eq!(active["detail"], "Aerolite · 812 of 1,000 credits left");
+    }
     #[test]
     fn powermove_account_rows_follow_the_session() {
         assert!(cloud_rows(&serde_json::Value::Null).is_empty());
@@ -1909,8 +2001,8 @@ mod cloud_tests {
         );
         assert_eq!(
             options[1]["label"],
-            "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\n\
-             Get Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove"
+            "Aerolite\n$9.99\nper month\nYour editing agent, with inference included.\n\
+             Get Aerolite\n1,000 credits a month\tInference for Aerolite, run by Powermove"
         );
         assert_eq!(options.len(), 3);
         // Only the plans the backend lists: Aerolite alone, no Aero anywhere.
@@ -1935,7 +2027,7 @@ mod cloud_tests {
             &ready(json!({"subscribed":false,"plan":null,"waiting":"checkout"})),
             false,
         );
-        assert_eq!(waiting[0]["value"], "Aero needs Aerolite.");
+        assert_eq!(waiting[0]["value"], "Subscribe to Aerolite.");
         assert_eq!(waiting[1]["label"], "Waiting for checkout in your browser…");
         assert_eq!(waiting[1]["action"], "account.checkout-cancel");
         // Aerolite mid-period: the plan, Manage Billing…, the meter and the days.

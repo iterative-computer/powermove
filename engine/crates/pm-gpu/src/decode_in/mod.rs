@@ -98,6 +98,33 @@ pub struct ImportedFrame {
     pub desc: Option<DecodedFrameDesc>,
 }
 
+impl ImportedFrame {
+    /// Raw YUV planes that can be normalized when sampled by the source
+    /// pass. Other layouts still need the dedicated normalization pass.
+    pub fn progressive_yuv_codes(&self, range: pm_protocol::color::Range) -> Option<[f32; 5]> {
+        let f = &self.format;
+        if !matches!(f.layout, Layout::Biplanar | Layout::Planar)
+            || f.has_alpha()
+            || !matches!(f.bits, 8 | 10)
+        {
+            return None;
+        }
+        let max = match f.planes[0].format {
+            PlaneFormat::R8 => 255.0,
+            PlaneFormat::R16 => 65535.0,
+            _ => return None,
+        };
+        let n = f.norm_as(range);
+        Some([
+            max,
+            n.y_off as f32,
+            n.y_div as f32,
+            n.c_off as f32,
+            n.c_div as f32,
+        ])
+    }
+}
+
 /// The normalization output.
 pub enum Normalized {
     /// (Y′, 0, 0, A) at luma resolution and (Cb, Cr) at chroma resolution.

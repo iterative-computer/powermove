@@ -103,6 +103,11 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
               text "Subscriptions"
           div group label="Subscriptions"
             div form-group group label="Subscriptions"
+              div group settings.row.account.aerolite label="Aerolite"
+                div
+                  text
+                    text "Aerolite"
+                div
               div group settings.row.account.chatgpt label="ChatGPT"
                 div
                   text

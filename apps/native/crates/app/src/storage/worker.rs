@@ -16,14 +16,20 @@ const INTERVAL: Duration = Duration::from_secs(15 * 60);
 struct Requests {
     queued: BTreeSet<Bucket>,
     running: BTreeSet<Bucket>,
+    wake: Option<async_channel::Sender<()>>,
 }
 static REQUESTS: Mutex<Requests> = Mutex::new(Requests {
     queued: BTreeSet::new(),
     running: BTreeSet::new(),
+    wake: None,
 });
 
 pub(super) fn request(bucket: Bucket) {
-    REQUESTS.lock().unwrap().queued.insert(bucket);
+    let mut requests = REQUESTS.lock().unwrap();
+    requests.queued.insert(bucket);
+    if let Some(wake) = &requests.wake {
+        let _ = wake.try_send(());
+    }
 }
 
 pub(super) fn status(bucket: Bucket) -> Option<&'static str> {
@@ -37,10 +43,13 @@ pub(super) fn status(bucket: Bucket) -> Option<&'static str> {
     }
 }
 
-fn idle() -> bool {
+fn exports_clear() -> bool {
     !pm_engine_service::jobs::exports_running()
         && !crate::export_coordinator::holding_export_inputs()
-        && pm_engine_service::jobs::app_quiet_for(QUIET)
+}
+
+fn idle() -> bool {
+    exports_clear() && pm_engine_service::jobs::app_quiet_for(QUIET)
 }
 
 pub(super) fn first_reclaimed(profile: &Path) -> Option<u64> {
@@ -74,12 +83,28 @@ pub(super) fn reclaim(
 
 pub(crate) fn start(profile: PathBuf, cx: &mut gpui::App) {
     crate::media::use_idle_retention();
+    let (wake_tx, wake_rx) = async_channel::bounded(1);
+    REQUESTS.lock().unwrap().wake = Some(wake_tx.clone());
+    let bg = cx.background_executor().clone();
+    let tick_bg = bg.clone();
+    bg.spawn(async move {
+        loop {
+            tick_bg.timer(POLL).await;
+            if wake_tx.is_closed() {
+                break;
+            }
+            let _ = wake_tx.try_send(());
+        }
+    })
+    .detach();
     let mut last = None::<Instant>;
     let mut initial_freed = 0u64;
     cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor().timer(POLL).await;
-            if !idle() {
+        while wake_rx.recv().await.is_ok() {
+            let has_manual = !REQUESTS.lock().unwrap().queued.is_empty();
+            let automatic = idle() && last.is_none_or(|at| at.elapsed() >= INTERVAL);
+            let manual_ready = has_manual && exports_clear();
+            if !manual_ready && !automatic {
                 continue;
             }
             let snapshot = cx.update(|cx| {
@@ -109,18 +134,34 @@ pub(crate) fn start(profile: PathBuf, cx: &mut gpui::App) {
             let Some(pinned) = snapshot else {
                 continue;
             };
-            let automatic = last.is_none_or(|at| at.elapsed() >= INTERVAL);
-            let buckets = {
+            let (buckets, manual_cache) = {
                 let mut requests = REQUESTS.lock().unwrap();
-                let mut buckets = std::mem::take(&mut requests.queued);
+                let manual_buckets = if manual_ready {
+                    std::mem::take(&mut requests.queued)
+                } else {
+                    BTreeSet::new()
+                };
+                let manual_cache = manual_buckets.contains(&Bucket::Cache);
+                let mut buckets = manual_buckets;
                 if automatic {
                     buckets.extend(CATEGORIES.iter().map(|category| category.bucket));
                 }
                 requests.running.clone_from(&buckets);
-                buckets
+                (buckets, manual_cache)
             };
             if buckets.is_empty() {
                 continue;
+            }
+            // Show "Cleaning…" immediately when the user clicked Clean Up Now.
+            if manual_ready {
+                cx.update(|cx| {
+                    if let Some(editor) = crate::entry::editors(cx)
+                        .into_iter()
+                        .find(|editor| editor.read(cx).builtins.windows.contains_key("settings"))
+                    {
+                        editor.update(cx, |controller, cx| controller.update_builtins(cx));
+                    }
+                });
             }
             let result = cx
                 .background_executor()
@@ -129,11 +170,25 @@ pub(crate) fn start(profile: PathBuf, cx: &mut gpui::App) {
                     let buckets = buckets.clone();
                     async move {
                         let first = first_reclaimed(&profile).is_none();
-                        let limit = crate::pro_media::stored_cache_limit(&profile);
+                        // An explicit "Clean Up Now" on Media Cache clears all
+                        // unpinned regenerable cache; background sweeps keep up
+                        // to the configured cache limit.
+                        let limit = if manual_cache {
+                            0
+                        } else {
+                            crate::pro_media::stored_cache_limit(&profile)
+                        };
+                        let keep_going = || {
+                            if manual_ready {
+                                exports_clear()
+                            } else {
+                                idle()
+                            }
+                        };
                         let freed = reclaim(&profile, first, || {
-                            maintenance::clean(&profile, &buckets, limit, &pinned, &idle)
+                            maintenance::clean(&profile, &buckets, limit, &pinned, &keep_going)
                         })?;
-                        let complete = idle();
+                        let complete = keep_going();
                         let cumulative = initial_freed.saturating_add(freed);
                         if first && automatic && complete {
                             record_first(&profile, cumulative)?;

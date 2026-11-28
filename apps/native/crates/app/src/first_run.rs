@@ -1326,30 +1326,26 @@ pub(crate) fn step_frame(
                 // Signed in on Free: its plan to buy, right here; on a plan,
                 // the plan's name.
                 match (&choices.aero, powermove) {
-                    (AeroPlan::Offer { name, .. }, Some(_)) => Choice {
+                    (AeroPlan::Offer { .. }, Some(_)) => Choice {
                         badge: Some("Recommended".into()),
-                        detail: Some(format!("Runs on {name}, Powermove's inference.")),
+                        detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: None,
-                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
                     },
-                    // On a plan the row keeps the Free row's lines (the
-                    // tag beside the name, the detail under it), so buying
-                    // here moves nothing; the plan's name stands at the end,
-                    // so the detail leaves it out and fits beside it.
                     (AeroPlan::On(plan), Some(_)) => Choice {
                         badge: Some("Recommended".into()),
                         detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: Some(plan.clone()),
-                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
                     },
                     _ => Choice {
                         badge: Some("Recommended".into()),
                         detail: None,
                         pill: powermove.is_none().then(|| "Connect".into()),
                         status: powermove.map(str::to_owned),
-                        ..agent("aero", "Aero", "", "powermove", "chatgpt")
+                        ..agent("aero", "Aerolite", "", "powermove", "chatgpt")
                     },
                 },
                 agent(
@@ -1377,10 +1373,10 @@ pub(crate) fn step_frame(
                         name: name.clone(),
                         price: price.clone(),
                         period: "per month".into(),
-                        note: "Aero, our agent, with inference included.".into(),
+                        note: "Your editing agent, with inference included.".into(),
                         features: vec![(
                             format!("{credits} credits a month"),
-                            "Inference for Aero, run by Powermove".into(),
+                            "Inference for Aerolite, run by Powermove".into(),
                         )],
                         action: format!("Get {name}"),
                     })
@@ -2346,33 +2342,42 @@ pub(crate) fn note_workspace_request(on: bool) {
 pub fn take_workspace_request() -> bool {
     WORKSPACE_REQUEST.with(|r| r.replace(false))
 }
-thread_local! {
-    static CHIME: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSound>>> =
-        const { RefCell::new(None) };
-}
+static CHIME_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The original scene's sound, once, with the animation. Reduce Motion is silent.
+/// Plays on a background thread so CoreAudio initialization never stalls the
+/// intro's animation frames on the main UI thread.
 fn play_chime() {
     use objc2::{AnyThread, MainThreadMarker};
     use objc2_app_kit::{NSSound, NSWorkspace};
     use objc2_foundation::NSData;
+    use std::sync::atomic::Ordering;
     const SOUND: &[u8] = include_bytes!("../assets/onboarding-chime.wav");
     if MainThreadMarker::new().is_none()
         || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     {
         return;
     }
-    let sound = NSSound::initWithData(NSSound::alloc(), &NSData::with_bytes(SOUND));
-    if let Some(sound) = sound {
-        sound.play();
-        CHIME.with(|slot| *slot.borrow_mut() = Some(sound));
-    }
+    let id = CHIME_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = std::thread::Builder::new()
+        .name("onboarding-chime".into())
+        .spawn(move || {
+            let sound = NSSound::initWithData(NSSound::alloc(), &NSData::with_bytes(SOUND));
+            let Some(sound) = sound else { return };
+            if CHIME_GEN.load(Ordering::SeqCst) != id {
+                return;
+            }
+            sound.play();
+            while sound.isPlaying() {
+                if CHIME_GEN.load(Ordering::SeqCst) != id {
+                    sound.stop();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
 }
 fn stop_chime() {
-    CHIME.with(|slot| {
-        if let Some(sound) = slot.borrow_mut().take() {
-            sound.stop();
-        }
-    });
+    CHIME_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 #[cfg(test)]
 #[path = "first_run_tests.rs"]
@@ -2391,7 +2396,7 @@ mod step_frame_tests {
         let frame = step_frame(Onboard::Agent, &choices, &none, None, None);
         let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["aero", "claude", "chatgpt"]);
-        assert_eq!(frame.choices[0].label, "Aero");
+        assert_eq!(frame.choices[0].label, "Aerolite");
         assert_eq!(frame.chosen.as_deref(), Some("aero"));
         assert!(frame.choices.iter().all(|c| c.pill.as_deref() == Some("Connect") && c.status.is_none()));
         // A ChatGPT sign-in is Codex's only; the Powermove account is Aero's.

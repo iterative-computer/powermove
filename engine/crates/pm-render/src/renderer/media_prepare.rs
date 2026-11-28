@@ -199,19 +199,20 @@ fn visit_upcoming<'d>(
         let Some(kind) = string(member(layer_node, "type")).and_then(|s| s.as_str()) else {
             continue;
         };
-        if !matches!(kind, "image" | "video" | "precomp") {
+        let media = matches!(kind, "image" | "video" | "precomp");
+        if !media && kind != "shader" && !has_program_stages(layer) {
             continue;
         }
         let from = to_number(member(layer_node, "from"));
         let end = from + to_number(member(layer_node, "dur"));
-        if !(from <= seconds && seconds < end)
+        if (kind != "group" && !(from <= seconds && seconds < end))
             || !upcoming_value(member(layer_node, "on"), seconds).truthy()
         {
             continue;
         }
-        if kind != "precomp" {
-            visit(comp, layer, kind, seconds, scale);
-        } else if depth < plan::PRECOMP_MAX_DEPTH
+        visit(comp, layer, kind, seconds, scale);
+        if kind == "precomp"
+            && depth < plan::PRECOMP_MAX_DEPTH
             && let Some((id, _)) = capability::precomp_target(comp.root(), layer)
             && let Ok(child) = Comp::in_root(comp.root(), &id, comp.revision())
             && let Some(at) = upcoming_source_time(layer, seconds)
@@ -222,6 +223,30 @@ fn visit_upcoming<'d>(
             visit_upcoming(&child, at, (0., 0.), depth + 1, deadline, visit);
         }
     }
+}
+
+fn has_program_stages(layer: &pm_model::Node) -> bool {
+    use pm_eval::node::{array, is_str, truthy};
+    array(layer.get("fx")).is_some_and(|fx| !fx.is_empty())
+        || truthy(layer.get("transitionIn"))
+        || truthy(layer.get("transitionOut"))
+        || is_str(layer.get("type"), "extension")
+}
+
+fn upcoming_programs<'a>(
+    effects: &crate::effects::Effects,
+    saved: &mut crate::effects::prewarm::SavedEffects<'a>,
+    layer: &'a pm_model::Node,
+    seconds: f64,
+    keys: &mut Vec<crate::effects::prewarm::Key>,
+) {
+    for fx in pm_eval::node::array(layer.get("fx")).unwrap_or_default() {
+        let on = upcoming_value(fx.get("on"), seconds);
+        if !matches!(on, pm_eval::JsValue::Bool(false)) {
+            saved.push(effects, fx, keys);
+        }
+    }
+    crate::effects::prewarm::push_other_programs(layer, keys);
 }
 
 /// Resolve stored values and keyframes without evaluating expressions.
@@ -267,6 +292,85 @@ fn upcoming_source_time(layer: &pm_model::Node, time: f64) -> Option<f64> {
         }
     };
     Some((time - to_number(member(Some(layer), "from"))) * number("speed", 1.) + number("trim", 0.))
+}
+
+/// Order the active composition and its instances by their approximate
+/// first root-timeline use. Lookahead handles moving and expression-driven
+/// retimes, and unreferenced compositions are queued last.
+pub(super) fn program_layers<'a>(
+    document: &'a Document,
+    composition: &str,
+) -> Vec<&'a pm_model::Node> {
+    use pm_eval::node;
+    type Ordered<'a> = (f64, &'a pm_model::Node);
+    fn collect<'a>(
+        comp: &Comp<'a>,
+        parent_time: &dyn Fn(f64) -> f64,
+        depth: u32,
+        layers: &mut Vec<Ordered<'a>>,
+        seen: &mut std::collections::HashSet<pm_model::JsString>,
+    ) {
+        seen.insert(comp.id().clone());
+        for layer in comp.layers() {
+            if layers.len() >= 65_536 {
+                break;
+            }
+            if matches!(
+                layer.get("on").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(false))
+            ) {
+                continue;
+            }
+            let from = node::number(layer.get("from")).unwrap_or(0.);
+            let end = from + node::number(layer.get("dur")).unwrap_or(0.).max(0.);
+            layers.push((parent_time(from), layer));
+            if depth < plan::PRECOMP_MAX_DEPTH
+                && let Some((id, _)) = capability::precomp_target(comp.root(), layer)
+                && let Ok(child) = Comp::in_root(comp.root(), &id, comp.revision())
+            {
+                let at = upcoming_source_time(layer, from).unwrap_or(0.);
+                let speed = upcoming_source_time(layer, from + 1.).map_or(0., |next| next - at);
+                collect(
+                    &child,
+                    &|time| {
+                        let mapped = if speed > 0. {
+                            from + (time - at) / speed
+                        } else {
+                            from
+                        };
+                        parent_time(mapped.max(from).min(end))
+                    },
+                    depth + 1,
+                    layers,
+                    seen,
+                );
+            }
+        }
+    }
+
+    let Some(root) = document.root() else {
+        return Vec::new();
+    };
+    let mut layers = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(comp) = Comp::resolve(document, composition) {
+        collect(&comp, &|time| time, 0, &mut layers, &mut seen);
+    }
+    layers.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut result: Vec<_> = layers.into_iter().map(|(_, layer)| layer).collect();
+    if node::string(root.get("id")).is_some_and(|id| !seen.contains(id)) {
+        result.extend(node::array(root.get("layers")).unwrap_or_default());
+    }
+    if let Some(comps) = root.get("comps") {
+        for (id, comp) in node::entries(comps) {
+            if !seen.contains(&id) {
+                result.extend(node::array(node::member(comp.node(), "layers")).unwrap_or_default());
+            }
+        }
+    }
+    let mut visited = std::collections::HashSet::new();
+    result.retain(|layer| visited.insert(std::ptr::from_ref(*layer)));
+    result
 }
 
 fn upcoming_edge(
@@ -417,6 +521,10 @@ impl Renderer {
         });
         let mut result = MediaPreparation::default();
         let mut stills = std::collections::HashSet::new();
+        let mut programs = Vec::new();
+        let mut shaders = Vec::new();
+        let mut saved = crate::effects::prewarm::SavedEffects::default();
+        let native_effects = self.effect_host.is_none();
         visit_upcoming(
             &comp,
             comp.seconds_at(time.get()),
@@ -426,6 +534,15 @@ impl Renderer {
             &mut |comp, layer, kind, seconds, scale| {
                 use pm_eval::node::{is_str, member, string};
                 if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                if native_effects {
+                    upcoming_programs(&self.effects, &mut saved, layer, seconds, &mut programs);
+                }
+                if kind == "shader" {
+                    shaders.push(layer);
+                }
+                if !matches!(kind, "image" | "video") {
                     return;
                 }
                 let data = member(Some(layer), "d");
@@ -471,6 +588,21 @@ impl Renderer {
                 }
             },
         );
+        if !programs.is_empty() || !shaders.is_empty() {
+            let precision = project_settings(comp.root())?.precision;
+            let format = pm_gpu::target::working_format(precision);
+            self.shaders.prewarm(
+                &self.device,
+                format,
+                shaders
+                    .into_iter()
+                    .rev()
+                    .filter_map(crate::shader_layers::exec::prewarm_source),
+                true,
+            );
+            self.effects
+                .prewarm_selected(&self.device, format, &programs);
+        }
         Ok(result)
     }
 
@@ -490,6 +622,68 @@ impl Renderer {
 mod upcoming_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shader_lookahead_follows_the_active_precomps_source_time() {
+        let doc = Document::new(Some(pm_model::json::parse(&json!({
+            "id":"root","layers":[
+                {"id":"late","type":"shader","on":true,"from":5,"dur":2,"d":{"code":"// late"}},
+                {"id":"nested","type":"precomp","on":true,"from":1,"dur":3,"d":{"comp":"child","speed":2,"trim":4}}
+            ],
+            "comps":{"child":{"layers":[
+                {"id":"early","type":"shader","on":true,"from":6,"dur":2,"d":{"code":"// early"}}
+            ]}}
+        }).to_string()).unwrap()), 1);
+        let selected = program_layers(&doc, "root")
+            .into_iter()
+            .filter_map(crate::shader_layers::exec::prewarm_source)
+            .map(|(_, source, _)| source)
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 2);
+        assert!(selected[0].contains("// early"));
+        let mut upcoming = Vec::new();
+        let comp = Comp::resolve(&doc, "root").unwrap();
+        visit_upcoming(
+            &comp,
+            2.,
+            (1., 1.),
+            0,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &mut |_, layer, _, _, _| {
+                upcoming.extend(crate::shader_layers::exec::prewarm_source(layer))
+            },
+        );
+        assert_eq!(upcoming.len(), 1);
+        assert!(upcoming[0].1.contains("// early"));
+    }
+
+    #[test]
+    fn lookahead_selects_programs_for_enabled_layers_at_the_cut() {
+        let doc = Document::new(Some(pm_model::json::parse(&json!({
+            "id":"root","layers":[
+                {"type":"text","on":true,"from":2,"dur":1,"fx":[
+                    {"type":"blur","on":true},{"type":"blur","on":true},{"type":"glow","on":false}
+                ]},
+                {"type":"solid","on":true,"from":0,"dur":1,"fx":[{"type":"fill","on":true}]}
+            ]
+        }).to_string()).unwrap()), 1);
+        let comp = Comp::resolve(&doc, "root").unwrap();
+        let mut programs = Vec::new();
+        let effects = crate::effects::Effects::new("lookahead-test");
+        let mut saved = crate::effects::prewarm::SavedEffects::default();
+        visit_upcoming(
+            &comp,
+            2.,
+            (1., 1.),
+            0,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &mut |_, layer, _, time, _| {
+                upcoming_programs(&effects, &mut saved, layer, time, &mut programs)
+            },
+        );
+        assert_eq!(programs.len(), 1);
+        assert_eq!(programs[0].1.as_str(), "blur");
+    }
 
     #[test]
     fn large_scene_finds_active_stills_and_retimed_nested_video() {
@@ -516,6 +710,9 @@ mod upcoming_tests {
         let comp = Comp::resolve(&doc, "root").unwrap();
         let mut found = Vec::new();
         let mut scan = |_: &Comp<'_>, layer: &pm_model::Node, kind: &str, time, _| {
+            if kind == "precomp" {
+                return;
+            }
             let id = pm_eval::node::to_js_string(layer.get("id")).to_string_lossy();
             found.push((id, kind.to_owned(), upcoming_source_time(layer, time)));
         };

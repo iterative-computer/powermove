@@ -86,7 +86,7 @@ The entry is TypeScript/TSX and exports one or more of:
   and all extension APIs below. Return `{ root, dispose, settle?, show?, publish? }`.
 - `activate(ctx)`: runs on load (and works on its own for headless/chrome/tool/effect
   extensions with no `view()` or `mount()`). `ctx` exposes:
-  `{ host, id, hot, api, commands, themes, menus, overlays, timeline, effects, transitions, layers, toolbar, panelHeader, menuBar, tools, slots, events, workspace, dialogs, fs, storage, net, clipboard, media, shell }`.
+  `{ host, id, hot, api, commands, themes, menus, overlays, timeline, effects, transitions, layers, toolbar, statusBar, panelHeader, menuBar, tools, slots, ui, events, workspace, dialogs, fs, storage, net, clipboard, media, shell }`.
 
 ### Update-safe API contract
 
@@ -101,32 +101,80 @@ conflict exists, your working fork is preserved untouched.
 
 ### Chrome & UI integration (Layers 1–3)
 
-- **Commands**: `commands.register({ id, title, key }, run)` adds `title` to the
-  command palette and keymap. Returns a disposer.
-- **Window toolbar**: `toolbar.contribute({ id, label, symbol?, tooltip?, active?, disabled?, order? }, run)`
-  adds a native macOS `NSToolbarItem` button to the window titlebar. Returns a disposer.
-- **Panel headers**: `panelHeader.contribute(panelId, { id, label?, symbol?, tooltip?, active?, disabled?, order? }, run)`
-  adds a trailing native button inside any panel's header (`"timeline"`, `"viewer"`,
-  `"inspector"`, `"assets"`, `"fxbrowser"`, `"agent"`, or `"*"`). Returns a disposer.
-- **macOS menu bar**: `menuBar.contribute(menuName, { id, label, shortcut?, checked?, disabled?, separatorBefore?, order? }, run)`
-  adds items to an existing macOS menu (`"File"`, `"Edit"`, `"View"`, `"Layer"`, `"Playback"`, `"Window"`, `"Help"`)
-  or creates a new top-level menu. Returns a disposer.
-- **Live UI slots inside built-in panels**: `slots.contribute(slot, Component)` mounts a
-  live Preact/native-UI component directly inside a built-in panel without forking it.
-  Supported slots: `"inspector.top"`, `"inspector.bottom"`, `"timeline.toolbar"`,
-  `"timeline.footer"`, `"viewer.hud"`, `"agent.toolbar"`, `"assets.toolbar"`. Returns a disposer.
-- **Interactive viewer tools & overlays**:
-  - `tools.register({ id, label, symbol?, shortcut?, cursor? }, { onActivate?, onDeactivate?, onPointerDown?, onPointerMove?, onPointerUp?, onWheel?, onKeyDown? })`
-    registers a first-class interactive viewer tool receiving composition-space coordinates
-    `{ x, y, compX, compY, scale, width, height, button, clickCount, modifiers }`.
-  - `overlays.viewer(({ frame }) => …, { interactive?: true })` draws over the viewer
-    composition (`frame` = `{ x, y, width, height, scale }`). Pass `{ interactive: true }`
-    to receive pointer clicks/drags on overlay elements.
-- **Themes & menus & timeline**:
-  - `themes.register({ id, title, tokens })`, `themes.activate(id | null)`
-  - `menus.contribute(location, (ctx) => items)` for `"panel:context"`, `"layer:context"`, `"timeline:context"`, `"viewer:context"`
-  - `timeline.chrome({ rowHeight, gutterWidth, rulerHeight, keyframeSize, clipRadius, surfaceOrder })`
-  - `timeline.paint((clips) => shapes)`
+Settings is reserved for Powermove. Extensions cannot replace the Settings
+panel, modify its toolbar or header, contribute to its slots, or add items
+to its context menus. Header actions targeting `"*"` apply to eligible panels.
+
+`ui.surfaces()` returns the supported toolbar targets and zones, status bar
+targets and sides, slot names, context menu locations, replaceable panel IDs,
+and excluded surfaces. Registration and modification methods below return a
+disposer. Calling it removes that registration or patch. Powermove also removes
+the extension's contributions when its realm closes.
+
+- **Commands**. `commands.register({ id, title, key }, run)` adds a command
+  to the palette and optionally binds a key.
+- **Window toolbar**. `toolbar.contribute({ id, label, icon?, tooltip?, active?, badge?, zone?, order?, variant?, disabled?, menu?, onClick? })`
+  adds a button. Supply `onClick`, `menu`, or both. The default zone is
+  `"after-add"` and the default order is `0`. Other zones are `"leading"`,
+  `"center"`, and `"trailing"`. Variants are `"default"`, `"accent"`, and
+  `"subtle"`. Use SF Symbol names for icons.
+  - Dropdown entries use `{ id?, label, icon?, key?, checked?, disabled?, separator?, submenu?, run? }`.
+    Nested menus use the same descriptor. `run` handles selection.
+  - `toolbar.modify(target, { hidden?, label?, icon?, tooltip?, badge?, order? })`
+    patches `"title"`, `"tools"`, `"add"`, `"tasks"`, `"agent"`, `"export"`, or `"panelLibrary"`.
+  - `toolbar.contributeAddItem({ id, label, icon?, section?, tooltip?, onClick })`
+    adds an item to the `+` menu.
+- **Status bar**. `statusBar.contribute({ id, side, text, order?, icon?, tooltip?, tone?, clickable?, onClick? })`
+  adds an item on the `"left"`, `"center"`, or `"right"`. Tones are
+  `"default"`, `"accent"`, `"warning"`, and `"danger"`. An `onClick` callback
+  makes the item clickable unless `clickable` is false.
+  `statusBar.modify(target, { hidden?, text? })` patches `"state"`, `"offline"`,
+  `"dimensions"`, or `"workspace"`.
+- **Panel headers and tabs**. `panelHeader.contribute(panelId, { id, label?, icon?, tooltip?, active?, onClick })`
+  adds a trailing header action. `panelHeader.modify(panelId, { title?, icon?, badge?, hidden? })`
+  patches the header and tab presentation.
+- **macOS menu bar**. `menuBar.contribute(menuName, items)` appends items to an
+  existing menu such as `"File"` or creates a new top-level menu. Use `"-"`
+  for separators, or `{ label, key?, checked?, disabled?, submenu?, run? }`
+  for entries.
+- **Live UI slots**. `slots.contribute(slot, Component)` publishes a live
+  Preact component. The named slots are below. Use `panel:<panelId>.top` or
+  `panel:<panelId>.bottom` for a specific panel. Generic panel IDs can contain
+  ASCII letters, digits, hyphens, underscores, and dot-separated segments.
+
+| Surface | Slots |
+| --- | --- |
+| Toolbar | `toolbar.leading`, `toolbar.center`, `toolbar.trailing` |
+| Status bar | `statusBar.left`, `statusBar.center`, `statusBar.right` |
+| Viewer | `viewer.hud`, `viewer.top`, `viewer.bottom`, `viewer.controls.left`, `viewer.controls.right` |
+| Timeline | `timeline.toolbar`, `timeline.footer`, `timeline.header`, `timeline.top`, `timeline.bottom` |
+| Properties | `inspector.header`, `inspector.top`, `inspector.bottom` |
+| Project and effects | `assets.toolbar`, `assets.top`, `assets.bottom`, `effects.top`, `effects.bottom`, `layerEffects.top`, `layerEffects.bottom` |
+| Agent, easing, color, export | `agent.toolbar`, `agent.top`, `agent.bottom`, `easing.top`, `easing.bottom`, `color.top`, `color.bottom`, `export.top`, `export.bottom` |
+| Windows | `home.header`, `home.top`, `home.bottom`, `panelLibrary.top`, `panelLibrary.bottom`, `welcome.top`, `welcome.bottom`, `store.top`, `store.bottom` |
+
+- **Context menus**. `menus.contribute(location, (ctx) => items)` accepts
+  `"panel:context"`, `"layer:context"`, `"timeline:context"`, `"viewer:context"`,
+  `"assets:context"`, `"inspector:context"`, `"effects:context"`, `"home:context"`,
+  `"toolbar:context"`, `"statusBar:context"`, and the existing `"titlebar:right"`.
+  Use `"-"` for a separator, `{ header }` for a section heading, or
+  `{ label, kb?, on?, disabled?, submenu?, run? }` for an entry. The provider can
+  return an array or a promise resolving to one.
+- **Viewer tools**. `tools.register({ id, title, icon?, shortcut?, cursor?, showInToolbar?, overlay?, onActivate?, onDeactivate?, onPointerDown?, onPointerMove?, onPointerUp?, onWheel?, onKeyDown? })`
+  registers a tool. Set `showInToolbar` to request a toolbar button. Pointer
+  events include viewer and composition coordinates. Use `tools.activate(id)`
+  to activate a tool or `tools.activate(null)` to switch to Select.
+- **Viewer overlays**. `overlays.viewer(({ frame }) => …, { interactive?: true })`
+  draws over the composition. `frame` contains `x`, `y`, `width`, `height`,
+  and `scale`. Set `interactive` to receive pointer events.
+- **Themes and timeline**. Use `themes.register({ id, title, tokens })` to
+  register a theme and `themes.activate(id | null)` to select it.
+  Use `timeline.chrome({ rowHeight, gutterWidth, rulerHeight, keyframeSize, clipRadius, surfaceOrder })`
+  to adjust timeline appearance and `timeline.paint((clips) => shapes)` to
+  draw clip decorations.
+
+The v4 broker accepts and discovers these contributions. A contribution
+appears when the native renderer for its surface supports it.
 
 ### Custom GPU shaders (Layer 4)
 
@@ -137,7 +185,13 @@ conflict exists, your working fork is preserved untouched.
 ### Events, workspace, dialogs & native OS capabilities (Layers 5–6)
 
 - **Events**: `events.on(event, handler)` for `"selection"`, `"document"`, `"playback"`, `"layout"`, `"tool"`, `"command"`, `"time"`. Returns disposer.
-- **Workspace**: `workspace.openPanel(id)`, `workspace.closePanel(id)`, `workspace.focusPanel(id)`, `workspace.listPanels()`, `workspace.runCommand(name, args?)`.
+- **Workspace**. Use `workspace.openPanel(id)`, `workspace.closePanel(id)`,
+  `workspace.focusPanel(id)`, or `workspace.togglePanel(id)` to control panels.
+  `workspace.getLayout()` reports open and visible panels, contributed panels,
+  and the selected tool. `workspace.setLayout(layout)` sends the JSON layout
+  to the shell's `workspaceSetLayout` command, which needs native support.
+  Also available are `workspace.setTool(id)`, `workspace.notify(message)`, and
+  `workspace.runCommand(name, args?)`.
 - **Native macOS dialogs**: `dialogs.openFolder(opts?)`, `dialogs.openFiles(opts?)`, `dialogs.saveFile(opts?)`, `dialogs.confirm(opts)`, `dialogs.alert(opts)`.
 - **Filesystem**: `fs.homeDir()`, `fs.listDir(path, { includeHidden? })`, `fs.stat(path)`, `fs.exists(path)`, `fs.readText(path)`, `fs.readBytes(path)`, `fs.writeText(path, text)`, `fs.writeBytes(path, base64)`, `fs.mkdir(path)`, `fs.rename(from, to)`, `fs.trash(path)`.
 - **Persistent per-extension KV storage**: `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)`, `storage.keys()`, `storage.clear()` (persists across reloads & app restarts).

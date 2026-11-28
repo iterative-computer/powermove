@@ -28,6 +28,16 @@ pub(crate) fn test_request_start() -> Option<Instant> {
     TEST_REQUEST_START.get()
 }
 
+thread_local! {
+    static BACKGROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this prewarm worker's compiler requests as background work. The
+/// permit is held only inside each isolated request, never during GPU work.
+pub fn background_worker() {
+    BACKGROUND.set(true);
+}
+
 pub const PROCESS_SLOTS: usize = 2;
 pub const MAX_FRAME: usize = 64 << 20;
 pub const MAX_RESIDENT_BYTES: u64 = 1 << 30;
@@ -99,10 +109,8 @@ struct Permit<'a>(&'a Pool);
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.0.active.fetch_sub(1, Ordering::AcqRel);
-        if self.0.waits {
-            let _guard = self.0.freed.0.lock().unwrap_or_else(|e| e.into_inner());
-            self.0.freed.1.notify_one();
-        }
+        let _guard = self.0.freed.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.freed.1.notify_one();
     }
 }
 struct Worker(Child);
@@ -332,7 +340,7 @@ impl Pool {
                 return Ok(Permit(self));
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            if !self.waits || left.is_zero() {
+            if (!self.waits && !BACKGROUND.get()) || left.is_zero() {
                 return Err(Failure::new(
                     FailureStage::CompilerBusy,
                     "all GLSL compiler process slots are occupied; retry later",
@@ -361,6 +369,10 @@ impl Pool {
         use std::os::fd::OwnedFd;
         // Independent unit tests expecting success must not compete for the
         // deliberately tiny production pool; integration tests exercise real admission.
+        static BACKGROUND_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _background = BACKGROUND
+            .get()
+            .then(|| BACKGROUND_SLOT.lock().unwrap_or_else(|e| e.into_inner()));
         #[cfg(test)]
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(test)]

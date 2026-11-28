@@ -157,15 +157,48 @@ fn cached_file(path: &Path) -> bool {
     }
 }
 
+fn stale_proxy_temp(path: &Path, now: SystemTime) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(suffix) = name.strip_prefix(".tmp") else {
+        return false;
+    };
+    if suffix.len() != 6 || !suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    File::read(path.to_path_buf()).is_some_and(|file| file.age(now) >= Duration::from_secs(300))
+}
+
 fn clean_cache(
     profile: &Path,
     limit: u64,
     pinned: &BTreeSet<PathBuf>,
+    now: SystemTime,
     idle: &impl Fn() -> bool,
 ) -> io::Result<u64> {
     let mut reclaimed: u64 = 0;
     if let Some(root) = owned_dir(profile, "media-cache") {
         reclaimed = crate::media::sweep_cache(&root, idle)?;
+    }
+    // Sweep orphaned `NamedTempFile` proxy/optimized staging files left behind
+    // by interrupted transcodes (always safe after 5 min of inactivity).
+    for store in ["Media Storage/Proxies/store", "Media Storage/Optimized/store"] {
+        if let Some(root) = owned_dir(profile, store) {
+            for entry in children(&root) {
+                if !idle() {
+                    return Ok(reclaimed);
+                }
+                let path = entry.path();
+                if !pinned.contains(&path)
+                    && stale_proxy_temp(&path, now)
+                    && let Some(file) = File::read(path)
+                    && let Some(bytes) = file.remove()?
+                {
+                    reclaimed = reclaimed.saturating_add(bytes);
+                }
+            }
+        }
     }
     let reclaimed_by_budget = crate::media::with_idle_cache(|| {
         let mut list = Vec::new();
@@ -352,7 +385,7 @@ pub(super) fn clean(
                 JOURNAL_LIMIT,
                 idle,
             )?,
-            Bucket::Cache => clean_cache(profile, cache_limit, pinned, idle)?,
+            Bucket::Cache => clean_cache(profile, cache_limit, pinned, now, idle)?,
             Bucket::AgentHistory => clean_history(profile, now, idle)?,
             Bucket::Recovery => clean_recovery(profile, now, idle)?,
             Bucket::Migration => pm_first_launch::later::tidy_superseded(profile, now, idle)?,
@@ -438,9 +471,31 @@ mod tests {
             "1\n0\nfixture (1) posters 3\n",
         )
         .unwrap();
-        clean_cache(root.path(), 0, &BTreeSet::new(), &|| true).unwrap();
+        clean_cache(root.path(), 0, &BTreeSet::new(), SystemTime::now(), &|| true).unwrap();
         assert!(authored.is_file());
         assert!(!generated.exists());
+    }
+
+    #[test]
+    fn profile_hygiene_sweeps_stale_proxy_temp_files_only() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("Media Storage/Proxies/store");
+        fs::create_dir_all(&store).unwrap();
+        let stale = store.join(".tmpAb12Cd");
+        let fresh = store.join(".tmpXy98Zw");
+        let custom = store.join("keep.mov");
+        fs::write(&stale, vec![1u8; 8192]).unwrap();
+        fs::write(&fresh, vec![2u8; 8192]).unwrap();
+        fs::write(&custom, vec![3u8; 8192]).unwrap();
+        let now = SystemTime::now();
+        fs::File::open(&stale)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(600))
+            .unwrap();
+        clean_cache(root.path(), CACHE_DEFAULT, &BTreeSet::new(), now, &|| true).unwrap();
+        assert!(!stale.exists(), "stale proxy staging temp should be swept");
+        assert!(fresh.is_file(), "fresh in-flight temp must be kept");
+        assert!(custom.is_file(), "unrecognized user file must be kept");
     }
 
     #[test]

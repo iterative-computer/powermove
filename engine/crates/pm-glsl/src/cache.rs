@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -73,6 +73,8 @@ pub fn prepare_isolated(
 
 type Entry = Arc<Result<Prepared, Failure>>;
 
+type InFlight = HashMap<Key, Arc<OnceLock<Entry>>>;
+
 /// Entries with their last use, and the use counter.
 type Memory = (HashMap<Key, (Entry, u64)>, u64);
 
@@ -82,6 +84,7 @@ pub struct Cache {
     dir: Option<PathBuf>,
     deadline: Duration,
     memory: Mutex<Memory>,
+    in_flight: Mutex<InFlight>,
 }
 
 impl Cache {
@@ -93,6 +96,7 @@ impl Cache {
             dir,
             deadline: DEFAULT_DEADLINE,
             memory: Mutex::new((HashMap::new(), 0)),
+            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -113,21 +117,44 @@ impl Cache {
     /// in the next process).
     pub fn prepare(&self, fragment: &str, line_offset: u32) -> Entry {
         let key = self.key(fragment, line_offset);
+        self.prepare_key(key, || {
+            if let Some(prepared) = self.disk_get(key) {
+                return Ok(prepared);
+            }
+            let result = prepare_isolated(fragment, line_offset, self.deadline);
+            if let Ok(prepared) = &result {
+                self.disk_put(key, prepared);
+            }
+            result
+        })
+    }
+
+    fn prepare_key(&self, key: Key, prepare: impl FnOnce() -> Result<Prepared, Failure>) -> Entry {
         if let Some(hit) = self.memory_get(key) {
             return hit;
         }
-        let entry: Entry = Arc::new(match self.disk_get(key) {
-            Some(prepared) => Ok(prepared),
-            None => {
-                let result = prepare_isolated(fragment, line_offset, self.deadline);
-                if let Ok(prepared) = &result {
-                    self.disk_put(key, prepared);
-                }
-                result
+        let pending = {
+            let mut flights = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(hit) = self.memory_get(key) {
+                return hit;
             }
-        });
-        if !matches!(entry.as_ref(), Err(f) if f.stage.retryable()) {
-            self.memory_put(key, entry.clone());
+            flights.entry(key).or_default().clone()
+        };
+        let entry = pending
+            .get_or_init(|| {
+                let entry = Arc::new(prepare());
+                if !matches!(entry.as_ref(), Err(f) if f.stage.retryable()) {
+                    self.memory_put(key, entry.clone());
+                }
+                entry
+            })
+            .clone();
+        let mut flights = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if flights
+            .get(&key)
+            .is_some_and(|flight| Arc::ptr_eq(flight, &pending))
+        {
+            flights.remove(&key);
         }
         entry
     }
@@ -236,6 +263,36 @@ mod tests {
     use crate::pipeline::FailureStage;
 
     const SRC: &str = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_uv); }\n";
+
+    #[test]
+    fn concurrent_requests_share_one_translation_per_key() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let cache = Cache::new("concurrent", None);
+        let key = cache.key(SRC, 0);
+        let start = Barrier::new(8);
+        let calls = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let requests: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        cache.prepare_key(key, || {
+                            calls.fetch_add(1, Ordering::Relaxed);
+                            pipeline::prepare(SRC, 0)
+                        })
+                    })
+                })
+                .collect();
+            let mut results = requests.into_iter().map(|r| r.join().unwrap());
+            let first = results.next().unwrap();
+            assert!(first.is_ok());
+            assert!(results.all(|entry| Arc::ptr_eq(&first, &entry)));
+        });
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn keys_cover_source_offset_and_context() {

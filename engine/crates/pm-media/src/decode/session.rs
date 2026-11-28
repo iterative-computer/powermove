@@ -165,6 +165,16 @@ impl Session {
         self.trim(None);
     }
 
+    /// Under decoder lease pressure, keep the last requested picture;
+    /// the shared cache already received the decoded window.
+    pub(crate) fn shed_window(&mut self) {
+        let keep = self
+            .last_target
+            .filter(|k| self.window.contains_key(k))
+            .or_else(|| self.window.keys().next_back().copied());
+        self.window.retain(|key, _| Some(*key) == keep);
+    }
+
     /// Keep at least the requested frame, even if that one exceeds the budget.
     pub fn set_window_bytes(&mut self, bytes: usize) {
         self.window_bytes = bytes;

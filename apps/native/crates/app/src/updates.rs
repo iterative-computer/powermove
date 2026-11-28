@@ -15,12 +15,12 @@
 use crate::alert::{Alert, Button};
 use gpui::*;
 use objc2::{
-    MainThreadMarker, MainThreadOnly, Message, msg_send,
+    Message, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject, Bool},
 };
-use objc2_app_kit::{NSAlert, NSColor, NSFont, NSScrollView, NSTextView, NSWindow};
-use objc2_foundation::{NSBundle, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_app_kit::NSWindow;
+use objc2_foundation::{NSBundle, NSString};
 use pm_services::{
     Result as ServiceResult, ServiceErrorCode,
     storage::ServiceStorage,
@@ -264,38 +264,45 @@ fn present_when_free(
     })
     .detach();
 }
-fn whats_new(claim: ReleaseClaim, previous: &str, window: &NSWindow, cx: &mut App) {
+/// Powermove ▸ What’s New…: opens the native What's New sheet on demand,
+/// using the local release fixture if present or Powermove 2.0's built-in notes.
+pub fn show_whats_new(profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) {
+    let source = fixture(&profile);
+    let current = current_version();
+    let work = cx.background_executor().spawn(async move {
+        source
+            .as_deref()
+            .and_then(|p| read_feed(p).ok())
+            .map(|f| f.releases())
+            .unwrap_or_default()
+    });
+    cx.spawn(async move |cx| {
+        let releases = work.await;
+        cx.update(|_| {
+            let t = pm_shell::tokens();
+            let content = if releases.is_empty() {
+                crate::whats_new_sheet::WhatsNewContent::v2_default(&current, RELEASES_PAGE)
+            } else {
+                crate::whats_new_sheet::WhatsNewContent::from_releases(
+                    &releases,
+                    &current,
+                    RELEASES_PAGE,
+                )
+            };
+            crate::whats_new_sheet::present(&window, content, &t);
+        });
+    })
+    .detach();
+}
+
+fn whats_new(claim: ReleaseClaim, _previous: &str, window: &NSWindow, cx: &mut App) {
     let t = pm_shell::tokens();
-    let entries: Vec<_> = claim
-        .releases
-        .iter()
-        .map(|r| {
-            let m = &r.metadata;
-            let name = m["name"]
-                .as_str()
-                .filter(|n| !n.is_empty())
-                .unwrap_or(&r.version);
-            let notes = m["body"]
-                .as_str()
-                .filter(|b| !b.trim().is_empty())
-                .unwrap_or("Fixes and improvements.");
-            (
-                Some(name.to_owned()),
-                m["published_at"].as_str().and_then(long_date),
-                notes.to_owned(),
-            )
-        })
-        .collect();
-    let alert = Alert::new(
-        format!("What’s New in Powermove {}", claim.current),
-        format!("Powermove updated from {previous} to {}.", claim.current),
-        vec![
-            Button::new("Continue", false).default().cancel(),
-            Button::new("View on GitHub", true),
-        ],
+    let content = crate::whats_new_sheet::WhatsNewContent::from_releases(
+        &claim.releases,
+        &claim.current,
+        RELEASES_PAGE,
     );
-    let accessory = notes_view(&entries, &t, t.metrics.sheet_width_wide);
-    let rx = alert.sheet_with(window, |native| set_accessory(native, &accessory));
+    crate::whats_new_sheet::present(window, content, &t);
     // Marked seen now that it's on screen, even if a quit dismisses it.
     let mut host = Prefetched::default();
     if cx
@@ -307,23 +314,6 @@ fn whats_new(claim: ReleaseClaim, previous: &str, window: &NSWindow, cx: &mut Ap
     {
         persist(SEEN, serde_json::json!(version), cx);
     }
-    cx.spawn(async move |_| {
-        if rx.recv().await.ok().flatten() == Some(true) {
-            crate::platform::open_url(RELEASES_PAGE);
-        }
-    })
-    .detach();
-}
-/// `2026-11-04T…` in the system's long date style.
-fn long_date(iso: &str) -> Option<String> {
-    let day = iso.get(..10)?;
-    let formatter = objc2_foundation::NSDateFormatter::new();
-    formatter.setDateFormat(Some(&NSString::from_str("yyyy-MM-dd")));
-    let date = formatter.dateFromString(&NSString::from_str(day))?;
-    formatter.setDateFormat(None);
-    formatter.setDateStyle(objc2_foundation::NSDateFormatterStyle::LongStyle);
-    formatter.setTimeStyle(objc2_foundation::NSDateFormatterStyle::NoStyle);
-    Some(formatter.stringFromDate(&date).to_string())
 }
 
 /// The What's New marker and release history, read before the check and
@@ -347,106 +337,6 @@ impl ReleaseHost for Prefetched {
         self.marked = Some(version.into());
         Ok(())
     }
-}
-
-/// Release notes as one scrolling text view: each release's name and date,
-/// then its Markdown (inline: links work, nothing remote loads).
-fn notes_view(
-    entries: &[(Option<String>, Option<String>, String)],
-    t: &pm_design::Tokens,
-    width: f32,
-) -> Retained<NSScrollView> {
-    let mtm = MainThreadMarker::new().expect("main thread");
-    let frame = NSRect::new(
-        NSPoint::new(0., 0.),
-        NSSize::new(width as f64, t.metrics.palette_height as f64),
-    );
-    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
-    scroll.setHasVerticalScroller(true);
-    scroll.setBorderType(objc2_app_kit::NSBorderType::NoBorder);
-    scroll.setDrawsBackground(false);
-    let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), frame);
-    text.setEditable(false);
-    text.setSelectable(true);
-    text.setDrawsBackground(false);
-    text.setVerticallyResizable(true);
-    text.setHorizontallyResizable(false);
-    unsafe {
-        let storage: *mut AnyObject = msg_send![&*text, textStorage];
-        for (index, (name, date, notes)) in entries.iter().enumerate() {
-            let gap = if index == 0 { "" } else { "\n\n" };
-            if let Some(name) = name {
-                append(
-                    storage,
-                    &format!("{gap}{name}\n"),
-                    &NSFont::boldSystemFontOfSize(t.typography.title as f64),
-                    &NSColor::labelColor(),
-                );
-            }
-            if let Some(date) = date {
-                append(
-                    storage,
-                    &format!("{date}\n"),
-                    &NSFont::systemFontOfSize(t.typography.minimum as f64),
-                    &NSColor::secondaryLabelColor(),
-                );
-            }
-            append_markdown(storage, notes, t.typography.reading as f64);
-        }
-    }
-    scroll.setDocumentView(Some(&text));
-    scroll
-}
-unsafe fn append(storage: *mut AnyObject, text: &str, font: &NSFont, colour: &NSColor) {
-    unsafe {
-        let ns = NSString::from_str(text);
-        let piece: *mut AnyObject = msg_send![objc2::class!(NSMutableAttributedString), alloc];
-        let piece: *mut AnyObject = msg_send![piece, initWithString: &*ns];
-        style(piece, font, colour);
-        let _: () = msg_send![storage, appendAttributedString: piece];
-        let _: () = msg_send![piece, release];
-    }
-}
-unsafe fn style(piece: *mut AnyObject, font: &NSFont, colour: &NSColor) {
-    unsafe {
-        let length: usize = msg_send![piece, length];
-        let range = NSRange::new(0, length);
-        let font_key = NSString::from_str("NSFont");
-        let colour_key = NSString::from_str("NSColor");
-        let _: () = msg_send![piece, addAttribute: &*font_key, value: font, range: range];
-        let _: () = msg_send![piece, addAttribute: &*colour_key, value: colour, range: range];
-    }
-}
-/// Inline Markdown keeps line breaks and links; anything unparseable reads as text.
-unsafe fn append_markdown(storage: *mut AnyObject, markdown: &str, size: f64) {
-    unsafe {
-        let font = NSFont::systemFontOfSize(size);
-        let colour = NSColor::labelColor();
-        let options: *mut AnyObject =
-            msg_send![objc2::class!(NSAttributedStringMarkdownParsingOptions), new];
-        // NSAttributedStringMarkdownInterpretedSyntaxInlineOnlyPreservingWhitespace
-        let _: () = msg_send![options, setInterpretedSyntax: 2isize];
-        let ns = NSString::from_str(markdown);
-        let parsed: *mut AnyObject = msg_send![objc2::class!(NSMutableAttributedString), alloc];
-        let parsed: *mut AnyObject = msg_send![
-            parsed,
-            initWithMarkdownString: &*ns,
-            options: options,
-            baseURL: std::ptr::null::<AnyObject>(),
-            error: std::ptr::null_mut::<*mut AnyObject>()
-        ];
-        let _: () = msg_send![options, release];
-        if parsed.is_null() {
-            append(storage, markdown, &font, &colour);
-            return;
-        }
-        style(parsed, &font, &colour);
-        let _: () = msg_send![storage, appendAttributedString: parsed];
-        let _: () = msg_send![parsed, release];
-    }
-}
-fn set_accessory(native: &NSAlert, view: &NSScrollView) {
-    native.setAccessoryView(Some(view));
 }
 
 #[cfg(test)]

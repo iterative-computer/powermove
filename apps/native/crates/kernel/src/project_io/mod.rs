@@ -46,7 +46,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pm_model::canonical::open_comp_id;
-use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_container};
+#[cfg(test)]
+use pm_model::container::read_container;
+use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_container_with_history};
 use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -517,7 +519,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
     let stop = std::sync::atomic::AtomicBool::new(false);
     let (container, hash) = std::thread::scope(|scope| {
         let whole = scope.spawn(|| hash_project_file(&file, path, before.size, &stop));
-        let container = read_container(
+        let container = read_container_with_history(
             &file,
             ReadOptions {
                 verify_media: false,
@@ -533,7 +535,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         (container, hash)
     });
-    let container = container?;
+    let (container, raw_history) = container?;
     let hash = hash?;
     if options.verify_media {
         let records: Vec<&MediaRecord> = container
@@ -559,7 +561,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         held: file.try_clone().ok().map(durable::HeldFile::new),
         stat_taken: taken,
     });
-    from_container(container, Some(path.to_owned()), Some(version))
+    from_container_with_history(container, Some(path.to_owned()), Some(version), raw_history)
 }
 
 /// Legacy files predate native colour management. Keep their preview intent
@@ -628,12 +630,21 @@ pub(crate) fn adopt_electron_asset(asset: &mut Value, legacy_container: bool) {
     }
 }
 
-/// Splits, validates and canonicalizes a decoded container (shared by
-/// [`open_project`] and tests that build files in memory).
+#[cfg(test)]
 pub(crate) fn from_container(
     container: pm_model::container::Container,
     path: Option<PathBuf>,
     version: Option<Arc<FileVersion>>,
+) -> Result<OpenedProject, ProjectIoError> {
+    from_container_with_history(container, path, version, None)
+}
+
+/// Splits, validates and canonicalizes a decoded container.
+fn from_container_with_history(
+    container: pm_model::container::Container,
+    path: Option<PathBuf>,
+    version: Option<Arc<FileVersion>>,
+    mut raw_history: Option<pm_model::json::RawHistory>,
 ) -> Result<OpenedProject, ProjectIoError> {
     let format = container.format;
     // `document.proj || document`.
@@ -700,6 +711,11 @@ pub(crate) fn from_container(
                 None => legacy.clone(),
             };
             fields.insert(key, retained);
+            // Inline legacy media uses the stored history to find its
+            // reachable records. Preserve that compatibility path.
+            if let Some(raw) = raw_history.take() {
+                fields.insert("history", raw.json().parse());
+            }
             let reachable = reachable_in_stored(&project, fields.get("history"));
             if let Value::Object(legacy) = legacy {
                 for (id, source) in legacy.iter() {
@@ -736,25 +752,29 @@ pub(crate) fn from_container(
     }
 
     let version_member = fields.remove("v");
-    let raw_history = fields.remove("history");
+    let parsed_history = fields.remove("history");
     let workspace = fields.remove("ws");
     normalize_compositions(&mut project);
     let canonical = crate::model::to_canonical(project);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);
-    let (retained_history, history) = pm_model::parallel::join(
-        || {
-            raw_history
-                .as_ref()
-                .map(crate::history::CompactJson::history)
-        },
-        || {
-            raw_history
-                .as_ref()
-                .and_then(|h| History::from_saved(h, open_comp.as_deref()))
-        },
-    );
-    // Free the parsed history tree before asking malloc to return pages.
-    drop(raw_history);
+    let (retained_history, history) = if let Some(raw) = raw_history {
+        let (retained, history) = History::from_saved_json(raw.json(), open_comp.as_deref());
+        (Some(retained), history)
+    } else {
+        pm_model::parallel::join(
+            || {
+                parsed_history
+                    .as_ref()
+                    .map(crate::history::CompactJson::history)
+            },
+            || {
+                parsed_history
+                    .as_ref()
+                    .and_then(|h| History::from_saved(h, open_comp.as_deref()))
+            },
+        )
+    };
+    drop(parsed_history);
     let opened = OpenedProject {
         file: ProjectFile {
             path,

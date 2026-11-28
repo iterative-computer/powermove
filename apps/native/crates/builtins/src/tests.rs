@@ -8130,3 +8130,480 @@ fn semantic_activate_retargets_after_node_id_republish() {
     drop(entry);
     actor.shutdown();
 }
+
+#[test]
+fn v4_surface_catalog_excludes_settings_and_accepts_safe_panel_slots() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = graph_of("export function activate() {}");
+    let generation = finish(
+        panels
+            .mount_extension("surface-catalog", &graph, None)
+            .unwrap(),
+    )
+    .generation;
+    let call = |op, input: Value| {
+        panels.broker.call(
+            &generation,
+            op,
+            &input,
+            HostBudget {
+                cancellation: Cancellation::default(),
+                deadline: Instant::now() + Duration::from_secs(5),
+                max_response_bytes: 128 * 1024,
+            },
+        )
+    };
+    let surfaces = call("ui.surfaces", Value::Null).unwrap();
+    assert_eq!(
+        surfaces["toolbarTargets"],
+        json!([
+            "title",
+            "tools",
+            "add",
+            "tasks",
+            "agent",
+            "export",
+            "panelLibrary"
+        ])
+    );
+    assert_eq!(
+        surfaces["toolbarZones"],
+        json!(["leading", "center", "after-add", "trailing"])
+    );
+    assert_eq!(
+        surfaces["statusBarTargets"],
+        json!(["state", "offline", "dimensions", "workspace"])
+    );
+    assert_eq!(
+        surfaces["statusBarSides"],
+        json!(["left", "center", "right"])
+    );
+    assert_eq!(
+        surfaces["contextMenus"],
+        json!([
+            "panel:context",
+            "layer:context",
+            "timeline:context",
+            "viewer:context",
+            "assets:context",
+            "inspector:context",
+            "effects:context",
+            "home:context",
+            "toolbar:context",
+            "statusBar:context"
+        ])
+    );
+    assert_eq!(surfaces["excluded"], json!(["settings"]));
+    let listed_slots = surfaces["slots"].as_array().unwrap();
+    assert_eq!(listed_slots.len(), 46);
+    for slot in BUILTIN_SLOTS {
+        assert!(is_valid_slot(slot), "{slot}");
+        assert!(listed_slots.contains(&json!(slot)), "{slot}");
+    }
+    for suffix in ["top", "bottom"] {
+        assert!(listed_slots.contains(&json!(format!("panel:<panelId>.{suffix}"))));
+        assert!(is_valid_slot(&format!(
+            "panel:third-party.viewer_2.{suffix}"
+        )));
+    }
+    for slot in [
+        "panel:.top",
+        "panel:../viewer.top",
+        "panel:viewer .top",
+        "panel:a:b.bottom",
+        "panel:viewer.middle",
+        "unknown.top",
+    ] {
+        assert!(!is_valid_slot(slot), "{slot}");
+    }
+    let replaceable = surfaces["replaceablePanels"].as_array().unwrap();
+    assert_eq!(replaceable.len() + 1, BUILTIN_PANELS.len());
+    assert!(replaceable.contains(&json!("viewer")));
+    assert!(
+        !replaceable
+            .iter()
+            .any(|id| is_protected_surface(id.as_str().unwrap()))
+    );
+
+    for id in [
+        "settings",
+        "SeTtInGs",
+        "settings.extensions",
+        "settings:main",
+        "panel:settings",
+        "panel:SETTINGS.main",
+    ] {
+        assert!(is_protected_surface(id), "{id}");
+        assert!(matches!(
+            panels.replace(id, "fork", &graph),
+            Err(Error::Invalid("Settings cannot be replaced by extensions"))
+        ));
+        for (op, input) in [
+            (
+                "toolbar.modify.set",
+                json!([{"target": id, "hidden": true}]),
+            ),
+            (
+                "panelHeader.set",
+                json!([{"panelId": id, "id": "try", "key": "try"}]),
+            ),
+            (
+                "panelHeader.modify.set",
+                json!([{"panelId": id, "hidden": true}]),
+            ),
+            ("slot.validate", json!({"slot": format!("{id}.top")})),
+            ("slot.commit", json!({"slot": format!("panel:{id}.bottom")})),
+        ] {
+            assert!(call(op, input).is_err(), "{op} accepted {id}");
+        }
+    }
+    assert!(is_protected_surface("panel:settings2"));
+    assert!(!is_protected_surface("settings-helper"));
+    assert!(
+        panels
+            .gather_menus("panel:context", &json!({"panelId": "Settings"}))
+            .is_empty()
+    );
+    assert!(panels.toolbar_mods_since(0).is_none());
+    assert!(panels.panel_headers_since(0).is_none());
+    assert!(panels.panel_header_mods_since(0).is_none());
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn v4_chrome_registries_scope_sets_and_cleanup_to_the_owner_generation() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = graph_of("export function activate() {}");
+    let mount = |owner| finish(panels.mount_extension(owner, &graph, None).unwrap()).generation;
+    let first = mount("chrome-a");
+    let second = mount("chrome-b");
+    let call = |generation, op, input: &Value| {
+        panels.broker.call(
+            generation,
+            op,
+            input,
+            HostBudget {
+                cancellation: Cancellation::default(),
+                deadline: Instant::now() + Duration::from_secs(5),
+                max_response_bytes: 128 * 1024,
+            },
+        )
+    };
+    type Since = fn(&Builtins, u64) -> Option<(u64, Vec<Value>)>;
+    let cases: [(&str, Since, &str, Value, Value); 5] = [
+        (
+            "toolbar.modify.set",
+            Builtins::toolbar_mods_since,
+            "panel",
+            json!({"target": "tools", "hidden": true, "label": "Tools", "icon": "star", "tooltip": "Edit", "badge": "3", "order": -4}),
+            json!({"target": "missing"}),
+        ),
+        (
+            "toolbar.addMenu.set",
+            Builtins::toolbar_add_items_since,
+            "panel",
+            json!({"id": "new", "label": "New", "icon": "plus", "section": "Items", "tooltip": "Add"}),
+            json!({"label": "Missing id"}),
+        ),
+        (
+            "statusBar.set",
+            Builtins::status_bar_items_since,
+            "panel",
+            json!({"id": "status", "side": "right", "order": 5, "text": "Ready", "tone": "accent", "icon": "checkmark", "tooltip": "Done", "clickable": true}),
+            json!({"id": "bad", "side": "bottom", "text": "Invalid"}),
+        ),
+        (
+            "statusBar.modify.set",
+            Builtins::status_bar_mods_since,
+            "panel",
+            json!({"target": "dimensions", "hidden": false, "text": "HD"}),
+            json!({"target": "dimensions", "hidden": "no"}),
+        ),
+        (
+            "panelHeader.modify.set",
+            Builtins::panel_header_mods_since,
+            "owner",
+            json!({"panelId": "viewer", "title": "Preview", "icon": "eye", "badge": "4", "hidden": false}),
+            json!({"panelId": ""}),
+        ),
+    ];
+    let mut revisions = Vec::new();
+    for (op, since, key, valid, invalid) in &cases {
+        assert!(since(&panels, 0).is_none());
+        call(&first, op, &json!([valid])).unwrap();
+        let (rev, items) = since(&panels, 0).unwrap();
+        let mut expected = valid.clone();
+        expected[*key] = json!("chrome-a");
+        assert_eq!(items, vec![expected]);
+        assert!(since(&panels, rev).is_none());
+        assert!(call(&first, op, &json!([valid, invalid])).is_err(), "{op}");
+        assert!(
+            since(&panels, rev).is_none(),
+            "invalid {op} changed revision"
+        );
+        call(&second, op, &json!([valid])).unwrap();
+        let (rev, items) = since(&panels, rev).unwrap();
+        assert_eq!(items.len(), 2);
+        revisions.push(rev);
+    }
+    panels.unmount_extension("chrome-a");
+    let remounted = mount("chrome-a");
+    assert_ne!(first.number, remounted.number);
+    for ((op, since, key, valid, _), rev) in cases.iter().zip(&mut revisions) {
+        let (now, items) = since(&panels, *rev).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0][*key], "chrome-b");
+        assert!(matches!(
+            call(&first, op, &json!([valid])),
+            Err(Error::StaleGeneration)
+        ));
+        call(&remounted, op, &json!([valid])).unwrap();
+        *rev = since(&panels, now).unwrap().0;
+    }
+
+    panels.broker.revoke_generation(&first);
+    for ((_, since, _, _, _), rev) in cases.iter().zip(&revisions) {
+        assert!(
+            since(&panels, *rev).is_none(),
+            "stale revocation changed live state"
+        );
+    }
+    panels.broker.revoke_generation(&remounted);
+    for ((op, since, key, valid, _), rev) in cases.iter().zip(&mut revisions) {
+        assert!(matches!(
+            call(&remounted, op, &json!([valid])),
+            Err(Error::StaleGeneration)
+        ));
+        let (now, items) = since(&panels, *rev).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0][*key], "chrome-b");
+        *rev = now;
+    }
+
+    let remaining = panels.realm_of("chrome-b").unwrap();
+    panels.close();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !remaining.is_disposed() {
+        assert!(Instant::now() < deadline, "realm did not shut down");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for ((_, since, _, _, _), rev) in cases.iter().zip(&revisions) {
+        let (now, items) = since(&panels, *rev).unwrap();
+        assert!(items.is_empty());
+        assert!(since(&panels, now).is_none());
+    }
+    actor.shutdown();
+}
+
+#[test]
+fn v4_chrome_sdk_routes_actions_and_disposes_registrations() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = graph_of(
+        r#"
+        export function activate({ api, toolbar, statusBar, panelHeader, menuBar, tools, ui, slots, menus, commands, workspace }) {
+            const expectRejection = (action) => {
+                try { action(); } catch (error) {
+                    if (String(error).includes('Settings')) return;
+                    throw error;
+                }
+                throw Error('Settings contribution should fail');
+            };
+            expectRejection(() => toolbar.modify('settings', {hidden: true}));
+            expectRejection(() => panelHeader.contribute('settings', {id: 'settings', onClick() {}}));
+            expectRejection(() => panelHeader.modify('settings', {hidden: true}));
+            expectRejection(() => slots.contribute('panel:settings.bottom', () => null));
+            if (ui.surfaces().excluded.join() !== 'settings') throw Error('Bad discovery');
+            for (const name of ['statusBar', 'ui', 'toolbar.modify', 'panelHeader.modify', 'workspace.setLayout']) {
+                if (!api.has(name)) throw Error('Missing capability ' + name);
+            }
+
+            const clicks = [];
+            const note = (name) => () => clicks.push(name);
+            const disposers = [
+                toolbar.contribute({id: 'legacy', label: 'Legacy', onClick: note('legacy')}),
+                toolbar.contribute({
+                    id: 'dropdown', label: 'Actions', zone: 'leading', order: -2, variant: 'subtle',
+                    disabled: false, menu: [{label: 'More', submenu: [
+                        {id: 'leaf', label: 'Run', icon: 'bolt', key: 'Cmd+R', checked: true, run: note('menu')},
+                        {label: 'Disabled', disabled: true, run: note('disabled')},
+                    ]}],
+                }),
+                toolbar.modify('title', {label: 'Title'}),
+                toolbar.contributeAddItem({id: 'custom-add', label: 'Custom', onClick: note('add')}),
+                statusBar.contribute({id: 'ready', side: 'right', text: 'Ready', onClick: note('status')}),
+                statusBar.modify('offline', {hidden: true}),
+                panelHeader.contribute('*', {id: 'help', label: 'Help', onClick: note('header')}),
+                panelHeader.modify('viewer', {title: 'Preview'}),
+                menuBar.contribute('Custom', [{label: 'Action', run: note('menuBar')}]),
+                tools.register({id: 'brush', title: 'Brush', showInToolbar: true}),
+                slots.contribute('panel:viewer.top', () => jsx('text', {children: 'Generic slot'})),
+                menus.contribute('statusBar:context', () => [{label: 'Status actions'}]),
+            ];
+            slots.contribute('panel:viewer.bottom', () => jsx('text', {children: 'Remove on unload'}));
+            commands.register({id: 'dispose', title: 'Dispose'}, () => {
+                if (clicks.join() !== 'legacy,menu,add,status,header,menuBar')
+                    throw Error('Unexpected clicks: ' + clicks.join());
+                disposers.forEach((dispose) => dispose());
+            });
+            commands.register({id: 'layout', title: 'Layout'}, () => workspace.setLayout({openPanels: ['viewer']}));
+        }
+    "#,
+    );
+    finish(panels.mount_extension("chrome-sdk", &graph, None).unwrap());
+    let (toolbar_rev, toolbar) = panels.toolbar_items_since(0).unwrap();
+    assert_eq!(toolbar[0]["zone"], "after-add");
+    assert_eq!(toolbar[0]["order"], 0);
+    assert_eq!(toolbar[1]["zone"], "leading");
+    assert_eq!(toolbar[1]["order"], -2);
+    assert_eq!(toolbar[1]["variant"], "subtle");
+    assert_eq!(toolbar[1]["disabled"], false);
+    let nested = &toolbar[1]["menu"][0]["submenu"];
+    let leaf = &nested[0];
+    assert_eq!(leaf["icon"], "bolt");
+    assert_eq!(leaf["key"], "Cmd+R");
+    assert!(leaf.get("run").is_none());
+    assert!(nested[1]["actionKey"].is_null());
+    let (status_rev, status) = panels.status_bar_items_since(0).unwrap();
+    assert_eq!(status[0]["clickable"], true);
+    assert_eq!(panels.tools_since(0).unwrap().1[0]["showInToolbar"], true);
+    assert_eq!(panels.panel_headers_since(0).unwrap().1[0]["panelId"], "*");
+
+    finish(panels.run_toolbar("chrome-sdk", "legacy").unwrap());
+    finish(
+        panels
+            .run_toolbar_menu("chrome-sdk", leaf["actionKey"].as_str().unwrap())
+            .unwrap(),
+    );
+    finish(
+        panels
+            .run_toolbar_add_item("chrome-sdk", "custom-add")
+            .unwrap(),
+    );
+    finish(panels.run_status_bar("chrome-sdk", "ready").unwrap());
+    finish(panels.run_panel_header("chrome-sdk", "*:help").unwrap());
+    finish(panels.run_menu_bar("chrome-sdk", "mb1").unwrap());
+    let (_, menu) = panels
+        .gather_menus("statusBar:context", &json!({}))
+        .pop()
+        .unwrap();
+    assert!(finish(menu.unwrap()).value.contains("Status actions"));
+
+    let layout = panels.run_command("chrome-sdk", "layout", &[]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = panels.take_platform_requests().pop() {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "no workspace layout request");
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(request.operation, "ext.workspace.runCommand");
+    assert_eq!(
+        request.input,
+        json!({"name": "workspaceSetLayout", "args": [{"openPanels": ["viewer"]}]})
+    );
+    panels.platform_reply(request.id, Ok(Value::Null));
+    finish(layout);
+
+    // Both slots have already reached the renderer before it gets the clears.
+    let mut published = std::collections::BTreeSet::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while published.len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "missing slot publications: {published:?}"
+        );
+        published.extend(
+            panels
+                .take_publications()
+                .into_iter()
+                .map(|p| p.panel)
+                .filter(|id| id.starts_with("chrome-sdk@slot:")),
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        published,
+        [
+            "chrome-sdk@slot:panel:viewer.bottom".into(),
+            "chrome-sdk@slot:panel:viewer.top".into()
+        ]
+        .into()
+    );
+    finish(panels.run_command("chrome-sdk", "dispose", &[]).unwrap());
+    assert!(
+        panels
+            .toolbar_items_since(toolbar_rev)
+            .unwrap()
+            .1
+            .is_empty()
+    );
+    assert!(
+        panels
+            .status_bar_items_since(status_rev)
+            .unwrap()
+            .1
+            .is_empty()
+    );
+    assert!(panels.toolbar_mods_since(0).unwrap().1.is_empty());
+    assert!(panels.toolbar_add_items_since(0).unwrap().1.is_empty());
+    assert!(panels.status_bar_mods_since(0).unwrap().1.is_empty());
+    assert!(panels.panel_header_mods_since(0).unwrap().1.is_empty());
+    assert_eq!(
+        panels.take_cleared_slots(),
+        ["chrome-sdk@slot:panel:viewer.top"]
+    );
+    panels.unmount_extension("chrome-sdk");
+    assert_eq!(
+        panels.take_cleared_slots(),
+        ["chrome-sdk@slot:panel:viewer.bottom"]
+    );
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn v4_chrome_failed_activation_removes_partially_published_ui() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = graph_of(
+        r#"
+        export async function activate({ toolbar, statusBar, panelHeader }) {
+            toolbar.modify('title', { hidden: true });
+            toolbar.contributeAddItem({ id: 'add', label: 'Add', onClick() {} });
+            statusBar.contribute({ id: 'label', side: 'left', text: 'Loading' });
+            statusBar.modify('state', { hidden: true });
+            panelHeader.modify('viewer', { title: 'Preview' });
+            await Promise.resolve();
+            throw Error('activation stopped');
+        }
+    "#,
+    );
+    let ticket = panels
+        .mount_extension("failed-chrome", &graph, None)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let failure = loop {
+        if let Some(result) = ticket.try_take() {
+            break result.unwrap_err();
+        }
+        assert!(Instant::now() < deadline, "activation did not finish");
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert!(failure.to_string().contains("activation stopped"));
+    for since in [
+        Builtins::toolbar_mods_since,
+        Builtins::toolbar_add_items_since,
+        Builtins::status_bar_items_since,
+        Builtins::status_bar_mods_since,
+        Builtins::panel_header_mods_since,
+    ] {
+        assert_eq!(since(&panels, 0), Some((2, vec![])));
+    }
+    panels.close();
+    actor.shutdown();
+}

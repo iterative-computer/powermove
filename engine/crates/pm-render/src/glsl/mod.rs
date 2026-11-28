@@ -187,7 +187,7 @@ pub fn write(
     module: &naga::Module,
     stage: naga::ShaderStage,
     entries: &[Entry],
-) -> Result<(String, String), String> {
+) -> Result<(String, String), pm_glsl::Failure> {
     let slots = slots(entries)
         .into_iter()
         .map(|s| pm_glsl::compiler::Slot {
@@ -199,8 +199,7 @@ pub fn write(
         })
         .collect();
     let (source, entry) =
-        pm_glsl::compiler::msl(module, stage, slots, pm_glsl::cache::DEFAULT_DEADLINE)
-            .map_err(|e| e.to_string())?;
+        pm_glsl::compiler::msl(module, stage, slots, pm_glsl::cache::DEFAULT_DEADLINE)?;
     Ok((angle_calls(&source), entry))
 }
 
@@ -296,7 +295,7 @@ pub fn stage_module(
     module: naga::Module,
     stage: naga::ShaderStage,
     entries: &[Entry],
-) -> Result<Stage, String> {
+) -> Result<Stage, pm_glsl::Failure> {
     if !pm_gpu::msl::supported(device) {
         return Ok(Stage {
             module: device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -309,6 +308,7 @@ pub fn stage_module(
     }
     let (source, entry_point) = write(&module, stage, entries)?;
     msl_stage(device, label, source, &entry_point)
+        .map_err(|e| pm_glsl::Failure::new(pm_glsl::FailureStage::NagaValidate, e))
 }
 
 #[cfg(test)]

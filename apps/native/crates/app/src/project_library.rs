@@ -44,6 +44,10 @@ pub struct ThumbnailSource {
 }
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
+/// Profile setting key: once the Home sidebar Aerolite offer is dismissed,
+/// never show it again across sessions.
+const HOME_AEROLITE_OFFER_DISMISSED: &str = "homeAeroliteOfferDismissed";
+
 /// The account row's menu: label and command (None, a separator). A
 /// command with a menu-bar key shows it (Account Settings…, ⌘,).
 const ACCOUNT_MENU: [Option<(&str, &str)>; 4] = [
@@ -90,6 +94,7 @@ pub enum Outbound {
 }
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
 pub struct ProjectLibrary {
+    pub(crate) slot_owner: Option<WeakEntity<crate::session::Controller>>,
     pub controller: LibraryController<KernelLibraryPort>,
     delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     sink: Sink,
@@ -134,7 +139,7 @@ pub struct ProjectLibrary {
     gallery_native: Vec<Entity<NativeControl>>,
     /// The open button menu, and where its button was last painted.
     menu: Option<Menu>,
-    /// The sidebar's Aero offer was closed (for this launch).
+    /// The sidebar's Aerolite offer was permanently dismissed.
     offer_closed: bool,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
     row_anchors: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
@@ -232,7 +237,13 @@ impl ProjectLibrary {
         controller.query.section = Section::from_key(&setting("projectsSection"));
         controller.query.sort = Sort::from_key(&setting("projectsSort"));
         let layout = Layout::from_key(&setting("projectsView"));
+        let offer_closed = kernel
+            .state()
+            .settings
+            .get(HOME_AEROLITE_OFFER_DISMISSED)
+            == Some(&pm_model::Value::Bool(true));
         Self {
+            slot_owner: None,
             controller,
             delete_toast: None,
             sink,
@@ -255,7 +266,7 @@ impl ProjectLibrary {
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
-            offer_closed: false,
+            offer_closed,
             anchors: Rc::default(),
             row_anchors: Rc::default(),
             menu_row: None,
@@ -568,6 +579,34 @@ impl ProjectLibrary {
         let _ = self.controller.set_query(query);
         self.pump(cx);
     }
+    /// Permanently dismisses the Home sidebar's Aerolite offer card across
+    /// windows and future launches.
+    fn dismiss_aero_offer(&mut self, cx: &mut Context<Self>) {
+        self.offer_closed = true;
+        drop(
+            self.kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![pm_kernel::state::StateOp::Setting {
+                        key: HOME_AEROLITE_OFFER_DISMISSED.into(),
+                        value: Some(pm_model::Value::Bool(true)),
+                    }],
+                }),
+        );
+        let me = cx.entity_id();
+        cx.defer(move |cx| {
+            for editor in crate::entry::editors(cx) {
+                let library = editor.read(cx).library.clone();
+                if let Some(library) = library.filter(|l| l.entity_id() != me) {
+                    library.update(cx, |v, cx| {
+                        v.offer_closed = true;
+                        cx.notify();
+                    });
+                }
+            }
+        });
+        cx.notify();
+    }
     /// One of v1's Home settings, through the kernel (off the main thread).
     fn persist(&self, key: &str, value: &str) {
         drop(
@@ -636,16 +675,33 @@ impl ProjectLibrary {
                 None => serde_json::json!({"separator": true}),
             })
             .collect();
-        let this = cx.entity();
-        crate::v4_native::menu(window, &options, cx, move |index, cx| {
+        let this = cx.entity().downgrade();
+        let choose = move |index: Option<usize>, cx: &mut App| {
             let chosen = index.and_then(|i| actions.get(i).copied().flatten());
             if let Some(action) = chosen {
-                this.update(cx, |v, cx| {
+                let _ = this.update(cx, |v, cx| {
                     let _ = v.controller.menu(&id, action);
                     v.pump(cx);
                 });
             }
-        });
+        };
+        let project_id = row.id.clone();
+        if let Some(owner) = self.slot_owner.as_ref().and_then(WeakEntity::upgrade)
+            && owner.read(cx).extensions_listen()
+        {
+            let at = window.mouse_position();
+            owner.update(cx, |v, cx| {
+                v.extension_rows_menu(
+                    vec![("home:context", json!({"projectId": project_id}))],
+                    &options,
+                    (at.x.into(), at.y.into()),
+                    Box::new(choose),
+                    cx,
+                );
+            });
+        } else {
+            crate::v4_native::menu(window, &options, cx, choose);
+        }
     }
 }
 /// Development builds: an on-screen review runs a row's context-menu choice
@@ -833,14 +889,27 @@ impl ProjectLibrary {
         kit.nav_row(id, symbol, label, count, selected)
             .debug_selector(|| id.into())
     }
-    /// The sidebar's foot on Free, above the account: Aero and the plan the
-    /// backend offers, its button straight to Checkout, closable for this
-    /// launch. Nothing when signed out (the Sign In row), on a plan, or
+    /// The sidebar's foot on Free, above the account: Aerolite and the plan the
+    /// backend offers, its button straight to Checkout; once dismissed, never
+    /// shown again. Nothing when signed out (the Sign In row), on a plan, or
     /// before the plans are read.
-    fn aero_offer(&self, kit: &Kit, account: &Value, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn aero_offer(
+        &self,
+        kit: &Kit,
+        account: &Value,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let billing = &account["billing"];
         let plan = billing["plans"][0]["name"].as_str()?;
-        if self.offer_closed
+        let dismissed = self.offer_closed
+            || self
+                .kernel
+                .state()
+                .settings
+                .get(HOME_AEROLITE_OFFER_DISMISSED)
+                == Some(&pm_model::Value::Bool(true));
+        if dismissed
             || account["signedIn"] != true
             || billing["state"] != "ready"
             || billing["subscribed"] != false
@@ -848,17 +917,23 @@ impl ProjectLibrary {
             return None;
         }
         let t = &kit.t;
-        let c = &t.colors;
         let pad = t.space.md;
         // Concentric with its button: the card's corner is the button's
         // plus the padding between them.
         let corner = t.metrics.control_radius + pad;
+        let scale = window.scale_factor();
+        let card_bg = linear_gradient(
+            180.,
+            linear_color_stop(rgb(pm_shell::brand::AEROLITE_DEEP), 0.),
+            linear_color_stop(rgb(pm_shell::brand::AEROLITE_NIGHT), 0.58),
+        )
+        .color_space(ColorSpace::Oklab);
         Some(
             div()
                 .id("home-aero-offer")
                 .debug_selector(|| "home-aero-offer".into())
                 .role(Role::Group)
-                .aria_label(format!("Aero, your editing agent. Get {plan}."))
+                .aria_label(format!("Aerolite, your editing agent. Get {plan}."))
                 .relative()
                 .mx(px(t.space.xs))
                 .mb(px(t.space.sm))
@@ -866,49 +941,54 @@ impl ProjectLibrary {
                 .flex()
                 .flex_col()
                 .gap(px(t.space.xs))
-                // A quiet accent light on the sidebar's material, its edge
-                // a hairline of the same light.
+                // Paper Powermove Aerolite Night Zenith + Sky-Blue surface.
                 .rounded(px(corner))
-                .bg(ink(c.accent, t.translucency.hover))
+                .bg(card_bg)
                 .border_1()
-                .border_color(ink(c.accent, t.translucency.selected))
+                .border_color(ink(pm_shell::brand::AEROLITE_SKY, 0.28))
                 .child(
                     div()
-                        .text_role(t, Text::Label)
-                        .text_color(rgb(c.text))
-                        .child("Aero"),
+                        .pr(px(t.metrics.hit))
+                        .child(pm_shell::brand::aerolite_wordmark(22., scale)),
                 )
                 .child(
                     div()
                         .pr(px(t.metrics.hit))
                         .text_role(t, Text::Caption)
-                        .text_color(rgb(c.secondary))
+                        .text_color(ink(pm_shell::brand::AEROLITE_TINT, 0.78))
                         .child("Your editing agent, with inference included."),
                 )
                 .child(
-                    kit.button(
-                        "home-aero-offer-get",
-                        format!("Get {plan}"),
-                        Button::Primary,
-                        None,
-                        None,
-                    )
-                    .mt(px(t.space.xs))
-                    .w_full()
-                    .on_click(cx.listener(|_, _, _, cx| crate::cloud::subscribe_offered(cx))),
+                    div()
+                        .id("home-aero-offer-get")
+                        .debug_selector(|| "home-aero-offer-get".into())
+                        .role(Role::Button)
+                        .aria_label(format!("Get {plan}"))
+                        .tab_index(0)
+                        .mt(px(t.space.xs))
+                        .w_full()
+                        .h(px(t.metrics.row))
+                        .rounded(px(t.metrics.control_radius))
+                        .bg(rgb(pm_shell::brand::AEROLITE_SKY))
+                        .hover_style(|s| s.bg(rgb(pm_shell::brand::AEROLITE_LIGHT)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_role(t, Text::Label)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(pm_shell::brand::AEROLITE_NIGHT))
+                        .child(format!("Get {plan}"))
+                        .on_click(cx.listener(|_, _, _, cx| crate::cloud::subscribe_offered(cx))),
                 )
                 .child(
-                    // Not now: closed for this launch, in the corner.
+                    // Dismiss permanently, in the corner.
                     div()
                         .absolute()
                         .top(px(t.space.xs))
                         .right(px(t.space.xs))
                         .child(
-                            kit.icon_button("home-aero-offer-close", "xmark", "Not now", false)
-                                .on_click(cx.listener(|v, _, _, cx| {
-                                    v.offer_closed = true;
-                                    cx.notify();
-                                })),
+                            kit.icon_button("home-aero-offer-close", "xmark", "Dismiss", false)
+                                .on_click(cx.listener(|v, _, _, cx| v.dismiss_aero_offer(cx))),
                         ),
                 )
                 .into_any_element(),
@@ -1863,7 +1943,7 @@ impl Render for ProjectLibrary {
                 .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
             )
             .child(div().flex_1())
-            .children(self.aero_offer(&kit, &account, cx))
+            .children(self.aero_offer(&kit, &account, window, cx))
             .child(match identity {
                 Some(name) => self
                     .nav_row(
@@ -2154,6 +2234,8 @@ impl Render for ProjectLibrary {
                 Some(switch) => switch.clone().into_any_element(),
                 None => view_switch.into_any_element(),
             });
+        let [header_slots, top_slots, bottom_slots] = ["home.header", "home.top", "home.bottom"]
+            .map(|id| crate::builtins::window_slot(self.slot_owner.as_ref(), id, &t, window, cx));
         let header = div()
             .flex()
             .flex_col()
@@ -2162,7 +2244,8 @@ impl Render for ProjectLibrary {
             .px(px(INSET))
             .pb(px(t.space.md))
             .child(title_row)
-            .child(controls_row);
+            .child(controls_row)
+            .children(header_slots);
         // Body: cards or rows; an empty section says so with v1's copy.
         let width = (sheet - 2. * INSET).max(0.);
         // As many cards of the usual width as fit when four or more do;
@@ -2391,7 +2474,9 @@ impl Render for ProjectLibrary {
             .elevated(&t, Elevation::Panel)
             .overflow_hidden()
             .child(header)
-            .child(body);
+            .children(top_slots)
+            .child(body)
+            .children(bottom_slots);
         div()
             .id("home")
             .relative()

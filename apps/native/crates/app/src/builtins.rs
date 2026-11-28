@@ -69,6 +69,26 @@ impl MediaProbeRefresh {
     }
 }
 
+pub(crate) fn panel_context_location(panel: &str) -> Option<&'static str> {
+    match panel {
+        "inspector" => Some("inspector:context"),
+        "fxbrowser" | "layer-effects" => Some("effects:context"),
+        _ => None,
+    }
+}
+
+pub(crate) fn window_slot(
+    owner: Option<&WeakEntity<Controller>>,
+    id: &str,
+    tokens: &pm_design::Tokens,
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<AnyElement> {
+    owner
+        .and_then(|owner| owner.update(cx, |v, cx| v.slot_elements(id, tokens, window, cx)).ok())
+        .unwrap_or_default()
+}
+
 /// The viewer overlays a native Metal layer and must join each shell repaint,
 /// including the loading reveal, even when its panel publication is unchanged.
 /// The Agent panel hosts AppKit push buttons (`Open`, `Show in Finder`,
@@ -2044,6 +2064,19 @@ impl Controller {
             mounted |= removed;
         }
         for p in runtime.take_publications() {
+            if p.panel
+                .split_once(pm_builtins::SLOT_PREFIX)
+                .is_some_and(|(owner, slot)| {
+                    !pm_builtins::is_valid_slot(slot) || pm_builtins::is_protected_surface(owner)
+                })
+                || (pm_builtins::is_protected_surface(&p.panel)
+                    && (p.panel != "settings"
+                        || !runtime.status().iter().any(|entry| {
+                            entry["panel"] == "settings" && entry["generation"] == p.generation
+                        })))
+            {
+                continue;
+            }
             if self.builtins.memory_recovery.get(&p.panel) == Some(&MemoryRecovery::Failed) {
                 continue;
             }
@@ -2166,7 +2199,11 @@ impl Controller {
 
     fn publish_settings_form(&mut self, publication: Publication, cx: &mut Context<Self>) {
         if let Some(form) = self.builtins.settings_form.as_mut() {
-            form.publish(publication, &self.host.borrow().tokens, cx);
+            form.publish(
+                publication,
+                &crate::settings_window::base_tokens(&self.host.borrow().tokens),
+                cx,
+            );
         }
     }
 
@@ -2377,17 +2414,21 @@ impl Controller {
         if matches!(id, "viewer" | "timeline" | "agent") {
             let top_slot = match id {
                 "timeline" => self.slot_elements("timeline.toolbar", &t, window, cx),
-                "agent" => self.slot_elements("agent.toolbar", &t, window, cx),
+                "agent" => {
+                    let mut slots = if self.builtins.agent_docked {
+                        vec![]
+                    } else {
+                        self.slot_elements("agent.top", &t, window, cx)
+                    };
+                    slots.extend(self.slot_elements("agent.toolbar", &t, window, cx));
+                    slots
+                }
                 _ => vec![],
             };
             let bottom_slot = match id {
                 "timeline" => self.slot_elements("timeline.footer", &t, window, cx),
+                "agent" if !self.builtins.agent_docked => self.slot_elements("agent.bottom", &t, window, cx),
                 _ => vec![],
-            };
-            let hud_slot = if id == "viewer" {
-                self.slot_elements("viewer.hud", &t, window, cx)
-            } else {
-                vec![]
             };
             return Some(
                 div()
@@ -2408,19 +2449,6 @@ impl Controller {
                             .child(fixed_body_view(id, &view)),
                     )
                     .children(bottom_slot)
-                    .when(!hud_slot.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .bottom(px(8.))
-                                .left(px(8.))
-                                .right(px(8.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .children(hud_slot),
-                        )
-                    })
                     .child(keep)
                     .into_any_element(),
             );
@@ -2455,15 +2483,19 @@ impl Controller {
         // a wheel step inside what it recorded replays it shifted, with no
         // render or layout of the panel; its AppKit controls sit in the
         // body's slot region and move with it (P-SLOT-REGION, PM-696).
-        let assets_slots = if id == pm_builtins::PROJECT_PANEL {
+        let top_slots = if id == pm_builtins::PROJECT_PANEL {
             self.slot_elements("assets.toolbar", &t, window, cx)
         } else if id == "inspector" {
             self.slot_elements("inspector.top", &t, window, cx)
+        } else if id == "export" {
+            self.slot_elements("export.top", &t, window, cx)
         } else {
             vec![]
         };
         let bottom_slots = if id == "inspector" {
             self.slot_elements("inspector.bottom", &t, window, cx)
+        } else if id == "export" {
+            self.slot_elements("export.bottom", &t, window, cx)
         } else {
             vec![]
         };
@@ -2498,7 +2530,7 @@ impl Controller {
                 .flex()
                 .flex_col()
                 .on_scroll_wheel(on_wheel)
-                .children(assets_slots)
+                .children(top_slots)
                 .child(
                     div()
                         .relative()
@@ -2513,20 +2545,31 @@ impl Controller {
                 .into_any_element(),
         )
     }
-    /// Layer 3: instantiates and returns all live extension slot views targeting `slot_id`.
-    fn slot_elements(
+    /// Instantiates and returns all live extension slot views targeting `slot_id`.
+    pub(crate) fn slot_elements(
         &mut self,
         slot_id: &str,
         tokens: &pm_design::Tokens,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let suffix = format!("{}{slot_id}", pm_builtins::SLOT_PREFIX);
+        if (self.builtins.slots.is_empty() && self.builtins.pending_slots.is_empty())
+            || !pm_builtins::is_valid_slot(slot_id)
+        {
+            return vec![];
+        }
+        let horizontal = slot_id.starts_with("toolbar.")
+            || slot_id.starts_with("statusBar.")
+            || slot_id.starts_with("viewer.controls.");
+        let matches_slot = |key: &str| {
+            key.split_once(pm_builtins::SLOT_PREFIX)
+                .is_some_and(|(_, slot)| slot == slot_id)
+        };
         let ready_keys: Vec<String> = self
             .builtins
             .pending_slots
             .keys()
-            .filter(|k| k.ends_with(&suffix))
+            .filter(|key| matches_slot(key))
             .cloned()
             .collect();
         if let Some(runtime) = self.builtins.runtime.clone() {
@@ -2545,7 +2588,7 @@ impl Controller {
             .builtins
             .slots
             .iter()
-            .filter(|(k, _)| k.ends_with(&suffix))
+            .filter(|(key, _)| matches_slot(key))
             .map(|(_, v)| v.clone())
             .collect();
         matching
@@ -2557,7 +2600,11 @@ impl Controller {
                         v.retheme(tokens.clone(), cx);
                     }
                 });
-                div().w_full().flex_none().child(view).into_any_element()
+                div()
+                    .when(horizontal, |d| d.min_w(px(0.)).overflow_hidden())
+                    .when(!horizontal, |d| d.w_full().flex_none())
+                    .child(view)
+                    .into_any_element()
             })
             .collect()
     }
@@ -4003,14 +4050,28 @@ impl Controller {
                     let options = request.input.as_array().cloned().unwrap_or_default();
                     let selected = options.clone();
                     let runtime = runtime.clone();
-                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                    let choose = move |index: Option<usize>, _: &mut App| {
                         let value = index
                             .and_then(|index| crate::v4_native::menu_item(&selected, index))
                             .and_then(|item| item.get("id"))
                             .cloned()
                             .unwrap_or(Value::Null);
                         runtime.platform_reply(request.id, Ok(value));
-                    });
+                    };
+                    if let Some(location) = panel_context_location(&request.panel)
+                        && self.extensions_listen()
+                    {
+                        let at = window.mouse_position();
+                        self.extension_rows_menu(
+                            vec![(location, json!({"panelId": request.panel}))],
+                            &options,
+                            (at.x.into(), at.y.into()),
+                            Box::new(choose),
+                            cx,
+                        );
+                    } else {
+                        crate::v4_native::menu(window, &options, cx, choose);
+                    }
                     continue;
                 }
                 "effectMenu" => {
@@ -4080,9 +4141,21 @@ impl Controller {
                         .cloned()
                         .unwrap_or_default();
                     let runtime = runtime.clone();
-                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                    let choose = move |index: Option<usize>, _: &mut App| {
                         runtime.platform_reply(request.id, Ok(json!(index)));
-                    });
+                    };
+                    if request.panel == pm_builtins::PROJECT_PANEL && self.extensions_listen() {
+                        let at = window.mouse_position();
+                        self.extension_rows_menu(
+                            vec![("assets:context", request.input["context"].clone())],
+                            &options,
+                            (at.x.into(), at.y.into()),
+                            Box::new(choose),
+                            cx,
+                        );
+                    } else {
+                        crate::v4_native::menu(window, &options, cx, choose);
+                    }
                     continue;
                 }
                 // ---- Layer 5: Workspace Control & Native Dialogs ----------------
@@ -4133,9 +4206,29 @@ impl Controller {
                             .as_array()
                             .cloned()
                             .unwrap_or_default();
-                        self.host.borrow().send_command(name, args);
+                        if name == "workspaceSetLayout" {
+                            let owner = cx.entity();
+                            let runtime = runtime.clone();
+                            cx.defer(move |cx| {
+                                let result = owner.update(cx, |v, cx| {
+                                    v.set_extension_workspace_layout(
+                                        args.first().unwrap_or(&Value::Null),
+                                        cx,
+                                    )
+                                });
+                                runtime.platform_reply(
+                                    request.id,
+                                    result.map(|()| Value::Null).map_err(|e| e.to_string()),
+                                );
+                            });
+                            continue;
+                        } else {
+                            self.host.borrow().send_command(name, args);
+                            Ok(Value::Null)
+                        }
+                    } else {
+                        Ok(Value::Null)
                     }
-                    Ok(Value::Null)
                 }
                 "ext.workspace.notify" => {
                     if let Some(msg) = request.input["message"].as_str() {

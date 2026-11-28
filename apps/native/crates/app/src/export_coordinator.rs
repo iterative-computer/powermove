@@ -4,12 +4,13 @@ use crate::session::Controller;
 use gpui::Context;
 use pm_promedia::{
     export_panel::{Format, Options},
-    tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec},
+    tasks::{BackgroundTasks, ProgressUnit, TaskId, TaskKind, TaskSpec, TaskState},
 };
 use pm_protocol::{
     common::SessionId,
     priority::{JobSpec, JobState},
 };
+use pm_shell::ExportActivity;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -48,6 +49,7 @@ pub struct Run {
     pub handle: Mutex<Option<pm_engine_service::jobs::ExportHandle>>,
     pub cancel: AtomicBool,
     progress: AtomicU8,
+    task_id: OnceLock<TaskId>,
     #[cfg(test)]
     child_started: OnceLock<std::time::Instant>,
 }
@@ -89,6 +91,31 @@ pub fn tasks() -> Arc<Mutex<BackgroundTasks>> {
     static TASKS: std::sync::OnceLock<Arc<Mutex<BackgroundTasks>>> = std::sync::OnceLock::new();
     TASKS.get_or_init(Arc::default).clone()
 }
+pub(crate) fn toolbar_activity(job: Option<&Run>, tasks: &BackgroundTasks) -> Option<ExportActivity> {
+    let local = job.map(|job| (job.task_id.get().copied(), job.progress.load(Ordering::Acquire)));
+    // Before admission there is no Background Tasks row for this run.
+    let mut count = usize::from(matches!(local, Some((None, 1..))));
+    let mut percent = None;
+    for task in tasks.iter() {
+        if task.kind != TaskKind::Export || task.state.terminal() {
+            continue;
+        }
+        count += 1;
+        let task_percent = match local {
+            Some((Some(id), progress)) if id == task.id => progress.checked_sub(2),
+            _ if task.state != TaskState::Queued && task.completed > 0 && task.total > 0 => {
+                let total = u128::from(task.total);
+                let done = u128::from(task.completed.min(task.total));
+                Some(((done * 100 + total / 2) / total) as u8)
+            }
+            _ => None,
+        };
+        // Show the first export with known progress in queue order.
+        percent = percent.or(task_percent);
+    }
+    (count > 0).then_some(ExportActivity { percent, count })
+}
+
 /// How to stop a running export: an agent's flag, or a window's job.
 enum Canceller {
     Flag(Arc<AtomicBool>),
@@ -325,7 +352,11 @@ impl Controller {
         let project_path = self.path.clone();
         let last_export = crate::platform::last_export_folder();
         let job = Arc::new(Run::default());
+        if !enqueue {
+            job.progress.store(1, Ordering::Release);
+        }
         self.builtins.export_job = Some(job.clone());
+        self.sync_export_toolbar();
         let activity = self.engine.export_activity();
         let tasks = self.builtins.export_tasks.clone();
         let resources = saved.as_ref().map_or_else(
@@ -423,13 +454,13 @@ impl Controller {
                         .is_some_and(|j| Arc::ptr_eq(j, &job))
                     {
                         v.builtins.export_job = None;
+                        v.sync_export_toolbar();
                     }
                     cx.notify();
                 });
                 return;
             };
             if !enqueue {
-                job.progress.store(1, Ordering::Release);
                 let _ = this.update(cx, |v, cx| {
                     if v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &job)) {
                         if queue_id.is_none() {
@@ -449,6 +480,7 @@ impl Controller {
                         let current = owner.update(cx, |v, cx| {
                             let running = v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &watched));
                             if running && progress != last {
+                                v.sync_export_toolbar();
                                 cx.notify();
                             }
                             running
@@ -665,6 +697,7 @@ impl Controller {
                 if queue_id.is_some() {
                     v.render_pending(cx);
                 }
+                v.sync_export_toolbar();
                 cx.notify();
             });
         })
@@ -756,6 +789,9 @@ async fn execute(
                     )
                     .map_err(|e| format!("{e:?}"))
                     .and_then(|_| tasks.start_next().ok_or("Export task did not start".into()))
+                    .inspect(|ticket| {
+                        let _ = job.task_id.set(ticket.id);
+                    })
             };
             match queued {
                 Err(error) => Err(error.into()),
@@ -1624,6 +1660,7 @@ impl Controller {
                     Err(error) => v.message = error,
                     _ => {}
                 }
+                v.sync_export_toolbar();
                 cx.notify();
                 false
             }).unwrap_or(false);
@@ -1836,5 +1873,70 @@ mod frozen_queue_tests {
         let mut legacy = record;
         legacy.as_object_mut().unwrap().remove("extensionBundle");
         assert!(Frozen::restore(&legacy, &changed, 43).unwrap().extensions.entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod toolbar_activity_tests {
+    use super::*;
+
+    fn enqueue(tasks: &mut BackgroundTasks, kind: TaskKind) -> TaskId {
+        tasks.enqueue("window".into(), "project".into(), TaskSpec {
+            title: "Film".into(),
+            kind,
+            unit: ProgressUnit::Frames,
+            priority: 0,
+            total: 100,
+        }).unwrap()
+    }
+
+    #[test]
+    fn local_run_is_counted_once_and_disappears_on_completion() {
+        let mut tasks = BackgroundTasks::default();
+        let job = Run::default();
+        assert_eq!(toolbar_activity(Some(&job), &tasks), None);
+
+        job.progress.store(1, Ordering::Release);
+        let preparing = Some(ExportActivity { percent: None, count: 1 });
+        assert_eq!(toolbar_activity(Some(&job), &tasks), preparing);
+
+        let id = enqueue(&mut tasks, TaskKind::Export);
+        let ticket = tasks.start_next().unwrap();
+        job.task_id.set(id).unwrap();
+        assert_eq!(toolbar_activity(Some(&job), &tasks), preparing);
+        job.progress.store(2, Ordering::Release);
+        assert_eq!(toolbar_activity(Some(&job), &tasks).unwrap().percent, Some(0));
+
+        job.progress.store(44, Ordering::Release);
+        assert_eq!(toolbar_activity(Some(&job), &tasks), Some(ExportActivity {
+            percent: Some(42),
+            count: 1,
+        }));
+        tasks.finish(ticket, Ok(())).unwrap();
+        assert_eq!(toolbar_activity(Some(&job), &tasks), None);
+    }
+
+    #[test]
+    fn shared_running_and_pending_exports_settle_independently() {
+        let mut tasks = BackgroundTasks::default();
+        let running = enqueue(&mut tasks, TaskKind::Export);
+        let ticket = tasks.start_next().unwrap();
+        let pending = enqueue(&mut tasks, TaskKind::Export);
+        enqueue(&mut tasks, TaskKind::Captions);
+        assert_eq!(toolbar_activity(None, &tasks), Some(ExportActivity { percent: None, count: 2 }));
+
+        tasks.progress(ticket, 42, 100).unwrap();
+        assert_eq!(toolbar_activity(None, &tasks), Some(ExportActivity { percent: Some(42), count: 2 }));
+        tasks.cancel(pending).unwrap();
+        tasks.cancel(running).unwrap();
+        assert_eq!(toolbar_activity(None, &tasks).unwrap().count, 1);
+        tasks.settle_control(ticket).unwrap();
+        assert_eq!(toolbar_activity(None, &tasks), None);
+
+        enqueue(&mut tasks, TaskKind::Export);
+        tasks.start_next().unwrap(); // Captions
+        let failed = tasks.start_next().unwrap();
+        tasks.finish(failed, Err("export failed".into())).unwrap();
+        assert_eq!(toolbar_activity(None, &tasks), None);
     }
 }

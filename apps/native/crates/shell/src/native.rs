@@ -861,7 +861,7 @@ pub fn contents(v: &NSView) -> Retained<NSView> {
     }
 }
 /// Menu, location and view for a deferred context-menu pop-up.
-type PendingMenu = (Retained<NSMenu>, NSPoint, Retained<NSView>);
+type PendingMenu = (Retained<NSMenu>, NSPoint, Retained<NSView>, Option<String>);
 struct TargetState {
     replays: RefCell<HashMap<usize, u64>>,
     /// The host whose keys it replays: a replay completes there at once,
@@ -949,6 +949,11 @@ define_class!(
         /// Layer 1: extension-contributed toolbar buttons carry their command in `identifier`.
         #[unsafe(method(extToolbarAct:))]
         fn ext_toolbar_act(&self, sender: &NSButton) {
+            if let Some(menu) = sender.menu() {
+                let y = if sender.isFlipped() { sender.bounds().size.height } else { 0. };
+                menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0., y), Some(sender));
+                return;
+            }
             if let Some(id) = sender.identifier() {
                 let name = id.to_string();
                 if !name.is_empty() {
@@ -956,13 +961,20 @@ define_class!(
                 }
             }
         }
+        #[unsafe(method(extToolbarMenuAct:))]
+        fn ext_toolbar_menu_act(&self, sender: &NSMenuItem) {
+            self.act_named(sel!(actNamed:), sender);
+        }
         #[unsafe(method(showPendingMenu:))]
         fn show_pending_menu(&self, _: Option<&AnyObject>) {
             let pending = self.ivars().pending_menu.borrow_mut().take();
-            if let Some((menu, at, view)) = pending {
+            if let Some((menu, at, view, completion)) = pending {
                 OPEN_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
                 let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&view));
                 OPEN_MENU.with(|m| m.borrow_mut().take());
+                if let Some(name) = completion {
+                    self.send(Command { name, args: vec![], token: None });
+                }
             }
         }
         /// The project's name in the bar: its menu, under it (one press).
@@ -2929,6 +2941,9 @@ struct ToolbarState {
     tabs_width: Retained<NSLayoutConstraint>,
     /// Home's cell, the strip's first.
     home: Retained<TabView>,
+    items: RefCell<std::collections::HashMap<String, Retained<NSToolbarItem>>>,
+    baselines: RefCell<std::collections::HashMap<String, ToolbarAppearance>>,
+    mods: RefCell<Vec<ExtensionToolbarMod>>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -2946,12 +2961,12 @@ define_class!(
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
             let mut ids = toolbar_ids().to_vec();
             ids.push(NSString::from_str("agentPresence"));
-            ids.push(NSString::from_str("extToolbar"));
+            ids.extend(EXT_TOOLBAR_ZONES.map(|(id, _)| NSString::from_str(id)));
             NSArray::from_retained_slice(&ids)
         }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
         fn item(&self, _: &NSToolbar, id: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
-            self.make(id)
+            self.make_cached(id)
         }
     }
 );
@@ -2975,6 +2990,12 @@ const TOOLBAR_ORDER: [&str; 12] = [
     SPACE,
     "panelLibrary",
     "settings",
+];
+const EXT_TOOLBAR_ZONES: [(&str, &str); 4] = [
+    ("extToolbarLeading", "leading"),
+    ("extToolbarCenter", "center"),
+    ("extToolbar", "after-add"),
+    ("extToolbarTrailing", "trailing"),
 ];
 const FLEXIBLE: &str = "\u{0}flexible";
 const SPACE: &str = "\u{0}space";
@@ -3003,7 +3024,6 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
 pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
     use objc2::AnyThread;
     let side = (points * 3.).ceil().max(1.) as u32;
-    let coverage = crate::icons::coverage(glyph, side)?;
     let rep = unsafe {
         objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             objc2_app_kit::NSBitmapImageRep::alloc(),
@@ -3024,18 +3044,24 @@ pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) 
         return None;
     }
     let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
-    // Black at the glyph's coverage, premultiplied: a template takes its
-    // shape. A mark with its own colour is drawn in it and never tinted.
-    let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
-    let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
-    for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
-        p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
+    if glyph.full_color {
+        let rgba = crate::icons::rgba(glyph, side, 0.)?;
+        pixels.copy_from_slice(&rgba);
+    } else {
+        let coverage = crate::icons::coverage(glyph, side)?;
+        // Black at the glyph's coverage, premultiplied: a template takes its
+        // shape. A mark with its own colour is drawn in it and never tinted.
+        let [r, g, b] = glyph.color.map_or([0; 3], |c| [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+        let premultiply = |c: u8, a: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+        for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
+            p.copy_from_slice(&[premultiply(r, a), premultiply(g, a), premultiply(b, a), a]);
+        }
     }
     let size = NSSize::new(points, points);
     rep.setSize(size);
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.addRepresentation(&rep);
-    image.setTemplate(glyph.color.is_none());
+    image.setTemplate(!glyph.full_color && glyph.color.is_none());
     image.setAccessibilityDescription(Some(&NSString::from_str(label)));
     Some(image)
 }
@@ -3073,6 +3099,85 @@ fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
         objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(points, weight);
     image.imageWithSymbolConfiguration(&config).unwrap_or(image)
 }
+/// The export activity shown in the toolbar. An absent activity means idle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportActivity {
+    pub percent: Option<u8>,
+    pub count: usize,
+}
+
+impl ExportActivity {
+    fn title(self) -> String {
+        match (self.percent, self.count) {
+            (Some(percent), _) => format!("Exporting {percent}%"),
+            (None, count) if count > 1 => format!("Exporting ({count})…"),
+            (None, _) => "Exporting…".into(),
+        }
+    }
+
+    fn tooltip(self) -> String {
+        let progress = match self.percent {
+            Some(percent) => format!("Exporting · {percent}%"),
+            None => "Exporting…".into(),
+        };
+        let count = if self.count > 1 {
+            format!(" · {} exports", self.count)
+        } else {
+            String::new()
+        };
+        format!("{progress}{count} — Click to view Export")
+    }
+}
+
+#[test]
+fn export_toolbar_formats_activity() {
+    let preparing = ExportActivity { percent: None, count: 1 };
+    assert_eq!(preparing.title(), "Exporting…");
+    assert_eq!(preparing.tooltip(), "Exporting… — Click to view Export");
+
+    let multiple = ExportActivity { count: 2, ..preparing };
+    assert_eq!(multiple.title(), "Exporting (2)…");
+    let rendering = ExportActivity { percent: Some(42), ..multiple };
+    assert_eq!(rendering.title(), "Exporting 42%");
+    assert_eq!(rendering.tooltip(), "Exporting · 42% · 2 exports — Click to view Export");
+}
+
+fn export_progress_image(percent: Option<u8>) -> Retained<NSImage> {
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let center = NSPoint::new(
+            rect.origin.x + rect.size.width / 2.,
+            rect.origin.y + rect.size.height / 2.,
+        );
+        let radius = 6.;
+        let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(center.x - radius, center.y - radius),
+            NSSize::new(radius * 2., radius * 2.),
+        ));
+        let ink = NSColor::whiteColor();
+        ring.setLineWidth(1.75);
+        ink.colorWithAlphaComponent(0.28).setStroke();
+        ring.stroke();
+        let sweep = percent.map_or(270., |p| f64::from(p.min(100)) * 3.6);
+        ink.setStroke();
+        if sweep >= 360. {
+            ring.stroke();
+        } else if sweep > 0. {
+            let arc = NSBezierPath::bezierPath();
+            arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                center, radius, 90., 90. - sweep, true,
+            );
+            arc.setLineWidth(1.75);
+            arc.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+            arc.stroke();
+        }
+        objc2::runtime::Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(16., 16.), false, &draw);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(objc2_foundation::ns_string!("Export progress")));
+    image
+}
+
 impl ToolbarDelegate {
     fn new(mtm: MainThreadMarker, target: Retained<Target>, tokens: Tokens) -> Retained<Self> {
         unsafe {
@@ -3121,11 +3226,34 @@ impl ToolbarDelegate {
                         tabs_width,
                         home: home_cell,
                         tokens,
+                        items: RefCell::default(),
+                        baselines: RefCell::default(),
+                        mods: RefCell::default(),
                     }
                 })),
                 init
             ]
         }
+    }
+    fn make_cached(&self, id: &NSString) -> Option<Retained<NSToolbarItem>> {
+        let name = id.to_string();
+        if let Some(item) = self.ivars().items.borrow().get(&name) {
+            return Some(item.clone());
+        }
+        let item = self.make(id)?;
+        if TOOLBAR_ORDER.contains(&name.as_str()) {
+            self.ivars()
+                .baselines
+                .borrow_mut()
+                .insert(name.clone(), ToolbarAppearance::read(&item));
+        }
+        if TOOLBAR_ORDER.contains(&name.as_str())
+            || EXT_TOOLBAR_ZONES.iter().any(|(strip, _)| *strip == name)
+            || name == "agentPresence"
+        {
+            self.ivars().items.borrow_mut().insert(name, item.clone());
+        }
+        Some(item)
     }
     fn make(&self, id: &NSString) -> Option<Retained<NSToolbarItem>> {
         let mtm = self.mtm();
@@ -3192,7 +3320,7 @@ impl ToolbarDelegate {
             item.setAutovalidates(false);
             return Some(item);
         }
-        if name == "extToolbar" {
+        if EXT_TOOLBAR_ZONES.iter().any(|(id, _)| *id == name) {
             let stack = NSStackView::new(mtm);
             stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
             stack.setSpacing(4.0);
@@ -3290,6 +3418,9 @@ impl ToolbarDelegate {
         item.setBordered(true);
         item.setLabel(&NSString::from_str(label));
         item.setToolTip(Some(&NSString::from_str(label)));
+        if name == "settings" {
+            item.setVisibilityPriority(NSToolbarItemVisibilityPriorityHigh);
+        }
         if name == "export" {
             item.setTitle(&NSString::from_str(label));
             item.setStyle(NSToolbarItemStyle::Prominent);
@@ -3314,6 +3445,29 @@ fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
 }
 
 impl Host {
+    pub fn set_export_progress(&mut self, activity: Option<ExportActivity>) {
+        let previous = self.export_activity;
+        if previous == activity {
+            return;
+        }
+        let Some(item) = self._delegate.make_cached(objc2_foundation::ns_string!("export")) else {
+            return;
+        };
+        self.export_activity = activity;
+        if let Some(activity) = activity {
+            let title = activity.title();
+            if previous.map(ExportActivity::title).as_deref() != Some(title.as_str()) {
+                item.setTitle(&NSString::from_str(&title));
+            }
+            item.setToolTip(Some(&NSString::from_str(&activity.tooltip())));
+            if previous.map(|state| state.percent) != Some(activity.percent) {
+                item.setImage(Some(&export_progress_image(activity.percent)));
+            }
+        } else {
+            self.apply_toolbar_appearance(&item);
+        }
+    }
+
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
         if let Some(button) = agent_launcher_button(&self._toolbar) {
             button.publish(snapshot, self.tokens.clone());
@@ -3334,42 +3488,43 @@ impl Host {
             panel_visible,
         );
         if let Some(item) = agent_launcher_item(&self._toolbar) {
-            item.setHidden(!show);
+            item.setHidden(!show || toolbar_hidden(&self._delegate.ivars().mods.borrow(), "agent"));
         }
     }
 
-    /// Layer 1: updates the dynamic extension toolbar strip right beside Add.
     pub fn set_extension_toolbar(&mut self, items: &[ExtensionToolbarItem]) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
+        for (strip, zone) in EXT_TOOLBAR_ZONES {
+            let mut entries: Vec<_> = items.iter().filter(|item| item.zone == zone).collect();
+            entries.sort_by_key(|item| item.order);
+            self.set_extension_toolbar_zone(strip, &entries);
+        }
+        self.order_extension_toolbar();
+    }
+
+    fn set_extension_toolbar_zone(&self, strip: &str, items: &[&ExtensionToolbarItem]) {
+        let mtm = self._target.mtm();
         let toolbar = &self._toolbar;
-        let existing_idx = toolbar
+        let existing = toolbar
             .items()
             .iter()
-            .position(|i| i.itemIdentifier().to_string() == "extToolbar");
+            .position(|i| i.itemIdentifier().to_string() == strip);
         if items.is_empty() {
-            if let Some(idx) = existing_idx {
-                toolbar.removeItemAtIndex(idx as isize);
+            if let Some(index) = existing {
+                toolbar.removeItemAtIndex(index as isize);
+                self._delegate.ivars().items.borrow_mut().remove(strip);
             }
             return;
         }
-        if existing_idx.is_none() {
-            let insert_at = toolbar
-                .items()
-                .iter()
-                .position(|i| i.itemIdentifier().to_string() == "add")
-                .map(|i| i + 1)
-                .unwrap_or(toolbar.items().len());
+        if existing.is_none() {
             toolbar.insertItemWithItemIdentifier_atIndex(
-                &NSString::from_str("extToolbar"),
-                insert_at as isize,
+                &NSString::from_str(strip),
+                toolbar.items().len().saturating_sub(1) as isize,
             );
         }
         let Some(tb_item) = toolbar
             .items()
             .iter()
-            .find(|i| i.itemIdentifier().to_string() == "extToolbar")
+            .find(|i| i.itemIdentifier().to_string() == strip)
         else {
             return;
         };
@@ -3388,10 +3543,8 @@ impl Host {
                 _ => entry.label.clone(),
             };
             let btn = if let Some(icon) = &entry.icon
-                && let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                    &NSString::from_str(icon),
-                    Some(&NSString::from_str(&entry.label)),
-                ) {
+                && let Some(img) = extension_toolbar_image(icon, &entry.label, t)
+            {
                 let b = unsafe {
                     NSButton::buttonWithTitle_image_target_action(
                         &NSString::from_str(&title),
@@ -3421,14 +3574,353 @@ impl Host {
             btn.setControlSize(NSControlSize::Regular);
             btn.setIdentifier(Some(&NSString::from_str(&entry.command)));
             btn.setToolTip(Some(&NSString::from_str(&entry.tooltip)));
-            if entry.active {
+            if entry.active || entry.variant == "accent" {
                 btn.setContentTintColor(Some(&native_color(t.colors.accent)));
+            } else if entry.variant == "subtle" {
+                btn.setBordered(false);
+            }
+            btn.setEnabled(!entry.disabled);
+            if !entry.menu.is_empty() {
+                let menu = NSMenu::new(mtm);
+                menu.setAutoenablesItems(false);
+                for item in &entry.menu {
+                    menu.addItem(&build_extension_menu_item(
+                        mtm,
+                        target,
+                        item,
+                        sel!(extToolbarMenuAct:),
+                        false,
+                    ));
+                }
+                unsafe {
+                    btn.setMenu(Some(&menu));
+                }
             }
             btn.sizeToFit();
             stack.addArrangedSubview(&btn);
         }
         stack.setNeedsLayout(true);
     }
+
+    pub fn set_extension_toolbar_mods(&mut self, mods: &[ExtensionToolbarMod]) {
+        *self._delegate.ivars().mods.borrow_mut() = toolbar_mods(mods);
+        for item in self._toolbar.items().to_vec() {
+            self.apply_toolbar_appearance(&item);
+        }
+        self.order_extension_toolbar();
+    }
+
+    fn apply_toolbar_appearance(&self, item: &NSToolbarItem) {
+        let target = item.itemIdentifier().to_string();
+        if target.eq_ignore_ascii_case("settings") {
+            return;
+        }
+        let state = self._delegate.ivars();
+        let baselines = state.baselines.borrow();
+        let Some(base) = baselines.get(&target) else {
+            return;
+        };
+        let mods = state.mods.borrow();
+        let patch = mods.iter().find(|patch| patch.target == target);
+        if target == "export" && self.export_activity.is_some() {
+            item.setHidden(self.aside() || toolbar_hidden(&mods, &target));
+            return;
+        }
+        let task = (target == "tasks")
+            .then_some(self.shown_task_status.as_ref())
+            .flatten();
+        let task_title = task.map(|task| NSString::from_str(&task.pill()));
+        let task_tip = task.map(|task| NSString::from_str(&task.spoken()));
+        let title = toolbar_caption(patch, || {
+            task_title.as_deref().unwrap_or(&base.label).to_string()
+        })
+        .map(|caption| NSString::from_str(&caption));
+        item.setLabel(title.as_deref().unwrap_or(&base.label));
+        item.setTitle(
+            title.as_deref().or(task_title.as_deref()).unwrap_or(&base.title)
+        );
+        let tip = patch
+            .and_then(|p| p.tooltip.as_deref())
+            .map(NSString::from_str);
+        item.setToolTip(
+            tip.as_deref()
+                .or(task_tip.as_deref())
+                .or(base.tooltip.as_deref()),
+        );
+        let icon = patch.and_then(|p| p.icon.as_deref()).and_then(|icon| {
+            extension_toolbar_image(icon, &item.label().to_string(), &self.tokens)
+        });
+        let task_image = task.map(|task| task_toolbar_image(task, 0., &self.tokens));
+        item.setImage(
+            icon.as_deref()
+                .or(task_image.as_deref())
+                .or(base.image.as_deref()),
+        );
+        if let Some(control) = item
+            .view()
+            .and_then(|v| v.downcast::<SegmentedControl>().ok())
+        {
+            let (_, glyph, name) = TOOLS[0];
+            let fallback = toolbar_symbol(glyph, name, &self.tokens);
+            control.set_segment_image(0, icon.as_deref().unwrap_or(&fallback), name);
+            control.setAccessibilityLabel(Some(&item.label()));
+            control.setToolTip(tip.as_deref());
+            control.setLabel_forSegment(title.as_deref().unwrap_or(objc2_foundation::ns_string!("")), 0);
+            control.setWidth_forSegment(if title.is_some() { 0. } else { TOOL_SEGMENT }, 0);
+            control.sizeToFit();
+        }
+        if target == "title"
+            && let Ok(button) = state.home.ivars().label.clone().downcast::<NSButton>()
+        {
+            let fallback = toolbar_symbol("house", "Projects", &self.tokens);
+            button.setImage(Some(icon.as_deref().unwrap_or(&fallback)));
+            button.setToolTip(Some(tip.as_deref().unwrap_or(&base.label)));
+            button.setAccessibilityLabel(Some(&item.label()));
+            button.setTitle(title.as_deref().unwrap_or(objc2_foundation::ns_string!("")));
+            button.setImagePosition(if title.is_some_and(|title| !title.is_empty()) {
+                NSCellImagePosition::ImageLeading
+            } else {
+                NSCellImagePosition::ImageOnly
+            });
+            let height = f64::from(self.tokens.metrics.control);
+            let width = if button.title().is_empty() {
+                height
+            } else {
+                button.sizeToFit();
+                button.frame().size.width.clamp(height, height.max(164.))
+            };
+            let size = NSSize::new(width, height);
+            button.setFrameSize(size);
+            state.home.setFrameSize(size);
+            // The strip is laid out by hand, so a new Home width needs a rebuild.
+            if let Some(holder) = unsafe { state.home.superview() }
+                && holder.frame().size.width != width
+            {
+                self.tabs_shown.borrow_mut().1 = -1.;
+                self.sync_tabs();
+            }
+        }
+        let hidden = match target.as_str() {
+            "tools" | "add" | "export" | "panelLibrary" => self.aside(),
+            "tasks" => task.is_none(),
+            "agent" => {
+                if let Some(button) = agent_launcher_button(&self._toolbar) {
+                    button.set_toolbar_mod(patch.cloned());
+                }
+                self.sync_agent_button();
+                return;
+            }
+            _ => base.hidden,
+        };
+        item.setHidden(hidden || toolbar_hidden(&mods, &target));
+    }
+
+    fn order_extension_toolbar(&self) {
+        let toolbar = &self._toolbar;
+        let items = toolbar.items();
+        let mut order = toolbar_order(&self._delegate.ivars().mods.borrow());
+        for (anchor, strip, offset) in [
+            ("title", "extToolbarLeading", 1),
+            ("tools", "extToolbarCenter", 0),
+            ("add", "extToolbar", 1),
+            ("settings", "extToolbarTrailing", 0),
+            ("agent", "agentPresence", 0),
+        ] {
+            if items
+                .iter()
+                .any(|item| item.itemIdentifier().to_string() == strip)
+            {
+                let index = order.iter().position(|id| *id == anchor).unwrap() + offset;
+                order.insert(index, strip);
+            }
+        }
+        let flex = unsafe { NSToolbarFlexibleSpaceItemIdentifier }.to_string();
+        let space = unsafe { NSToolbarSpaceItemIdentifier }.to_string();
+        for (index, name) in order.iter().enumerate() {
+            let name = match *name {
+                FLEXIBLE => &flex,
+                SPACE => &space,
+                other => other,
+            };
+            let current = toolbar.items();
+            if current
+                .iter()
+                .nth(index)
+                .is_some_and(|item| item.itemIdentifier().to_string() == name)
+            {
+                continue;
+            }
+            if let Some(from) = current
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(i, item)| (item.itemIdentifier().to_string() == name).then_some(i))
+            {
+                toolbar.removeItemAtIndex(from as isize);
+                toolbar.insertItemWithItemIdentifier_atIndex(
+                    &NSString::from_str(name),
+                    index as isize,
+                );
+            }
+        }
+    }
+
+    pub fn set_extension_add_items(&mut self, entries: &[ExtensionAddMenuItem]) {
+        let Some(add) = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|item| item.itemIdentifier().to_string() == "add")
+            .and_then(|item| item.downcast::<objc2_app_kit::NSMenuToolbarItem>().ok())
+        else {
+            return;
+        };
+        let mtm = self._target.mtm();
+        let menu = add.menu();
+        for item in menu
+            .itemArray()
+            .iter()
+            .filter(|item| item.tag() == EXT_MENU_TAG)
+        {
+            menu.removeItem(&item);
+        }
+        let mut section = None;
+        for (index, entry) in entries.iter().enumerate() {
+            if index == 0 || entry.section.as_deref() != section {
+                let separator = NSMenuItem::separatorItem(mtm);
+                separator.setTag(EXT_MENU_TAG);
+                menu.addItem(&separator);
+                section = entry.section.as_deref();
+                if let Some(title) = section.filter(|title| !title.is_empty()) {
+                    let heading = named_item(mtm, title, "");
+                    heading.setEnabled(false);
+                    heading.setTag(EXT_MENU_TAG);
+                    unsafe { heading.setRepresentedObject(None) };
+                    menu.addItem(&heading);
+                }
+            }
+            let item = named_item(mtm, &entry.label, &entry.command);
+            unsafe {
+                item.setTarget(Some(&self._target));
+            }
+            item.setTag(EXT_MENU_TAG);
+            item.setToolTip(entry.tooltip.as_deref().map(NSString::from_str).as_deref());
+            if let Some(icon) = &entry.icon {
+                item.setImage(extension_toolbar_image(icon, &entry.label, &self.tokens).as_deref());
+            }
+            menu.addItem(&item);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionToolbarMod {
+    pub target: String,
+    pub hidden: Option<bool>,
+    pub label: Option<String>,
+    pub icon: Option<String>,
+    pub tooltip: Option<String>,
+    pub badge: Option<String>,
+    pub order: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionAddMenuItem {
+    pub id: String,
+    pub label: String,
+    pub icon: Option<String>,
+    pub section: Option<String>,
+    pub tooltip: Option<String>,
+    pub command: String,
+}
+
+struct ToolbarAppearance {
+    label: Retained<NSString>,
+    title: Retained<NSString>,
+    tooltip: Option<Retained<NSString>>,
+    image: Option<Retained<NSImage>>,
+    hidden: bool,
+}
+
+impl ToolbarAppearance {
+    fn read(item: &NSToolbarItem) -> Self {
+        Self {
+            label: item.label(),
+            title: item.title(),
+            tooltip: item.toolTip(),
+            image: item.image(),
+            hidden: item.isHidden(),
+        }
+    }
+}
+
+fn toolbar_mods(mods: &[ExtensionToolbarMod]) -> Vec<ExtensionToolbarMod> {
+    let mut merged: Vec<ExtensionToolbarMod> = Vec::new();
+    for patch in mods {
+        if patch.target.eq_ignore_ascii_case("settings")
+            || !TOOLBAR_ORDER.contains(&patch.target.as_str())
+        {
+            continue;
+        }
+        if let Some(old) = merged.iter_mut().find(|item| item.target == patch.target) {
+            old.hidden = patch.hidden.or(old.hidden);
+            old.label = patch.label.clone().or(old.label.take());
+            old.icon = patch.icon.clone().or(old.icon.take());
+            old.tooltip = patch.tooltip.clone().or(old.tooltip.take());
+            old.badge = patch.badge.clone().or(old.badge.take());
+            old.order = patch.order.or(old.order);
+        } else {
+            merged.push(patch.clone());
+        }
+    }
+    merged
+}
+
+fn toolbar_caption(
+    patch: Option<&ExtensionToolbarMod>,
+    fallback: impl FnOnce() -> String,
+) -> Option<String> {
+    let patch = patch.filter(|patch| patch.label.is_some() || patch.badge.is_some())?;
+    let label = patch.label.clone().unwrap_or_else(fallback);
+    Some(match patch.badge.as_deref().filter(|badge| !badge.is_empty()) {
+        Some(badge) if label.is_empty() => badge.to_owned(),
+        Some(badge) => format!("{label} ({badge})"),
+        None => label,
+    })
+}
+
+fn toolbar_hidden(mods: &[ExtensionToolbarMod], target: &str) -> bool {
+    mods.iter()
+        .any(|patch| patch.target == target && patch.hidden == Some(true))
+}
+
+fn toolbar_order(mods: &[ExtensionToolbarMod]) -> Vec<&'static str> {
+    let mut positions: Vec<_> = TOOLBAR_ORDER[..TOOLBAR_ORDER.len() - 1]
+        .iter()
+        .enumerate()
+        .collect();
+    positions.sort_by_key(|(i, id)| {
+        mods.iter()
+            .find(|patch| patch.target == **id)
+            .and_then(|patch| patch.order)
+            .unwrap_or(*i as i32)
+    });
+    positions
+        .into_iter()
+        .map(|(_, id)| *id)
+        .chain(["settings"])
+        .collect()
+}
+
+fn extension_toolbar_image(icon: &str, label: &str, tokens: &Tokens) -> Option<Retained<NSImage>> {
+    crate::icons::glyph(icon)
+        .and_then(|glyph| glyph_image(glyph, f64::from(tokens.metrics.symbol_toolbar), label))
+        .or_else(|| {
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str(icon),
+                Some(&NSString::from_str(label)),
+            )
+        })
 }
 
 /// Layer 1: a window toolbar item contributed by a v4 extension.
@@ -3441,6 +3933,11 @@ pub struct ExtensionToolbarItem {
     pub active: bool,
     pub badge: Option<String>,
     pub command: String,
+    pub zone: String,
+    pub order: i32,
+    pub variant: String,
+    pub disabled: bool,
+    pub menu: Vec<ExtensionMenuItem>,
 }
 
 /// Layer 1: a macOS menu bar item contributed by a v4 extension.
@@ -3448,6 +3945,7 @@ pub struct ExtensionToolbarItem {
 pub struct ExtensionMenuItem {
     pub separator: bool,
     pub label: String,
+    pub icon: Option<String>,
     pub key: Option<String>,
     pub checked: bool,
     pub disabled: bool,
@@ -3464,6 +3962,78 @@ pub struct ExtensionMenuSection {
 
 /// Tag used to identify extension-contributed menu bar items & custom top-level menus.
 const EXT_MENU_TAG: isize = 0x504D_4558;
+
+fn settings_accelerator((key, flags): &(String, u64)) -> bool {
+    key == "," && *flags == NSEventModifierFlags::Command.0 as u64
+}
+
+fn build_extension_menu_item(
+    mtm: MainThreadMarker,
+    target: &Target,
+    spec: &ExtensionMenuItem,
+    action: objc2::runtime::Sel,
+    shortcuts: bool,
+) -> Retained<NSMenuItem> {
+    if spec.separator {
+        let sep = NSMenuItem::separatorItem(mtm);
+        sep.setTag(EXT_MENU_TAG);
+        return sep;
+    }
+    let (key, flags) = spec
+        .key
+        .as_deref()
+        .filter(|_| shortcuts)
+        .map(menu::accelerator)
+        .filter(|shortcut| !settings_accelerator(shortcut))
+        .unwrap_or_default();
+    let item_action = spec.command.as_ref().map(|_| action);
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(&spec.label),
+            item_action,
+            &NSString::from_str(&key),
+        )
+    };
+    item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
+    if let Some(icon) = &spec.icon {
+        item.setImage(
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str(icon),
+                Some(&NSString::from_str(&spec.label)),
+            )
+            .as_deref(),
+        );
+    }
+    item.setTag(EXT_MENU_TAG);
+    item.setState(if spec.checked {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    item.setEnabled(!spec.disabled);
+    if let Some(cmd) = &spec.command {
+        unsafe {
+            item.setRepresentedObject(Some(&NSString::from_str(cmd)));
+            item.setTarget(Some(target));
+        }
+    }
+    if !spec.submenu.is_empty() {
+        let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&spec.label));
+        sub.setAutoenablesItems(false);
+        for child in &spec.submenu {
+            sub.addItem(&build_extension_menu_item(
+                mtm, target, child, action, shortcuts,
+            ));
+        }
+        item.setSubmenu(Some(&sub));
+        unsafe {
+            item.setTarget(Some(&sub));
+            item.setAction(Some(sel!(submenuAction:)));
+        }
+    }
+    item
+}
 
 /// Layer 1: synchronizes v4 extension menu bar contributions into `NSApplication.mainMenu()`.
 /// Cleanly removes previous extension items on every update/unload without disturbing built-in menus.
@@ -3498,58 +4068,6 @@ pub fn set_extension_menus(sections: &[ExtensionMenuSection]) {
     let Some(target) = target else {
         return;
     };
-    fn build_item(
-        mtm: MainThreadMarker,
-        target: &Target,
-        spec: &ExtensionMenuItem,
-    ) -> Retained<NSMenuItem> {
-        if spec.separator {
-            let sep = NSMenuItem::separatorItem(mtm);
-            sep.setTag(EXT_MENU_TAG);
-            return sep;
-        }
-        let (key, flags) = spec
-            .key
-            .as_deref()
-            .map(menu::accelerator)
-            .unwrap_or_default();
-        let action = spec.command.as_ref().map(|_| sel!(actNamed:));
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(&spec.label),
-                action,
-                &NSString::from_str(&key),
-            )
-        };
-        item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
-        item.setTag(EXT_MENU_TAG);
-        item.setState(if spec.checked {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        });
-        item.setEnabled(!spec.disabled);
-        if let Some(cmd) = &spec.command {
-            unsafe {
-                item.setRepresentedObject(Some(&NSString::from_str(cmd)));
-                item.setTarget(Some(target));
-            }
-        }
-        if !spec.submenu.is_empty() {
-            let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&spec.label));
-            sub.setAutoenablesItems(false);
-            for child in &spec.submenu {
-                sub.addItem(&build_item(mtm, target, child));
-            }
-            item.setSubmenu(Some(&sub));
-            unsafe {
-                item.setTarget(Some(&sub));
-                item.setAction(Some(sel!(submenuAction:)));
-            }
-        }
-        item
-    }
 
     for section in sections {
         if section.items.is_empty() {
@@ -3591,7 +4109,13 @@ pub fn set_extension_menus(sections: &[ExtensionMenuSection]) {
             sub
         };
         for item in &section.items {
-            submenu.addItem(&build_item(mtm, &target, item));
+            submenu.addItem(&build_extension_menu_item(
+                mtm,
+                &target,
+                item,
+                sel!(actNamed:),
+                true,
+            ));
         }
     }
 }
@@ -4086,9 +4610,8 @@ impl Host {
             self.shown_task_status = None;
             return;
         };
-        item.setHidden(false);
-        item.setTitle(&NSString::from_str(&shown.pill()));
-        item.setToolTip(Some(&NSString::from_str(&shown.spoken())));
+        self.shown_task_status = status.clone();
+        self.apply_toolbar_appearance(&item);
         // The menu: what runs, the file, then Cancel.
         let mtm = MainThreadMarker::from(&*item);
         let menu = item.menu();
@@ -4125,12 +4648,21 @@ impl Host {
             if let Some(timer) = self.task_timer.take() {
                 timer.invalidate();
             }
-            item.setImage(Some(&task_toolbar_image(&shown, 0., &tokens)));
         } else if self.task_timer.is_none() {
             let started = std::time::Instant::now();
             let item = item.clone();
+            let delegate = self._delegate.clone();
             let step =
                 block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    if delegate
+                        .ivars()
+                        .mods
+                        .borrow()
+                        .iter()
+                        .any(|p| p.target == "tasks" && p.icon.is_some())
+                    {
+                        return;
+                    }
                     let turn = started.elapsed().as_secs_f64() % 1.;
                     item.setImage(Some(&task_toolbar_image(&shown, turn, &tokens)));
                 });
@@ -4273,6 +4805,7 @@ pub struct Host {
     /// a focused control then takes Space and Return; after a click, Space
     /// is the editor's (play), as in Electron.
     pub keyboard_navigated: Cell<bool>,
+    pub extension_toolbar_context: Cell<bool>,
     pub canvas_focus: Cell<bool>,
     pub studio_flying: Rc<Cell<bool>>,
     flowchart: Option<flowchart::Popover>,
@@ -4288,6 +4821,7 @@ pub struct Host {
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
+    export_activity: Option<ExportActivity>,
     /// What the toolbar's Agent item shows, and the timer that turns its
     /// working ring.
     agent_status: AgentStatus,
@@ -4515,6 +5049,7 @@ impl Host {
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
             keyboard_navigated: Cell::new(false),
+            extension_toolbar_context: Cell::new(false),
             canvas_focus: Cell::new(false),
             studio_flying: Rc::new(Cell::new(false)),
             flowchart: None,
@@ -4526,6 +5061,7 @@ impl Host {
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
+            export_activity: None,
             agent_status: AgentStatus::default(),
             task_status: None,
             shown_task_status: None,
@@ -4714,6 +5250,22 @@ impl Host {
                             Host::flush_typing(&host);
                         }
                         host.borrow().keyboard_navigated.set(false);
+                        if e.r#type() == NSEventType::RightMouseDown
+                            && e.windowNumber() == window.windowNumber()
+                        {
+                            let h = host.borrow();
+                            if h.extension_toolbar_context.get() {
+                                let p = gpui.convertPoint_fromView(e.locationInWindow(), None);
+                                let y = if gpui.isFlipped() { p.y } else { gpui.bounds().size.height - p.y };
+                                if y >= 0. && y < f64::from(h.toolbar_inset()) {
+                                    h.send_command("shellToolbarContextMenu", vec![p.x.into(), y.into()]);
+                                    DISMISSED_MENU_BUTTONS.with(|buttons| {
+                                        buttons.set(buttons.get() | (1 << e.buttonNumber()));
+                                    });
+                                    return std::ptr::null_mut();
+                                }
+                            }
+                        }
                         // A press on the window's own content (a timeline, a
                         // canvas, a list), not on a hosted control or inside
                         // an extension panel, takes the keyboard back from a
@@ -5568,6 +6120,7 @@ impl Host {
             .collect();
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
         let height = t.metrics.control as f64;
+        let home_width = self._delegate.ivars().home.frame().size.width;
         // The tools stay in the middle of the bar however many projects are
         // open: the tabs have what lies between the strip's leading edge and
         // the tools, less Home and New Project.
@@ -5584,7 +6137,9 @@ impl Host {
             .find(|item| item.itemIdentifier().to_string() == "tools")
             .and_then(|item| item.view())
             .map_or(0., |view| view.frame().size.width);
-        let room = TabLayout::room(self.window.frame().size.width, tools, leading, height);
+        let room = (TabLayout::room(self.window.frame().size.width, tools, leading, height)
+            - (home_width - height))
+            .max(0.);
         // The strip redraws when a page opens, closes or shows as well.
         let mut marked = tabs.clone();
         marked.extend(page_cells.iter().map(|(number, i, title, selected)| Tab {
@@ -5643,7 +6198,7 @@ impl Host {
             view
         };
         // Home, the strip's first cell: a quiet glyph.
-        holder(0., height).addSubview(&self._delegate.ivars().home);
+        holder(0., home_width).addSubview(&self._delegate.ivars().home);
         // A title in one size and weight whatever its state, so a tab is as
         // wide showing as not. A label keeps `LABEL_PAD` clear inside each
         // end of its frame.
@@ -5888,7 +6443,7 @@ impl Host {
             view.restyle();
             x += width + TAB_GAP;
         }
-        let mut x = height + TAB_GAP;
+        let mut x = home_width + TAB_GAP;
         if layout.viewport > 0. {
             let frame = NSRect::new(NSPoint::new(x, 0.), NSSize::new(layout.viewport, height));
             let scroll = TabScroll::new(mtm, frame, layout, &document, active);
@@ -6004,6 +6559,7 @@ impl Host {
             .collect();
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
         let height = t.metrics.control as f64;
+        let home_width = self._delegate.ivars().home.frame().size.width;
         // The tools stay in the middle of the bar however many projects are
         // open: the tabs have what lies between the strip's leading edge and
         // the tools, less Home and New Project.
@@ -6023,7 +6579,7 @@ impl Host {
         let room = (self.window.frame().size.width / 2.
             - (tools.max(TAB_TOOLS) / 2. + TAB_CLEAR)
             - leading.max(TAB_LEADING)
-            - 2. * (height + TAB_GAP))
+            - height - home_width - 2. * TAB_GAP)
             .max(TAB_MIN)
             .floor();
         let pages = self.pages.borrow().clone();
@@ -6096,8 +6652,8 @@ impl Host {
             view
         };
         // Home, the strip's first cell: a quiet glyph.
-        holder(0., height).addSubview(&self._delegate.ivars().home);
-        let mut x = height + TAB_GAP;
+        holder(0., home_width).addSubview(&self._delegate.ivars().home);
+        let mut x = home_width + TAB_GAP;
         if let Some((name, sub, menu)) = title {
             let agent = name.starts_with("● ");
             let name = name.strip_prefix("● ").unwrap_or(&name).to_owned();
@@ -6300,7 +6856,9 @@ impl Host {
             let name = item.itemIdentifier().to_string();
             // The tabs stay, as in v1's title bar on Home.
             if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
-                item.setHidden(aside);
+                item.setHidden(
+                    aside || toolbar_hidden(&self._delegate.ivars().mods.borrow(), &name),
+                );
             }
         }
         self.sync_agent_button();
@@ -6626,6 +7184,9 @@ impl Host {
             popup.borrow_mut().update_tokens(&t, surface);
         }
         self.tokens = t;
+        if let Some(item) = self._delegate.make_cached(objc2_foundation::ns_string!("export")) {
+            item.setBackgroundTintColor(Some(&native_color(self.tokens.colors.accent)));
+        }
         if let Some(launcher) = agent_launcher_button(&self._toolbar) {
             launcher.set_tokens(self.tokens.clone());
         }
@@ -6936,7 +7497,11 @@ impl Host {
         bindings: impl IntoIterator<Item = crate::keyboard::Binding>,
     ) {
         self.contributed.retain(|b| !b.id.starts_with(owner));
-        self.add_bindings(bindings);
+        self.add_bindings(
+            bindings
+                .into_iter()
+                .filter(|binding| !settings_accelerator(&menu::accelerator(&binding.chord))),
+        );
     }
     pub fn viewer_layer(&self) -> metal::MetalLayer {
         self.layer.clone()
@@ -7425,6 +7990,24 @@ impl Host {
     /// Shown on the next run-loop turn so menu tracking never nests inside
     /// GPUI's event dispatch.
     pub fn context_menu(&self, items: &[MenuEntry], x: f32, y: f32) {
+        self.context_menu_with_completion(items, x, y, None);
+    }
+    pub fn context_menu_with_completion(
+        &self,
+        items: &[MenuEntry],
+        x: f32,
+        y: f32,
+        completion: Option<String>,
+    ) {
+        let complete = |completion: Option<String>| {
+            if let Some(name) = completion {
+                self.send_command(&name, vec![]);
+            }
+        };
+        if items.is_empty() {
+            complete(completion);
+            return;
+        }
         // An agent's panel action never leaves a menu on screen.
         let model = menu_model(items);
         if let Some(choice) = crate::agent_menu::claim(&agent_menu_windows(&self.window), &model) {
@@ -7435,6 +8018,7 @@ impl Host {
                     token: None,
                 });
             }
+            complete(completion);
             return;
         }
         let mtm = MainThreadMarker::new().unwrap();
@@ -7449,7 +8033,9 @@ impl Host {
         } else {
             NSPoint::new(x as f64, h - y as f64)
         };
-        *self._target.ivars().pending_menu.borrow_mut() = Some((menu, at, self.gpui.clone()));
+        let old = self._target.ivars().pending_menu.borrow_mut()
+            .replace((menu, at, self.gpui.clone(), completion));
+        complete(old.and_then(|(_, _, _, completion)| completion));
         unsafe {
             let _: () = msg_send![&*self._target,performSelector:sel!(showPendingMenu:),withObject:std::ptr::null::<AnyObject>(),afterDelay:0.0f64];
         }
@@ -13095,4 +13681,52 @@ fn fullscreen_overlay_reserves_top_space_without_a_content_layout_inset() {
     assert_eq!(toolbar_top_inset(60., true, true, m), 60.);
     assert_eq!(toolbar_top_inset(0.5, true, false, m), m.dock_gap);
     assert_eq!(toolbar_top_inset(-1., false, false, m), 0.);
+}
+
+#[cfg(test)]
+#[test]
+fn toolbar_mods_restore_original_order_and_keep_settings_visible() {
+    let mods = toolbar_mods(&[
+        ExtensionToolbarMod {
+            target: "SETTINGS".into(),
+            hidden: Some(true),
+            label: Some("Other".into()),
+            ..Default::default()
+        },
+        ExtensionToolbarMod {
+            target: "export".into(),
+            label: Some("Deliver".into()),
+            order: Some(0),
+            ..Default::default()
+        },
+        ExtensionToolbarMod {
+            target: "panelLibrary".into(),
+            hidden: Some(true),
+            ..Default::default()
+        },
+        ExtensionToolbarMod {
+            target: "add".into(),
+            tooltip: Some("Insert layer".into()),
+            ..Default::default()
+        },
+    ]);
+    assert_eq!(mods.len(), 3);
+    assert_eq!(mods[0].label.as_deref(), Some("Deliver"));
+    assert_eq!(mods[2].tooltip.as_deref(), Some("Insert layer"));
+    assert!(toolbar_hidden(&mods, "panelLibrary"));
+    assert!(!toolbar_hidden(&mods, "SETTINGS"));
+    let order = toolbar_order(&mods);
+    assert!(
+        order.iter().position(|id| *id == "export").unwrap()
+            < order.iter().position(|id| *id == "add").unwrap()
+    );
+    assert_eq!(order.last(), Some(&"settings"));
+    assert!(settings_accelerator(&menu::accelerator(
+        "CommandOrControl+,"
+    )));
+
+    let cleared = toolbar_mods(&[]);
+    assert!(cleared.is_empty());
+    assert_eq!(toolbar_order(&cleared), TOOLBAR_ORDER);
+    assert!(!toolbar_hidden(&cleared, "panelLibrary"));
 }

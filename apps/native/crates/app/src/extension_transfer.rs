@@ -180,6 +180,7 @@ pub fn spawn_run(config: Config, tx: async_channel::Sender<Update>) {
 pub fn open_from_settings(
     original: PathBuf,
     profile: PathBuf,
+    owner: gpui::WeakEntity<crate::session::Controller>,
     done: impl Fn(&mut gpui::App) + 'static,
     cx: &mut gpui::App,
 ) {
@@ -271,6 +272,15 @@ pub fn open_from_settings(
                         cx,
                     ) {
                         Ok(handle) => {
+                            if let Some(editor) = owner.upgrade() {
+                                let owner = owner.clone();
+                                let _ = handle.update(cx, |view, _, cx| {
+                                    cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+                                    view.set_extension_slot(Rc::new(move |id, tokens, window, cx| {
+                                        crate::builtins::window_slot(Some(&owner), id, tokens, window, cx)
+                                    }), cx);
+                                });
+                            }
                             OPEN.with(|o| *o.borrow_mut() = Some(handle));
                             if let Some(act) = OPEN_ACTION.with(|a| a.borrow().clone()) {
                                 review(act, cx);

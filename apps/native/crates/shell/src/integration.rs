@@ -54,6 +54,31 @@ pub trait Integration {
     fn panel_header_actions(&self, _id: &str, _cx: &App) -> Vec<PanelHeaderButton> {
         Vec::new()
     }
+    fn panel_header_mods(&self, _cx: &App) -> Vec<crate::view::PanelHeaderMod> {
+        Vec::new()
+    }
+    fn status_bar_extensions(
+        &self,
+        _cx: &App,
+    ) -> (
+        Vec<crate::view::ExtensionStatusBarItem>,
+        Vec<crate::view::ExtensionStatusBarMod>,
+    ) {
+        Default::default()
+    }
+    fn extension_slot(
+        &self,
+        _id: &str,
+        _tokens: &pm_design::Tokens,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Vec<AnyElement> {
+        Vec::new()
+    }
+    fn has_extension_context_menus(&self, _cx: &App) -> bool {
+        false
+    }
+    fn surface_context_menu(&self, _location: &'static str, _at: (f32, f32), _cx: &mut App) {}
     /// Home (v1's Projects screen), drawn in place of the docks while the
     /// window shows it; `None` = the docks.
     fn home(&self, _window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
