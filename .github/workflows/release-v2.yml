@@ -215,7 +215,7 @@ jobs:
 
   release:
     needs: build
-    if: ${{ !inputs.dry_run && (needs.build.result == 'success' || (inputs.build_run_id != '' && needs.build.result == 'skipped')) }}
+    if: ${{ always() && !cancelled() && !inputs.dry_run && (needs.build.result == 'success' || (inputs.build_run_id != '' && needs.build.result == 'skipped')) }}
     runs-on: macos-26
     timeout-minutes: 90
     # Protected: a required reviewer approves before anything is notarized or published.
