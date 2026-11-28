@@ -124,6 +124,29 @@ fn follow_activity() {
         };
         std::mem::forget(token);
     }
+    // A `hang`'s surface: the Settings window is key, or another window is.
+    let block = block2::RcBlock::new(
+        |note: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+            // SAFETY: AppKit hands a live notification whose object is the window.
+            let window = unsafe { note.as_ref() }
+                .object()
+                .and_then(|o| o.downcast::<objc2_app_kit::NSWindow>().ok());
+            pm_telemetry::note_settings_key(
+                window.is_some_and(|w| pm_shell::settings_window::is_settings(&w)),
+            );
+        },
+    );
+    // SAFETY: a notification name constant; the observer lives for the process.
+    let token = unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWindowDidBecomeKeyNotification),
+                None,
+                None,
+                &block,
+            )
+    };
+    std::mem::forget(token);
     if let Some(mtm) = objc2::MainThreadMarker::new() {
         pm_telemetry::set_active(objc2_app_kit::NSApplication::sharedApplication(mtm).isActive());
     }
@@ -207,13 +230,9 @@ pub fn project_opened(opening: Opening, published: std::sync::Arc<pm_kernel::Pub
     let _ = std::thread::Builder::new()
         .name("pm-telemetry-open".into())
         .spawn(move || {
-            let Some(root) = published.snapshot.root() else {
+            let Some(facts) = Facts::of_published(&published) else {
                 return;
             };
-            // The composition it opens on carries the frame and rate.
-            let comp = published.snapshot.render_comp();
-            let main = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
-            let facts = Facts::of(root, main);
             pm_telemetry::capture(pm_telemetry::Event::ProjectOpened(
                 pm_telemetry::ProjectOpened {
                     source: opening.source,
@@ -247,6 +266,13 @@ struct Facts {
 }
 
 impl Facts {
+    /// The composition it shows carries the frame and rate.
+    fn of_published(published: &pm_kernel::Published) -> Option<Facts> {
+        let root = published.snapshot.root()?;
+        let comp = published.snapshot.render_comp();
+        let main = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
+        Some(Facts::of(root, main))
+    }
     fn of(root: &pm_model::Node, main: &pm_model::Node) -> Facts {
         use pm_model::NodeKind;
         let number = |node: Option<&pm_model::Node>| match node.map(|n| n.kind()) {
@@ -295,6 +321,28 @@ impl Facts {
         facts.comps = comps;
         facts
     }
+}
+
+/// A person runs a command in an editor window: what it shows, and its
+/// project, for a `hang`. The project is counted only if a hang comes, on the
+/// telemetry thread, from the kernel's publication at that moment.
+pub fn note_editor(
+    surface: pm_telemetry::Surface,
+    kernel: &pm_kernel::KernelHandle,
+    project: Option<&str>,
+) {
+    if !pm_telemetry::enabled() {
+        return;
+    }
+    let facts = project.map(|project| {
+        let (kernel, project) = (kernel.clone(), project.to_owned());
+        std::sync::Arc::new(move || -> Option<(usize, bool)> {
+            let published = kernel.published(&project)?;
+            let facts = Facts::of_published(&published)?;
+            Some((facts.layers, facts.has_3d))
+        }) as pm_telemetry::ProjectFacts
+    });
+    pm_telemetry::note_editor(surface, facts);
 }
 
 /// A save finished: how long it took, and the file's size (read off the

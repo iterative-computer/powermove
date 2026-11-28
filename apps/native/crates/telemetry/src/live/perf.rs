@@ -52,6 +52,12 @@ pub fn context() -> PerfContext {
     PerfContext::Paused
 }
 
+/// A played frame reached the viewer in the half second before `ms` (on the
+/// `main_thread` clock): playback ran when the main thread stopped.
+pub fn played_before(ms: u64) -> bool {
+    MOMENT.load(Relaxed) == 1 && ms.saturating_sub(MOMENT_AT.load(Relaxed)) < 500
+}
+
 #[inline]
 pub fn note_playback_target(fps: f32) {
     if super::taking() && fps.is_finite() && fps > 0. {

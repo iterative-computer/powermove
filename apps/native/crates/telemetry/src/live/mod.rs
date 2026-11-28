@@ -13,6 +13,7 @@
 //! sharing is turned off cannot be recalled; nothing starts after.
 mod crash;
 pub mod exception;
+pub mod hang;
 mod outbox;
 pub mod perf;
 mod system;
@@ -61,7 +62,7 @@ enum Msg {
     Identify(String, u64),
     /// Raw return addresses and a scrubbed location, from the panic hook.
     Panic(Vec<u64>, Option<(String, u32)>, i64, u64),
-    HangBegan(i64, u64),
+    HangBegan(Box<hang::Context>, i64, u64),
     HangEnded(&'static str, i64, u64),
     StoreInstalled(String, bool, i64, u64),
     StoreRemoved(String, i64, u64),
@@ -133,7 +134,13 @@ pub fn set_sharing(on: bool) {
 
 #[inline]
 pub fn capture(event: Event) {
-    if taking() && !send(Msg::Event(event, now_ms(), generation())) {
+    if !taking() {
+        return;
+    }
+    if let Event::CommandInvoked(c) = &event {
+        hang::note_command(c.command_id);
+    }
+    if !send(Msg::Event(event, now_ms(), generation())) {
         DROPPED.fetch_add(1, Relaxed);
     }
 }
@@ -226,7 +233,8 @@ struct Worker {
     revoked: u64,
     was_off: bool,
     crashes_read: bool,
-    hanging: bool,
+    /// The hang under way, as sent if the app is ended before it answers.
+    hanging: Option<Hang>,
 }
 
 impl Worker {
@@ -261,7 +269,7 @@ impl Worker {
             revoked: 0,
             was_off: false,
             crashes_read: false,
-            hanging: false,
+            hanging: None,
         }
     }
 
@@ -383,7 +391,7 @@ impl Worker {
         self.client = None;
         self.pending.clear();
         self.folding = None;
-        self.hanging = false;
+        self.hanging = None;
         perf::clear();
         self.peaks = perf::Peaks::default();
         DROPPED.store(0, Relaxed);
@@ -425,19 +433,22 @@ impl Worker {
             Msg::Panic(addrs, location, at, g) if self.current(g) => {
                 self.panic(addrs, location, at)
             }
-            Msg::HangBegan(at, g) if self.current(g) => {
-                self.hanging = true;
+            Msg::HangBegan(context, at, g) if self.current(g) => {
+                let hang = context.hang("unrecovered");
                 // Kept in case the app is ended while it hangs.
                 if self.may_write()
-                    && let Some(record) = self.event_record(&hang_event("unrecovered"), at)
+                    && let Some(record) = self.event_record(&Event::Hang(hang.clone()), at)
                 {
                     let _ = self.outbox.write(outbox::HANG_PENDING, &[record]);
                 }
+                self.hanging = Some(hang);
             }
             Msg::HangEnded(duration, at, g) => {
                 let _ = std::fs::remove_file(self.outbox.dir().join(outbox::HANG_PENDING));
-                if std::mem::take(&mut self.hanging) && self.current(g) {
-                    self.add(hang_event(duration), at, g);
+                if let Some(hang) = self.hanging.take()
+                    && self.current(g)
+                {
+                    self.add(Event::Hang(Hang { duration, ..hang }), at, g);
                 }
             }
             Msg::StoreInstalled(id, fresh, at, g) => {
@@ -811,10 +822,6 @@ fn sending_session(sessions: &[prefs::Session], pid: u64, launched: f64) -> Opti
         .cloned()
 }
 
-fn hang_event(duration: &'static str) -> Event {
-    Event::Hang(Hang { duration })
-}
-
 #[cfg(test)]
 pub static TEST_HOST: OnceLock<String> = OnceLock::new();
 
@@ -883,10 +890,11 @@ fn install_panic_hook() {
 }
 
 /// Watches the main thread's heartbeat: blocked for more than 2 s while the
-/// app is active, it tells the worker (which keeps a pending `hang`, sent at
-/// the next launch if the app is ended while it hangs); when the main thread
-/// answers, the hang is sent with its duration. No stack is taken: the main
-/// thread is never suspended for telemetry.
+/// app is active, it tells the worker what was going on ([`hang::Context`];
+/// the worker keeps a pending `hang`, sent at the next launch if the app is
+/// ended while it hangs); when the main thread answers, the hang is sent
+/// with its duration. No stack is taken: the main thread is never suspended
+/// for telemetry.
 fn watch_hangs() {
     let mut last = Instant::now();
     let mut began: Option<u64> = None;
@@ -904,8 +912,10 @@ fn watch_hangs() {
                     && ACTIVE.load(Relaxed)
                     && crate::main_thread::installed()
                 {
-                    began = Some(crate::main_thread::now_ms().saturating_sub(late));
-                    send(Msg::HangBegan(now_ms(), generation()));
+                    let start = crate::main_thread::now_ms().saturating_sub(late);
+                    began = Some(start);
+                    let context = hang::Context::now(perf::played_before(start));
+                    send(Msg::HangBegan(Box::new(context), now_ms(), generation()));
                 }
             }
             Some(start) if late < 1000 => {

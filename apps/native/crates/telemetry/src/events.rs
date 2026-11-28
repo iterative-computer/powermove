@@ -446,12 +446,48 @@ pub struct ContextFrames {
     pub hitches_16ms: u64,
 }
 
-/// The main thread did not answer for more than 2 s.
+/// The main thread did not answer for more than 2 s, and what the person was
+/// doing when it stopped: only values the other events already send.
 #[derive(Debug, Clone, Serialize)]
 pub struct Hang {
     /// "2-5s", "5-10s", "10-30s", "30s+", or "unrecovered" (the app was
     /// ended while it hung; sent at the next launch).
     pub duration: &'static str,
+    /// The last command a person ran, by its `command_invoked` id ("none"
+    /// before the first).
+    pub last_command: &'static str,
+    /// Playback was asked for or running.
+    pub playing: bool,
+    pub surface: Surface,
+    /// The project of the last command, counted as `project_opened` counts
+    /// it (absent without a project).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer_count: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_3d: Option<bool>,
+}
+
+/// What the front window showed: a project, Home, the Store page, or the
+/// Settings window.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Surface {
+    #[default]
+    Other,
+    Editor,
+    Home,
+    Store,
+    Settings,
+}
+
+impl Surface {
+    pub const ALL: [Surface; 5] = [
+        Surface::Other,
+        Surface::Editor,
+        Surface::Home,
+        Surface::Store,
+        Surface::Settings,
+    ];
 }
 
 /// Public model ids the app's harnesses offer. Anything else (a model a
@@ -632,6 +668,20 @@ mod tests {
         })
         .unwrap();
         assert_eq!(p, serde_json::json!({"panel_id":"timeline"}));
+        let h = serde_json::to_value(Event::Hang(Hang {
+            duration: "2-5s",
+            last_command: "save",
+            playing: false,
+            surface: Surface::Store,
+            layer_count: Some("6-20"),
+            has_3d: Some(false),
+        }))
+        .unwrap();
+        assert_eq!(
+            h["properties"],
+            serde_json::json!({"duration":"2-5s","last_command":"save","playing":false,
+                "surface":"store","layer_count":"6-20","has_3d":false})
+        );
     }
 
     #[test]

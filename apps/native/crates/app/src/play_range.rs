@@ -188,6 +188,7 @@ impl Controller {
         {
             self.end_run();
         }
+        pm_telemetry::note_playing(self.running());
         accepted
     }
     /// Each display tick: a run stops at the work area's end when Loop is
@@ -196,6 +197,8 @@ impl Controller {
         if !self.running() {
             if self.playback.armed || self.playback.stop.is_some() {
                 self.end_run();
+                // A run that ended by itself (no Loop) is no longer playing.
+                pm_telemetry::note_playing(false);
             }
             return;
         }
