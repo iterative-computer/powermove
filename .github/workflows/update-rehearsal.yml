@@ -30,10 +30,24 @@ jobs:
         run: |
           set -euo pipefail
           gh run download "${{ inputs.dry_run_id }}" -R "$GITHUB_REPOSITORY" -n "dry-run-$VERSION" -D dry
-          find dry -maxdepth 3 -type f | sed 's/^/  /'
-          feed=$(dirname "$(find dry -name latest-mac.yml | head -1)")
-          test -f "$feed/Powermove-$VERSION-mac-arm64.zip" || cp "$(find dry -name "Powermove-$VERSION-mac-arm64.zip" | head -1)" "$feed/"
-          echo "FEED=$GITHUB_WORKSPACE/$feed" >> "$GITHUB_ENV"
+          gh run download "${{ inputs.dry_run_id }}" -R "$GITHUB_REPOSITORY" -n "signed-app-$VERSION" -D signed
+          find dry signed -maxdepth 3 -type f | sed 's/^/  /'
+          feed="$GITHUB_WORKSPACE/dry/feeds"
+          # A dry run keeps the signed app (a ditto archive, as the update ZIP is) but not the ZIP itself:
+          # serve it as the ZIP, with the feed's checksum and size made to match.
+          zip="$feed/Powermove-$VERSION-mac-arm64.zip"
+          cp signed/signed-app.zip "$zip"
+          sha=$(openssl dgst -sha512 -binary "$zip" | base64)
+          size=$(stat -f%z "$zip")
+          python3 - "$feed/latest-mac.yml" "$sha" "$size" <<'PY'
+          import re, sys
+          path, sha, size = sys.argv[1:]
+          text = open(path).read()
+          text = re.sub(r'(sha512: ).*', lambda m: m.group(1) + sha, text)
+          text = re.sub(r'(size: ).*', lambda m: m.group(1) + size, text)
+          open(path, 'w').write(text)
+          PY
+          echo "FEED=$feed" >> "$GITHUB_ENV"
           cat "$feed/latest-mac.yml"
       - name: Powermove 1.3.2, pointed at the local feed
         run: |
