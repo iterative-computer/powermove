@@ -243,7 +243,7 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
     crate::note_settings_key(true);
     crate::note_settings_key(false);
     send(Msg::HangBegan(
-        Box::new(hang::Context::now(false)),
+        Box::new(hang::Context::now(false, false)),
         now_ms(),
         generation(),
     ));
@@ -271,6 +271,7 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
         ("last_command", serde_json::json!("play")),
         ("playing", serde_json::json!(true)),
         ("surface", serde_json::json!("editor")),
+        ("main_thread_answered", serde_json::json!(false)),
         ("layer_count", serde_json::json!("2-5")),
         ("has_3d", serde_json::json!(true)),
     ] {
@@ -281,10 +282,11 @@ fn consent_offline_panic_and_opt_out_end_to_end() {
     crate::note_editor(Surface::Home, None);
     crate::note_settings_key(true);
     crate::note_playing(false);
-    let context = hang::Context::now(true).hang("2-5s");
+    let context = hang::Context::now(true, true).hang("2-5s");
     let value = serde_json::to_value(&context).unwrap();
     assert_eq!(value["surface"], "settings");
     assert_eq!(value["playing"], true);
+    assert_eq!(value["main_thread_answered"], true);
     assert!(value.get("layer_count").is_none() && value.get("has_3d").is_none());
     hang::reset();
 

@@ -42,7 +42,7 @@ range), number of displays and their largest scale, language and region codes.
 | `store_extension_installed`, `store_extension_removed` | the Store extension's id |
 | `settings_changed` | theme, tabs or windows, and telemetry being turned back on |
 | `perf_summary` | every 5 minutes: frame-time percentiles and slow-frame counts per activity (paused, playing, scrubbing, dragging, scrolling), playback frame rate achieved and aimed for, peak memory and GPU memory, thermal state, battery |
-| `hang` | the app stopped responding for more than 2 seconds: how long, as a range; the last command's id, whether playback was running, what the front window showed (a project, Home, the Store, Settings), and the project's layer count range and whether it has 3D (no stack) |
+| `hang` | the app stopped responding for more than 2 seconds: how long, as a range; the last command's id, whether playback was running, what the front window showed (a project, Home, the Store, Settings), the project's layer count range and whether it has 3D, and whether the main thread itself still answered (no stack) |
 | exceptions | a crash or panic: its type from a fixed list (a panic: where in Powermove's code, never its message), and the stack as offsets and function names in Powermove's own executable; other frames are anonymous |
 
 ## How it works

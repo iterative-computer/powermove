@@ -914,7 +914,8 @@ fn watch_hangs() {
                 {
                     let start = crate::main_thread::now_ms().saturating_sub(late);
                     began = Some(start);
-                    let context = hang::Context::now(perf::played_before(start));
+                    let answered = crate::main_thread::since_queue_beat_ms() < 1000;
+                    let context = hang::Context::now(perf::played_before(start), answered);
                     send(Msg::HangBegan(Box::new(context), now_ms(), generation()));
                 }
             }

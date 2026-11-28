@@ -459,6 +459,10 @@ pub struct Hang {
     /// Playback was asked for or running.
     pub playing: bool,
     pub surface: Surface,
+    /// The main thread still drained its dispatch queue: what stopped was
+    /// the app's heartbeat, a task woken through the shared background
+    /// queues (they were held up), not the main thread itself.
+    pub main_thread_answered: bool,
     /// The project of the last command, counted as `project_opened` counts
     /// it (absent without a project).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -673,6 +677,7 @@ mod tests {
             last_command: "save",
             playing: false,
             surface: Surface::Store,
+            main_thread_answered: false,
             layer_count: Some("6-20"),
             has_3d: Some(false),
         }))
@@ -680,7 +685,7 @@ mod tests {
         assert_eq!(
             h["properties"],
             serde_json::json!({"duration":"2-5s","last_command":"save","playing":false,
-                "surface":"store","layer_count":"6-20","has_3d":false})
+                "surface":"store","main_thread_answered":false,"layer_count":"6-20","has_3d":false})
         );
     }
 

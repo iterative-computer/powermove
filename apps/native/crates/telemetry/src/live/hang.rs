@@ -59,17 +59,21 @@ pub struct Context {
     last_command: &'static str,
     playing: bool,
     surface: Surface,
+    main_thread_answered: bool,
     project: Option<ProjectFacts>,
 }
 
 impl Context {
-    pub fn now(played_recently: bool) -> Context {
+    /// `main_thread_answered`: the main queue's own heartbeat is fresh
+    /// ([`crate::main_thread::since_queue_beat_ms`]).
+    pub fn now(played_recently: bool, main_thread_answered: bool) -> Context {
         Context {
             // The main thread holds these locks only for a store; one it
             // holds now (the hang began inside it) reads as unknown.
             last_command: LAST_COMMAND.try_lock().map_or("unknown", |c| *c),
             playing: PLAYING.load(Relaxed) || played_recently,
             surface: surface(),
+            main_thread_answered,
             project: PROJECT.try_lock().ok().and_then(|p| p.clone()),
         }
     }
@@ -82,6 +86,7 @@ impl Context {
             last_command: self.last_command,
             playing: self.playing,
             surface: self.surface,
+            main_thread_answered: self.main_thread_answered,
             layer_count: facts.map(|(layers, _)| count_bucket(layers)),
             has_3d: facts.map(|(_, has_3d)| has_3d),
         }
